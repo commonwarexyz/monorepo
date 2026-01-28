@@ -550,8 +550,8 @@ impl BufferPool {
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
     /// matching the semantics of [`IoBufMut::with_capacity`] and
-    /// `BytesMut::with_capacity`. Use [`IoBufMut::resize`] to initialize
-    /// the buffer to a specific length.
+    /// `BytesMut::with_capacity`. Use `put_slice` or other `BufMut` methods
+    /// to write data to the buffer.
     ///
     /// The actual capacity is rounded up to the next power-of-two size class.
     /// The buffer will be returned to the pool when dropped.
@@ -786,101 +786,6 @@ impl PooledBufMut {
         }
     }
 
-    /// Resizes the buffer to `new_len` bytes, filling new bytes with `value`.
-    ///
-    /// If `new_len` is less than the current length, the buffer is truncated.
-    /// If `new_len` is greater and exceeds capacity, this will:
-    /// 1. Try to get a larger buffer from the pool
-    /// 2. Fall back to direct allocation if the pool is exhausted
-    ///
-    /// # Pool Fallback
-    ///
-    /// When reallocating, if the pool is exhausted or the new size exceeds
-    /// `max_size`, the buffer falls back to direct heap allocation. Such buffers
-    /// will NOT return to the pool when dropped. Use `returns_to_pool()` to check.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `new_len` is extremely large (would overflow when rounded to
-    /// next power of two).
-    pub fn resize(&mut self, new_len: usize, value: u8) {
-        let current_len = self.len();
-
-        if new_len <= current_len {
-            // Truncating - just adjust length (cursor stays the same)
-            self.len = self.cursor + new_len;
-            return;
-        }
-
-        // Growing - check if we need a bigger buffer
-        // new_len is relative to current view, capacity() is also view-relative
-        if new_len > self.capacity() {
-            // Need a bigger buffer - calculate raw capacity needed
-            // After reallocation, cursor resets to 0, so raw capacity = new_len
-            let new_capacity = new_len.next_power_of_two();
-
-            // Try to get from pool first, fall back to direct allocation
-            let (new_buffer, new_pool) = self
-                .pool
-                .upgrade()
-                .and_then(|pool| {
-                    // Use pool's min_size as floor for capacity
-                    let capacity = new_capacity.max(pool.config.min_size);
-                    let idx = pool.config.class_index(capacity)?;
-                    let buf = pool.try_alloc(idx)?;
-                    Some((buf, Arc::downgrade(&pool)))
-                })
-                .unwrap_or_else(|| {
-                    // Fallback: use alignment as minimum (matches pool behavior)
-                    let alignment = self.buffer.alignment;
-                    let capacity = new_capacity.max(alignment);
-                    (AlignedBuffer::new(capacity, alignment), Weak::new())
-                });
-
-            // Copy existing data (only the readable portion: cursor..len)
-            if current_len > 0 {
-                // SAFETY: Both pointers are valid, non-overlapping, and current_len bytes are initialized.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        self.buffer.as_ptr().add(self.cursor),
-                        new_buffer.as_ptr(),
-                        current_len,
-                    );
-                }
-            }
-
-            // Capture old pool reference before we replace it
-            let old_pool = std::mem::replace(&mut self.pool, new_pool);
-
-            // Swap in new buffer atomically, then return old buffer to pool.
-            // Using mem::replace ensures self.buffer is always valid if a panic occurs.
-            let old_buffer = std::mem::replace(&mut self.buffer, ManuallyDrop::new(new_buffer));
-            let old_buffer = ManuallyDrop::into_inner(old_buffer);
-
-            self.cursor = 0;
-            self.len = current_len;
-
-            // Return old buffer to pool, or drop it (Drop handles deallocation)
-            if let Some(pool_inner) = old_pool.upgrade() {
-                pool_inner.return_buffer(old_buffer);
-            }
-            // else: old_buffer is dropped here, which deallocates it
-        }
-
-        // Fill new bytes with value
-        let fill_start = self.len;
-        let fill_end = self.cursor + new_len;
-        // SAFETY: We verified capacity above, and fill_start..fill_end is within bounds.
-        unsafe {
-            std::ptr::write_bytes(
-                self.buffer.as_ptr().add(fill_start),
-                value,
-                fill_end - fill_start,
-            );
-        }
-        self.len = fill_end;
-    }
-
     /// Freezes the buffer into an immutable `IoBuf`.
     ///
     /// Only the readable portion (`cursor..len`) is included in the result.
@@ -898,16 +803,6 @@ impl PooledBufMut {
         let pool = std::mem::take(&mut me.pool);
 
         Bytes::from_owner(PooledOwner::new(buffer, cursor, len, pool)).into()
-    }
-
-    /// Returns `true` if this buffer will return to a pool when dropped.
-    ///
-    /// Returns `false` if:
-    /// - The buffer was created via fallback allocation (pool exhausted or size exceeded max)
-    /// - The pool has been dropped
-    #[inline]
-    pub fn returns_to_pool(&self) -> bool {
-        self.pool.strong_count() > 0
     }
 }
 
@@ -1192,7 +1087,7 @@ mod tests {
 
         // Allocate and initialize a buffer
         let mut buf = pool.alloc(11).unwrap();
-        buf.resize(11, 0);
+        buf.put_slice(&[0u8; 11]);
         assert_eq!(buf.len(), 11);
 
         // Write some data
@@ -1267,29 +1162,6 @@ mod tests {
         // Verify storage pool works (page-aligned)
         let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
         assert!(storage_buf.capacity() >= page_size());
-    }
-
-    #[test]
-    fn test_pooled_resize_grow_beyond_capacity() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        // Allocate and initialize a buffer at minimum size class
-        let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0x22); // Fill with known pattern
-        let original_capacity = buf.capacity();
-        assert_eq!(buf.len(), 100);
-
-        // Grow beyond capacity - should get a new buffer from the pool
-        let new_size = original_capacity + 100;
-        buf.resize(new_size, 0xAB);
-        assert!(buf.capacity() >= new_size);
-        assert_eq!(buf.len(), new_size);
-        // Original data should be preserved
-        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x22));
-        // New bytes should be filled with 0xAB
-        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0xAB));
     }
 
     /// Helper to get the number of allocated buffers for a size class.
@@ -1369,7 +1241,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0);
+        buf.put_slice(&[0u8; 100]);
         let iobuf = buf.freeze();
 
         // Create a slice - this should hold a reference to the underlying buffer
@@ -1395,7 +1267,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0x42);
+        buf.put_slice(&[0x42u8; 100]);
         let mut iobuf = buf.freeze();
 
         // copy_to_bytes should create a slice sharing the same buffer
@@ -1495,7 +1367,7 @@ mod tests {
         for _ in 0..100 {
             // Incoming data (could be IoBuf or IoBufMut)
             let mut incoming = pool.alloc(100).unwrap();
-            incoming.resize(100, 0x42);
+            incoming.put_slice(&[0x42u8; 100]);
             let incoming_iobuf = incoming.freeze();
 
             // Convert to IoBufs (what send() does)
@@ -1626,7 +1498,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0);
+        buf.put_slice(&[0u8; 100]);
         let iobuf = buf.freeze();
 
         // Drop the pool while buffer is still alive
@@ -1640,80 +1512,6 @@ mod tests {
         // No assertion here - we just want to make sure it doesn't panic
     }
 
-    /// Verify PooledBufMut matches BytesMut semantics for advance + resize.
-    #[test]
-    fn test_bytesmut_parity_advance_resize() {
-        use bytes::BytesMut;
-
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        // Test: advance then resize (grow within capacity)
-        {
-            let mut bytes = BytesMut::with_capacity(100);
-            bytes.resize(50, 0xAA);
-            Buf::advance(&mut bytes, 20);
-
-            let mut pooled = pool.alloc(100).unwrap();
-            pooled.resize(50, 0xAA);
-            Buf::advance(&mut pooled, 20);
-
-            assert_eq!(bytes.len(), pooled.len(), "len after advance");
-            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after advance");
-
-            bytes.resize(40, 0xBB);
-            pooled.resize(40, 0xBB);
-
-            assert_eq!(bytes.len(), pooled.len(), "len after resize grow");
-            assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after resize grow");
-        }
-
-        // Test: advance then resize (shrink)
-        {
-            let mut bytes = BytesMut::with_capacity(100);
-            bytes.resize(50, 0xCC);
-            Buf::advance(&mut bytes, 20);
-
-            let mut pooled = pool.alloc(100).unwrap();
-            pooled.resize(50, 0xCC);
-            Buf::advance(&mut pooled, 20);
-
-            bytes.resize(10, 0);
-            pooled.resize(10, 0);
-
-            assert_eq!(bytes.len(), pooled.len(), "len after resize shrink");
-            assert_eq!(
-                bytes.as_ref(),
-                pooled.as_ref(),
-                "content after resize shrink"
-            );
-        }
-
-        // Test: resize that requires reallocation
-        {
-            let mut bytes = BytesMut::with_capacity(page);
-            bytes.resize(100, 0xDD);
-            Buf::advance(&mut bytes, 30);
-
-            let mut pooled = pool.alloc(page).unwrap();
-            pooled.resize(100, 0xDD);
-            Buf::advance(&mut pooled, 30);
-
-            // Grow beyond original capacity
-            let new_size = page + 100;
-            bytes.resize(new_size, 0xEE);
-            pooled.resize(new_size, 0xEE);
-
-            assert_eq!(bytes.len(), pooled.len(), "len after realloc resize");
-            assert_eq!(
-                bytes.as_ref(),
-                pooled.as_ref(),
-                "content after realloc resize"
-            );
-        }
-    }
-
     /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
     #[test]
     fn test_bytesmut_parity_buf_trait() {
@@ -1724,10 +1522,10 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut bytes = BytesMut::with_capacity(100);
-        bytes.resize(50, 0xAA);
+        bytes.put_slice(&[0xAAu8; 50]);
 
         let mut pooled = pool.alloc(100).unwrap();
-        pooled.resize(50, 0xAA);
+        pooled.put_slice(&[0xAAu8; 50]);
 
         // remaining()
         assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
@@ -1794,11 +1592,11 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut bytes = BytesMut::with_capacity(100);
-        bytes.resize(50, 0xAA);
+        bytes.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut bytes, 10);
 
         let mut pooled = pool.alloc(100).unwrap();
-        pooled.resize(50, 0xAA);
+        pooled.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut pooled, 10);
 
         // Both should have 40 bytes remaining
@@ -1823,11 +1621,11 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut bytes = BytesMut::with_capacity(100);
-        bytes.resize(50, 0xAA);
+        bytes.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut bytes, 10);
 
         let mut pooled = pool.alloc(100).unwrap();
-        pooled.resize(50, 0xAA);
+        pooled.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut pooled, 10);
 
         bytes.clear();
@@ -1870,34 +1668,6 @@ mod tests {
         // Allocate again - should reuse from freelist
         let _buf5 = pool.alloc(100).expect("reuse from freelist");
         assert_eq!(get_available(&pool, page), 2);
-    }
-
-    /// Test cross-size-class resize.
-    #[test]
-    fn test_cross_size_class_resize() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 8, 10), &mut registry);
-
-        // Allocate smallest class
-        let mut buf = pool.alloc(100).unwrap();
-        assert_eq!(buf.capacity(), page);
-        buf.resize(100, 0x11);
-
-        // Grow to require larger class
-        let new_size = page * 2 + 100;
-        buf.resize(new_size, 0x22);
-        assert!(buf.capacity() >= new_size);
-
-        // Original data preserved
-        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x11));
-        // New data filled
-        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0x22));
-
-        // Shrink back (doesn't change capacity)
-        buf.resize(50, 0);
-        assert_eq!(buf.len(), 50);
-        assert!(buf.capacity() >= new_size);
     }
 
     /// Test try_alloc error variants.
@@ -1943,10 +1713,10 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
 
         let mut bytes = BytesMut::with_capacity(page);
-        bytes.resize(50, 0xAA);
+        bytes.put_slice(&[0xAAu8; 50]);
 
         let mut pooled = pool.alloc(page).unwrap();
-        pooled.resize(50, 0xAA);
+        pooled.put_slice(&[0xAAu8; 50]);
 
         // Before advance
         assert_eq!(bytes.len(), pooled.len(), "len before advance");
@@ -1976,7 +1746,7 @@ mod tests {
         Buf::advance(&mut bytes, 20);
 
         let mut pooled = pool.alloc(page).unwrap();
-        pooled.resize(50, 0xBB);
+        pooled.put_slice(&[0xBB; 50]);
         Buf::advance(&mut pooled, 20);
 
         // SAFETY: 40 bytes are initialized (we resized to 50, advanced 20, so 30 readable
@@ -2005,7 +1775,7 @@ mod tests {
         bytes.clear();
 
         let mut pooled = pool.alloc(page).unwrap();
-        pooled.resize(50, 0xCC);
+        pooled.put_slice(&[0xCC; 50]);
         Buf::advance(&mut pooled, 20);
         let pooled_cap_before = pooled.capacity();
         pooled.clear();
@@ -2030,28 +1800,11 @@ mod tests {
         bytes.put_slice(&[0xBB; 10]);
 
         let mut pooled = pool.alloc(100).unwrap();
-        pooled.resize(30, 0xAA);
+        pooled.put_slice(&[0xAA; 30]);
         Buf::advance(&mut pooled, 10);
         pooled.put_slice(&[0xBB; 10]);
 
         assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after put_slice");
-    }
-
-    #[test]
-    fn test_resize_beyond_max_pool_size() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
-        let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0x11);
-
-        // Resize beyond max_size - should fall back to heap
-        buf.resize(page * 10, 0x22);
-
-        assert_eq!(buf.len(), page * 10);
-        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x11));
-        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0x22));
     }
 
     #[test]
@@ -2086,7 +1839,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0x42);
+        buf.put_slice(&[0x42; 100]);
         Buf::advance(&mut buf, 100);
 
         let frozen = buf.freeze();
@@ -2115,27 +1868,6 @@ mod tests {
         let buf = pool.alloc(page);
         assert!(buf.is_some());
         assert_eq!(buf.unwrap().capacity(), page);
-    }
-
-    #[test]
-    fn test_stress_resize_with_advance() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        for _ in 0..100 {
-            let mut buf = pool.alloc(100).unwrap();
-            buf.resize(50, 0xAA);
-            Buf::advance(&mut buf, 25);
-            buf.resize(100, 0xBB);
-            assert_eq!(buf.len(), 100);
-            assert!(buf.as_ref()[..25].iter().all(|&b| b == 0xAA));
-            assert!(buf.as_ref()[25..].iter().all(|&b| b == 0xBB));
-            buf.resize(10, 0);
-            assert_eq!(buf.len(), 10);
-            drop(buf);
-        }
-        assert_eq!(get_allocated(&pool, page), 0);
     }
 
     #[test]
@@ -2174,7 +1906,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0x42);
+        buf.put_slice(&[0x42; 100]);
         let iobuf = buf.freeze();
         let slice = iobuf.slice(10..50);
         let clone1 = slice.clone();
@@ -2189,59 +1921,6 @@ mod tests {
 
         drop(clone2);
         assert_eq!(get_allocated(&pool, page), 0); // Finally returned
-    }
-
-    #[test]
-    fn test_resize_fallback_on_pool_exhaustion() {
-        let page = page_size();
-        let mut registry = test_registry();
-        // Pool with only 1 buffer per class
-        let pool = BufferPool::new(test_config(page, page * 4, 1), &mut registry);
-
-        // Allocate the only buffer in the smallest class
-        let _held = pool.alloc(100).unwrap();
-        assert_eq!(get_allocated(&pool, page), 1);
-        assert_eq!(get_available(&pool, page), 0);
-
-        // Allocate another buffer (will get from pool)
-        let mut buf = pool.alloc(page * 2).unwrap();
-        buf.resize(100, 0x11);
-
-        // Now resize to a size that needs the smallest class, but it's exhausted
-        // This should fall back to heap allocation
-        buf.resize(page * 3, 0x22);
-
-        // Buffer works correctly
-        assert_eq!(buf.len(), page * 3);
-        assert!(buf.as_ref()[..100].iter().all(|&b| b == 0x11));
-        assert!(buf.as_ref()[100..].iter().all(|&b| b == 0x22));
-
-        // The old buffer (page*2 class) should have been returned
-        assert_eq!(get_available(&pool, page * 2), 1);
-    }
-
-    #[test]
-    fn test_resize_after_pool_dropped() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        let mut buf = pool.alloc(100).unwrap();
-        buf.resize(50, 0x11);
-
-        // Drop the pool
-        drop(pool);
-
-        // Resize should fall back to heap (pool reference is gone)
-        buf.resize(page * 2, 0x22);
-
-        // Buffer should work correctly
-        assert_eq!(buf.len(), page * 2);
-        assert!(buf.as_ref()[..50].iter().all(|&b| b == 0x11));
-        assert!(buf.as_ref()[50..].iter().all(|&b| b == 0x22));
-
-        // Drop should not panic
-        drop(buf);
     }
 
     #[test]
@@ -2260,95 +1939,9 @@ mod tests {
 
         // PooledBufMut should match
         let mut pooled = pool.alloc(100).unwrap();
-        pooled.resize(50, 0xAA);
+        pooled.put_slice(&[0xAA; 50]);
         pooled.truncate(100); // Should be no-op
         assert_eq!(pooled.len(), 50);
-    }
-
-    #[test]
-    fn test_returns_to_pool() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
-        // Normal pooled buffer returns to pool
-        let buf = pool.alloc(100).unwrap();
-        assert!(buf.is_pooled());
-
-        // After resize beyond max, still reports correctly
-        let mut buf2 = pool.alloc(100).unwrap();
-        assert!(buf2.is_pooled());
-        buf2.resize(page * 10, 0); // Falls back to heap
-        assert!(!buf2.is_pooled()); // Now returns false
-
-        drop(buf);
-        drop(buf2);
-    }
-
-    #[test]
-    fn test_freelist_full_on_return() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        // Allocate and return to fill freelist
-        let buf1 = pool.alloc(100).unwrap();
-        let buf2 = pool.alloc(100).unwrap();
-        drop(buf1);
-        drop(buf2);
-
-        // Freelist should have 2 buffers
-        assert_eq!(get_available(&pool, page), 2);
-        assert_eq!(get_allocated(&pool, page), 0);
-
-        // Allocate from freelist, then resize to heap fallback
-        let mut buf3 = pool.alloc(100).unwrap();
-        assert_eq!(get_available(&pool, page), 1);
-        buf3.resize(page * 10, 0); // Falls back to heap
-
-        // Old buffer returned, freelist should be full again
-        assert_eq!(get_available(&pool, page), 2);
-
-        // Drop buf3 - the heap-allocated buffer just gets deallocated
-        drop(buf3);
-        // Freelist unchanged since buf3 doesn't return to pool
-        assert_eq!(get_available(&pool, page), 2);
-    }
-
-    #[test]
-    fn test_concurrent_resize() {
-        use std::{sync::Arc, thread};
-
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = Arc::new(BufferPool::new(
-            test_config(page, page * 8, 100),
-            &mut registry,
-        ));
-
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let pool = Arc::clone(&pool);
-                thread::spawn(move || {
-                    for _ in 0..50 {
-                        let mut buf = pool.alloc(100).unwrap();
-                        buf.resize(50, 0xAA);
-                        Buf::advance(&mut buf, 25);
-                        buf.resize(page * 2, 0xBB); // Cross-class resize
-                        assert_eq!(buf.len(), page * 2);
-                        buf.resize(100, 0); // Shrink
-                        drop(buf);
-                    }
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // All buffers should be returned
-        assert_eq!(get_allocated(&pool, page), 0);
     }
 
     #[test]
@@ -2358,7 +1951,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(50, 0xAA);
+        buf.put_slice(&[0xAA; 50]);
         buf.clear();
 
         let frozen = buf.freeze();
@@ -2377,7 +1970,7 @@ mod tests {
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
-        buf.resize(100, 0);
+        buf.put_slice(&[0; 100]);
 
         // Initially aligned
         assert_eq!(buf.as_mut_ptr() as usize % page, 0);

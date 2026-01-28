@@ -99,9 +99,17 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Resize buffer and pass directly to read_at (avoids copy)
+        // Reuse existing buffer if it has enough capacity, otherwise allocate new
         let mut buf = std::mem::take(&mut self.buffer);
-        buf.resize(bytes_to_read, 0);
+        buf.clear();
+        let buf = if buf.capacity() >= bytes_to_read {
+            // SAFETY: We just cleared the buffer and verified capacity.
+            // The bytes will be overwritten by read_at before being read.
+            unsafe { buf.set_len(bytes_to_read) };
+            buf
+        } else {
+            IoBufMut::zeroed(bytes_to_read)
+        };
         let read_result = self.blob.read_at(self.blob_position, buf).await?;
         self.buffer = read_result.coalesce();
         self.buffer_valid_len = bytes_to_read;

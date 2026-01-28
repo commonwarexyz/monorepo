@@ -245,19 +245,10 @@ impl IoBufMut {
         }
     }
 
-    /// Returns `true` if this buffer uses pooled storage AND will return to
-    /// the pool when dropped.
-    ///
-    /// Returns `false` if:
-    /// - The buffer is owned (backed by `BytesMut`)
-    /// - The buffer was created via fallback allocation (pool exhausted or size exceeded)
-    /// - The pool has been dropped
+    /// Returns `true` if this buffer is from a pool.
     #[inline]
-    pub fn is_pooled(&self) -> bool {
-        match &self.inner {
-            IoBufMutInner::Owned(_) => false,
-            IoBufMutInner::Pooled(b) => b.returns_to_pool(),
-        }
+    pub const fn is_pooled(&self) -> bool {
+        matches!(&self.inner, IoBufMutInner::Pooled(_))
     }
 
     /// Sets the length of the buffer.
@@ -323,21 +314,6 @@ impl IoBufMut {
         match &mut self.inner {
             IoBufMutInner::Owned(b) => b.as_mut_ptr(),
             IoBufMutInner::Pooled(b) => b.as_mut_ptr(),
-        }
-    }
-
-    /// Resizes the buffer to `new_len`, filling new bytes with `value`.
-    ///
-    /// If `new_len` is less than the current length, the buffer is truncated.
-    /// If `new_len` is greater, the buffer is extended with `value` bytes.
-    ///
-    /// For pooled buffers, if the new length exceeds capacity, a larger buffer
-    /// will be obtained from the pool (or allocated directly if the pool is exhausted).
-    #[inline]
-    pub fn resize(&mut self, new_len: usize, value: u8) {
-        match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.resize(new_len, value),
-            IoBufMutInner::Pooled(b) => b.resize(new_len, value),
         }
     }
 
