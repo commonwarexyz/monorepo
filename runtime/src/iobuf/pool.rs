@@ -561,14 +561,6 @@ impl BufferPool {
         self.try_alloc(capacity).ok()
     }
 
-    /// Allocates a buffer optimized for I/O operations.
-    ///
-    /// Currently identical to [`Self::alloc`]. In the future, this may return
-    /// buffers registered with io_uring for zero-copy I/O.
-    pub fn alloc_for_io(&self, capacity: usize) -> Option<IoBufMut> {
-        self.alloc(capacity)
-    }
-
     /// Attempts to allocate a buffer, returning an error on failure.
     ///
     /// This is like [`Self::alloc`] but returns a [`Result`] that distinguishes
