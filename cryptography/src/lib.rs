@@ -17,16 +17,9 @@ use rand::SeedableRng as _;
 use rand_chacha::ChaCha20Rng;
 use rand_core::CryptoRngCore;
 
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
-pub mod bls12381;
-#[cfg(not(any(commonware_stability_DELTA, commonware_stability_EPSILON)))]
-pub mod ed25519;
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON
-)))]
-pub mod secp256r1;
+commonware_macros::stability_mod!(GAMMA, pub mod bls12381);
+commonware_macros::stability_mod!(GAMMA, pub mod ed25519);
+commonware_macros::stability_mod!(BETA, pub mod secp256r1);
 
 commonware_macros::stability_scope!(BETA {
     pub mod bloomfilter;
