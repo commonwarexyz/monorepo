@@ -11,11 +11,263 @@ use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
+    braced,
     parse::{Parse, ParseStream, Result},
-    parse_macro_input, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    parse_macro_input, Error, Expr, Ident, ItemFn, LitInt, LitStr, Pat, Token, Visibility,
 };
 
 mod nextest;
+
+/// Stability level input that accepts either a literal integer (0-4) or a named constant
+/// (ALPHA, BETA, GAMMA, DELTA, EPSILON).
+#[allow(dead_code)]
+struct StabilityLevel {
+    value: u8,
+    span: Span,
+}
+
+impl Parse for StabilityLevel {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let lookahead = input.lookahead1();
+        if lookahead.peek(LitInt) {
+            let lit: LitInt = input.parse()?;
+            let value: u8 = lit
+                .base10_parse()
+                .map_err(|_| Error::new(lit.span(), "stability level must be 0, 1, 2, 3, or 4"))?;
+            if value > 4 {
+                return Err(Error::new(
+                    lit.span(),
+                    "stability level must be 0, 1, 2, 3, or 4",
+                ));
+            }
+            Ok(Self {
+                value,
+                span: lit.span(),
+            })
+        } else if lookahead.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            let value = match ident.to_string().as_str() {
+                "ALPHA" => 0,
+                "BETA" => 1,
+                "GAMMA" => 2,
+                "DELTA" => 3,
+                "EPSILON" => 4,
+                _ => {
+                    return Err(Error::new(
+                        ident.span(),
+                        "expected stability level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
+                    ));
+                }
+            };
+            Ok(Self {
+                value,
+                span: ident.span(),
+            })
+        } else {
+            Err(lookahead.error())
+        }
+    }
+}
+
+/// Marks an item with a stability level.
+///
+/// When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability
+/// less than X are excluded. Unmarked items are always included.
+///
+/// See [commonware README](https://github.com/commonwarexyz/monorepo#stability) for stability level definitions.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::stability;
+///
+/// #[stability(BETA)]  // excluded at GAMMA, DELTA, EPSILON
+/// pub struct StableApi { }
+/// ```
+fn level_name(level: u8) -> &'static str {
+    match level {
+        0 => "ALPHA",
+        1 => "BETA",
+        2 => "GAMMA",
+        3 => "DELTA",
+        4 => "EPSILON",
+        _ => unreachable!(),
+    }
+}
+
+/// Generates cfg exclusion identifiers for levels above the given level.
+/// Always includes `commonware_stability_RESERVED` to allow finding unmarked items.
+fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
+    let mut names: Vec<_> = ((level + 1)..=4)
+        .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
+        .collect();
+    // RESERVED excludes all stability-marked items, leaving only unmarked ones
+    names.push(format_ident!("commonware_stability_RESERVED"));
+    names
+}
+
+#[proc_macro_attribute]
+pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let level = parse_macro_input!(attr as StabilityLevel);
+
+    // Generate a single cfg(not(any(...))) for all levels above this item's level.
+    // #[stability(ALPHA)] expands to #[cfg(not(any(commonware_stability_BETA, commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON, commonware_stability_RESERVED)))]
+    // RESERVED is always included so that building with --cfg commonware_stability_RESERVED excludes ALL marked items.
+    let exclude_names = exclusion_cfg_names(level.value);
+
+    let item2: proc_macro2::TokenStream = item.into();
+    let expanded = quote! {
+        #[cfg(not(any(#(#exclude_names),*)))]
+        #item2
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Input for the `stability_mod!` macro: `level, visibility mod name`
+struct StabilityModInput {
+    level: StabilityLevel,
+    visibility: Visibility,
+    name: Ident,
+}
+
+impl Parse for StabilityModInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let level: StabilityLevel = input.parse()?;
+        input.parse::<Token![,]>()?;
+        let visibility: Visibility = input.parse()?;
+        input.parse::<Token![mod]>()?;
+        let name: Ident = input.parse()?;
+        Ok(Self {
+            level,
+            visibility,
+            name,
+        })
+    }
+}
+
+/// Marks a module with a stability level.
+///
+/// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, modules with stability
+/// less than N are excluded.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::stability_mod;
+///
+/// stability_mod!(BETA, pub mod stable_module);
+/// ```
+#[proc_macro]
+pub fn stability_mod(input: TokenStream) -> TokenStream {
+    let StabilityModInput {
+        level,
+        visibility,
+        name,
+    } = parse_macro_input!(input as StabilityModInput);
+
+    let exclude_names = exclusion_cfg_names(level.value);
+
+    let expanded = quote! {
+        #[cfg(not(any(#(#exclude_names),*)))]
+        #visibility mod #name;
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Input for the `stability_scope!` macro: `level [, cfg(predicate)] { items... }`
+struct StabilityScopeInput {
+    level: StabilityLevel,
+    cfg_predicate: Option<syn::Meta>,
+    items: Vec<syn::Item>,
+}
+
+impl Parse for StabilityScopeInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let level: StabilityLevel = input.parse()?;
+
+        // Check for optional cfg predicate
+        let cfg_predicate = if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+
+            // Parse `cfg(...)` - expect the literal identifier "cfg" followed by parenthesized content
+            let cfg_ident: Ident = input.parse()?;
+            if cfg_ident != "cfg" {
+                return Err(Error::new(cfg_ident.span(), "expected `cfg`"));
+            }
+            let cfg_content;
+            syn::parenthesized!(cfg_content in input);
+            Some(cfg_content.parse()?)
+        } else {
+            None
+        };
+
+        let content;
+        braced!(content in input);
+
+        let mut items = Vec::new();
+        while !content.is_empty() {
+            items.push(content.parse()?);
+        }
+
+        Ok(Self {
+            level,
+            cfg_predicate,
+            items,
+        })
+    }
+}
+
+/// Marks all items within a scope with a stability level and optional cfg predicate.
+///
+/// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, items with stability
+/// less than N are excluded.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::stability_scope;
+///
+/// // Without cfg predicate
+/// stability_scope!(BETA {
+///     pub mod stable_module;
+///     pub use crate::stable_module::Item;
+/// });
+///
+/// // With cfg predicate
+/// stability_scope!(BETA, cfg(feature = "std") {
+///     pub mod std_only_module;
+/// });
+/// ```
+#[proc_macro]
+pub fn stability_scope(input: TokenStream) -> TokenStream {
+    let StabilityScopeInput {
+        level,
+        cfg_predicate,
+        items,
+    } = parse_macro_input!(input as StabilityScopeInput);
+
+    let exclude_names = exclusion_cfg_names(level.value);
+
+    let cfg_attr = cfg_predicate.map_or_else(
+        || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
+        |pred| quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
+    );
+
+    let expanded_items: Vec<_> = items
+        .into_iter()
+        .map(|item| {
+            quote! {
+                #cfg_attr
+                #item
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        #(#expanded_items)*
+    };
+
+    TokenStream::from(expanded)
+}
 
 /// Run a test function asynchronously.
 ///
@@ -24,9 +276,7 @@ mod nextest;
 ///
 /// # Example
 /// ```rust
-/// use commonware_macros::test_async;
-///
-/// #[test_async]
+/// #[commonware_macros::test_async]
 /// async fn test_async_fn() {
 ///    assert_eq!(2 + 2, 4);
 /// }
@@ -69,10 +319,9 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example
 /// ```rust
-/// use commonware_macros::test_traced;
 /// use tracing::{debug, info};
 ///
-/// #[test_traced("INFO")]
+/// #[commonware_macros::test_traced("INFO")]
 /// fn test_info_level() {
 ///     info!("This is an info log");
 ///     debug!("This is a debug log (won't be shown)");
@@ -195,11 +444,10 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example
 /// ```rust,ignore
-/// use commonware_macros::test_collect_traces;
 /// use commonware_runtime::telemetry::traces::collector::TraceStorage;
 /// use tracing::{debug, info};
 ///
-/// #[test_collect_traces("INFO")]
+/// #[commonware_macros::test_collect_traces("INFO")]
 /// fn test_info_level(traces: TraceStorage) {
 ///     // Filter applies to console output (FmtLayer)
 ///     info!("This is an info log");
@@ -363,16 +611,15 @@ impl ToTokens for SelectInput {
 ///
 /// ```rust
 /// use std::time::Duration;
-/// use commonware_macros::select;
 /// use futures::executor::block_on;
 /// use futures_timer::Delay;
 ///
 /// async fn task() -> usize {
 ///     42
 /// }
-//
+///
 /// block_on(async move {
-///     select! {
+///     commonware_macros::select! {
 ///         _ = Delay::new(Duration::from_secs(1)) => {
 ///             println!("timeout fired");
 ///         },
@@ -536,7 +783,7 @@ impl Parse for SelectLoopInput {
 /// # Syntax
 ///
 /// ```rust,ignore
-/// select_loop! {
+/// commonware_macros::select_loop! {
 ///     context,
 ///     on_start => { /* optional: runs at start of each iteration */ },
 ///     on_stopped => { cleanup },
@@ -564,11 +811,9 @@ impl Parse for SelectLoopInput {
 /// # Example
 ///
 /// ```rust,ignore
-/// use commonware_macros::select_loop;
-///
 /// async fn run(context: impl commonware_runtime::Spawner) {
 ///     let mut counter = 0;
-///     select_loop! {
+///     commonware_macros::select_loop! {
 ///         context,
 ///         on_start => {
 ///             // Prepare state for this iteration (visible in arms and on_end)

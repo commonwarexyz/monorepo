@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
 documentation = "https://docs.rs/commonware-math"
 
+[lints]
+workspace = true
+
 [features]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -31,6 +34,7 @@ std = [
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-macros.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }

@@ -60,10 +60,10 @@
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
-    impl_certificate_bls12381_multisig, impl_certificate_bls12381_threshold,
-    impl_certificate_ed25519, impl_certificate_secp256r1,
-    secp256r1::certificate as secp256r1,
 };
+
+#[commonware_macros::stability(ALPHA)]
+pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
@@ -558,9 +558,10 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
+        use crate::impl_certificate_ed25519;
         use commonware_codec::conformance::CodecConformance;
 
-        /// Test context type for generic scheme tests.
+        /// Test subject for generic scheme conformance tests.
         #[derive(Clone, Debug)]
         pub struct TestSubject {
             pub message: Bytes,

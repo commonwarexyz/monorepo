@@ -108,11 +108,11 @@ mod tests {
     fn test_u64() {
         let value = 42u64;
         let array = U64::new(value);
-        assert_eq!(value, U64::decode(array.as_ref()).unwrap().into());
-        assert_eq!(value, U64::from(array.0).into());
+        assert_eq!(value, u64::from(U64::decode(array.as_ref()).unwrap()));
+        assert_eq!(value, u64::from(U64::from(array.0)));
 
         let vec = array.to_vec();
-        assert_eq!(value, U64::decode(vec.as_ref()).unwrap().into());
+        assert_eq!(value, u64::from(U64::decode(vec.as_ref()).unwrap()));
     }
 
     #[test]

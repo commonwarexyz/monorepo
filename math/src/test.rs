@@ -53,16 +53,16 @@ impl From<u8> for F {
 
 impl Object for F {}
 
-impl<'a> Add<&'a F> for F {
+impl<'a> Add<&'a Self> for F {
     type Output = Self;
 
-    fn add(self, rhs: &'a F) -> Self::Output {
+    fn add(self, rhs: &'a Self) -> Self::Output {
         Self((self.0 + rhs.0) % P)
     }
 }
 
-impl<'a> AddAssign<&'a F> for F {
-    fn add_assign(&mut self, rhs: &'a F) {
+impl<'a> AddAssign<&'a Self> for F {
+    fn add_assign(&mut self, rhs: &'a Self) {
         *self = *self + rhs;
     }
 }
@@ -75,7 +75,7 @@ impl Neg for F {
     }
 }
 
-impl<'a> Sub<&'a F> for F {
+impl<'a> Sub<&'a Self> for F {
     type Output = Self;
 
     fn sub(self, rhs: &'a Self) -> Self::Output {
@@ -83,8 +83,8 @@ impl<'a> Sub<&'a F> for F {
     }
 }
 
-impl<'a> SubAssign<&'a F> for F {
-    fn sub_assign(&mut self, rhs: &'a F) {
+impl<'a> SubAssign<&'a Self> for F {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         *self = *self - rhs;
     }
 }
@@ -95,16 +95,16 @@ impl Additive for F {
     }
 }
 
-impl<'a> Mul<&'a F> for F {
+impl<'a> Mul<&'a Self> for F {
     type Output = Self;
 
-    fn mul(self, rhs: &'a F) -> Self::Output {
+    fn mul(self, rhs: &'a Self) -> Self::Output {
         Self(mul_mod(self.0, rhs.0, P))
     }
 }
 
-impl<'a> MulAssign<&'a F> for F {
-    fn mul_assign(&mut self, rhs: &'a F) {
+impl<'a> MulAssign<&'a Self> for F {
+    fn mul_assign(&mut self, rhs: &'a Self) {
         *self = *self * rhs;
     }
 }
@@ -170,16 +170,16 @@ impl Read for G {
 
 impl Object for G {}
 
-impl<'a> Add<&'a G> for G {
+impl<'a> Add<&'a Self> for G {
     type Output = Self;
 
-    fn add(self, rhs: &'a G) -> Self::Output {
+    fn add(self, rhs: &'a Self) -> Self::Output {
         Self(mul_mod(self.0, rhs.0, Q))
     }
 }
 
-impl<'a> AddAssign<&'a G> for G {
-    fn add_assign(&mut self, rhs: &'a G) {
+impl<'a> AddAssign<&'a Self> for G {
+    fn add_assign(&mut self, rhs: &'a Self) {
         *self = *self + rhs;
     }
 }
@@ -192,16 +192,16 @@ impl Neg for G {
     }
 }
 
-impl<'a> Sub<&'a G> for G {
+impl<'a> Sub<&'a Self> for G {
     type Output = Self;
 
-    fn sub(self, rhs: &'a G) -> Self::Output {
+    fn sub(self, rhs: &'a Self) -> Self::Output {
         self + &-*rhs
     }
 }
 
-impl<'a> SubAssign<&'a G> for G {
-    fn sub_assign(&mut self, rhs: &'a G) {
+impl<'a> SubAssign<&'a Self> for G {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         *self = *self - rhs;
     }
 }
@@ -239,7 +239,7 @@ impl CryptoGroup for G {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for G {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(G::generator() * &u.arbitrary::<F>()?)
+        Ok(Self::generator() * &u.arbitrary::<F>()?)
     }
 }
 
@@ -265,7 +265,7 @@ mod test {
         type Strategy = BoxedStrategy<Self>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<F>().prop_map(|x| G::generator() * &x).boxed()
+            any::<F>().prop_map(|x| Self::generator() * &x).boxed()
         }
     }
 

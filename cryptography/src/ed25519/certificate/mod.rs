@@ -488,229 +488,225 @@ impl Read for Certificate {
     }
 }
 
-mod macros {
-    /// Generates an Ed25519 signing scheme wrapper for a specific protocol.
-    ///
-    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-    /// implementation, and a `fixture` function for testing.
-    ///
-    /// # Parameters
-    ///
-    /// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
-    ///   in the subject type to bind to the GAT lifetime and digest type parameters.
-    ///
-    /// - `$namespace`: The namespace type that implements [`Namespace`](crate::certificate::Namespace).
-    ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
-    ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
-    ///   to create the namespace, then passes it to `Subject::namespace()` during signing
-    ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
-    ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // For non-generic subject types with a single namespace:
-    /// impl_certificate_ed25519!(MySubject, Vec<u8>);
-    ///
-    /// // For protocols with generic subject types:
-    /// impl_certificate_ed25519!(Subject<'a, D>, Namespace);
-    /// ```
-    #[macro_export]
-    macro_rules! impl_certificate_ed25519 {
-        ($subject:ty, $namespace:ty) => {
-            /// Generates a test fixture with Ed25519 identities and signing schemes.
+/// Generates an Ed25519 signing scheme wrapper for a specific protocol.
+///
+/// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+/// implementation, and a `fixture` function for testing.
+///
+/// # Parameters
+///
+/// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
+///   in the subject type to bind to the GAT lifetime and digest type parameters.
+///
+/// - `$namespace`: The namespace type that implements [`Namespace`].
+///   This type pre-computes and stores any protocol-specific namespace bytes derived from
+///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
+///   to create the namespace, then passes it to `Subject::namespace()` during signing
+///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
+///   For protocols with multiple message types, a custom struct can pre-compute all variants.
+///
+/// # Example
+/// ```ignore
+/// // For non-generic subject types with a single namespace:
+/// impl_certificate_ed25519!(MySubject, Vec<u8>);
+///
+/// // For protocols with generic subject types:
+/// impl_certificate_ed25519!(Subject<'a, D>, Namespace);
+/// ```
+#[macro_export]
+macro_rules! impl_certificate_ed25519 {
+    ($subject:ty, $namespace:ty) => {
+        /// Generates a test fixture with Ed25519 identities and signing schemes.
+        ///
+        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+        /// scheme instances share a consistent ordering.
+        #[cfg(feature = "mocks")]
+        #[allow(dead_code)]
+        pub fn fixture<R>(
+            rng: &mut R,
+            namespace: &[u8],
+            n: u32,
+        ) -> $crate::certificate::mocks::Fixture<Scheme>
+        where
+            R: rand::RngCore + rand::CryptoRng,
+        {
+            $crate::ed25519::certificate::mocks::fixture(
+                rng,
+                namespace,
+                n,
+                Scheme::signer,
+                Scheme::verifier,
+            )
+        }
+
+        /// Ed25519 signing scheme wrapper.
+        #[derive(Clone, Debug)]
+        pub struct Scheme {
+            generic: $crate::ed25519::certificate::Generic<$namespace>,
+        }
+
+        impl Scheme {
+            /// Creates a new scheme instance with the provided key material.
             ///
-            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-            /// scheme instances share a consistent ordering.
-            #[cfg(feature = "mocks")]
-            #[allow(dead_code)]
-            pub fn fixture<R>(
-                rng: &mut R,
+            /// Participants use the same key for both identity and signing.
+            ///
+            /// If the provided private key does not match any signing key in the participant set,
+            /// the instance will act as a verifier (unable to generate signatures).
+            ///
+            /// Returns `None` if the provided private key does not match any participant
+            /// in the participant set.
+            pub fn signer(
                 namespace: &[u8],
-                n: u32,
-            ) -> $crate::certificate::mocks::Fixture<Scheme>
+                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                private_key: $crate::ed25519::PrivateKey,
+            ) -> Option<Self> {
+                Some(Self {
+                    generic: $crate::ed25519::certificate::Generic::signer(
+                        namespace,
+                        participants,
+                        private_key,
+                    )?,
+                })
+            }
+
+            /// Builds a verifier that can authenticate signatures without generating them.
+            ///
+            /// Participants use the same key for both identity and signing.
+            pub fn verifier(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+            ) -> Self {
+                Self {
+                    generic: $crate::ed25519::certificate::Generic::verifier(
+                        namespace,
+                        participants,
+                    ),
+                }
+            }
+        }
+
+        impl $crate::certificate::Scheme for Scheme {
+            type Subject<'a, D: $crate::Digest> = $subject;
+            type PublicKey = $crate::ed25519::PublicKey;
+            type Signature = $crate::ed25519::Signature;
+            type Certificate = $crate::ed25519::certificate::Certificate;
+
+            fn me(&self) -> Option<commonware_utils::Participant> {
+                self.generic.me()
+            }
+
+            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+                &self.generic.participants
+            }
+
+            fn sign<D: $crate::Digest>(
+                &self,
+                subject: Self::Subject<'_, D>,
+            ) -> Option<$crate::certificate::Attestation<Self>> {
+                self.generic.sign::<_, D>(subject)
+            }
+
+            fn verify_attestation<R, D>(
+                &self,
+                _rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestation: &$crate::certificate::Attestation<Self>,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
             where
-                R: rand::RngCore + rand::CryptoRng,
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
             {
-                $crate::ed25519::certificate::mocks::fixture(
-                    rng,
-                    namespace,
-                    n,
-                    Scheme::signer,
-                    Scheme::verifier,
-                )
+                self.generic
+                    .verify_attestation::<_, D>(subject, attestation)
             }
 
-            /// Ed25519 signing scheme wrapper.
-            #[derive(Clone, Debug)]
-            pub struct Scheme {
-                generic: $crate::ed25519::certificate::Generic<$namespace>,
+            fn verify_attestations<R, D, I>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestations: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> $crate::certificate::Verification<Self>
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+            {
+                self.generic
+                    .verify_attestations::<_, _, D, _>(rng, subject, attestations)
             }
 
-            impl Scheme {
-                /// Creates a new scheme instance with the provided key material.
-                ///
-                /// Participants use the same key for both identity and signing.
-                ///
-                /// If the provided private key does not match any signing key in the participant set,
-                /// the instance will act as a verifier (unable to generate signatures).
-                ///
-                /// Returns `None` if the provided private key does not match any participant
-                /// in the participant set.
-                pub fn signer(
-                    namespace: &[u8],
-                    participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
-                    private_key: $crate::ed25519::PrivateKey,
-                ) -> Option<Self> {
-                    Some(Self {
-                        generic: $crate::ed25519::certificate::Generic::signer(
-                            namespace,
-                            participants,
-                            private_key,
-                        )?,
-                    })
-                }
-
-                /// Builds a verifier that can authenticate signatures without generating them.
-                ///
-                /// Participants use the same key for both identity and signing.
-                pub fn verifier(
-                    namespace: &[u8],
-                    participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
-                ) -> Self {
-                    Self {
-                        generic: $crate::ed25519::certificate::Generic::verifier(
-                            namespace,
-                            participants,
-                        ),
-                    }
-                }
+            fn assemble<I, M>(
+                &self,
+                attestations: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> Option<Self::Certificate>
+            where
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                M: commonware_utils::Faults,
+            {
+                self.generic.assemble::<Self, _, M>(attestations)
             }
 
-            impl $crate::certificate::Scheme for Scheme {
-                type Subject<'a, D: $crate::Digest> = $subject;
-                type PublicKey = $crate::ed25519::PublicKey;
-                type Signature = $crate::ed25519::Signature;
-                type Certificate = $crate::ed25519::certificate::Certificate;
-
-                fn me(&self) -> Option<commonware_utils::Participant> {
-                    self.generic.me()
-                }
-
-                fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-                    &self.generic.participants
-                }
-
-                fn sign<D: $crate::Digest>(
-                    &self,
-                    subject: Self::Subject<'_, D>,
-                ) -> Option<$crate::certificate::Attestation<Self>> {
-                    self.generic.sign::<_, D>(subject)
-                }
-
-                fn verify_attestation<R, D>(
-                    &self,
-                    _rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    attestation: &$crate::certificate::Attestation<Self>,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                {
-                    self.generic
-                        .verify_attestation::<_, D>(subject, attestation)
-                }
-
-                fn verify_attestations<R, D, I>(
-                    &self,
-                    rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    attestations: I,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> $crate::certificate::Verification<Self>
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                {
-                    self.generic
-                        .verify_attestations::<_, _, D, _>(rng, subject, attestations)
-                }
-
-                fn assemble<I, M>(
-                    &self,
-                    attestations: I,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> Option<Self::Certificate>
-                where
-                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic.assemble::<Self, _, M>(attestations)
-                }
-
-                fn verify_certificate<R, D, M>(
-                    &self,
-                    rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    certificate: &Self::Certificate,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic
-                        .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
-                }
-
-                fn verify_certificates<'a, R, D, I, M>(
-                    &self,
-                    rng: &mut R,
-                    certificates: I,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand::Rng + rand::CryptoRng,
-                    D: $crate::Digest,
-                    I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic
-                        .verify_certificates::<Self, _, D, _, M>(rng, certificates)
-                }
-
-                fn is_attributable() -> bool {
-                    $crate::ed25519::certificate::Generic::<$namespace>::is_attributable()
-                }
-
-                fn is_batchable() -> bool {
-                    $crate::ed25519::certificate::Generic::<$namespace>::is_batchable()
-                }
-
-                fn certificate_codec_config(
-                    &self,
-                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    self.generic.certificate_codec_config()
-                }
-
-                fn certificate_codec_config_unbounded(
-                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::ed25519::certificate::Generic::<$namespace>::certificate_codec_config_unbounded()
-                }
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
             }
-        };
-    }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand::Rng + rand::CryptoRng,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+            }
+
+            fn is_attributable() -> bool {
+                $crate::ed25519::certificate::Generic::<$namespace>::is_attributable()
+            }
+
+            fn is_batchable() -> bool {
+                $crate::ed25519::certificate::Generic::<$namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded(
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::ed25519::certificate::Generic::<$namespace>::certificate_codec_config_unbounded()
+            }
+        }
+    };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        certificate::Scheme as _, impl_certificate_ed25519, sha256::Digest as Sha256Digest,
-    };
+    use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;

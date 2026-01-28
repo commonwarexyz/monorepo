@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::encrypted::Error;
 use commonware_codec::{
     varint::{Decoder, UInt, MAX_U32_VARINT_SIZE},
     Encode,

@@ -18,7 +18,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Sink, Spawner, Stream};
-use commonware_stream::{Receiver, Sender};
+use commonware_stream::encrypted::{Receiver, Sender};
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use rand_core::CryptoRngCore;

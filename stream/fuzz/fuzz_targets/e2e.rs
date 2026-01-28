@@ -3,9 +3,8 @@
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
 use commonware_stream::{
-    dial, listen,
+    encrypted::{dial, listen, Config, Error, Receiver, Sender},
     utils::codec::{recv_frame, send_frame},
-    Config, Error, Receiver, Sender,
 };
 use futures::future::{select, Either};
 use libfuzzer_sys::fuzz_target;

@@ -19,7 +19,7 @@ use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{
     buffer::PoolRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
 };
-use commonware_stream::{dial, Config as StreamConfig};
+use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

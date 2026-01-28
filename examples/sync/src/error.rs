@@ -8,7 +8,7 @@ use thiserror::Error;
 pub enum Error {
     /// Stream error during communication
     #[error("stream error")]
-    Network(#[from] commonware_stream::Error),
+    Network(#[from] commonware_stream::encrypted::Error),
 
     /// Received unexpected response type for a request
     #[error("unexpected response type for request {request_id}")]

@@ -1,12 +1,18 @@
-pub(crate) mod audited;
-pub(crate) mod deterministic;
-pub(crate) mod metered;
+use commonware_macros::stability_scope;
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network")))]
-pub(crate) mod tokio;
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "iouring-network"))]
-pub(crate) mod iouring;
+stability_scope!(ALPHA {
+    pub(crate) mod audited;
+    pub(crate) mod deterministic;
+});
+stability_scope!(BETA {
+    pub(crate) mod metered;
+});
+stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-network"))) {
+    pub(crate) mod tokio;
+});
+stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-network")) {
+    pub(crate) mod iouring;
+});
 
 #[cfg(test)]
 mod tests {

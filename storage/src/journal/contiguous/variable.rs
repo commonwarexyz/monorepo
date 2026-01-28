@@ -226,6 +226,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * `size()` returns `size`
     /// * `oldest_retained_pos()` returns `None` (fully pruned)
     /// * Next append receives position `size`
+    #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         // Initialize empty data journal
         let data = variable::Journal::init(
@@ -287,6 +288,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// # Errors
     /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,

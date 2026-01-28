@@ -8,7 +8,7 @@ use commonware_cryptography::Hasher;
 mod actor;
 pub use actor::Application;
 use commonware_runtime::{Sink, Stream};
-use commonware_stream::{Receiver, Sender};
+use commonware_stream::encrypted::{Receiver, Sender};
 mod ingress;
 
 /// Configuration for the application.

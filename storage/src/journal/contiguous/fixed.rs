@@ -406,6 +406,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// # Crash Safety
     /// If a crash occurs during this operation, `init()` will recover to a consistent state
     /// (though possibly different from the intended `size`).
+    #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
         let tail_section = size / items_per_blob;
@@ -462,6 +463,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///    may be retained (from the section boundary to `range.start - 1`).
     /// 3. **Data exceeds range**: Returns error
     /// 4. **Stale data**: Destroys and recreates at `range.start`
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,

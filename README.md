@@ -53,6 +53,28 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
+## Stability
+
+Each public API item in the Commonware Library is annotated with a stability level:
+
+| Level        | Index | Description                                                                              |
+|--------------|-------|------------------------------------------------------------------------------------------|
+| **ALPHA**    | 0     | Significant breaking changes expected with no migration path. Critical vulnerabilities possible. |
+| **BETA**     | 1     | Wire and storage format stable. All breaking changes include a migration path.           |
+| **GAMMA**    | 2     | API stable. Audited multiple times and fuzzed extensively.                               |
+| **DELTA**    | 3     | Battle-tested. Only changes expected are performance optimizations.                      |
+| **EPSILON**  | 4     | Primitive is frozen. No changes expected.                                                |
+
+Higher stability code can only depend on code with equal or higher stability. This is enforced at compile time:
+
+```bash
+# Generate docs for only code with stability >= GAMMA (level 2)
+RUSTFLAGS="--cfg commonware_stability_GAMMA" RUSTDOCFLAGS="--cfg commonware_stability_GAMMA" cargo doc
+
+# Check if your application only uses commonware APIs with stability >= GAMMA
+RUSTFLAGS="--cfg commonware_stability_GAMMA" cargo build -p my-app
+```
+
 ## Licensing
 
 This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses. You may choose either license when employing this code.

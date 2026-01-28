@@ -64,8 +64,8 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     }
 }
 
-#[derive(Clone, Debug)]
 /// Sends messages containing content to the router to send to peers.
+#[derive(Clone, Debug)]
 pub struct Messenger<P: PublicKey> {
     sender: Mailbox<Message<P>>,
 }
