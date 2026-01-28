@@ -174,7 +174,7 @@ impl FixedSize for Checkpoint {
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
 /// Single table entry stored in the table blob.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 struct Entry {
     // Epoch in which this slot was written
@@ -211,17 +211,6 @@ impl Entry {
             position,
             added,
             crc: Self::compute_crc(epoch, section, position, added),
-        }
-    }
-
-    /// Create a new empty [Entry].
-    const fn new_empty() -> Self {
-        Self {
-            epoch: 0,
-            section: 0,
-            position: 0,
-            added: 0,
-            crc: 0,
         }
     }
 
@@ -1036,7 +1025,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                     }
                     Entry::new(self.next_epoch, section, position, 0)
                 }
-                None => Entry::new_empty(),
+                None => Entry::default(),
             };
             Self::rewrite_entries(&mut writes, &entry1, &entry2, &reset_entry);
         }
