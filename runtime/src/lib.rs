@@ -508,62 +508,60 @@ pub trait Clock:
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "external")] {
-        /// Interface that runtimes can implement to constrain the execution latency of a future.
-        pub trait Pacer: Clock + Clone + Send + Sync + 'static {
-            /// Defer completion of a future until a specified `latency` has elapsed. If the future is
-            /// not yet ready at the desired time of completion, the runtime will block until the future
-            /// is ready.
-            ///
-            /// In [crate::deterministic], this is used to ensure interactions with external systems can
-            /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
-            /// multiple runtimes to be tested with no code changes).
-            ///
-            /// # Setting Latency
-            ///
-            /// `pace` is not meant to be a time penalty applied to awaited futures and should be set to
-            /// the expected resolution latency of the future. To better explore the possible behavior of an
-            /// application, users can set latency to a randomly chosen value in the range of
-            /// `[expected latency / 2, expected latency * 2]`.
-            ///
-            /// # Warning
-            ///
-            /// Because `pace` blocks if the future is not ready, it is important that the future's completion
-            /// doesn't require anything in the current thread to complete (or else it will deadlock).
-            fn pace<'a, F, T>(
-                &'a self,
-                latency: Duration,
-                future: F,
-            ) -> impl Future<Output = T> + Send + 'a
-            where
-                F: Future<Output = T> + Send + 'a,
-                T: Send + 'a;
-        }
-
-        /// Extension trait that makes it more ergonomic to use [Pacer].
+stability_scope!(ALPHA, cfg(feature = "external") {
+    /// Interface that runtimes can implement to constrain the execution latency of a future.
+    pub trait Pacer: Clock + Clone + Send + Sync + 'static {
+        /// Defer completion of a future until a specified `latency` has elapsed. If the future is
+        /// not yet ready at the desired time of completion, the runtime will block until the future
+        /// is ready.
         ///
-        /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
-        /// runtime should delay completion relative to the clock.
-        pub trait FutureExt: Future + Send + Sized {
-            /// Delay completion of the future until a specified `latency` on `pacer`.
-            fn pace<'a, E>(
-                self,
-                pacer: &'a E,
-                latency: Duration,
-            ) -> impl Future<Output = Self::Output> + Send + 'a
-            where
-                E: Pacer + 'a,
-                Self: Send + 'a,
-                Self::Output: Send + 'a,
-            {
-                pacer.pace(latency, self)
-            }
-        }
-
-        impl<F> FutureExt for F where F: Future + Send {}
+        /// In [crate::deterministic], this is used to ensure interactions with external systems can
+        /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
+        /// multiple runtimes to be tested with no code changes).
+        ///
+        /// # Setting Latency
+        ///
+        /// `pace` is not meant to be a time penalty applied to awaited futures and should be set to
+        /// the expected resolution latency of the future. To better explore the possible behavior of an
+        /// application, users can set latency to a randomly chosen value in the range of
+        /// `[expected latency / 2, expected latency * 2]`.
+        ///
+        /// # Warning
+        ///
+        /// Because `pace` blocks if the future is not ready, it is important that the future's completion
+        /// doesn't require anything in the current thread to complete (or else it will deadlock).
+        fn pace<'a, F, T>(
+            &'a self,
+            latency: Duration,
+            future: F,
+        ) -> impl Future<Output = T> + Send + 'a
+        where
+            F: Future<Output = T> + Send + 'a,
+            T: Send + 'a;
     }
-}
+
+    /// Extension trait that makes it more ergonomic to use [Pacer].
+    ///
+    /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
+    /// runtime should delay completion relative to the clock.
+    pub trait FutureExt: Future + Send + Sized {
+        /// Delay completion of the future until a specified `latency` on `pacer`.
+        fn pace<'a, E>(
+            self,
+            pacer: &'a E,
+            latency: Duration,
+        ) -> impl Future<Output = Self::Output> + Send + 'a
+        where
+            E: Pacer + 'a,
+            Self: Send + 'a,
+            Self::Output: Send + 'a,
+        {
+            pacer.pace(latency, self)
+        }
+    }
+
+    impl<F> FutureExt for F where F: Future + Send {}
+});
 
 commonware_macros::stability_scope!(GAMMA {
     /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
