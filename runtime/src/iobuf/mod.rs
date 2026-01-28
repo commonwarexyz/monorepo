@@ -249,10 +249,22 @@ impl IoBufMut {
     ///
     /// # Safety
     ///
-    /// Caller must ensure that `len` bytes starting from the buffer's pointer
-    /// have been initialized.
+    /// Caller must ensure all bytes in `0..len` are initialized before any
+    /// read operations.
+    ///
+    /// Note: It is safe to set `len` before writing if no reads occur until
+    /// after the write completes (e.g., passing the buffer to `read_exact`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len > capacity()`.
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
+        assert!(
+            len <= self.capacity(),
+            "set_len({len}) exceeds capacity({})",
+            self.capacity()
+        );
         match &mut self.inner {
             IoBufMutInner::Owned(b) => b.set_len(len),
             IoBufMutInner::Pooled(b) => b.set_len(len),

@@ -643,11 +643,11 @@ impl PooledBufMut {
     ///
     /// # Safety
     ///
-    /// Caller must ensure that `len` bytes starting from the buffer's pointer
-    /// have been initialized.
+    /// Caller must ensure:
+    /// - `len <= self.capacity()`
+    /// - All bytes in `0..len` are initialized before any read operations
     #[inline]
     pub unsafe fn set_len(&mut self, len: usize) {
-        debug_assert!(len <= self.capacity());
         self.len = len;
     }
 
