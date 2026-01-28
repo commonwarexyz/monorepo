@@ -811,19 +811,23 @@ impl PooledBufMut {
                 }
             }
 
-            // Return old buffer to pool, or drop it (Drop handles deallocation)
-            // SAFETY: We're replacing the buffer, and no other code will access the old one.
-            let old_buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-            if let Some(pool) = self.pool.upgrade() {
-                pool.return_buffer(old_buffer);
-            }
-            // else: old_buffer is dropped here, which deallocates it
+            // Capture old pool reference before we replace it
+            let old_pool = std::mem::replace(&mut self.pool, new_pool);
 
-            // Install new buffer with cursor reset to 0
-            self.buffer = ManuallyDrop::new(new_buffer);
+            // Swap in new buffer atomically, then return old buffer to pool.
+            // Using mem::replace ensures self.buffer is always valid if a panic occurs.
+            let old_buffer =
+                std::mem::replace(&mut self.buffer, ManuallyDrop::new(new_buffer));
+            let old_buffer = ManuallyDrop::into_inner(old_buffer);
+
             self.cursor = 0;
             self.len = current_len;
-            self.pool = new_pool;
+
+            // Return old buffer to pool, or drop it (Drop handles deallocation)
+            if let Some(pool_inner) = old_pool.upgrade() {
+                pool_inner.return_buffer(old_buffer);
+            }
+            // else: old_buffer is dropped here, which deallocates it
         }
 
         // Fill new bytes with value
@@ -845,17 +849,14 @@ impl PooledBufMut {
     /// Only the readable portion (`cursor..len`) is included in the result.
     /// The underlying buffer will be returned to the pool when all references
     /// to the `IoBuf` (including slices) are dropped.
-    pub fn freeze(mut self) -> IoBuf {
-        // SAFETY: We're consuming self and use mem::forget to prevent Drop from running.
-        let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        let cursor = self.cursor;
-        let len = self.len;
-        // Move the weak out instead of cloning, otherwise cloning and then forgetting
-        // would leak the original weak reference.
-        let pool = std::mem::take(&mut self.pool);
-
-        // Prevent Drop from running
-        std::mem::forget(self);
+    pub fn freeze(self) -> IoBuf {
+        // SAFETY: Wrap self in ManuallyDrop first to prevent Drop from running
+        // if any subsequent code panics. Then use ptr::read to extract fields.
+        let mut me = ManuallyDrop::new(self);
+        let buffer = unsafe { std::ptr::read(&*me.buffer) };
+        let cursor = me.cursor;
+        let len = me.len;
+        let pool = std::mem::take(&mut me.pool);
 
         Bytes::from_owner(PooledOwner::new(buffer, cursor, len, pool)).into()
     }
