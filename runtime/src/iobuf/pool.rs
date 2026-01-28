@@ -1,7 +1,36 @@
 //! Buffer pool for efficient I/O operations.
 //!
-//! Provides page-aligned, pooled buffers that can be reused to reduce allocation
-//! overhead.
+//! Provides pooled, aligned buffers that can be reused to reduce allocation
+//! overhead. Buffer alignment is configurable: use page alignment for storage I/O
+//! (required for direct I/O and DMA), or cache-line alignment for network I/O
+//! (reduces fragmentation).
+//!
+//! # Thread Safety
+//!
+//! [`BufferPool`] is `Send + Sync` and can be safely shared across threads.
+//! Allocation and deallocation are lock-free operations using atomic counters
+//! and a lock-free queue ([`crossbeam_queue::ArrayQueue`]).
+//!
+//! # Pool Lifecycle
+//!
+//! The pool uses reference counting internally. Buffers hold a weak reference
+//! to the pool, so:
+//! - If a buffer is returned after the pool is dropped, it is deallocated
+//!   directly instead of being returned to the freelist.
+//! - The pool can be dropped while buffers are still in use; those buffers
+//!   remain valid and will be deallocated when they are dropped.
+//!
+//! # Size Classes
+//!
+//! Buffers are organized into power-of-two size classes from `min_size` to
+//! `max_size`. For example, with `min_size = 4096` and `max_size = 32768`:
+//! - Class 0: 4096 bytes
+//! - Class 1: 8192 bytes
+//! - Class 2: 16384 bytes
+//! - Class 3: 32768 bytes
+//!
+//! Allocation requests are rounded up to the next size class. Requests larger
+//! than `max_size` return `None`.
 
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
