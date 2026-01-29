@@ -98,7 +98,7 @@ fn fuzz(data: FuzzInput) {
                     let v = Value::new(*value);
 
                     let empty = db.is_empty();
-                    db.update(k, v).await.expect("update should not fail");
+                    db.write_batch([(k, Some(v))].into_iter()).await.expect("update should not fail");
                     let result = expected_state.insert(*key, *value);
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -114,7 +114,7 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    db.delete(k).await.expect("delete should not fail");
+                    db.write_batch([(k, None)].into_iter()).await.expect("delete should not fail");
                     if expected_state.remove(key).is_some() {
                         uncommitted_ops += 1;
                         if expected_state.keys().len() != 0 {

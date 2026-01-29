@@ -412,6 +412,25 @@ where
         Ok(true)
     }
 
+    /// Writes a batch of key-value pairs to the database.
+    ///
+    /// For each item in the iterator:
+    /// - `(key, Some(value))` updates or creates the key with the given value
+    /// - `(key, None)` deletes the key
+    pub async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (K, Option<V>)> + Send,
+    ) -> Result<(), Error> {
+        for (key, value) in iter {
+            if let Some(value) = value {
+                self.update(key, value).await?;
+            } else {
+                self.delete(key).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Commit any pending operations to the database, ensuring their durability upon return from
     /// this function. Also raises the inactivity floor according to the schedule. Returns the
     /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range

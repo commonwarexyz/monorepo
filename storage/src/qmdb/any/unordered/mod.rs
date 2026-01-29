@@ -230,6 +230,18 @@ where
 
         Ok(())
     }
+
+    /// Writes a batch of key-value pairs to the database.
+    ///
+    /// For each item in the iterator:
+    /// - `(key, Some(value))` updates or creates the key with the given value
+    /// - `(key, None)` deletes the key
+    pub async fn write_batch(
+        &mut self,
+        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+    ) -> Result<(), Error> {
+        self.write_batch_with_callback(iter, |_, _| {}).await
+    }
 }
 
 impl<

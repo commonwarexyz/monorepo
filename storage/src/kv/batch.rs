@@ -126,9 +126,7 @@ where
 }
 
 /// A k/v store that supports making batched changes.
-pub trait Batchable:
-    Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> + Updatable + Deletable
-{
+pub trait Batchable: Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
@@ -148,19 +146,7 @@ pub trait Batchable:
     ) -> impl Future<Output = Result<(), Error>> + Send + use<'a, Self, Iter>
     where
         Self: Send,
-        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
-    {
-        async move {
-            for (key, value) in iter {
-                if let Some(value) = value {
-                    self.update(key, value).await?;
-                } else {
-                    self.delete(key).await?;
-                }
-            }
-            Ok(())
-        }
-    }
+        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a;
 }
 
 #[cfg(test)]

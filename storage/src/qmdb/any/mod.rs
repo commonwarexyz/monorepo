@@ -838,6 +838,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    // Consolidated test that runs test_any_db_multiple_commits_delete_replayed on all 8 variants.
+
     use crate::qmdb::any::{
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
