@@ -19,6 +19,7 @@ bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 futures = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["sync"], optional = true }
 hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
@@ -57,6 +58,7 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"thiserror/std",
+	"tokio",
 	"zeroize/std",
 ]
 arbitrary = [
