@@ -764,11 +764,13 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{
+        channels::{mpsc, oneshot},
+        NZUsize,
+    };
     use futures::{
-        channel::{mpsc, oneshot},
         future::{pending, ready},
-        join, pin_mut, FutureExt, SinkExt, StreamExt,
+        join, pin_mut, FutureExt,
     };
     use prometheus_client::{
         encoding::EncodeLabelSet,
@@ -1028,10 +1030,10 @@ mod tests {
     {
         runner.start(|context| async move {
             // Should hit timeout
-            let (mut sender, mut receiver) = mpsc::unbounded();
+            let (sender, mut receiver) = mpsc::unbounded_channel();
             for _ in 0..2 {
                 select! {
-                    v = receiver.next() => {
+                    v = receiver.recv() => {
                         panic!("unexpected value: {v:?}");
                     },
                     _ = context.sleep(Duration::from_millis(100)) => {
@@ -1041,15 +1043,15 @@ mod tests {
             }
 
             // Populate channel
-            sender.send(0).await.unwrap();
-            sender.send(1).await.unwrap();
+            sender.send(0).unwrap();
+            sender.send(1).unwrap();
 
             // Prefer not reading channel without losing messages
             select! {
                 _ = async {} => {
                     // Skip reading from channel even though populated
                 },
-                v = receiver.next() => {
+                v = receiver.recv() => {
                     panic!("unexpected value: {v:?}");
                 },
             };
@@ -1060,7 +1062,7 @@ mod tests {
                     _ = context.sleep(Duration::from_millis(100)) => {
                         panic!("timeout");
                     },
-                    v = receiver.next() => {
+                    v = receiver.recv() => {
                         assert_eq!(v.unwrap(), i);
                     },
                 };
@@ -1467,7 +1469,7 @@ mod tests {
             let task = |cleanup_duration: Duration| {
                 let context = context.clone();
                 let counter = counter.clone();
-                let mut started_tx = started_tx.clone();
+                let started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
                     // Wait for signal to be acquired
                     let mut signal = context.stopped();
@@ -1490,7 +1492,7 @@ mod tests {
 
             // Give tasks time to start
             for _ in 0..3 {
-                started_rx.next().await.unwrap();
+                started_rx.recv().await.unwrap();
             }
 
             // Stop and verify all cleanup completed
@@ -1756,7 +1758,7 @@ mod tests {
 
             // Spawn tasks
             let handles = Arc::new(Mutex::new(Vec::new()));
-            let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
+            let (initialized_tx, mut initialized_rx) = mpsc::channel(9);
             let root_task = context.spawn({
                 let handles = handles.clone();
                 move |_| async move {
@@ -1764,7 +1766,7 @@ mod tests {
                     {
                         let handle = context.spawn({
                             let handles = handles.clone();
-                            let mut initialized_tx = initialized_tx.clone();
+                            let initialized_tx = initialized_tx.clone();
                             move |_| async move {
                                 for grandchild in grandchildren {
                                     let handle = grandchild.spawn(|_| async {
@@ -1787,7 +1789,7 @@ mod tests {
 
             // Wait for tasks to initialize
             for _ in 0..9 {
-                initialized_rx.next().await.unwrap();
+                initialized_rx.recv().await.unwrap();
             }
 
             // Verify we have all 9 handles (3 children + 6 grandchildren)
@@ -2020,22 +2022,22 @@ mod tests {
                 let dropper = dropper.clone();
                 move |context| async move {
                     // Create tasks with circular dependencies through channels
-                    let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
-                    let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
-                    let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
+                    let (setup_tx, mut setup_rx) = mpsc::unbounded_channel::<()>();
+                    let (tx1, mut rx1) = mpsc::unbounded_channel::<()>();
+                    let (tx2, mut rx2) = mpsc::unbounded_channel::<()>();
 
                     // Task 1 holds tx2 and waits on rx1
                     context.with_label("task1").spawn({
-                        let mut setup_tx = setup_tx.clone();
+                        let setup_tx = setup_tx.clone();
                         let dropper = dropper.clone();
                         move |_| async move {
                             // Setup deadlock and mark ready
-                            tx2.send(()).await.unwrap();
-                            rx1.next().await.unwrap();
-                            setup_tx.send(()).await.unwrap();
+                            tx2.send(()).unwrap();
+                            rx1.recv().await.unwrap();
+                            setup_tx.send(()).unwrap();
 
                             // Wait forever
-                            while rx1.next().await.is_some() {}
+                            while rx1.recv().await.is_some() {}
                             drop(tx2);
                             drop(dropper);
                         }
@@ -2044,19 +2046,19 @@ mod tests {
                     // Task 2 holds tx1 and waits on rx2
                     context.with_label("task2").spawn(move |_| async move {
                         // Setup deadlock and mark ready
-                        tx1.send(()).await.unwrap();
-                        rx2.next().await.unwrap();
-                        setup_tx.send(()).await.unwrap();
+                        tx1.send(()).unwrap();
+                        rx2.recv().await.unwrap();
+                        setup_tx.send(()).unwrap();
 
                         // Wait forever
-                        while rx2.next().await.is_some() {}
+                        while rx2.recv().await.is_some() {}
                         drop(tx1);
                         drop(dropper);
                     });
 
                     // Wait for tasks to start
-                    setup_rx.next().await.unwrap();
-                    setup_rx.next().await.unwrap();
+                    setup_rx.recv().await.unwrap();
+                    setup_rx.recv().await.unwrap();
                 }
             });
 

@@ -1,6 +1,6 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
+use commonware_utils::channels::oneshot;
 use futures::{
-    channel::oneshot,
     future::{select, Either},
     pin_mut,
     stream::{AbortHandle, Abortable},

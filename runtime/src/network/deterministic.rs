@@ -1,5 +1,5 @@
 use crate::{mocks, Error, IoBufs};
-use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
+use commonware_utils::channels::mpsc;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -47,7 +47,7 @@ impl crate::Listener for Listener {
     type Stream = Stream;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
         Ok((socket, Sink { sender }, Stream { receiver }))
     }
 
@@ -102,7 +102,7 @@ impl crate::Network for Network {
         }
 
         // Bind the socket
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         listeners.insert(socket, sender);
         Ok(Listener {
             address: socket,
@@ -122,7 +122,7 @@ impl crate::Network for Network {
         };
 
         // Get listener
-        let mut sender = {
+        let sender = {
             let listeners = self.listeners.lock().unwrap();
             let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
             sender.clone()
@@ -133,7 +133,6 @@ impl crate::Network for Network {
         let (listener_sender, listener_receiver) = mocks::Channel::init();
         sender
             .send((dialer, dialer_sender, listener_receiver))
-            .await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {

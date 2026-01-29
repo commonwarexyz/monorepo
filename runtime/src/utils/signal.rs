@@ -1,6 +1,7 @@
 //! Mechanisms for coordinating actions across many tasks.
 
-use futures::{channel::oneshot, future::Shared, FutureExt};
+use commonware_utils::channels::oneshot::{self, error::RecvError};
+use futures::{future::Shared, FutureExt};
 use std::{
     future::Future,
     pin::Pin,
@@ -50,7 +51,7 @@ use std::{
 /// ```rust
 /// use commonware_macros::select;
 /// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};
-/// use futures::channel::oneshot;
+/// use commonware_utils::channels::oneshot;
 /// use std::time::Duration;
 ///
 /// let executor = deterministic::Runner::default();
@@ -90,7 +91,7 @@ pub enum Signal {
 }
 
 impl Future for Signal {
-    type Output = Result<i32, oneshot::Canceled>;
+    type Output = Result<i32, RecvError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut *self {
