@@ -777,7 +777,7 @@ where
 }
 
 #[derive(Clone, PartialEq)]
-enum AckOrReveal<P: PublicKey> {
+pub enum AckOrReveal<P: PublicKey> {
     Ack(PlayerAck<P>),
     Reveal(DealerPrivMsg),
 }
@@ -860,7 +860,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-enum DealerResult<P: PublicKey> {
+pub enum DealerResult<P: PublicKey> {
     Ok(Map<P, AckOrReveal<P>>),
     TooManyReveals,
 }
@@ -982,6 +982,14 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
+    pub fn commitment(&self) -> &Poly<V::Public> {
+        &self.pub_msg.commitment
+    }
+
+    pub fn result(&self) -> &DealerResult<P> {
+        &self.results
+    }
+
     fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
@@ -1044,6 +1052,18 @@ impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
 }
 
 impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
+    pub fn dealer(&self) -> &S::PublicKey {
+        &self.dealer
+    }
+
+    pub fn log(&self) -> &DealerLog<V, S::PublicKey> {
+        &self.log
+    }
+
+    pub fn signature(&self) -> &S::Signature {
+        &self.sig
+    }
+
     fn sign(sk: &S, info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
         let sig = transcript_for_log(info, &log).sign(sk);
         Self {
