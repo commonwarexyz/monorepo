@@ -467,7 +467,7 @@ pub mod fuzz {
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
+        commonware_test::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 

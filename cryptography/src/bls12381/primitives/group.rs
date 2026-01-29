@@ -1681,6 +1681,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::{Rayon, Sequential};
+    use commonware_test::minifuzz;
     use commonware_utils::test_rng;
     use std::{
         collections::{BTreeSet, HashMap},
@@ -1689,27 +1690,27 @@ mod tests {
 
     #[test]
     fn test_scalar_as_field() {
-        commonware_test::test(|u| test_suites::fuzz_field::<Scalar>(u));
+        minifuzz::test(test_suites::fuzz_field::<Scalar>);
     }
 
     #[test]
     fn test_g1_as_space() {
-        commonware_test::test(|u| test_suites::fuzz_space_ring::<Scalar, G1>(u));
+        minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G1>);
     }
 
     #[test]
     fn test_g2_as_space() {
-        commonware_test::test(|u| test_suites::fuzz_space_ring::<Scalar, G2>(u));
+        minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G2>);
     }
 
     #[test]
     fn test_hash_to_g1() {
-        commonware_test::test(|u| test_suites::fuzz_hash_to_group::<G1>(u));
+        minifuzz::test(test_suites::fuzz_hash_to_group::<G1>);
     }
 
     #[test]
     fn test_hash_to_g2() {
-        commonware_test::test(|u| test_suites::fuzz_hash_to_group::<G2>(u));
+        minifuzz::test(test_suites::fuzz_hash_to_group::<G2>);
     }
 
     #[test]
@@ -2112,7 +2113,7 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_g1() {
-        commonware_test::test(|u| {
+        minifuzz::test(|u| {
             let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
             let points: Vec<G1> = (0..n)
                 .map(|_| u.arbitrary())
@@ -2127,7 +2128,7 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_g2() {
-        commonware_test::test(|u| {
+        minifuzz::test(|u| {
             let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
             let points: Vec<G2> = (0..n)
                 .map(|_| u.arbitrary())
@@ -2142,7 +2143,7 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_edge_cases_g1() {
-        commonware_test::test(|u| {
+        minifuzz::test(|u| {
             let points: Vec<G1> = (0..50)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?;
@@ -2159,7 +2160,7 @@ mod tests {
 
     #[test]
     fn test_msm_parallel_edge_cases_g2() {
-        commonware_test::test(|u| {
+        minifuzz::test(|u| {
             let points: Vec<G2> = (0..50)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?;
