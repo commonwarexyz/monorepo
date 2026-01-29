@@ -554,24 +554,18 @@ mod tests {
         }
     }
 
-    /// Parses encoded metrics for a given metric suffix and peer label.
-    /// Returns (max_value, nodes_recording_nonzero).
-    fn parse_metric(encoded: &str, metric_suffix: &str, peer_label: &str) -> (u64, u32) {
-        let mut max_value = 0;
-        let mut nodes_recording = 0;
-        for line in encoded.lines() {
-            if line.contains(metric_suffix) && line.contains(peer_label) {
-                if let Some(number) = line.split_whitespace().last().and_then(|s| s.parse().ok()) {
-                    if number > 0 {
-                        nodes_recording += 1;
-                    }
-                    if number > max_value {
-                        max_value = number;
-                    }
-                }
-            }
-        }
-        (max_value, nodes_recording)
+    /// Counts lines where all patterns match and the trailing value is non-zero.
+    fn count_nonzero_metric_lines(encoded: &str, patterns: &[&str]) -> u32 {
+        encoded
+            .lines()
+            .filter(|line| patterns.iter().all(|p| line.contains(p)))
+            .filter(|line| {
+                line.split_whitespace()
+                    .last()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|n| n > 0)
+            })
+            .count() as u32
     }
 
     fn all_online<S, F, L>(mut fixture: F)
@@ -1679,13 +1673,10 @@ mod tests {
 
             // Ensure online nodes are recording skips/nullifications for the offline leader
             let encoded = context.encode();
-            let offline_peer_label = format!("peer=\"{}\"", offline);
+            let peer_label = format!("peer=\"{}\"", offline);
             for metric in ["_skips_per_leader", "_nullifications_per_leader"] {
-                let (max_value, nodes_recording) =
-                    parse_metric(&encoded, metric, &offline_peer_label);
-                assert!(max_value > 0, "expected {metric} for offline leader > 0");
                 assert_eq!(
-                    nodes_recording,
+                    count_nonzero_metric_lines(&encoded, &[metric, &peer_label]),
                     n - 1,
                     "expected all online nodes to record {metric} for offline leader"
                 );
