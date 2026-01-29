@@ -2,8 +2,7 @@ use crate::{Error, Originator};
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::channels::fallible::AsyncFallibleExt;
-use futures::channel::{mpsc, oneshot};
+use commonware_utils::channels::{fallible::AsyncFallibleExt, mpsc, oneshot};
 
 /// Messages that can be sent to a [Mailbox].
 pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {

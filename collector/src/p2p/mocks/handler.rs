@@ -1,10 +1,6 @@
 use super::types::{Request, Response};
 use commonware_cryptography::ed25519::PublicKey;
-use commonware_utils::channels::fallible::OneshotExt;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use commonware_utils::channels::{fallible::OneshotExt, mpsc, oneshot};
 use std::collections::HashMap;
 
 /// A mock [crate::Handler] received a request.
@@ -30,7 +26,7 @@ pub struct Handler {
 impl Handler {
     /// Create a new [Handler].
     pub fn new(respond_by_default: bool) -> (Self, mpsc::UnboundedReceiver<Processed>) {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 sender,
@@ -43,7 +39,7 @@ impl Handler {
 
     /// Create a dummy [Handler] that doesn't track events.
     pub fn dummy() -> Self {
-        let (sender, _) = mpsc::unbounded();
+        let (sender, _) = mpsc::unbounded_channel();
         Self {
             sender,
             responses: HashMap::new(),
@@ -74,14 +70,11 @@ impl crate::Handler for Handler {
         let should_respond = self.responses.contains_key(&request_id) || self.respond_by_default;
 
         // Send event
-        let _ = self
-            .sender
-            .send(Processed {
-                origin: origin.clone(),
-                request: request.clone(),
-                responded: should_respond,
-            })
-            .await;
+        let _ = self.sender.send(Processed {
+            origin,
+            request: request.clone(),
+            responded: should_respond,
+        });
 
         // Send response if configured
         if let Some(response) = self.responses.get(&request_id) {

@@ -16,10 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
-};
+use commonware_utils::channels::{mpsc, oneshot};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
@@ -251,7 +248,7 @@ impl Receiver for MockReceiver {
     type PublicKey = PublicKey;
 
     async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
-        let (pk, msg) = self.rx.next().await.ok_or(MockRecvError)?;
+        let (pk, msg) = self.rx.recv().await.ok_or(MockRecvError)?;
         match msg {
             Ok(req) => {
                 let mut buf = IoBufMut::with_capacity(req.encode_size());
@@ -438,14 +435,14 @@ fn fuzz(input: FuzzInput) {
                     restarts += 1;
                     mailboxes.insert(idx, mailbox);
 
-                    let (_tx, _rx) = mpsc::unbounded();
+                    let (_tx, _rx) = mpsc::unbounded_channel();
                     let mock_receiver = MockReceiver { rx: _rx };
                     engine.start(
                         (MockSender, mock_receiver),
                         (
                             MockSender,
                             MockReceiver {
-                                rx: mpsc::unbounded().1,
+                                rx: mpsc::unbounded_channel().1,
                             },
                         ),
                     );

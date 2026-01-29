@@ -1166,6 +1166,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
  "libfuzzer-sys",
  "rand 0.8.5",
