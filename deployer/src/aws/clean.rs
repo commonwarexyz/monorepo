@@ -37,7 +37,7 @@ pub async fn clean() -> Result<(), Error> {
 
     // Delete the config file so a new bucket name is generated on next use
     delete_bucket_config();
-    info!("deleted bucket config");
+    info!(bucket = bucket_name.as_str(), "deleted bucket config");
 
     Ok(())
 }
