@@ -24,7 +24,7 @@ pub(crate) mod test;
 
 #[cfg(feature = "fuzz")]
 pub mod fuzz {
-    use arbitrary::Arbitrary;
+    use arbitrary::{Arbitrary, Unstructured};
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
@@ -36,13 +36,13 @@ pub mod fuzz {
     }
 
     impl Plan {
-        pub fn run(self) {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
-                Self::Poly(plan) => plan.run(),
-                Self::Algebra(plan) => plan.run(),
-                Self::Goldilocks(plan) => plan.run(),
-                Self::Test(plan) => plan.run(),
-                Self::Ntt(plan) => plan.run(),
+                Self::Poly(plan) => plan.run(u),
+                Self::Algebra(plan) => plan.run(u),
+                Self::Goldilocks(plan) => plan.run(u),
+                Self::Test(plan) => plan.run(u),
+                Self::Ntt(plan) => plan.run(u),
             }
         }
     }

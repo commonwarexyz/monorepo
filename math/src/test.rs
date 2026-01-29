@@ -247,17 +247,20 @@ impl arbitrary::Arbitrary<'_> for G {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use arbitrary::Arbitrary;
+    use crate::algebra::test_suites;
+    use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::Encode as _;
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
         FCodec(F),
         GCodec(G),
+        FuzzField,
+        FuzzSpace,
     }
 
     impl Plan {
-        pub fn run(self) {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::FCodec(x) => {
                     assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
@@ -265,38 +268,29 @@ pub mod fuzz {
                 Self::GCodec(x) => {
                     assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
                 }
+                Self::FuzzField => {
+                    test_suites::fuzz_field::<F>(u)?;
+                }
+                Self::FuzzSpace => {
+                    test_suites::fuzz_space::<F, G>(u)?;
+                }
             }
+            Ok(())
         }
     }
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| {
-            u.arbitrary::<Plan>()?.run();
-            Ok(())
-        });
+        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod test {
-    use super::*;
-    use crate::algebra;
-
-    #[test]
-    fn test_field() {
-        algebra::test_suites::test_field::<F>();
-    }
-
-    #[test]
-    fn test_group() {
-        algebra::test_suites::test_space::<F, G>();
-    }
-
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::*;
+        use super::super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {

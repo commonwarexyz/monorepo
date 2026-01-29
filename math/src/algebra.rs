@@ -319,7 +319,28 @@ pub trait Random {
 
 #[cfg(any(test, feature = "arbitrary"))]
 pub mod test_suites {
+    //! A collection of property tests for algebraic types.
+    //!
+    //! Provides pre-canned test suites that verify algebraic laws hold for a given type.
+    //! For example, [`fuzz_additive`] checks:
+    //!
+    //! - `+=` is consistent with `+`
+    //! - Addition is commutative
+    //! - Addition is associative
+    //! - Zero is the neutral element
+    //! - Negation is the additive inverse
+    //!
+    //! These functions take `&mut Unstructured` so users can run the harness themselves.
+    //!
+    //! # Example
+    //!
+    //! ```rust
+    //! # use commonware_math::algebra::test_suites::*;
+    //! # use commonware_math::test::F;
+    //! commonware_test::test(|u| fuzz_field::<F>(u));
+    //! ```
     use super::*;
+    use arbitrary::Unstructured;
 
     fn check_add_assign<T: Additive>(a: T, b: T) {
         let mut acc = a.clone();
@@ -354,21 +375,23 @@ pub mod test_suites {
         assert_eq!(acc, a - &b, "-= different from -");
     }
 
-    /// Run the test suite for the [`Additive`] trait.
-    pub fn test_additive<T: Additive + for<'a> arbitrary::Arbitrary<'a>>() {
-        commonware_test::test(|u| {
-            let a: T = u.arbitrary()?;
-            let b: T = u.arbitrary()?;
-            let c: T = u.arbitrary()?;
-            check_add_assign(a.clone(), b.clone());
-            check_add_commutes(a.clone(), b.clone());
-            check_add_associates(a.clone(), b.clone(), c);
-            check_add_zero(a.clone());
-            check_add_neg_self(a.clone());
-            check_sub_vs_add_neg(a.clone(), b.clone());
-            check_sub_assign(a, b);
-            Ok(())
-        });
+    /// Fuzz the [`Additive`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    pub fn fuzz_additive<T: Additive + for<'a> arbitrary::Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let a: T = u.arbitrary()?;
+        let b: T = u.arbitrary()?;
+        let c: T = u.arbitrary()?;
+        check_add_assign(a.clone(), b.clone());
+        check_add_commutes(a.clone(), b.clone());
+        check_add_associates(a.clone(), b.clone(), c);
+        check_add_zero(a.clone());
+        check_add_neg_self(a.clone());
+        check_sub_vs_add_neg(a.clone(), b.clone());
+        check_sub_assign(a, b);
+        Ok(())
     }
 
     fn check_mul_assign<T: Multiplicative>(a: T, b: T) {
@@ -385,17 +408,19 @@ pub mod test_suites {
         assert_eq!((a.clone() * &b) * &c, a * &(b * &c), "* not associative");
     }
 
-    /// Run the test suite for the [`Multiplicative`] trait.
-    pub fn test_multiplicative<T: Multiplicative + for<'a> arbitrary::Arbitrary<'a>>() {
-        commonware_test::test(|u| {
-            let a: T = u.arbitrary()?;
-            let b: T = u.arbitrary()?;
-            let c: T = u.arbitrary()?;
-            check_mul_assign(a.clone(), b.clone());
-            check_mul_commutes(a.clone(), b.clone());
-            check_mul_associative(a, b, c);
-            Ok(())
-        });
+    /// Fuzz the [`Multiplicative`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    pub fn fuzz_multiplicative<T: Multiplicative + for<'a> arbitrary::Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let a: T = u.arbitrary()?;
+        let b: T = u.arbitrary()?;
+        let c: T = u.arbitrary()?;
+        check_mul_assign(a.clone(), b.clone());
+        check_mul_commutes(a.clone(), b.clone());
+        check_mul_associative(a, b, c);
+        Ok(())
     }
 
     fn check_mul_one<T: Ring>(a: T) {
@@ -410,21 +435,21 @@ pub mod test_suites {
         );
     }
 
-    /// Run the test suite for the [`Ring`] trait.
+    /// Fuzz the [`Ring`] trait properties.
     ///
-    /// This will also run [`test_additive`] and [`test_multiplicative`].
-    pub fn test_ring<T: Ring + for<'a> arbitrary::Arbitrary<'a>>() {
-        test_additive::<T>();
-        test_multiplicative::<T>();
-
-        commonware_test::test(|u| {
-            let a: T = u.arbitrary()?;
-            let b: T = u.arbitrary()?;
-            let c: T = u.arbitrary()?;
-            check_mul_one(a.clone());
-            check_mul_distributes(a, b, c);
-            Ok(())
-        });
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`Additive`] and [`Multiplicative`] properties.
+    pub fn fuzz_ring<T: Ring + for<'a> arbitrary::Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_additive::<T>(u)?;
+        fuzz_multiplicative::<T>(u)?;
+        let a: T = u.arbitrary()?;
+        let b: T = u.arbitrary()?;
+        let c: T = u.arbitrary()?;
+        check_mul_one(a.clone());
+        check_mul_distributes(a, b, c);
+        Ok(())
     }
 
     fn check_inv<T: Field>(a: T) {
@@ -435,17 +460,17 @@ pub mod test_suites {
         }
     }
 
-    /// Run the test suite for the [`Field`] trait.
+    /// Fuzz the [`Field`] trait properties.
     ///
-    /// This will also run [`test_ring`].
-    pub fn test_field<T: Field + for<'a> arbitrary::Arbitrary<'a>>() {
-        test_ring::<T>();
-
-        commonware_test::test(|u| {
-            let a: T = u.arbitrary()?;
-            check_inv(a);
-            Ok(())
-        });
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`Ring`] properties.
+    pub fn fuzz_field<T: Field + for<'a> arbitrary::Arbitrary<'a>>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_ring::<T>(u)?;
+        let a: T = u.arbitrary()?;
+        check_inv(a);
+        Ok(())
     }
 
     fn check_scale_distributes<R, K: Space<R>>(a: K, b: K, x: R) {
@@ -466,57 +491,52 @@ pub mod test_suites {
         );
     }
 
-    /// Run tests for [`Space`], assuming nothing about the scalar `R`.
-    pub fn test_space<
+    /// Fuzz the [`Space`] trait properties, assuming nothing about the scalar `R`.
+    ///
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    pub fn fuzz_space<
         R: Debug + for<'a> arbitrary::Arbitrary<'a>,
         K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
-    >() {
-        commonware_test::test(|u| {
-            let a: K = u.arbitrary()?;
-            let b: K = u.arbitrary()?;
-            let x: R = u.arbitrary()?;
-            check_scale_distributes(a.clone(), b, x);
-            Ok(())
-        });
-        commonware_test::test(|u| {
-            let a: K = u.arbitrary()?;
-            let b: R = u.arbitrary()?;
-            check_scale_assign(a, b);
-            Ok(())
-        });
-        commonware_test::test(|u| {
-            let len: usize = u.int_in_range(0..=16)?;
-            let points: Vec<K> = (0..len)
-                .map(|_| u.arbitrary())
-                .collect::<arbitrary::Result<_>>()?;
-            let scalars: Vec<R> = (0..len)
-                .map(|_| u.arbitrary())
-                .collect::<arbitrary::Result<_>>()?;
-            check_msm_eq_naive(&points, &scalars);
-            Ok(())
-        });
+    >(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let a: K = u.arbitrary()?;
+        let b: K = u.arbitrary()?;
+        let x: R = u.arbitrary()?;
+        check_scale_distributes(a.clone(), b.clone(), x);
+        let c: R = u.arbitrary()?;
+        check_scale_assign(a, c);
+        let len: usize = u.int_in_range(0..=16)?;
+        let points: Vec<K> = (0..len)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        let scalars: Vec<R> = (0..len)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        check_msm_eq_naive(&points, &scalars);
+        Ok(())
     }
 
     fn check_scale_compat<R: Multiplicative, K: Space<R>>(a: K, b: R, c: R) {
         assert_eq!((a.clone() * &b) * &c, a * &(b * &c));
     }
 
-    /// Run tests for [`Space`], assuming `R` is [`Multiplicative`].
+    /// Fuzz the [`Space`] trait properties, assuming `R` is [`Multiplicative`].
     ///
-    /// This will also run [`test_space`], but check additional compatibility
-    /// properties with `R` having multiplication.
-    pub fn test_space_multiplicative<
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks base [`Space`] properties plus compatibility with multiplication.
+    pub fn fuzz_space_multiplicative<
         R: Multiplicative + for<'a> arbitrary::Arbitrary<'a>,
         K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
-    >() {
-        test_space::<R, K>();
-        commonware_test::test(|u| {
-            let a: K = u.arbitrary()?;
-            let b: R = u.arbitrary()?;
-            let c: R = u.arbitrary()?;
-            check_scale_compat(a, b, c);
-            Ok(())
-        });
+    >(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_space::<R, K>(u)?;
+        let a: K = u.arbitrary()?;
+        let b: R = u.arbitrary()?;
+        let c: R = u.arbitrary()?;
+        check_scale_compat(a, b, c);
+        Ok(())
     }
 
     fn check_scale_one<R: Ring, K: Space<R>>(a: K) {
@@ -527,24 +547,22 @@ pub mod test_suites {
         assert_eq!(K::zero(), a * &R::zero());
     }
 
-    /// Run tests for [`Space`] assuming that `R` is a [`Ring`].
+    /// Fuzz the [`Space`] trait properties, assuming `R` is a [`Ring`].
     ///
-    /// This also runs the tests in [`test_space_multiplicative`].
-    ///
-    /// This additionally checks compatibility with [`Ring::one()`] and
-    /// [`Additive::zero()`].
-    pub fn test_space_ring<
+    /// Takes arbitrary data and checks that algebraic laws hold.
+    /// This also checks [`fuzz_space_multiplicative`] properties plus compatibility
+    /// with [`Ring::one()`] and [`Additive::zero()`].
+    pub fn fuzz_space_ring<
         R: Ring + for<'a> arbitrary::Arbitrary<'a>,
         K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
-    >() {
-        test_space_multiplicative::<R, K>();
-
-        commonware_test::test(|u| {
-            let a: K = u.arbitrary()?;
-            check_scale_one::<R, K>(a.clone());
-            check_scale_zero::<R, K>(a);
-            Ok(())
-        });
+    >(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        fuzz_space_multiplicative::<R, K>(u)?;
+        let a: K = u.arbitrary()?;
+        check_scale_one::<R, K>(a.clone());
+        check_scale_zero::<R, K>(a);
+        Ok(())
     }
 
     fn check_hash_to_group<G: HashToGroup>(data: [[u8; 4]; 4]) {
@@ -555,16 +573,16 @@ pub mod test_suites {
         );
     }
 
-    /// Run tests for [`HashToGroup`].
+    /// Fuzz the [`HashToGroup`] trait properties.
     ///
-    /// This doesn't run any tests related to [`CryptoGroup`], just the hash
-    /// to group functionality itself.
-    pub fn test_hash_to_group<G: HashToGroup>() {
-        commonware_test::test(|u| {
-            let data: [[u8; 4]; 4] = u.arbitrary()?;
-            check_hash_to_group::<G>(data);
-            Ok(())
-        });
+    /// Takes arbitrary data and checks that the hash function is deterministic.
+    /// This doesn't check any properties related to [`CryptoGroup`].
+    pub fn fuzz_hash_to_group<G: HashToGroup>(
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let data: [[u8; 4]; 4] = u.arbitrary()?;
+        check_hash_to_group::<G>(data);
+        Ok(())
     }
 }
 
@@ -572,7 +590,7 @@ pub mod test_suites {
 pub mod fuzz {
     use super::*;
     use crate::fields::goldilocks::F;
-    use arbitrary::Arbitrary;
+    use arbitrary::{Arbitrary, Unstructured};
     use commonware_parallel::Sequential;
 
     #[derive(Debug, Arbitrary)]
@@ -587,7 +605,7 @@ pub mod fuzz {
     }
 
     impl Plan {
-        pub fn run(self) {
+        pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::ExpOne(x) => {
                     assert_eq!(x.exp(&[1]), x);
@@ -615,14 +633,12 @@ pub mod fuzz {
                     assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
                 }
             }
+            Ok(())
         }
     }
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| {
-            u.arbitrary::<Plan>()?.run();
-            Ok(())
-        });
+        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }

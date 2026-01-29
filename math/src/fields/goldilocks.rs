@@ -426,18 +426,19 @@ impl Field for F {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::algebra::Ring;
-    use arbitrary::Arbitrary;
+    use crate::algebra::{test_suites, Ring};
+    use arbitrary::{Arbitrary, Unstructured};
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
         Exp(F, u8),
         Div2(F),
         StreamRoundtrip(Vec<u64>),
+        FuzzField,
     }
 
     impl Plan {
-        pub fn run(self) {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::Exp(x, k) => {
                     let mut naive = F::one();
@@ -456,23 +457,23 @@ pub mod fuzz {
                     roundtrip.truncate(data.len());
                     assert_eq!(data, roundtrip);
                 }
+                Self::FuzzField => {
+                    test_suites::fuzz_field::<F>(u)?;
+                }
             }
+            Ok(())
         }
     }
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| {
-            u.arbitrary::<Plan>()?.run();
-            Ok(())
-        });
+        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::algebra;
 
     #[test]
     fn test_generator_calculation() {
@@ -497,11 +498,6 @@ mod test {
     #[test]
     fn test_root_of_unity_exp() {
         assert_eq!(F::ROOT_OF_UNITY.exp(&[1 << 26]), F(8));
-    }
-
-    #[test]
-    fn test_field() {
-        algebra::test_suites::test_field::<F>();
     }
 
     #[cfg(feature = "arbitrary")]
