@@ -393,14 +393,17 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         cfg: SyncConfig<D>,
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
-        let journal: Journal<E, D> = Journal::init_sync(
+        let journal_cfg = JConfig {
+            partition: cfg.config.journal_partition.clone(),
+            items_per_blob: cfg.config.items_per_blob,
+            write_buffer: cfg.config.write_buffer,
+            page_cache: cfg.config.page_cache.clone(),
+        };
+
+        // Open the journal.
+        let mut journal: Journal<E, D> = Journal::init_sync(
             context.with_label("mmr_journal"),
-            JConfig {
-                partition: cfg.config.journal_partition,
-                items_per_blob: cfg.config.items_per_blob,
-                write_buffer: cfg.config.write_buffer,
-                page_cache: cfg.config.page_cache.clone(),
-            },
+            journal_cfg,
             *cfg.range.start..*cfg.range.end,
         )
         .await?;
@@ -409,7 +412,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
         // Open the metadata.
         let metadata_cfg = MConfig {
-            partition: cfg.config.metadata_partition,
+            partition: cfg.config.metadata_partition.clone(),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
@@ -423,13 +426,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
+            // Use caller-provided pinned nodes.
             let nodes_to_pin_persisted = nodes_to_pin(cfg.range.start);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
         }
 
-        // Create the in-memory MMR with the pinned nodes required for its size.
+        // Create the in-memory MMR with the pinned nodes required for its size. This must be
+        // performed *before* pruning the journal to range.start to ensure all pinned nodes are
+        // present.
         let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
@@ -447,11 +453,17 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         )?;
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
+        // This must also be done before pruning.
         if cfg.range.start < journal_size {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
                 .await?;
         }
+
+        // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
         metadata.sync().await?;
+
+        // Prune the journal to range.start.
+        journal.prune(*cfg.range.start).await?;
 
         Ok(Self {
             mem_mmr,
@@ -1773,9 +1785,8 @@ mod tests {
     }
 
     // Regression test that MMR init() handles stale metadata (lower pruning boundary than journal).
-    // Before the fix, this would panic with an assertion failure. After the fix, it
-    // returns a MissingNode error (which is expected when metadata is corrupted and
-    // pinned nodes are lost).
+    // Before the fix, this would panic with an assertion failure. After the fix, it returns a
+    // MissingNode error (which is expected when metadata is corrupted and pinned nodes are lost).
     #[test_traced("WARN")]
     fn test_journaled_mmr_init_stale_metadata_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1871,6 +1882,65 @@ mod tests {
             assert_eq!(mmr.root(), expected_root);
 
             mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Regression test: init_sync must compute pinned nodes BEFORE pruning the journal.
+    // Previously, init_sync would prune the journal first, then try to read pinned nodes
+    // from the pruned positions, causing MissingNode errors. This test uses a small
+    // items_per_blob to trigger section-aligned pruning that exposes the bug.
+    #[test_traced]
+    fn test_journaled_mmr_init_sync_computes_pinned_nodes_before_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Use small items_per_blob to create many sections and trigger pruning edge cases.
+            let cfg = Config {
+                journal_partition: "mmr_journal".to_string(),
+                metadata_partition: "mmr_metadata".to_string(),
+                items_per_blob: NZU64!(7), // Small value to trigger the bug
+                write_buffer: NZUsize!(64),
+                thread_pool: None,
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // Create MMR with enough elements to span multiple sections.
+            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            mmr.sync().await.unwrap();
+
+            // Prune to a position that will be section-aligned.
+            let prune_pos = Position::new(50);
+            mmr.prune_to_pos(prune_pos).await.unwrap();
+
+            let original_size = mmr.size();
+            let original_root = mmr.root();
+            drop(mmr);
+
+            // Reopen via init_sync with a range that starts at the pruning boundary.
+            // The key is that range.start may not match the section-aligned boundary
+            // stored in the journal, so init_sync must compute pinned nodes before pruning.
+            let sync_cfg = SyncConfig::<sha256::Digest> {
+                config: cfg,
+                range: prune_pos..Position::new(200),
+                pinned_nodes: None, // Force init_sync to compute pinned nodes
+            };
+
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
+
+            // Verify the MMR state is correct.
+            assert_eq!(sync_mmr.size(), original_size);
+            assert_eq!(sync_mmr.root(), original_root);
+            assert_eq!(sync_mmr.pruned_to_pos(), prune_pos);
+
+            sync_mmr.destroy().await.unwrap();
         });
     }
 }
