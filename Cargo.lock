@@ -1115,7 +1115,6 @@ dependencies = [
  "criterion",
  "futures",
  "num-rational",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
