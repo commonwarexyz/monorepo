@@ -859,6 +859,7 @@ where
     }
 }
 
+/// The result of a dealer's finalized dealing.
 #[derive(Clone, Debug)]
 pub enum DealerResult<P: PublicKey> {
     Ok(Map<P, AckOrReveal<P>>),
@@ -982,10 +983,12 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
+    /// Returns the commitment contained in this log.
     pub fn commitment(&self) -> &Poly<V::Public> {
         &self.pub_msg.commitment
     }
 
+    /// Returns the logged result of the finalized dealing.
     pub fn result(&self) -> &DealerResult<P> {
         &self.results
     }
@@ -1052,16 +1055,16 @@ impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
 }
 
 impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
+    /// Returns the dealer of this log.
     pub fn dealer(&self) -> &S::PublicKey {
         &self.dealer
     }
 
+    /// Returns the raw, unsigned [`DealerLog`] wrapped by [`Self`].
+    ///
+    /// Use [`Self::check`] to return a verified [`DealearLog`].
     pub fn log(&self) -> &DealerLog<V, S::PublicKey> {
         &self.log
-    }
-
-    pub fn signature(&self) -> &S::Signature {
-        &self.sig
     }
 
     fn sign(sk: &S, info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
