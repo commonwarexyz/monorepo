@@ -1024,7 +1024,7 @@ pub mod fuzz {
     }
 
     impl Plan {
-        pub fn run(self) {
+        pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::NttEqNaive(p) => {
                     let ntt = p.clone().evaluate();
@@ -1059,15 +1059,13 @@ pub mod fuzz {
                     setup.test();
                 }
             }
+            Ok(())
         }
     }
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| {
-            u.arbitrary::<Plan>()?.run();
-            Ok(())
-        });
+        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
