@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,

@@ -107,7 +107,7 @@ pub(crate) mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::CacheRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};

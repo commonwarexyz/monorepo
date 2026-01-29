@@ -4,7 +4,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Provider;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.

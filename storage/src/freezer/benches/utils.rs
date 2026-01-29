@@ -1,6 +1,6 @@
 //! Helpers shared by the Freezer benchmarks.
 
-use commonware_runtime::{buffer::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::freezer::{Config, Freezer};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use rand::{rngs::StdRng, RngCore, SeedableRng};

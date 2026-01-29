@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;

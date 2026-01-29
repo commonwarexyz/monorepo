@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_runtime::{buffer::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::cache::{Cache, Config};
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::{

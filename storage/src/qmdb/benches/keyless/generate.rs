@@ -4,7 +4,7 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    buffer::CacheRef,
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
     RayonPoolSpawner,
 };

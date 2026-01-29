@@ -90,7 +90,7 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::CacheRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Runner as _,
     };

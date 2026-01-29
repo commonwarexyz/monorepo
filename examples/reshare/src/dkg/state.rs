@@ -26,7 +26,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::CacheRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage,
+    buffer::paged::CacheRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage,
 };
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},

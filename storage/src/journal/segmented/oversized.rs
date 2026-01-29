@@ -75,7 +75,7 @@ pub struct Config<C> {
     pub value_partition: String,
 
     /// Page cache for index journal caching.
-    pub index_page_cache: commonware_runtime::buffer::CacheRef,
+    pub index_page_cache: commonware_runtime::buffer::paged::CacheRef,
 
     /// Write buffer size for the index journal.
     pub index_write_buffer: NonZeroUsize,
@@ -447,7 +447,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner,
     };
     use commonware_utils::{NZUsize, NZU16};
 

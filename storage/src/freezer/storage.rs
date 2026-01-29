@@ -1211,7 +1211,7 @@ mod tests {
     use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::CacheRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},

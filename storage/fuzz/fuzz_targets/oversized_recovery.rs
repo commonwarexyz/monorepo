@@ -8,7 +8,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner, Storage as _,
+    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner, Storage as _,
 };
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
 use commonware_utils::{NZUsize, NZU16};

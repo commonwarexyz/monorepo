@@ -9,7 +9,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.

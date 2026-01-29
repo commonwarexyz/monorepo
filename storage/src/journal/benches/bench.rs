@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     journal::contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},

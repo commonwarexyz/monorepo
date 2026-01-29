@@ -6,7 +6,7 @@
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
-    buffer::{paged::Append, CacheRef},
+    buffer::paged::{Append, CacheRef},
     deterministic::Context,
     Storage as _,
 };

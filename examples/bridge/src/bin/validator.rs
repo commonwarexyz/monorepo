@@ -17,7 +17,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{
-    buffer::CacheRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
 };
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};

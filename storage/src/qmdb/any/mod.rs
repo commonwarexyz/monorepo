@@ -21,7 +21,7 @@ use crate::{
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub(crate) mod db;

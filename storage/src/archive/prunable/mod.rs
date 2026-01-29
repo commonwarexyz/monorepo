@@ -111,7 +111,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -148,7 +148,7 @@
 //! ```
 
 use crate::translator::Translator;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;

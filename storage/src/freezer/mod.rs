@@ -162,7 +162,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::freezer::{Freezer, Config, Identifier};
 //! use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 //!
@@ -205,7 +205,7 @@
 #[cfg(test)]
 mod conformance;
 mod storage;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::Array;
 use std::num::NonZeroUsize;
 pub use storage::{Checkpoint, Cursor, Freezer};

@@ -28,7 +28,7 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
 use std::{
@@ -857,7 +857,7 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::CacheRef, deterministic, Blob as _, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Blob as _, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 

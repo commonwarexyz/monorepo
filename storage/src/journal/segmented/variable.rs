@@ -54,7 +54,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::journal::segmented::variable::{Journal, Config};
 //! use commonware_utils::{NZUsize, NZU16};
 //!
@@ -84,10 +84,7 @@ use commonware_codec::{
     Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::{
-        paged::{Append, Replay},
-        CacheRef,
-    },
+    buffer::paged::{Append, CacheRef, Replay},
     Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};

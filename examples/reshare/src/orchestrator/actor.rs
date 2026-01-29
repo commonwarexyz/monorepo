@@ -21,8 +21,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
-    Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell,
+    Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};

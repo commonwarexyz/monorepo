@@ -12,7 +12,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
@@ -892,7 +892,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;

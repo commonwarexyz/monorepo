@@ -118,7 +118,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        buffer::CacheRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Metrics, Runner,
     };

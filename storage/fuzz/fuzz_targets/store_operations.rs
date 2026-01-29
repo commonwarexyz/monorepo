@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,

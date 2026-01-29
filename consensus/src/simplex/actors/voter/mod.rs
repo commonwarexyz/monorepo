@@ -12,7 +12,7 @@ use crate::{
 pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;

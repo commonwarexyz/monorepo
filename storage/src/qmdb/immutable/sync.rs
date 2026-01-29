@@ -132,7 +132,9 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::CacheRef, deterministic, Metrics, Runner as _, RwLock};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Metrics, Runner as _, RwLock,
+    };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::RngCore as _;

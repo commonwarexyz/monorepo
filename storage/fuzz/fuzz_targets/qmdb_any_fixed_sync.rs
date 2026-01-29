@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::CacheRef, deterministic, Metrics, Runner, RwLock};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner, RwLock};
 use commonware_storage::{
     qmdb::{
         any::{

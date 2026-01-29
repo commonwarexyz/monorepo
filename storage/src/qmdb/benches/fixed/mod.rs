@@ -6,7 +6,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::CacheRef, tokio::Context, RayonPoolSpawner};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, RayonPoolSpawner};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{

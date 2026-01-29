@@ -40,7 +40,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::cache::{Cache, Config};
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
@@ -76,7 +76,7 @@
 //! });
 //! ```
 
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 

@@ -9,7 +9,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_parallel::ThreadPool;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;

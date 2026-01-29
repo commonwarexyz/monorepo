@@ -71,7 +71,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::{
     num::{NonZeroU64, NonZeroUsize},

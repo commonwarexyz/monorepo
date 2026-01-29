@@ -5,7 +5,10 @@
 
 use crate::journal::Error;
 use commonware_runtime::{
-    buffer::{paged::Append, CacheRef, Write},
+    buffer::{
+        paged::{Append, CacheRef},
+        Write,
+    },
     telemetry::metrics::status::GaugeExt,
     Blob, Error as RError, Metrics, Storage,
 };

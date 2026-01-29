@@ -36,7 +36,7 @@ pub fn create_config() -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        page_cache: commonware_runtime::buffer::CacheRef::new(NZU16!(1024), NZUsize!(10)),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
 

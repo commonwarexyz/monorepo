@@ -9,7 +9,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::CacheRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
 

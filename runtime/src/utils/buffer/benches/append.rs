@@ -1,7 +1,7 @@
 //! Benchmark sequential append performance.
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
-use commonware_runtime::{buffer::CacheRef, deterministic, Runner as _};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::time::Instant;

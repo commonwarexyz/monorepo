@@ -130,7 +130,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::CacheRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};

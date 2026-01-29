@@ -1,7 +1,7 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
-use commonware_runtime::{buffer::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,

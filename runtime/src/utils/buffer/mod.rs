@@ -5,7 +5,6 @@ mod read;
 mod tip;
 mod write;
 
-pub use paged::CacheRef;
 pub use read::Read;
 pub use write::Write;
 

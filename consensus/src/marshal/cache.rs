@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
     metadata::{self, Metadata},

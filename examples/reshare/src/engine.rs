@@ -24,7 +24,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner,
+    Storage,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};

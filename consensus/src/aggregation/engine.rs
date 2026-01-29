@@ -22,7 +22,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::CacheRef,
+    buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{
         histogram,

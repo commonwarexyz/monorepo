@@ -630,7 +630,7 @@ mod tests {
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::CacheRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Metrics, Runner as _,
     };

@@ -18,7 +18,7 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
