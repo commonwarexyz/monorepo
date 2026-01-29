@@ -6,7 +6,7 @@
 
 use super::Error;
 use futures::Stream;
-use std::{future::Future, num::NonZeroUsize};
+use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
 pub mod fixed;
@@ -23,25 +23,19 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
+    /// Returns [start, end) where `start` and `end - 1` are the indices of the oldest and newest
+    /// retained operations respectively.
+    fn bounds(&self) -> Range<u64>;
+
     /// Return the total number of items that have been appended to the journal.
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    fn size(&self) -> u64;
-
-    /// Return the position of the oldest item still retained in the journal.
     ///
-    /// Returns `None` if the journal is empty or if all items have been pruned.
-    ///
-    /// After pruning, this returns the position of the first item that remains.
-    /// Note that due to section/blob alignment, this may be less than the `min_position`
-    /// passed to `prune()`.
-    fn oldest_retained_pos(&self) -> Option<u64>;
-
-    /// Return the location before which all items have been pruned.
-    ///
-    /// If this is the same as `size()`, then all items have been pruned.
-    fn pruning_boundary(&self) -> u64;
+    /// Equivalent to `bounds().end`.
+    fn size(&self) -> u64 {
+        self.bounds().end
+    }
 
     /// Return a stream of all items in the journal starting from `start_pos`.
     ///
@@ -92,7 +86,7 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
     ///
     /// # Behavior
     ///
-    /// - If `min_position > size()`, the prune is capped to `size()` (no error is returned)
+    /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
     ///   section/blob alignment
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
@@ -113,10 +107,9 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
     ///
     /// # Behavior
     ///
-    /// - If `size > current_size()`, returns [Error::InvalidRewind]
-    /// - If `size == current_size()`, this is a no-op
-    /// - If `size < oldest_retained_pos()`, returns [Error::InvalidRewind] (can't rewind to pruned
-    ///   data)
+    /// - If `size > bounds.end`, returns [Error::InvalidRewind]
+    /// - If `size == bounds.end`, this is a no-op
+    /// - If `size < bounds.start`, returns [Error::ItemPruned] (can't rewind to pruned data)
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during rewinding
     ///
@@ -144,11 +137,10 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
         P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
-            let journal_size = self.size();
-            let pruning_boundary = self.pruning_boundary();
-            let mut rewind_size = journal_size;
+            let bounds = self.bounds();
+            let mut rewind_size = bounds.end;
 
-            while rewind_size > pruning_boundary {
+            while rewind_size > bounds.start {
                 let item = self.read(rewind_size - 1).await?;
                 if predicate(&item) {
                     break;
@@ -156,9 +148,12 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
                 rewind_size -= 1;
             }
 
-            if rewind_size != journal_size {
-                let rewound_items = journal_size - rewind_size;
-                warn!(journal_size, rewound_items, "rewinding journal items");
+            if rewind_size != bounds.end {
+                let rewound_items = bounds.end - rewind_size;
+                warn!(
+                    journal_size = bounds.end,
+                    rewound_items, "rewinding journal items"
+                );
                 self.rewind(rewind_size).await?;
             }
 

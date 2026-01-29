@@ -224,7 +224,7 @@ impl<
     }
 
     fn oldest_retained(&self) -> u64 {
-        *self.oldest_retained_loc()
+        *self.any.log.bounds().start
     }
 }
 
@@ -248,6 +248,6 @@ where
     }
 
     fn oldest_retained(&self) -> u64 {
-        *self.oldest_retained_loc()
+        *self.any.log.bounds().start
     }
 }
