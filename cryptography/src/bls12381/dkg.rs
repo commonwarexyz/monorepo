@@ -776,9 +776,12 @@ where
     }
 }
 
+/// An [ack](PlayerAck) or a [reveal](DealerPrivMsg) for a player.
 #[derive(Clone, PartialEq)]
 pub enum AckOrReveal<P: PublicKey> {
+    /// Player acknowledged receipt of their share.
     Ack(PlayerAck<P>),
+    /// Dealer revealed the share (player did not ack).
     Reveal(DealerPrivMsg),
 }
 
@@ -859,10 +862,12 @@ where
     }
 }
 
-/// The result of a dealer's finalized dealing.
+/// The outcome of a finalized dealing.
 #[derive(Clone, Debug)]
 pub enum DealerResult<P: PublicKey> {
+    /// Dealing completed with acks or reveals for each player.
     Ok(Map<P, AckOrReveal<P>>),
+    /// Too many reveals; this dealing cannot be used.
     TooManyReveals,
 }
 
@@ -984,12 +989,12 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     /// Returns the commitment contained in this log.
-    pub fn commitment(&self) -> &Poly<V::Public> {
+    pub const fn commitment(&self) -> &Poly<V::Public> {
         &self.pub_msg.commitment
     }
 
     /// Returns the logged result of the finalized dealing.
-    pub fn result(&self) -> &DealerResult<P> {
+    pub const fn results(&self) -> &DealerResult<P> {
         &self.results
     }
 
@@ -1056,14 +1061,14 @@ impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
 
 impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     /// Returns the dealer of this log.
-    pub fn dealer(&self) -> &S::PublicKey {
+    pub const fn dealer(&self) -> &S::PublicKey {
         &self.dealer
     }
 
     /// Returns the raw, unsigned [`DealerLog`] wrapped by [`Self`].
     ///
-    /// Use [`Self::check`] to return a verified [`DealearLog`].
-    pub fn log(&self) -> &DealerLog<V, S::PublicKey> {
+    /// Use [`Self::check`] to return a verified [`DealerLog`].
+    pub const fn log(&self) -> &DealerLog<V, S::PublicKey> {
         &self.log
     }
 
