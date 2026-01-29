@@ -228,17 +228,17 @@ jobs:
     - name: Add WASM target
       run: rustup target add wasm32-unknown-unknown
     - name: Build cryptography
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build utils
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_utils.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_runtime.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
     - name: Build consensus
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_consensus.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_consensus.wasm"
     - name: Build storage
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_storage.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_storage.wasm"
 
   no_std:
     runs-on: ubuntu-latest
