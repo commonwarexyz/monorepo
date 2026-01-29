@@ -531,7 +531,7 @@ mod tests {
     use super::*;
     use crate::mmr::Proof;
     use commonware_cryptography::sha256;
-    use futures::channel::oneshot;
+    use commonware_utils::channels::oneshot;
 
     #[test]
     fn test_outstanding_requests() {
