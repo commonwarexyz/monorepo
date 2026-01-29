@@ -251,60 +251,75 @@ mod tests {
     where
         S::Blob: Send + Sync,
     {
+        let initial_open_blobs = storage.metrics.open_blobs.get();
+        let initial_writes = storage.metrics.storage_writes.get();
+        let initial_write_bytes = storage.metrics.storage_write_bytes.get();
+        let initial_reads = storage.metrics.storage_reads.get();
+        let initial_read_bytes = storage.metrics.storage_read_bytes.get();
+
         // Open a blob
         let (blob, _) = storage.open("metered_test", b"test_blob").await.unwrap();
 
         // Verify that the open_blobs metric is incremented
-        let open_blobs = storage.metrics.open_blobs.get();
-        assert!(
-            open_blobs >= 1,
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
             "open_blobs metric was not incremented after opening a blob"
         );
 
         // Write data to the blob
         blob.write_at(0, b"hello world").await.unwrap();
-        let writes = storage.metrics.storage_writes.get();
-        let write_bytes = storage.metrics.storage_write_bytes.get();
-        assert!(
-            writes >= 1,
+        assert_eq!(
+            storage.metrics.storage_writes.get() - initial_writes,
+            1,
             "storage_writes metric was not incremented after write"
         );
-        assert!(
-            write_bytes >= 11,
+        assert_eq!(
+            storage.metrics.storage_write_bytes.get() - initial_write_bytes,
+            11,
             "storage_write_bytes metric was not updated correctly after write"
         );
 
         // Read data from the blob
         let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
         assert_eq!(read.coalesce(), b"hello world");
-        let reads = storage.metrics.storage_reads.get();
-        let read_bytes = storage.metrics.storage_read_bytes.get();
-        assert!(
-            reads >= 1,
+        assert_eq!(
+            storage.metrics.storage_reads.get() - initial_reads,
+            1,
             "storage_reads metric was not incremented after read"
         );
-        assert!(
-            read_bytes >= 11,
+        assert_eq!(
+            storage.metrics.storage_read_bytes.get() - initial_read_bytes,
+            11,
             "storage_read_bytes metric was not updated correctly after read"
         );
 
         // Sync and drop the blob
         blob.sync().await.unwrap();
         drop(blob);
+
+        // Verify that the open_blobs metric is decremented
+        assert_eq!(
+            storage.metrics.open_blobs.get(),
+            initial_open_blobs,
+            "open_blobs metric was not decremented after dropping the blob"
+        );
     }
 
     async fn test_metered_blob_multiple_blobs<C: Clock, S: crate::Storage>(storage: &Storage<C, S>)
     where
         S::Blob: Send + Sync,
     {
+        let initial_open_blobs = storage.metrics.open_blobs.get();
+
         // Open multiple blobs
         let (blob1, _) = storage.open("metered_test", b"blob1").await.unwrap();
         let (blob2, _) = storage.open("metered_test", b"blob2").await.unwrap();
 
         // Verify that the open_blobs metric is incremented correctly
-        let open_blobs = storage.metrics.open_blobs.get();
-        assert!(
-            open_blobs >= 2,
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            2,
             "open_blobs metric was not updated correctly after opening multiple blobs"
         );
 
@@ -312,24 +327,53 @@ mod tests {
         blob1.sync().await.unwrap();
         drop(blob1);
 
+        // Verify that the open_blobs metric is decremented correctly
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
+            "open_blobs metric was not decremented correctly after dropping one blob"
+        );
+
         // Sync and drop the second blob
         blob2.sync().await.unwrap();
         drop(blob2);
+
+        // Verify that the open_blobs metric is decremented to initial value
+        assert_eq!(
+            storage.metrics.open_blobs.get(),
+            initial_open_blobs,
+            "open_blobs metric was not decremented correctly after dropping all blobs"
+        );
     }
 
     async fn test_cloned_blobs_share_metrics<C: Clock, S: crate::Storage>(storage: &Storage<C, S>)
     where
         S::Blob: Send + Sync,
     {
+        let initial_open_blobs = storage.metrics.open_blobs.get();
         let initial_writes = storage.metrics.storage_writes.get();
         let initial_reads = storage.metrics.storage_reads.get();
 
         // Open a blob
         let (blob, _) = storage.open("metered_test", b"clone_blob").await.unwrap();
 
+        // Verify that the open_blobs metric is incremented
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
+            "open_blobs metric was not incremented after opening a blob"
+        );
+
         // Clone the blob multiple times
         let clone1 = blob.clone();
         let clone2 = blob.clone();
+
+        // Verify that cloning doesn't change the open_blobs metric
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
+            "open_blobs metric should not change when blobs are cloned"
+        );
 
         // Use the clones for some operations to verify they share metrics
         blob.write_at(0, b"hello").await.unwrap();
@@ -350,9 +394,27 @@ mod tests {
             "Operations on cloned blobs should update shared metrics"
         );
 
-        // Drop all
+        // Drop individual clones and verify the metric doesn't change
         drop(clone1);
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
+            "open_blobs metric should not change when individual clones are dropped"
+        );
+
         drop(clone2);
+        assert_eq!(
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
+            "open_blobs metric should not change when individual clones are dropped"
+        );
+
+        // Drop the original blob - this should finally decrement the counter
         drop(blob);
+        assert_eq!(
+            storage.metrics.open_blobs.get(),
+            initial_open_blobs,
+            "open_blobs metric should be decremented only when the last blob reference is dropped"
+        );
     }
 }
