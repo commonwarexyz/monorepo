@@ -44,7 +44,7 @@ struct Peer {
 impl Peer {
     fn new<P: PublicKey>(pk: &P) -> Self {
         Self {
-            peer: format!("{pk:?}"),
+            peer: pk.to_string(),
         }
     }
 }
