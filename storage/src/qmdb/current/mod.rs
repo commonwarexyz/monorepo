@@ -10,6 +10,8 @@ use crate::{
 };
 use commonware_parallel::ThreadPool;
 use commonware_runtime::buffer::PoolRef;
+#[cfg(any(test, feature = "test-traits"))]
+use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -136,13 +138,13 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
 #[cfg(any(test, feature = "test-traits"))]
 pub trait BitmapPrunedBits {
     /// Returns the number of bits that have been pruned from the bitmap.
-    fn pruned_bits(&self) -> u64;
+    fn pruned_bits(&self) -> impl Future<Output = u64> + Send;
 
     /// Returns the value of the bit at the given index.
-    fn get_bit(&self, index: u64) -> bool;
+    fn get_bit(&self, index: u64) -> impl Future<Output = bool> + Send;
 
     /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> u64;
+    fn oldest_retained(&self) -> impl Future<Output = u64> + Send;
 }
 
 #[cfg(test)]
@@ -150,6 +152,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
+    use super::{FixedConfig, VariableConfig};
     use crate::{
         kv::{Deletable as _, Updatable as _},
         qmdb::{
@@ -160,14 +163,94 @@ pub mod tests {
             },
             Error,
         },
+        translator::{OneCap, TwoCap},
     };
     use commonware_runtime::{
+        buffer::PoolRef,
         deterministic::{self, Context},
         Metrics as _, Runner as _,
     };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use std::num::{NonZeroU16, NonZeroUsize};
     use tracing::warn;
+
+    // Janky page & cache sizes to exercise boundary conditions.
+    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
+
+    /// Shared config factory for ordered fixed Current QMDB tests.
+    pub(crate) fn ordered_fixed_config(partition_prefix: &str) -> FixedConfig<OneCap> {
+        FixedConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: OneCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for ordered variable Current QMDB tests.
+    pub(crate) fn ordered_variable_config(partition_prefix: &str) -> VariableConfig<OneCap, ()> {
+        VariableConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: OneCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for unordered fixed Current QMDB tests.
+    pub(crate) fn unordered_fixed_config(partition_prefix: &str) -> FixedConfig<TwoCap> {
+        FixedConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for unordered variable Current QMDB tests.
+    pub(crate) fn unordered_variable_config(partition_prefix: &str) -> VariableConfig<TwoCap, ()> {
+        VariableConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns a mutable db; callers should commit if needed.
@@ -241,16 +324,16 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
             // Drop and reopen the db
-            let root = db.root();
+            let root = db.root().await;
             drop(db);
             let db: C = open_db_clone(context.with_label("second"), partition).await;
 
             // Ensure the root matches
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
             context.auditor().state()
@@ -266,13 +349,13 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
-            let root = db.root();
+            let root = db.root().await;
             drop(db);
             let db: C = open_db(context.with_label("second"), partition).await;
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
             context.auditor().state()
@@ -305,9 +388,9 @@ pub mod tests {
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
-            let committed_root = db.root();
-            let committed_op_count = db.op_count();
-            let committed_inactivity_floor = db.inactivity_floor_loc();
+            let committed_root = db.root().await;
+            let committed_op_count = db.op_count().await;
+            let committed_inactivity_floor = db.inactivity_floor_loc().await;
             db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
@@ -319,8 +402,8 @@ pub mod tests {
             // state of the DB should be as of the last commit.
             drop(db);
             let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
-            assert_eq!(db.root(), committed_root);
-            assert_eq!(db.op_count(), committed_op_count);
+            assert_eq!(db.root().await, committed_root);
+            assert_eq!(db.op_count().await, committed_op_count);
 
             // Re-apply the exact same uncommitted operations.
             let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
@@ -332,13 +415,13 @@ pub mod tests {
             // into_merkleized is called). We do this by committing and then dropping the durable
             // db without calling close or into_merkleized.
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let committed_op_count = durable_db.op_count();
+            let committed_op_count = durable_db.op_count().await;
             drop(durable_db);
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
             let db: C = open_db(context.with_label("scenario2"), partition.clone()).await;
-            let scenario_2_root = db.root();
+            let scenario_2_root = db.root().await;
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
@@ -353,10 +436,10 @@ pub mod tests {
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.inactivity_floor_loc().await).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
-            assert_eq!(db.op_count(), committed_op_count);
-            assert_eq!(db.root(), scenario_2_root);
+            assert_eq!(db.op_count().await, committed_op_count);
+            assert_eq!(db.root().await, scenario_2_root);
 
             db.destroy().await.unwrap();
         });
@@ -406,7 +489,7 @@ pub mod tests {
                     let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
                     let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
                     clean_pruning
-                        .prune(clean_no_pruning.inactivity_floor_loc())
+                        .prune(clean_no_pruning.inactivity_floor_loc().await)
                         .await
                         .unwrap();
                     db_no_pruning_mut = clean_no_pruning.into_mutable();
@@ -421,14 +504,14 @@ pub mod tests {
             db_pruning = db_2.into_merkleized().await.unwrap();
 
             // Get roots from both databases - they should match
-            let root_no_pruning = db_no_pruning.root();
-            let root_pruning = db_pruning.root();
+            let root_no_pruning = db_no_pruning.root().await;
+            let root_pruning = db_pruning.root().await;
             assert_eq!(root_no_pruning, root_pruning);
 
             // Also verify inactivity floors match
             assert_eq!(
-                db_no_pruning.inactivity_floor_loc(),
-                db_pruning.inactivity_floor_loc()
+                db_no_pruning.inactivity_floor_loc().await,
+                db_pruning.inactivity_floor_loc().await
             );
 
             db_no_pruning.destroy().await.unwrap();
@@ -463,15 +546,15 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
 
             // The bitmap should have been pruned during into_merkleized().
-            let pruned_bits_before = db.pruned_bits();
+            let pruned_bits_before = db.pruned_bits().await;
             warn!(
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
                 pruned_bits_before,
-                *db.inactivity_floor_loc(),
-                *db.op_count()
+                *db.inactivity_floor_loc().await,
+                *db.op_count().await
             );
 
             // Verify we actually have some pruning (otherwise the test is meaningless).
@@ -485,7 +568,7 @@ pub mod tests {
             db.sync().await.unwrap();
 
             // Record the root before dropping.
-            let root_before = db.root();
+            let root_before = db.root().await;
             drop(db);
 
             // Reopen the database.
@@ -493,7 +576,7 @@ pub mod tests {
 
             // The pruned bits count should match. If sync() didn't persist the bitmap pruned
             // state, this would be 0.
-            let pruned_bits_after = db.pruned_bits();
+            let pruned_bits_after = db.pruned_bits().await;
             warn!("pruned_bits_after={}", pruned_bits_after);
 
             assert_eq!(
@@ -502,7 +585,7 @@ pub mod tests {
             );
 
             // Also verify the root matches.
-            assert_eq!(db.root(), root_before);
+            assert_eq!(db.root().await, root_before);
 
             db.destroy().await.unwrap();
         });
@@ -571,26 +654,32 @@ pub mod tests {
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.inactivity_floor_loc().await).await.unwrap();
 
             // Verify expected state after prune.
-            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
             assert_eq!(
-                db.inactivity_floor_loc(),
+                db.op_count().await,
+                Location::new_unchecked(expected_op_count)
+            );
+            assert_eq!(
+                db.inactivity_floor_loc().await,
                 Location::new_unchecked(expected_inactivity_floor)
             );
 
             // Record root before dropping.
-            let root = db.root();
+            let root = db.root().await;
             db.sync().await.unwrap();
             drop(db);
 
             // Reopen the db and verify it has exactly the same state.
             let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
-            assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(root, db.root().await);
             assert_eq!(
-                db.inactivity_floor_loc(),
+                db.op_count().await,
+                Location::new_unchecked(expected_op_count)
+            );
+            assert_eq!(
+                db.inactivity_floor_loc().await,
                 Location::new_unchecked(expected_inactivity_floor)
             );
 

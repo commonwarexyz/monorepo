@@ -579,7 +579,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
 }
 
 impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D> for CleanBitMap<E, D, N> {
-    fn size(&self) -> Position {
+    async fn size(&self) -> Position {
         self.size()
     }
 

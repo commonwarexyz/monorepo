@@ -8,7 +8,7 @@ use std::future::Future;
 /// A trait for accessing MMR digests from storage.
 pub trait Storage<D: Digest>: Send + Sync {
     /// Return the number of elements in the MMR.
-    fn size(&self) -> Position;
+    fn size(&self) -> impl Future<Output = Position> + Send;
 
     /// Return the specified node of the MMR if it exists & hasn't been pruned.
     fn get_node(&self, position: Position)
@@ -19,7 +19,7 @@ impl<D> Storage<D> for CleanMmr<D>
 where
     D: Digest,
 {
-    fn size(&self) -> Position {
+    async fn size(&self) -> Position {
         self.size()
     }
 

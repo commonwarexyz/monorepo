@@ -27,7 +27,7 @@ use crate::{
 };
 use commonware_codec::{FixedSize, Read};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage as RStorage};
 use commonware_utils::Array;
 
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
@@ -100,7 +100,7 @@ where
 
         Ok(Self {
             any,
-            status,
+            status: RwLock::new(status),
             cached_root,
         })
     }
@@ -117,8 +117,7 @@ mod test {
             current::{
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
-                tests::{self, apply_random_ops},
-                VariableConfig as Config,
+                tests::{self, apply_random_ops, ordered_variable_config},
             },
             store::{
                 batch_tests,
@@ -130,31 +129,9 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::NZU64;
     use rand::RngCore;
-    use std::num::{NonZeroU16, NonZeroUsize};
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
-
-    fn current_db_config(partition_prefix: &str) -> Config<OneCap, ()> {
-        Config {
-            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
-            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("{partition_prefix}_log_partition"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (),
-            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
-            translator: OneCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
     type CleanCurrentTest =
@@ -169,7 +146,7 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, current_db_config(&partition_prefix))
+        CleanCurrentTest::init(context, ordered_variable_config(&partition_prefix))
             .await
             .unwrap()
     }
@@ -400,7 +377,7 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.op_count();
+            let end_loc = db.op_count().await;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -459,10 +436,14 @@ mod test {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
-            for i in start..db.status.len() {
-                if !db.status.get_bit(i) {
-                    continue;
-                }
+            // Collect active indices first, then drop the read guard.
+            let active_indices: Vec<u64> = {
+                let status = db.status.read().await;
+                (start..status.len())
+                    .filter(|&i| status.get_bit(i))
+                    .collect()
+            };
+            for i in active_indices {
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
                 let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
@@ -779,13 +760,13 @@ mod test {
             db.delete(key_exists_1).await.unwrap();
             db.delete(key_exists_2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
-            assert_ne!(db.op_count(), 0);
+            assert_ne!(db.op_count().await, 0);
             assert_ne!(root, empty_root);
 
             let proof = db

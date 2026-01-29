@@ -18,7 +18,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use std::{future::Future, num::NonZeroU64};
+use std::num::NonZeroU64;
 use tracing::error;
 
 /// Database type alias for the Clean state.
@@ -111,25 +111,25 @@ where
         panic!("operations should end with a commit");
     }
 
-    fn root(&self) -> Key {
-        self.root()
+    async fn root(&self) -> Key {
+        self.root().await
     }
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    async fn op_count(&self) -> Location {
+        self.op_count().await
     }
 
-    fn lower_bound(&self) -> Location {
+    async fn lower_bound(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
-    fn historical_proof(
+    async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+    ) -> Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error> {
+        self.historical_proof(op_count, start_loc, max_ops).await
     }
 
     fn name() -> &'static str {

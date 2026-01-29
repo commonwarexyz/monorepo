@@ -27,7 +27,7 @@ pub trait Contiguous: Send + Sync {
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
     /// position as its value.
-    fn size(&self) -> u64;
+    fn size(&self) -> impl Future<Output = u64> + Send;
 
     /// Return the position of the oldest item still retained in the journal.
     ///
@@ -36,12 +36,12 @@ pub trait Contiguous: Send + Sync {
     /// After pruning, this returns the position of the first item that remains.
     /// Note that due to section/blob alignment, this may be less than the `min_position`
     /// passed to `prune()`.
-    fn oldest_retained_pos(&self) -> Option<u64>;
+    fn oldest_retained_pos(&self) -> impl Future<Output = Option<u64>> + Send;
 
     /// Return the location before which all items have been pruned.
     ///
     /// If this is the same as `size()`, then all items have been pruned.
-    fn pruning_boundary(&self) -> u64;
+    fn pruning_boundary(&self) -> impl Future<Output = u64> + Send;
 
     /// Return a stream of all items in the journal starting from `start_pos`.
     ///
@@ -54,8 +54,8 @@ pub trait Contiguous: Send + Sync {
     /// errors occur during replay.
     fn replay(
         &self,
-        start_pos: u64,
         buffer: NonZeroUsize,
+        start_pos: u64,
     ) -> impl std::future::Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error>,
     > + Send;
@@ -144,8 +144,8 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
         P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
-            let journal_size = self.size();
-            let pruning_boundary = self.pruning_boundary();
+            let journal_size = self.size().await;
+            let pruning_boundary = self.pruning_boundary().await;
             let mut rewind_size = journal_size;
 
             while rewind_size > pruning_boundary {

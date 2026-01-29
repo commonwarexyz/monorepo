@@ -92,7 +92,7 @@ impl<D: Digest> RangeProof<D> {
         max_ops: NonZeroU64,
     ) -> Result<(Self, Vec<C::Item>, Vec<[u8; N]>), Error> {
         // Compute the start and end locations & positions of the range.
-        let leaves = mmr.leaves();
+        let leaves = mmr.leaves().await;
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }

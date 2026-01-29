@@ -63,21 +63,25 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         let mut new_db_clone = new_db.clone();
-        let state1 = executor.start(|context| async move {
-            let ctx = context.clone();
-            run_batch_tests(&mut |idx| new_db_clone(ctx.with_label(&format!("db_{idx}"))))
-                .await
-                .unwrap();
-            ctx.auditor().state()
+        let state1 = executor.start(|context| {
+            Box::pin(async move {
+                let ctx = context.clone();
+                run_batch_tests(&mut |idx| new_db_clone(ctx.with_label(&format!("db_{idx}"))))
+                    .await
+                    .unwrap();
+                ctx.auditor().state()
+            })
         });
 
         let executor = deterministic::Runner::default();
-        let state2 = executor.start(|context| async move {
-            let ctx = context.clone();
-            run_batch_tests(&mut |idx| new_db(ctx.with_label(&format!("db_{idx}"))))
-                .await
-                .unwrap();
-            ctx.auditor().state()
+        let state2 = executor.start(|context| {
+            Box::pin(async move {
+                let ctx = context.clone();
+                run_batch_tests(&mut |idx| new_db(ctx.with_label(&format!("db_{idx}"))))
+                    .await
+                    .unwrap();
+                ctx.auditor().state()
+            })
         });
 
         assert_eq!(state1, state2);
@@ -103,8 +107,7 @@ pub mod tests {
         test_delete_unchecked(new_db, counter).await?;
         test_write_batch_from_to_empty(new_db, counter).await?;
         test_write_batch(new_db, counter).await?;
-        test_update_delete_update(new_db, counter).await?;
-        Ok(())
+        test_update_delete_update(new_db, counter).await
     }
 
     fn next_db<D, F: NewDbIndexed<D>>(
