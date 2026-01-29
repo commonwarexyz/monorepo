@@ -303,7 +303,7 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::N3f1;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, NZU32,
+    Faults, Participant, TryCollect, TryFromIterator, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -1007,6 +1007,37 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
             }
         }
     }
+
+    /// Return a [`DealerLogSummary`] of the results in this log.
+    ///
+    /// This can be useful for observing the progress of the DKG.
+    pub fn summary(&self) -> DealerLogSummary<P> {
+        match &self.results {
+            DealerResult::TooManyReveals => DealerLogSummary::TooManyReveals,
+            DealerResult::Ok(map) => {
+                let (reveals, acks): (Vec<_>, Vec<_>) =
+                    map.iter_pairs().partition(|(_, a_r)| a_r.is_reveal());
+                DealerLogSummary::Ok {
+                    acks: Set::try_from_iter(acks.into_iter().map(|(p, _)| p.clone()))
+                        .expect("map keys are deduped"),
+                    reveals: Set::try_from_iter(reveals.into_iter().map(|(p, _)| p.clone()))
+                        .expect("map keys are deduped"),
+                }
+            }
+        }
+    }
+}
+
+// This exists to have a public interface we're happy maintaining, not leaking
+// internal details about various things.
+/// Information about the reveals and acks in a [`DealerLog`].
+#[derive(Clone, Debug)]
+pub enum DealerLogSummary<P> {
+    /// The dealer is refusing to post any information, because they would have
+    /// too many reveals otherwise.
+    TooManyReveals,
+    /// The dealer has some players who acked, and some players who didn't, that it's revealing.
+    Ok { acks: Set<P>, reveals: Set<P> },
 }
 
 #[cfg(feature = "arbitrary")]
