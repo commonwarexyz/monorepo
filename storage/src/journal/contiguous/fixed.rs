@@ -457,9 +457,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Handles sync scenarios based on existing journal data vs. the given sync range:
     ///
     /// 1. **No existing data**: Creates journal at `range.start` (or empty if `range.start == 0`)
-    /// 2. **Data within range**: Prunes toward `range.start` and reuses existing data.
-    ///    Since prune only removes complete sections, some items before `range.start`
-    ///    may be retained (from the section boundary to `range.start - 1`).
+    /// 2. **Data within range**: Returns the journal (caller is responsible for pruning)
     /// 3. **Data exceeds range**: Returns error
     /// 4. **Stale data**: Destroys and recreates at `range.start`
     pub(crate) async fn init_sync(
@@ -476,7 +474,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             "initializing contiguous fixed journal for sync"
         );
 
-        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
+        let journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
         let size = journal.size();
 
         // No existing data - initialize at the start of the sync range if needed
@@ -507,18 +505,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             );
             journal.destroy().await?;
             return Self::init_at_size(context, cfg, range.start).await;
-        }
-
-        // Prune to lower bound if needed
-        let oldest = journal.oldest_retained_pos();
-        if let Some(oldest_pos) = oldest {
-            if oldest_pos < range.start {
-                debug!(
-                    oldest_pos,
-                    range.start, "pruning journal to sync range start"
-                );
-                journal.prune(range.start).await?;
-            }
         }
 
         Ok(journal)
