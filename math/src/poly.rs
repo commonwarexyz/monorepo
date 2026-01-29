@@ -490,8 +490,9 @@ mod impl_arbitrary {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
+    use crate::algebra::test_suites;
     use crate::test::{F, G};
-    use arbitrary::Arbitrary;
+    use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
     use commonware_utils::ordered::Map;
@@ -508,10 +509,12 @@ pub mod fuzz {
         InterpolateWithZeroPointMiddle(Poly<F>),
         TranslateScale(Poly<F>, F),
         CommitEval(Poly<F>, F),
+        FuzzAdditive,
+        FuzzSpaceRing,
     }
 
     impl Plan {
-        pub fn run(self) {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::Codec(f) => {
                     assert_eq!(
@@ -534,7 +537,7 @@ pub mod fuzz {
                 }
                 Self::Interpolate(f) => {
                     if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
-                        return;
+                        return Ok(());
                     }
                     let mut points = (0..f.required().get())
                         .map(|i| F::from((i + 1) as u8))
@@ -554,7 +557,7 @@ pub mod fuzz {
                 }
                 Self::InterpolateWithZeroPoint(f) => {
                     if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
-                        return;
+                        return Ok(());
                     }
                     let points: Vec<_> =
                         (0..f.required().get()).map(|i| F::from(i as u8)).collect();
@@ -568,7 +571,7 @@ pub mod fuzz {
                         || f.required().get() < 2
                         || f.required().get() >= F::MAX as u32
                     {
-                        return;
+                        return Ok(());
                     }
                     let n = f.required().get();
                     let points: Vec<_> = (1..n)
@@ -586,16 +589,20 @@ pub mod fuzz {
                 Self::CommitEval(f, x) => {
                     assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
                 }
+                Self::FuzzAdditive => {
+                    test_suites::fuzz_additive::<Poly<F>>(u)?;
+                }
+                Self::FuzzSpaceRing => {
+                    test_suites::fuzz_space_ring::<F, Poly<F>>(u)?;
+                }
             }
+            Ok(())
         }
     }
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| {
-            u.arbitrary::<Plan>()?.run();
-            Ok(())
-        });
+        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
@@ -603,16 +610,6 @@ pub mod fuzz {
 mod test {
     use super::*;
     use crate::test::F;
-
-    #[test]
-    fn test_additive() {
-        crate::algebra::test_suites::test_additive::<Poly<F>>();
-    }
-
-    #[test]
-    fn test_space() {
-        crate::algebra::test_suites::test_space_ring::<F, Poly<F>>();
-    }
 
     #[test]
     fn test_eq() {

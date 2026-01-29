@@ -1689,27 +1689,27 @@ mod tests {
 
     #[test]
     fn test_scalar_as_field() {
-        test_suites::test_field::<Scalar>();
+        commonware_test::test(|u| test_suites::fuzz_field::<Scalar>(u));
     }
 
     #[test]
     fn test_g1_as_space() {
-        test_suites::test_space_ring::<Scalar, G1>();
+        commonware_test::test(|u| test_suites::fuzz_space_ring::<Scalar, G1>(u));
     }
 
     #[test]
     fn test_g2_as_space() {
-        test_suites::test_space_ring::<Scalar, G2>();
+        commonware_test::test(|u| test_suites::fuzz_space_ring::<Scalar, G2>(u));
     }
 
     #[test]
     fn test_hash_to_g1() {
-        test_suites::test_hash_to_group::<G1>();
+        commonware_test::test(|u| test_suites::fuzz_hash_to_group::<G1>(u));
     }
 
     #[test]
     fn test_hash_to_g2() {
-        test_suites::test_hash_to_group::<G2>();
+        commonware_test::test(|u| test_suites::fuzz_hash_to_group::<G2>(u));
     }
 
     #[test]
