@@ -2,7 +2,9 @@ use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
-        interesting, min_active,
+        interesting,
+        metrics::Peer,
+        min_active,
         scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -15,7 +17,7 @@ use crate::{
 use commonware_cryptography::{certificate, Digest};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
 use commonware_utils::futures::Aborter;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -63,6 +65,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
+    skipped_views_per_leader: Family<Peer, Counter>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -72,9 +75,18 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
+        let skipped_views_per_leader = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
+        context.register(
+            "skipped_views_per_leader",
+            "skipped views per leader",
+            skipped_views_per_leader.clone(),
+        );
+        for participant in cfg.scheme.participants().iter() {
+            let _ = skipped_views_per_leader.get_or_create(&Peer::new(participant));
+        }
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());
@@ -97,6 +109,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             current_view,
             tracked_views,
             skipped_views,
+            skipped_views_per_leader,
         }
     }
 
@@ -252,7 +265,18 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = nullification.view();
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&nullification.certificate));
-        self.create_round(view).add_nullification(nullification)
+        let added = self.create_round(view).add_nullification(nullification);
+
+        // Track skipped view per leader if we know who the leader was
+        if added {
+            if let Some(leader) = self.views.get(&view).and_then(|round| round.leader()) {
+                self.skipped_views_per_leader
+                    .get_or_create(&Peer::new(&leader.key))
+                    .inc();
+            }
+        }
+
+        added
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
