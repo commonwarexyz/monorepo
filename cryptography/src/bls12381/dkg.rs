@@ -1028,9 +1028,9 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     }
 }
 
+/// Information about the reveals and acks in a [`DealerLog`].
 // This exists to have a public interface we're happy maintaining, not leaking
 // internal details about various things.
-/// Information about the reveals and acks in a [`DealerLog`].
 #[derive(Clone, Debug)]
 pub enum DealerLogSummary<P> {
     /// The dealer is refusing to post any information, because they would have
