@@ -81,6 +81,7 @@ pub(crate) mod test {
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore,
             },
             verify_proof, NonDurable, Unmerkleized,
         },
@@ -317,7 +318,7 @@ pub(crate) mod test {
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root_hash = db.root();
-            let original_op_count = db.op_count();
+            let original_op_count = db.bounds().end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -369,7 +370,7 @@ pub(crate) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.op_count() + 1, Location::new_unchecked(6), NZU64!(10))
+                db.historical_proof(db.bounds().end + 1, Location::new_unchecked(6), NZU64!(10))
                     .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));

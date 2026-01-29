@@ -106,6 +106,7 @@ pub(crate) mod test {
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore,
             },
             NonDurable, Unmerkleized,
         },
@@ -366,7 +367,7 @@ pub(crate) mod test {
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let root = db.root();
-            assert_eq!(db.op_count(), 1961);
+            assert_eq!(db.bounds().end, 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
                 Some(Location::new_unchecked(1961))
@@ -374,7 +375,7 @@ pub(crate) mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
+            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.sync().await.unwrap();
@@ -383,13 +384,13 @@ pub(crate) mod test {
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 1961);
+            assert_eq!(db.bounds().end, 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(db.oldest_retained_loc(), Location::new_unchecked(756));
+            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();

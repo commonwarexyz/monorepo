@@ -203,7 +203,10 @@ where
                 *loc
             }
             None => self
-                .op_count()
+                .any
+                .log
+                .bounds()
+                .end
                 .checked_sub(1)
                 .expect("db shouldn't be empty"),
         };

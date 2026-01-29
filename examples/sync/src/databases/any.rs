@@ -15,6 +15,7 @@ use commonware_storage::{
             FixedConfig as Config,
         },
         operation::Committable,
+        store::LogStore,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -115,11 +116,11 @@ where
         self.root()
     }
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    fn size(&self) -> Location {
+        LogStore::bounds(self).end
     }
 
-    fn lower_bound(&self) -> Location {
+    fn inactivity_floor(&self) -> Location {
         self.inactivity_floor_loc()
     }
 

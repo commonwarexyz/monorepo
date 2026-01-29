@@ -120,39 +120,39 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyOrderedFixed => {
                                         let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentUnorderedFixed => {
                                         let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentOrderedFixed => {
                                         let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyUnorderedVariable => {
                                         let db =
                                             UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyOrderedVariable => {
                                         let db =
                                             OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentUnorderedVariable => {
                                         let db = UVCurrentDb::init(
@@ -161,7 +161,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         )
                                         .await
                                         .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentOrderedVariable => {
                                         let db = OVCurrentDb::init(
@@ -170,7 +170,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         )
                                         .await
                                         .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                 }
                             }

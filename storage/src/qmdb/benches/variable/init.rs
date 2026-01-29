@@ -103,27 +103,27 @@ fn bench_variable_init(c: &mut Criterion) {
                                         let db = UVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyOrdered => {
                                         let db = OVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentUnordered => {
                                         let db =
                                             UVCurrentDb::init(ctx.clone(), current_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentOrdered => {
                                         let db =
                                             OVCurrentDb::init(ctx.clone(), current_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                 }
                             }

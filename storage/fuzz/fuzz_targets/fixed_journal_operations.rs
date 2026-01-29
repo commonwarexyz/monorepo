@@ -30,7 +30,7 @@ enum JournalOperation {
     Rewind {
         size: u64,
     },
-    OldestRetainedPos,
+    Bounds,
     Prune {
         min_pos: u64,
     },
@@ -104,8 +104,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                JournalOperation::OldestRetainedPos => {
-                    let _pos = journal.oldest_retained_pos();
+                JournalOperation::Bounds => {
+                    let _bounds = journal.bounds();
                 }
 
                 JournalOperation::Prune { min_pos } => {
@@ -147,7 +147,8 @@ fn fuzz(input: FuzzInput) {
                     restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size();
-                    oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
+                    let bounds = journal.bounds();
+                    oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
                 }
 
                 JournalOperation::Destroy => {
