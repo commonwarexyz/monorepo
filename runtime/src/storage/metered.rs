@@ -123,9 +123,9 @@ impl<C: RawClock, S: crate::Storage> crate::Storage for Storage<C, S> {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.metrics.open_blobs.inc();
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
+        self.metrics.open_blobs.inc();
         Ok((
             Blob {
                 inner,
