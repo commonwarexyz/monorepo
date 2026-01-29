@@ -1,0 +1,15 @@
+# Disallow futures::channel types - use commonware_utils::channels instead
+disallowed-types = [
+    { path = "futures::channel::mpsc::Sender", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures::channel::mpsc::Receiver", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures::channel::mpsc::UnboundedSender", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures::channel::mpsc::UnboundedReceiver", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures::channel::oneshot::Sender", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures::channel::oneshot::Receiver", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures_channel::mpsc::Sender", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures_channel::mpsc::Receiver", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures_channel::mpsc::UnboundedSender", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures_channel::mpsc::UnboundedReceiver", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures_channel::oneshot::Sender", reason = "prefer commonware_utils::channels", allow-invalid = true },
+    { path = "futures_channel::oneshot::Receiver", reason = "prefer commonware_utils::channels", allow-invalid = true },
+]
