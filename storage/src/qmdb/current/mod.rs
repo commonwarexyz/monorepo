@@ -154,6 +154,7 @@ pub mod tests {
         kv::{Deletable as _, Updatable as _},
         qmdb::{
             any::states::{CleanAny, MutableAny as _, UnmerkleizedDurableAny as _},
+            current::db::grafting_height,
             store::{
                 batch_tests::{TestKey, TestValue},
                 LogStore,
@@ -606,6 +607,147 @@ pub mod tests {
                     assert!(db.get(&k).await.unwrap().is_none());
                 }
             }
+        });
+    }
+
+    use crate::{
+        mmr::{hasher::Hasher as MmrHasher, Location, StandardHasher},
+        qmdb::{current::proof::RangeProof, store::MerkleizedStore},
+    };
+    use commonware_codec::Codec;
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_utils::NZU64;
+
+    /// Run `test_historical_proof` against a database factory.
+    ///
+    /// Tests that `MerkleizedStore::historical_proof` returns a proof that validates against
+    /// `root()` for current-db variants, and that invalid inputs are rejected.
+    pub fn test_historical_proof<C, F, Fut, const N: usize>(mut open_db: F)
+    where
+        C: CleanAny + MerkleizedStore<Digest = Digest>,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        <C as MerkleizedStore>::Operation: Codec,
+        <C as MerkleizedStore>::Proof: Into<(
+            RangeProof<Digest>,
+            Vec<<C as MerkleizedStore>::Operation>,
+            Vec<[u8; N]>,
+        )>,
+        F: FnMut(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let partition = "historical_proof_test".to_string();
+            let mut hasher = StandardHasher::<Sha256>::new();
+
+            // Create and populate database
+            let db: C = open_db(context.with_label("db"), partition.clone()).await;
+            let db = apply_random_ops::<C>(100, true, context.next_u64(), db.into_mutable())
+                .await
+                .unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
+
+            let root = db.root();
+            let op_count = db.op_count();
+            let start_loc = db.inactivity_floor_loc();
+
+            // Test historical_proof with current size (supported case)
+            let (proof, ops, chunks): (RangeProof<Digest>, _, Vec<[u8; N]>) = db
+                .historical_proof(op_count, start_loc, NZU64!(10))
+                .await
+                .unwrap()
+                .into();
+
+            // Verify proof against root
+            assert!(
+                proof.verify(
+                    hasher.inner(),
+                    grafting_height::<N>(),
+                    start_loc,
+                    &ops,
+                    &chunks,
+                    &root,
+                ),
+                "historical_proof should verify against root()"
+            );
+
+            // Verify historical_size < op_count fails
+            if op_count > Location::new_unchecked(1) {
+                let result = db
+                    .historical_proof(op_count - 1, start_loc, NZU64!(10))
+                    .await;
+                assert!(result.is_err(), "historical_size < op_count should fail");
+            }
+
+            // Verify start_loc >= op_count fails
+            let result = db.historical_proof(op_count, op_count, NZU64!(10)).await;
+            assert!(result.is_err(), "start_loc >= op_count should fail");
+
+            // Verify modified proof is invalid
+            let mut bad_proof = proof.clone();
+            bad_proof.proof.leaves = bad_proof.proof.leaves.saturating_add(1);
+            assert!(
+                !bad_proof.verify(
+                    hasher.inner(),
+                    grafting_height::<N>(),
+                    start_loc,
+                    &ops,
+                    &chunks,
+                    &root,
+                ),
+                "modified proof should not verify"
+            );
+
+            // Verify wrong start_loc causes failure
+            let wrong_start = start_loc + 1;
+            assert!(
+                !proof.verify(
+                    hasher.inner(),
+                    grafting_height::<N>(),
+                    wrong_start,
+                    &ops,
+                    &chunks,
+                    &root,
+                ),
+                "wrong start_loc should not verify"
+            );
+
+            // Verify truncated ops causes failure
+            if ops.len() > 1 {
+                let bad_ops = &ops[..ops.len() - 1];
+                assert!(
+                    !proof.verify(
+                        hasher.inner(),
+                        grafting_height::<N>(),
+                        start_loc,
+                        bad_ops,
+                        &chunks,
+                        &root,
+                    ),
+                    "truncated ops should not verify"
+                );
+            }
+
+            // Verify modified chunks causes failure
+            if !chunks.is_empty() {
+                let mut bad_chunks = chunks.clone();
+                bad_chunks[0][0] ^= 0xFF; // Flip bits in first chunk
+                assert!(
+                    !proof.verify(
+                        hasher.inner(),
+                        grafting_height::<N>(),
+                        start_loc,
+                        &ops,
+                        &bad_chunks,
+                        &root,
+                    ),
+                    "modified chunks should not verify"
+                );
+            }
+
+            db.destroy().await.unwrap();
         });
     }
 }

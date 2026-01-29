@@ -14,7 +14,7 @@ use crate::{
         hasher::Hasher as MmrHasher,
         journaled::Mmr,
         mem::Clean,
-        Location, Proof, StandardHasher,
+        Location, StandardHasher,
     },
     qmdb::{
         any::{
@@ -35,7 +35,7 @@ use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-const fn grafting_height<const N: usize>() -> u32 {
+pub(super) const fn grafting_height<const N: usize>() -> u32 {
     PrunableBitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
@@ -444,9 +444,6 @@ where
 }
 
 // MerkleizedStore for Merkleized states (both Durable and NonDurable)
-// TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
-// proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
-// root.
 impl<E, K, V, U, C, I, H, D, const N: usize> MerkleizedStore
     for Db<E, C, I, H, U, N, Merkleized<H>, D>
 where
@@ -462,6 +459,7 @@ where
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
+    type Proof = (RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>);
 
     fn root(&self) -> H::Digest {
         self.root()
@@ -472,9 +470,16 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.any
-            .historical_proof(historical_size, start_loc, max_ops)
+    ) -> Result<Self::Proof, Error> {
+        // TODO: Support historical_size != op_count()
+        let op_count = self.op_count();
+        if historical_size != op_count {
+            return Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(
+                historical_size,
+            )));
+        }
+
+        self.range_proof(StandardHasher::<H>::new().inner(), start_loc, max_ops)
             .await
     }
 }

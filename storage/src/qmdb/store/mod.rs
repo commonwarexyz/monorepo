@@ -6,10 +6,7 @@
 //! A log based store maintains a location before which all operations are inactive, called the
 //! _inactivity floor_. These operations can be cleaned from storage by calling [PrunableStore::prune].
 
-use crate::{
-    mmr::{Location, Proof},
-    qmdb::Error,
-};
+use crate::{mmr::Location, qmdb::Error};
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use core::future::Future;
@@ -79,36 +76,33 @@ pub trait MerkleizedStore: LogStore {
     /// The operation type stored in the log.
     type Operation;
 
+    /// The output of proof generation.
+    type Proof;
+
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the store in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
+    /// Generate and return a proof of all operations applied to the store in the range starting at
+    /// (and including) location `start_loc`, and ending at the first of either:
+    /// - the last operation performed, or
+    /// - the operation `max_ops` from the start.
     ///
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
-    #[allow(clippy::type_complexity)]
     fn proof(
         &self,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
-    {
+    ) -> impl Future<Output = Result<Self::Proof, Error>> + Send {
         self.historical_proof(self.op_count(), start_loc, max_ops)
     }
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the store in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
+    /// Generate and return a proof of all operations applied to the store in the range starting at
+    /// (and including) location `start_loc`, and ending at the first of either:
+    /// - the last operation performed, or
+    /// - the operation `max_ops` from the start,
     ///
     /// for the store when it had `historical_size` operations.
     ///
@@ -116,13 +110,12 @@ pub trait MerkleizedStore: LogStore {
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count`.
-    #[allow(clippy::type_complexity)]
     fn historical_proof(
         &self,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
+    ) -> impl Future<Output = Result<Self::Proof, Error>> + Send;
 }
 
 #[cfg(test)]

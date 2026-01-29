@@ -337,6 +337,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
+    type Proof = (Proof<H::Digest>, Vec<Operation<V>>);
 
     fn root(&self) -> Self::Digest {
         self.journal.root()
@@ -347,7 +348,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+    ) -> Result<Self::Proof, Error> {
         Ok(self
             .journal
             .historical_proof(historical_size, start_loc, max_ops)

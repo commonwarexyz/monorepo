@@ -444,7 +444,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         kv::{Deletable as _, Gettable as _, Updatable as _},
-        mmr::StandardHasher,
+        mmr::{Proof, StandardHasher},
         qmdb::{
             any::test::{fixed_db_config, variable_db_config},
             store::{LogStore, MerkleizedStore},
@@ -606,6 +606,8 @@ pub(super) mod test {
         make_value: impl Fn(u64) -> V,
     ) where
         <D as MerkleizedStore>::Operation: Codec,
+        <D as MerkleizedStore>::Proof:
+            Into<(Proof<Digest>, Vec<<D as MerkleizedStore>::Operation>)>,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -675,7 +677,8 @@ pub(super) mod test {
         let mut hasher = StandardHasher::<Sha256>::new();
         for loc in *db.inactivity_floor_loc()..*db.op_count() {
             let loc = Location::new_unchecked(loc);
-            let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
+            let (proof, ops): (Proof<Digest>, Vec<<D as MerkleizedStore>::Operation>) =
+                db.proof(loc, NZU64!(10)).await.unwrap().into();
             assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
         }
 

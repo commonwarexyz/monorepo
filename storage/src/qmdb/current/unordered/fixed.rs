@@ -107,7 +107,7 @@ pub mod test {
     use super::*;
     use crate::{
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        mmr::{hasher::Hasher as _, Proof},
+        mmr::{hasher::Hasher as _, Location, Proof, StandardHasher},
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
@@ -124,7 +124,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -575,6 +575,11 @@ pub mod test {
             let prefix = format!("current_unordered_batch_{seed}");
             open_db(ctx, prefix).await.into_mutable()
         });
+    }
+
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_historical_proof() {
+        tests::test_historical_proof::<CleanCurrentTest, _, _, 32>(open_db);
     }
 
     #[allow(dead_code)]

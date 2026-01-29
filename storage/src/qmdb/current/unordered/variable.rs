@@ -130,7 +130,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _, Runner as _};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::RngCore;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -587,6 +587,11 @@ mod test {
             let prefix = format!("current_unordered_variable_batch_{seed}");
             open_db(ctx, prefix).await.into_mutable()
         });
+    }
+
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_historical_proof() {
+        tests::test_historical_proof::<CleanCurrentTest, _, _, 32>(open_db);
     }
 
     #[allow(dead_code)]

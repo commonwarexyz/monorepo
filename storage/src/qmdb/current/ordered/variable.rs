@@ -821,6 +821,11 @@ mod test {
         });
     }
 
+    #[test_traced("DEBUG")]
+    pub fn test_current_db_historical_proof() {
+        tests::test_historical_proof::<CleanCurrentTest, _, _, 32>(open_db);
+    }
+
     #[allow(dead_code)]
     fn assert_merkleized_db_futures_are_send(
         db: &mut CleanCurrentTest,
