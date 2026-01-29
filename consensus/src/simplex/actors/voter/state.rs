@@ -65,7 +65,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     current_view: Gauge,
     tracked_views: Gauge,
     skipped_views: Counter,
-    skipped_views_per_leader: Family<Peer, Counter>,
+    nullifications_per_leader: Family<Peer, Counter>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -75,17 +75,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
         let skipped_views = Counter::default();
-        let skipped_views_per_leader = Family::<Peer, Counter>::default();
+        let nullifications_per_leader = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
         context.register("skipped_views", "skipped views", skipped_views.clone());
         context.register(
-            "skipped_views_per_leader",
-            "skipped views per leader",
-            skipped_views_per_leader.clone(),
+            "nullifications_per_leader",
+            "nullifications per leader",
+            nullifications_per_leader.clone(),
         );
         for participant in cfg.scheme.participants().iter() {
-            let _ = skipped_views_per_leader.get_or_create(&Peer::new(participant));
+            let _ = nullifications_per_leader.get_or_create(&Peer::new(participant));
         }
 
         // Build elector with participants
@@ -109,7 +109,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             current_view,
             tracked_views,
             skipped_views,
-            skipped_views_per_leader,
+            nullifications_per_leader,
         }
     }
 
@@ -265,12 +265,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = nullification.view();
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&nullification.certificate));
-        let added = self.create_round(view).add_nullification(nullification);
 
         // Track skipped view per leader if we know who the leader was
+        let added = self.create_round(view).add_nullification(nullification);
         if added {
             if let Some(leader) = self.views.get(&view).and_then(|round| round.leader()) {
-                self.skipped_views_per_leader
+                self.nullifications_per_leader
                     .get_or_create(&Peer::new(&leader.key))
                     .inc();
             }
