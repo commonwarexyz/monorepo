@@ -16,7 +16,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufMut, Listener as _, Metrics,
-    Network as RNetwork, Quota, RawClock, Spawner,
+    Network as RNetwork, Quota, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{

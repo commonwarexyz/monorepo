@@ -17,8 +17,7 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, RawClock, Resolver, SinkOf, Spawner,
-    StreamOf,
+    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
