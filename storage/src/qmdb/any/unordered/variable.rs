@@ -99,6 +99,140 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
     }
 }
 
+/// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
+///
+/// See [partitioned::Db] for the generic type, or use the convenience aliases:
+/// - [partitioned::p256::Db] for 256 partitions (P=1)
+/// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
+pub mod partitioned {
+    pub use super::{Operation, Update};
+    use crate::{
+        index::partitioned::unordered::Index,
+        journal::{
+            authenticated,
+            contiguous::variable::{Config as JournalConfig, Journal},
+        },
+        mmr::{journaled::Config as MmrConfig, Location},
+        qmdb::{
+            any::{VariableConfig, VariableValue},
+            operation::Committable as _,
+            Durable, Error, Merkleized,
+        },
+        translator::Translator,
+    };
+    use commonware_codec::Read;
+    use commonware_cryptography::Hasher;
+    use commonware_runtime::{Clock, Metrics, Storage};
+    use commonware_utils::Array;
+    use tracing::warn;
+
+    /// A key-value QMDB with a partitioned snapshot index and variable-size values.
+    ///
+    /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
+    /// the number of prefix bytes used for partitioning:
+    /// - `P = 1`: 256 partitions
+    /// - `P = 2`: 65,536 partitions
+    ///
+    /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
+    /// efficiency is important. Keys should be uniformly distributed across the prefix space.
+    pub type Db<E, K, V, H, T, const P: usize, S = Merkleized<H>, D = Durable> =
+        crate::qmdb::any::unordered::Db<
+            E,
+            Journal<E, Operation<K, V>>,
+            Index<T, Location, P>,
+            H,
+            Update<K, V>,
+            S,
+            D,
+        >;
+
+    impl<
+            E: Storage + Clock + Metrics,
+            K: Array,
+            V: VariableValue,
+            H: Hasher,
+            T: Translator,
+            const P: usize,
+        > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
+    where
+        Operation<K, V>: Read,
+    {
+        /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
+        /// discarded and the state of the db will be as of the last committed operation.
+        pub async fn init(
+            context: E,
+            cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
+        ) -> Result<Self, Error> {
+            Self::init_with_callback(context, cfg, None, |_, _| {}).await
+        }
+
+        /// Initialize the DB, invoking `callback` for each operation processed during recovery.
+        ///
+        /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
+        /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the
+        /// snapshot is built from the log, `callback` is invoked for each operation with its activity
+        /// status and previous location (if any).
+        pub(crate) async fn init_with_callback(
+            context: E,
+            cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
+            known_inactivity_floor: Option<Location>,
+            callback: impl FnMut(bool, Option<Location>),
+        ) -> Result<Self, Error> {
+            let mmr_config = MmrConfig {
+                journal_partition: cfg.mmr_journal_partition,
+                metadata_partition: cfg.mmr_metadata_partition,
+                items_per_blob: cfg.mmr_items_per_blob,
+                write_buffer: cfg.mmr_write_buffer,
+                thread_pool: cfg.thread_pool,
+                page_cache: cfg.page_cache.clone(),
+            };
+
+            let journal_config = JournalConfig {
+                partition: cfg.log_partition,
+                items_per_section: cfg.log_items_per_blob,
+                compression: cfg.log_compression,
+                codec_config: cfg.log_codec_config,
+                page_cache: cfg.page_cache,
+                write_buffer: cfg.log_write_buffer,
+            };
+
+            let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+                context.with_label("log"),
+                mmr_config,
+                journal_config,
+                Operation::<K, V>::is_commit,
+            )
+            .await?;
+
+            if log.size() == 0 {
+                warn!("Authenticated log is empty, initializing new db");
+                log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .await?;
+                log.sync().await?;
+            }
+
+            let index = Index::new(context.with_label("index"), cfg.translator);
+            let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
+
+            Ok(log)
+        }
+    }
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Variable-value DB with 256 partitions.
+        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
+            super::Db<E, K, V, H, T, 1, S, D>;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Variable-value DB with 65,536 partitions.
+        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
+            super::Db<E, K, V, H, T, 2, S, D>;
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
@@ -106,6 +240,12 @@ pub(crate) mod test {
         index::Unordered as _,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         qmdb::{
+            any::{
+                test::variable_db_config,
+                unordered::test::{
+                    test_any_db_basic, test_any_db_build_and_authenticate, test_any_db_empty,
+                },
+            },
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
@@ -155,11 +295,22 @@ pub(crate) mod test {
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
+    /// Type alias for Digest-valued variable DB (used for generic tests that require Digest values).
+    type DigestAnyTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
+
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         AnyTest::init(context, config).await.unwrap()
+    }
+
+    /// Return a Digest-valued variable database for generic tests.
+    async fn open_digest_db(context: Context) -> DigestAnyTest {
+        DigestAnyTest::init(context, variable_db_config("digest_partition"))
+            .await
+            .unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -234,50 +385,6 @@ pub(crate) mod test {
                 db,
                 |ctx| Box::pin(open_db(ctx)),
                 to_bytes,
-            )
-            .await;
-        });
-    }
-
-    // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
-    // in the snapshot.
-    #[test_traced("WARN")]
-    pub fn test_any_variable_db_log_replay() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("first")).await.into_mutable();
-
-            // Update the same key many times.
-            const UPDATES: u64 = 100;
-            let k = Sha256::hash(&UPDATES.to_be_bytes());
-            for i in 0u64..UPDATES {
-                let v = to_bytes(i);
-                db.update(k, v).await.unwrap();
-            }
-            let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
-
-            // Simulate a failed commit and test that the log replay doesn't leave behind old data.
-            drop(db);
-            let db = open_db(context.with_label("second")).await;
-            let iter = db.snapshot.get(&k);
-            assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(), root);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_any_variable_db_multiple_commits_delete_gets_replayed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
-            crate::qmdb::any::unordered::test::test_any_db_multiple_commits_delete_replayed(
-                context,
-                db,
-                |ctx| Box::pin(open_db(ctx)),
-                |i| vec![(i % 255) as u8; ((i % 7) + 3) as usize],
             )
             .await;
         });
@@ -400,36 +507,30 @@ pub(crate) mod test {
         });
     }
 
-    /// Test that various types of unclean shutdown while updating a non-empty DB recover to the
-    /// empty DB on re-open.
-    #[test_traced("WARN")]
-    fn test_any_fixed_non_empty_db_recovery() {
+    #[test_traced("INFO")]
+    fn test_any_variable_db_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
-            crate::qmdb::any::unordered::test::test_any_db_non_empty_recovery(
-                context,
-                db,
-                |ctx| Box::pin(open_db(ctx)),
-                to_bytes,
-            )
+            let db = open_digest_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_empty(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_digest_db(ctx))
+            })
             .await;
         });
     }
 
-    /// Test that various types of unclean shutdown while updating an empty DB recover to the empty
-    /// DB on re-open.
-    #[test_traced("WARN")]
-    fn test_any_variable_empty_db_recovery() {
+    #[test_traced("INFO")]
+    fn test_any_variable_db_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = open_db(context.clone()).await;
-            crate::qmdb::any::unordered::test::test_any_db_empty_recovery(
-                context,
-                db,
-                |ctx| Box::pin(open_db(ctx)),
-                to_bytes,
-            )
+            let db = open_digest_db(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_basic(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_digest_db(ctx))
+            })
             .await;
         });
     }
@@ -473,16 +574,6 @@ pub(crate) mod test {
             let seed = ctx.next_u64();
             let cfg = create_test_config(seed);
             AnyTest::init(ctx, cfg).await.unwrap().into_mutable()
-        });
-    }
-
-    // Test that merkleization state changes don't reset `steps`.
-    #[test_traced("DEBUG")]
-    fn test_any_unordered_variable_db_steps_not_reset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = crate::qmdb::any::unordered::test::open_variable_db(context).await;
-            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
         });
     }
 
@@ -562,5 +653,97 @@ pub(crate) mod test {
     #[allow(dead_code)]
     fn assert_mutable_db_commit_is_send(db: MutableDb) {
         assert_send(db.commit(None));
+    }
+
+    // Partitioned variant tests
+
+    type PartitionedVarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
+
+    fn partitioned_config(suffix: &str) -> PartitionedVarConfig {
+        VariableConfig {
+            mmr_journal_partition: format!("pv_journal_{suffix}"),
+            mmr_metadata_partition: format!("pv_metadata_{suffix}"),
+            mmr_items_per_blob: NZU64!(13),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("pv_log_journal_{suffix}"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: ((0..=10000).into(), ()),
+            translator: TwoCap,
+            thread_pool: None,
+            page_cache: CacheRef::new(NZU16!(77), NZUsize!(9)),
+        }
+    }
+
+    type PartitionedAnyTestP1 =
+        super::partitioned::Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, 1>;
+
+    type PartitionedAnyTestDigestP1 =
+        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
+
+    fn partitioned_to_bytes(i: u64) -> Vec<u8> {
+        let len = ((i % 13) + 7) as usize;
+        vec![(i % 255) as u8; len]
+    }
+
+    #[inline]
+    async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
+        PartitionedAnyTestP1::init(context, partitioned_config("partition_p1"))
+            .await
+            .unwrap()
+    }
+
+    async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
+        PartitionedAnyTestDigestP1::init(
+            context,
+            variable_db_config("unordered_partitioned_var_p1"),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test_traced("WARN")]
+    fn test_partitioned_variable_p1_build_and_authenticate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_context = context.with_label("db");
+            let db = open_partitioned_db_p1(db_context.clone()).await;
+            test_any_db_build_and_authenticate(
+                db_context,
+                db,
+                |ctx| Box::pin(open_partitioned_db_p1(ctx)),
+                partitioned_to_bytes,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_partitioned_variable_p1_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_partitioned_digest_db_p1(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_basic(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_partitioned_digest_db_p1(ctx))
+            })
+            .await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_partitioned_variable_p1_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_partitioned_digest_db_p1(context.with_label("db_0")).await;
+            let ctx = context.clone();
+            test_any_db_empty(db, move |idx| {
+                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
+                Box::pin(open_partitioned_digest_db_p1(ctx))
+            })
+            .await;
+        });
     }
 }

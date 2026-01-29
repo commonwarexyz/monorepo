@@ -446,28 +446,15 @@ pub(super) mod test {
         kv::{Deletable as _, Gettable as _, Updatable as _},
         mmr::StandardHasher,
         qmdb::{
-            any::test::{fixed_db_config, variable_db_config},
             store::{LogStore, MerkleizedStore},
             verify_proof,
         },
-        translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
-    use commonware_runtime::{
-        deterministic::{Context, Runner},
-        Runner as _,
-    };
+    use commonware_runtime::deterministic::Context;
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
-
-    /// A type alias for the concrete [fixed::Db] type used in these unit tests.
-    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-
-    /// A type alias for the concrete [variable::Db] type used in these unit tests.
-    type VariableDb =
-        variable::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:
@@ -480,25 +467,11 @@ pub(super) mod test {
     {
     }
 
-    /// Return an `Any` database initialized with a fixed config.
-    pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {
-        FixedDb::init(context, fixed_db_config("partition"))
-            .await
-            .unwrap()
-    }
-
-    /// Return an `Any` database initialized with a variable config.
-    pub(crate) async fn open_variable_db(context: Context) -> VariableDb {
-        VariableDb::init(context, variable_db_config("partition"))
-            .await
-            .unwrap()
-    }
-
     /// Test an empty database.
     ///
     /// The `reopen_db` closure receives a unique index for each invocation to enable
     /// unique metric labels (the deterministic runtime panics on duplicates).
-    async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
+    pub(crate) async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
         mut db: D,
         mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) {
@@ -566,34 +539,6 @@ pub(super) mod test {
 
         let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_fixed_db_empty() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            let db = open_fixed_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_fixed_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_variable_db_empty() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_variable_db(ctx))
-            })
-            .await;
-        });
     }
 
     pub(crate) async fn test_any_db_build_and_authenticate<

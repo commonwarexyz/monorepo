@@ -70,15 +70,137 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
     }
 }
 
+/// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
+///
+/// See [partitioned::Db] for the generic type, or use the convenience aliases:
+/// - [partitioned::p256::Db] for 256 partitions (P=1)
+/// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
+pub mod partitioned {
+    pub use super::{Operation, Update};
+    use crate::{
+        index::partitioned::ordered::Index,
+        journal::contiguous::fixed::Journal,
+        mmr::Location,
+        qmdb::{
+            any::{init_fixed_authenticated_log, FixedConfig as Config, FixedValue},
+            Durable, Error, Merkleized,
+        },
+        translator::Translator,
+    };
+    use commonware_cryptography::Hasher;
+    use commonware_runtime::{Clock, Metrics, Storage};
+    use commonware_utils::Array;
+    use tracing::warn;
+
+    /// An ordered key-value QMDB with a partitioned snapshot index.
+    ///
+    /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
+    /// the number of prefix bytes used for partitioning:
+    /// - `P = 1`: 256 partitions
+    /// - `P = 2`: 65,536 partitions
+    ///
+    /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
+    /// efficiency is important. Keys should be uniformly distributed across the prefix space.
+    pub type Db<E, K, V, H, T, const P: usize, S = Merkleized<H>, D = Durable> =
+        crate::qmdb::any::ordered::Db<
+            E,
+            Journal<E, Operation<K, V>>,
+            Index<T, Location, P>,
+            H,
+            Update<K, V>,
+            S,
+            D,
+        >;
+
+    impl<
+            E: Storage + Clock + Metrics,
+            K: Array,
+            V: FixedValue,
+            H: Hasher,
+            T: Translator,
+            const P: usize,
+        > Db<E, K, V, H, T, P, Merkleized<H>, Durable>
+    {
+        /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
+        /// discarded and the state of the db will be as of the last committed operation.
+        pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+            Self::init_with_callback(context, cfg, None, |_, _| {}).await
+        }
+
+        /// Initialize the DB, invoking `callback` for each operation processed during recovery.
+        ///
+        /// If `known_inactivity_floor` is provided and is less than the log's actual inactivity floor,
+        /// `callback` is invoked with `(false, None)` for each location in the gap. Then, as the
+        /// snapshot is built from the log, `callback` is invoked for each operation with its activity
+        /// status and previous location (if any).
+        pub(crate) async fn init_with_callback(
+            context: E,
+            cfg: Config<T>,
+            known_inactivity_floor: Option<Location>,
+            callback: impl FnMut(bool, Option<Location>),
+        ) -> Result<Self, Error> {
+            let translator = cfg.translator.clone();
+            let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+            if log.size() == 0 {
+                warn!("Authenticated log is empty, initializing new db");
+                log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .await?;
+                log.sync().await?;
+            }
+
+            let log = Self::init_from_log(
+                Index::new(context.with_label("index"), translator),
+                log,
+                known_inactivity_floor,
+                callback,
+            )
+            .await?;
+
+            Ok(log)
+        }
+    }
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Fixed-value DB with 256 partitions.
+        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
+            super::Db<E, K, V, H, T, 1, S, D>;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Fixed-value DB with 65,536 partitions.
+        pub type Db<E, K, V, H, T, S = crate::qmdb::Merkleized<H>, D = crate::qmdb::Durable> =
+            super::Db<E, K, V, H, T, 2, S, D>;
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::StandardHasher as Standard,
+        kv::{
+            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            Batchable as _, Deletable as _, Updatable as _,
+        },
+        mmr::{Location, StandardHasher as Standard},
         qmdb::{
-            any::ordered::Update,
-            store::{batch_tests, LogStore},
+            any::{
+                ordered::{
+                    test::{
+                        test_digest_ordered_any_db_basic, test_digest_ordered_any_db_empty,
+                        test_ordered_any_db_basic, test_ordered_any_db_empty,
+                        test_ordered_any_update_collision_edge_case,
+                    },
+                    Update,
+                },
+                test::fixed_db_config,
+            },
+            store::{
+                batch_tests,
+                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+            },
             verify_proof, Durable, Merkleized, NonDurable, Unmerkleized,
         },
         translator::{OneCap, TwoCap},
@@ -87,35 +209,13 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Runner as _,
     };
-    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZU64};
+    use futures::StreamExt as _;
     use rand::{rngs::StdRng, seq::IteratorRandom, RngCore, SeedableRng};
-    use std::{
-        collections::{BTreeMap, HashMap},
-        num::{NonZeroU16, NonZeroUsize},
-    };
-
-    // Janky page & cache sizes to exercise boundary conditions.
-    const PAGE_SIZE: NonZeroU16 = NZU16!(103);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(13);
-
-    fn any_db_config(suffix: &str) -> Config<TwoCap> {
-        Config {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log_journal_{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
+    use std::collections::{BTreeMap, HashMap};
 
     /// Type aliases for concrete [Db] types used in these unit tests.
     pub(crate) type CleanAnyTest =
@@ -125,35 +225,17 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanAnyTest {
-        CleanAnyTest::init(context, any_db_config("partition"))
+        CleanAnyTest::init(context, fixed_db_config("partition"))
             .await
             .unwrap()
-    }
-
-    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
-        create_generic_test_config::<TwoCap>(seed, TwoCap)
-    }
-
-    pub(crate) fn create_generic_test_config<T: Translator>(seed: u64, t: T) -> Config<T> {
-        Config {
-            mmr_journal_partition: format!("mmr_journal_{seed}"),
-            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
-            mmr_items_per_blob: NZU64!(12), // intentionally small and janky size
-            mmr_write_buffer: NZUsize!(64),
-            log_journal_partition: format!("log_journal_{seed}"),
-            log_items_per_blob: NZU64!(14), // intentionally small and janky size
-            log_write_buffer: NZUsize!(64),
-            translator: t,
-            thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed);
-        CleanAnyTest::init(context, config).await.unwrap()
+        CleanAnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string()))
+            .await
+            .unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -213,7 +295,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let seed = context.next_u64();
-            let config = create_generic_test_config::<OneCap>(seed, OneCap);
+            let config = fixed_db_config::<OneCap>(&seed.to_string());
             let db = Db::<
                 Context,
                 FixedBytes<2>,
@@ -802,124 +884,6 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_ordered_any_fixed_db_historical_proof_invalid() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = create_test_db(context.clone()).await.into_mutable();
-            let ops = create_test_ops(10);
-            apply_ops(&mut db, ops).await;
-            let (db, _) = db.commit(None).await.unwrap();
-            let db = db.into_merkleized();
-
-            let historical_op_count = Location::new_unchecked(5);
-            let (proof, ops) = db
-                .historical_proof(historical_op_count, Location::new_unchecked(1), NZU64!(10))
-                .await
-                .unwrap();
-            assert_eq!(proof.leaves, historical_op_count);
-            assert_eq!(ops.len(), 4);
-
-            let mut hasher = Standard::<Sha256>::new();
-
-            // Changing the proof digests should cause verification to fail
-            {
-                let mut proof = proof.clone();
-                proof.digests[0] = Sha256::hash(b"invalid");
-                let root_hash = db.root();
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(0),
-                    &ops,
-                    &root_hash
-                ));
-            }
-            {
-                let mut proof = proof.clone();
-                proof.digests.push(Sha256::hash(b"invalid"));
-                let root_hash = db.root();
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(0),
-                    &ops,
-                    &root_hash
-                ));
-            }
-
-            // Changing the ops should cause verification to fail
-            let changed_op = Operation::Update(Update {
-                key: Sha256::hash(b"key1"),
-                value: Sha256::hash(b"value1"),
-                next_key: Sha256::hash(b"key2"),
-            });
-            {
-                let mut ops = ops.clone();
-                ops[0] = changed_op.clone();
-                let root_hash = db.root();
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(0),
-                    &ops,
-                    &root_hash
-                ));
-            }
-            {
-                let mut ops = ops.clone();
-                ops.push(changed_op);
-                let root_hash = db.root();
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(0),
-                    &ops,
-                    &root_hash
-                ));
-            }
-
-            // Changing the start location should cause verification to fail
-            {
-                let root_hash = db.root();
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(1),
-                    &ops,
-                    &root_hash
-                ));
-            }
-
-            // Changing the root digest should cause verification to fail
-            {
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(0),
-                    &ops,
-                    &Sha256::hash(b"invalid")
-                ));
-            }
-
-            // Changing the proof size should cause verification to fail
-            {
-                let mut proof = proof.clone();
-                proof.leaves = Location::new_unchecked(100);
-                let root_hash = db.root();
-                assert!(!verify_proof(
-                    &mut hasher,
-                    &proof,
-                    Location::new_unchecked(0),
-                    &ops,
-                    &root_hash
-                ));
-            }
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test]
     fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
@@ -985,7 +949,7 @@ pub(crate) mod test {
             let seed = context.next_u64();
 
             // Use a OneCap to ensure many collisions.
-            let config = create_generic_test_config::<OneCap>(seed, OneCap);
+            let config = fixed_db_config::<OneCap>(&seed.to_string());
             let db = Db::<Context, Digest, i32, Sha256, OneCap, Merkleized<Sha256>, Durable>::init(
                 context.with_label("first"),
                 config,
@@ -997,7 +961,7 @@ pub(crate) mod test {
             db.into_merkleized().destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
-            let config = create_generic_test_config::<TwoCap>(seed, TwoCap);
+            let config = fixed_db_config::<TwoCap>(&seed.to_string());
             let db = Db::<Context, Digest, i32, Sha256, TwoCap, Merkleized<Sha256>, Durable>::init(
                 context.with_label("second"),
                 config,
@@ -1013,6 +977,332 @@ pub(crate) mod test {
     #[test_traced("DEBUG")]
     fn test_any_ordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    // Tests calling generic helpers with Digest-key DB (non-partitioned variant)
+
+    #[test_traced("WARN")]
+    fn test_digest_ordered_any_fixed_db_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_db(context.with_label("initial")).await;
+            test_digest_ordered_any_db_empty(context, db, |ctx| Box::pin(open_db(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_digest_ordered_any_fixed_db_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_db(context.with_label("initial")).await;
+            test_digest_ordered_any_db_basic(context, db, |ctx| Box::pin(open_db(ctx))).await;
+        });
+    }
+
+    // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
+
+    /// Type alias for a fixed db with FixedBytes<4> keys.
+    type FixedDb = Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+
+    /// Return a fixed db with FixedBytes<4> keys.
+    async fn open_fixed_db(context: Context) -> FixedDb {
+        FixedDb::init(context, fixed_db_config("fixed_bytes_partition"))
+            .await
+            .unwrap()
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.with_label("initial")).await;
+            test_ordered_any_db_empty(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_fixed_db_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.with_label("initial")).await;
+            test_ordered_any_db_basic(context, db, |ctx| Box::pin(open_fixed_db(ctx))).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_update_collision_edge_case_fixed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db = open_fixed_db(context.clone()).await;
+            test_ordered_any_update_collision_edge_case(db).await;
+        });
+    }
+
+    /// Builds a db with one key, and then creates another non-colliding key preceeding it in a
+    /// batch. The prev_key search will have to "cycle around" in order to find the correct next_key
+    /// value.
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_create_with_cycling_next_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
+
+            let mid_key = FixedBytes::from([0xAAu8; 4]);
+            let val = Sha256::fill(1u8);
+            db.create(mid_key.clone(), val).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+
+            // Batch-insert a preceeding non-translated-colliding key.
+            let preceeding_key = FixedBytes::from([0x55u8; 4]);
+            let mut db = db.into_mutable();
+            let mut batch = db.start_batch();
+            assert!(batch.create(preceeding_key.clone(), val).await.unwrap());
+            db.write_batch(batch.into_iter()).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
+
+            assert_eq!(db.get(&preceeding_key).await.unwrap().unwrap(), val);
+            assert_eq!(db.get(&mid_key).await.unwrap().unwrap(), val);
+
+            let span1 = db.get_span(&preceeding_key).await.unwrap().unwrap();
+            assert_eq!(span1.1.next_key, mid_key);
+            let span2 = db.get_span(&mid_key).await.unwrap().unwrap();
+            assert_eq!(span2.1.next_key, preceeding_key);
+
+            let db = db.into_mutable().commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
+        });
+    }
+
+    /// Builds a db with three keys A < B < C, then batch-deletes B. Verifies that A's next_key is
+    /// correctly updated to C (skipping the deleted B).
+    #[test_traced("WARN")]
+    fn test_ordered_any_batch_delete_middle_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
+
+            let key_a = FixedBytes::from([0x11u8; 4]);
+            let key_b = FixedBytes::from([0x22u8; 4]);
+            let key_c = FixedBytes::from([0x33u8; 4]);
+            let val = Sha256::fill(1u8);
+
+            // Create three keys in order: A -> B -> C -> A (circular)
+            db.create(key_a.clone(), val).await.unwrap();
+            db.create(key_b.clone(), val).await.unwrap();
+            db.create(key_c.clone(), val).await.unwrap();
+            let mut db = db.commit(None).await.unwrap().0.into_mutable();
+
+            // Verify initial spans
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_b);
+            let span_b = db.get_span(&key_b).await.unwrap().unwrap();
+            assert_eq!(span_b.1.next_key, key_c);
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            // Batch-delete the middle key B
+            let mut batch = db.start_batch();
+            batch.delete(key_b.clone()).await.unwrap();
+            db.write_batch(batch.into_iter()).await.unwrap();
+            let db = db.commit(None).await.unwrap().0.into_merkleized();
+
+            // Verify B is deleted
+            assert!(db.get(&key_b).await.unwrap().is_none());
+
+            // Verify A's next_key is now C (not B)
+            let span_a = db.get_span(&key_a).await.unwrap().unwrap();
+            assert_eq!(span_a.1.next_key, key_c);
+
+            // Verify C's next_key is still A
+            let span_c = db.get_span(&key_c).await.unwrap().unwrap();
+            assert_eq!(span_c.1.next_key, key_a);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_any_stream_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_fixed_db(context.clone()).await.into_mutable();
+
+            let key1 = FixedBytes::from([0x10u8, 0x00, 0x00, 0x05]);
+            let val = Sha256::fill(1u8);
+
+            // Test the single-bucket case.
+            db.create(key1.clone(), val).await.unwrap();
+            let db = db.commit(None).await.unwrap().0;
+
+            // Start key is in the DB.
+            {
+                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key collides & precedes the only key in the db.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x01]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key collides & follows the only key in the db.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key precedes the key in the DB without colliding.
+            {
+                let start = FixedBytes::from([0x00u8, 0x00, 0x00, 0x01]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key follows the key in the DB without colliding.
+            {
+                let start = FixedBytes::from([0xFFu8, 0x00, 0x00, 0x11]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert!(stream.next().await.is_none());
+            }
+
+            // Now test the multiple bucket cases.
+            let key2_1 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x05]);
+            let key2_2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x11]);
+            let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
+
+            let mut db = db.into_mutable();
+            db.create(key2_1.clone(), val).await.unwrap();
+            db.create(key2_2.clone(), val).await.unwrap();
+            db.create(key3.clone(), val).await.unwrap();
+            let db = db.commit(None).await.unwrap().0;
+
+            // Start key is in the DB.
+            {
+                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is not in DB but collides with an earlier key.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is not in the DB but collides with a later key.
+            {
+                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x00]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is not in the DB but falls between two colliding keys.
+            {
+                let start = FixedBytes::from([0x20u8, 0x00, 0x00, 0x06]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+
+            // Start key is in the DB and collides with an earlier key.
+            {
+                let mut stream = db.stream_range(key2_2.clone()).await.unwrap().boxed_local();
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
+                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
+                assert!(stream.next().await.is_none());
+            }
+            // Start key is > key3. Should yield nothing.
+            {
+                let start = FixedBytes::from([0x40u8, 0x00, 0x00, 0x00]);
+                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
+                assert!(stream.next().await.is_none());
+            }
+
+            let db = db.into_mutable().commit(None).await.unwrap().0;
+            db.into_merkleized().destroy().await.unwrap();
+        });
+    }
+
+    // Partitioned variant tests
+
+    type PartitionedAnyTest =
+        super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
+
+    async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
+        PartitionedAnyTest::init(context, fixed_db_config("ordered_partitioned_p1"))
+            .await
+            .unwrap()
+    }
+
+    #[test_traced("WARN")]
+    fn test_partitioned_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_context = context.with_label("db");
+            let db = open_partitioned_db(db_context.clone()).await;
+            test_digest_ordered_any_db_empty(db_context, db, |ctx| {
+                Box::pin(open_partitioned_db(ctx))
+            })
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_partitioned_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let db_context = context.with_label("db");
+            let db = open_partitioned_db(db_context.clone()).await;
+            test_digest_ordered_any_db_basic(db_context, db, |ctx| {
+                Box::pin(open_partitioned_db(ctx))
+            })
+            .await;
+        });
+    }
+
+    #[allow(dead_code)]
+    fn assert_merkleized_db_futures_are_send(db: &mut CleanAnyTest, key: Digest, loc: Location) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_prunable_store(db, loc);
+        assert_merkleized_store(db, loc);
+        assert_send(db.sync());
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_futures_are_send(db: &mut MutableAnyTest, key: Digest, value: Digest) {
+        assert_gettable(db, &key);
+        assert_log_store(db);
+        assert_send(db.update(key, value));
+        assert_send(db.create(key, value));
+        assert_deletable(db, key);
+        assert_batchable(db, key, value);
+        assert_send(db.get_all(&key));
+        assert_send(db.get_with_loc(&key));
+        assert_send(db.get_span(&key));
+    }
+
+    #[allow(dead_code)]
+    fn assert_mutable_db_commit_is_send(db: MutableAnyTest) {
+        assert_send(db.commit(None));
     }
 
     // FromSyncTestable implementation for from_sync_result tests
