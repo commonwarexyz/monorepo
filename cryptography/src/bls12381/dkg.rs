@@ -1065,7 +1065,7 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
         &self.dealer
     }
 
-    /// Returns the raw, unsigned [`DealerLog`] wrapped by [`Self`].
+    /// Returns an unsigned [`DealerLog`].
     ///
     /// Use [`Self::check`] to return a verified [`DealerLog`].
     pub const fn log(&self) -> &DealerLog<V, S::PublicKey> {
