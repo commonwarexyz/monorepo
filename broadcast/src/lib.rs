@@ -6,7 +6,7 @@
 )]
 
 use commonware_codec::Codec;
-use futures::channel::oneshot;
+use commonware_utils::channels::oneshot;
 use std::future::Future;
 
 pub mod buffered;
