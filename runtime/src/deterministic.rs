@@ -1518,7 +1518,7 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::Spawner;
     use crate::{
-        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
+        deterministic, reschedule, Blob, IoBufMut, Metrics, Pooling, Resolver, Runner as _, Storage,
     };
     use futures::stream::{FuturesUnordered, StreamExt as _};
 
@@ -1998,8 +1998,6 @@ mod tests {
 
     #[test]
     fn test_pooling_trait() {
-        use crate::Pooling;
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Access buffer pools via trait

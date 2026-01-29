@@ -942,6 +942,9 @@ impl Drop for PooledOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IoBufs;
+    use bytes::BytesMut;
+    use std::{sync::mpsc, thread};
 
     fn test_registry() -> Registry {
         Registry::default()
@@ -1258,8 +1261,6 @@ mod tests {
 
     #[test]
     fn test_copy_to_bytes_on_pooled_buffer() {
-        use crate::Buf;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -1315,8 +1316,6 @@ mod tests {
     fn test_iobuf_to_iobufmut_conversion_returns_pooled_buffer() {
         // This tests the IoBuf -> IoBufMut conversion that happens
         // when send() takes impl Into<IoBufMut>
-        use crate::IoBufMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -1355,9 +1354,6 @@ mod tests {
         // 3. Copies plaintext into encryption buffer
         // 4. Encrypts in place
         // 5. Freezes and sends
-
-        use crate::{Buf, IoBufs};
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 4), &mut registry);
@@ -1409,8 +1405,6 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_multithreaded_alloc_freeze_return() {
-        use std::{sync::Arc, thread};
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = Arc::new(BufferPool::new(test_config(page, page, 100), &mut registry));
@@ -1458,8 +1452,6 @@ mod tests {
     #[test]
     fn test_cross_thread_buffer_return() {
         // Allocate on one thread, freeze, send to another thread, drop there
-        use std::{sync::mpsc, thread};
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 100), &mut registry);
@@ -1514,8 +1506,6 @@ mod tests {
     /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
     #[test]
     fn test_bytesmut_parity_buf_trait() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1551,8 +1541,6 @@ mod tests {
     /// Verify PooledBufMut matches BytesMut semantics for BufMut trait.
     #[test]
     fn test_bytesmut_parity_bufmut_trait() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1584,8 +1572,6 @@ mod tests {
     /// Verify truncate works correctly after advance.
     #[test]
     fn test_bytesmut_parity_truncate_after_advance() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1613,8 +1599,6 @@ mod tests {
     /// Verify clear works correctly after advance.
     #[test]
     fn test_bytesmut_parity_clear_after_advance() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1690,8 +1674,6 @@ mod tests {
     /// Test is_pooled method.
     #[test]
     fn test_is_pooled() {
-        use crate::IoBufMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1705,8 +1687,6 @@ mod tests {
 
     #[test]
     fn test_bytesmut_parity_capacity_after_advance() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
@@ -1734,8 +1714,6 @@ mod tests {
 
     #[test]
     fn test_bytesmut_parity_set_len_after_advance() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
@@ -1762,8 +1740,6 @@ mod tests {
 
     #[test]
     fn test_bytesmut_parity_clear_preserves_view() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
@@ -1788,8 +1764,6 @@ mod tests {
 
     #[test]
     fn test_bytesmut_parity_put_after_advance() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
@@ -1925,8 +1899,6 @@ mod tests {
 
     #[test]
     fn test_truncate_beyond_len_is_noop() {
-        use bytes::BytesMut;
-
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
