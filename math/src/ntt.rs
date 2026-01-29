@@ -1021,10 +1021,10 @@ pub mod fuzz {
     impl<'a> Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             match u.int_in_range(0..=3)? {
-                0 => Ok(Plan::NttEqNaive(arb_polynomial_vector(u, 4, 2)?)),
-                1 => Ok(Plan::EvaluationThenInverse(arb_polynomial_vector(u, 4, 2)?)),
-                2 => Ok(Plan::VanishingPolynomial(arb_bit_vec_not_all_0(u, 4)?)),
-                _ => Ok(Plan::Recovery(arb_recovery_setup(u, 8, 8, 2)?)),
+                0 => Ok(Self::NttEqNaive(arb_polynomial_vector(u, 4, 2)?)),
+                1 => Ok(Self::EvaluationThenInverse(arb_polynomial_vector(u, 4, 2)?)),
+                2 => Ok(Self::VanishingPolynomial(arb_bit_vec_not_all_0(u, 4)?)),
+                _ => Ok(Self::Recovery(arb_recovery_setup(u, 8, 8, 2)?)),
             }
         }
     }
@@ -1032,15 +1032,15 @@ pub mod fuzz {
     impl Plan {
         pub fn run(self) {
             match self {
-                Plan::NttEqNaive(p) => {
+                Self::NttEqNaive(p) => {
                     let ntt = p.clone().evaluate();
                     let ntt_naive = p.evaluate_naive();
                     assert_eq!(ntt, ntt_naive);
                 }
-                Plan::EvaluationThenInverse(p) => {
+                Self::EvaluationThenInverse(p) => {
                     assert_eq!(p.clone(), p.evaluate().interpolate());
                 }
-                Plan::VanishingPolynomial(bv) => {
+                Self::VanishingPolynomial(bv) => {
                     let v = NTTPolynomial::vanishing(&bv);
                     let expected_degree = bv.count_zeros();
                     assert_eq!(
@@ -1061,7 +1061,7 @@ pub mod fuzz {
                         w_i = w_i * w;
                     }
                 }
-                Plan::Recovery(setup) => {
+                Self::Recovery(setup) => {
                     setup.test();
                 }
             }

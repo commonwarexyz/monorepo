@@ -1,8 +1,6 @@
 use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-#[cfg(test)]
-use proptest::prelude::{Arbitrary, BoxedStrategy};
 use rand_core::CryptoRngCore;
 
 /// The modulus P := 2^64 - 2^32 + 1.
@@ -425,64 +423,33 @@ impl Field for F {
     }
 }
 
-#[cfg(any(test, feature = "test_strategies"))]
-mod impl_proptest_arbitrary {
-    use super::*;
-    use proptest::prelude::*;
-
-    impl Arbitrary for F {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<u64>().prop_map_into().boxed()
-        }
-    }
-}
-
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
     use crate::algebra::Ring;
-    use arbitrary::{Arbitrary, Unstructured};
+    use arbitrary::Arbitrary;
 
-    #[derive(Debug)]
+    #[derive(Debug, Arbitrary)]
     pub enum Plan {
         Exp(F, u8),
         Div2(F),
         StreamRoundtrip(Vec<u64>),
     }
 
-    impl<'a> Arbitrary<'a> for Plan {
-        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            match u.int_in_range(0..=2)? {
-                0 => Ok(Plan::Exp(u.arbitrary()?, u.arbitrary()?)),
-                1 => Ok(Plan::Div2(u.arbitrary()?)),
-                _ => {
-                    let len = u.int_in_range(0..=127)?;
-                    let data: Vec<u64> = (0..len)
-                        .map(|_| u.arbitrary())
-                        .collect::<arbitrary::Result<_>>()?;
-                    Ok(Plan::StreamRoundtrip(data))
-                }
-            }
-        }
-    }
-
     impl Plan {
         pub fn run(self) {
             match self {
-                Plan::Exp(x, k) => {
+                Self::Exp(x, k) => {
                     let mut naive = F::one();
                     for _ in 0..k {
                         naive = naive * x;
                     }
                     assert_eq!(naive, x.exp(&[k as u64]));
                 }
-                Plan::Div2(x) => {
+                Self::Div2(x) => {
                     assert_eq!((x + x).div_2(), x);
                 }
-                Plan::StreamRoundtrip(data) => {
+                Self::StreamRoundtrip(data) => {
                     let mut roundtrip =
                         F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter()))
                             .collect::<Vec<_>>();
@@ -506,7 +473,6 @@ pub mod fuzz {
 mod test {
     use super::*;
     use crate::algebra;
-    use proptest::prelude::Arbitrary;
 
     #[test]
     fn test_generator_calculation() {
@@ -535,7 +501,7 @@ mod test {
 
     #[test]
     fn test_field() {
-        algebra::test_suites::test_field(file!(), &F::arbitrary());
+        algebra::test_suites::test_field::<F>();
     }
 
     #[cfg(feature = "arbitrary")]
