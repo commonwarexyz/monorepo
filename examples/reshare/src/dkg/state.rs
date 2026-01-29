@@ -526,9 +526,9 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         epoch: EpochNum,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) {
+    ) -> bool {
         if !self.unsent.contains_key(&player) {
-            return;
+            return false;
         }
         if let Some(ref mut dealer) = self.dealer {
             if dealer
@@ -537,8 +537,10 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
             {
                 self.unsent.remove(&player);
                 storage.append_ack(epoch, player, ack).await;
+                return true;
             }
         }
+        false
     }
 
     /// Finalize the dealer and produce a signed log for inclusion in a block.
