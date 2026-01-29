@@ -203,6 +203,10 @@ where
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        self.create(key, value).await
+    }
 }
 
 // StoreDeletable for (Unmerkleized, NonDurable) (aka mutable) state

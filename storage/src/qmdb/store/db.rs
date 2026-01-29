@@ -555,6 +555,10 @@ where
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        self.create(key, value).await
+    }
 }
 
 impl<E, K, V, T> Deletable for Db<E, K, V, T, NonDurable>
