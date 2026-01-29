@@ -24,8 +24,7 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
     Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channels::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -203,7 +202,7 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
-            message = vote_backup.next() => {
+            message = vote_backup.recv() => {
                 // If a message is received in an unregistered sub-channel in the vote network,
                 // ensure we have the boundary finalization.
                 let Some((their_epoch, (from, _))) = message else {
@@ -237,7 +236,7 @@ where
                     .hint_finalized(boundary_height, NonEmptyVec::new(from))
                     .await;
             },
-            transition = self.mailbox.next() => {
+            transition = self.mailbox.recv() => {
                 let Some(transition) = transition else {
                     warn!("mailbox closed, shutting down orchestrator");
                     break;

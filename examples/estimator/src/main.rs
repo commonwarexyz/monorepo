@@ -11,15 +11,12 @@ use commonware_p2p::{
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
 };
+use commonware_utils::channels::{mpsc, oneshot};
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    future::try_join_all,
-    SinkExt, StreamExt,
-};
+use futures::future::try_join_all;
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -316,7 +313,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
     // Wait for all jobs to indicate they're done
     let mut responders = Vec::with_capacity(peers);
     for _ in 0..peers {
-        responders.push(rx.next().await.unwrap());
+        responders.push(rx.recv().await.unwrap());
     }
 
     // Ensure any messages in the simulator are queued (this is virtual time)
@@ -406,7 +403,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     let mut jobs = Vec::new();
     for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
         let proposer_identity = proposer_identity.clone();
-        let mut tx = tx.clone();
+        let tx = tx.clone();
         let job = context.with_label("job");
         let commands = commands.to_vec();
         jobs.push(job.spawn(move |ctx| async move {

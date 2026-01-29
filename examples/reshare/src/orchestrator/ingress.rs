@@ -5,8 +5,7 @@ use commonware_cryptography::{
     bls12381::primitives::{group, sharing::Sharing, variant::Variant},
     PublicKey,
 };
-use commonware_utils::ordered::Set;
-use futures::{channel::mpsc, SinkExt};
+use commonware_utils::{channels::mpsc, ordered::Set};
 use tracing::error;
 
 /// Messages that can be sent to the orchestrator.

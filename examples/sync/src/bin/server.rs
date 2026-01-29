@@ -18,8 +18,7 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::DurationExt;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_utils::{channels::mpsc, DurationExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -326,7 +325,7 @@ where
                     // The response will be sent on `response_sender`.
                     context.with_label("request_handler").spawn({
                         let state = state.clone();
-                        let mut response_sender = response_sender.clone();
+                        let response_sender = response_sender.clone();
                         move |_| async move {
                             let response = handle_message::<DB>(&state, message).await;
                             if let Err(err) = response_sender.send(response).await {
@@ -343,7 +342,7 @@ where
             }
         },
 
-        outgoing = response_receiver.next() => {
+        outgoing = response_receiver.recv() => {
             if let Some(response) = outgoing {
                 // We have a response to send to the client.
                 let response_data = response.encode();

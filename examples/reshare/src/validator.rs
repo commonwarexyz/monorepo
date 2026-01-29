@@ -181,10 +181,9 @@ mod test {
         deterministic::{self, Runner},
         Clock, Handle, Quota, Runner as _, Spawner,
     };
-    use commonware_utils::{union, N3f1, TryCollect};
-    use futures::{
-        channel::{mpsc, oneshot},
-        SinkExt, StreamExt,
+    use commonware_utils::{
+        channels::{mpsc, oneshot},
+        union, N3f1, TryCollect,
     };
     use rand::seq::SliceRandom;
     use rand_core::CryptoRngCore;
@@ -245,7 +244,7 @@ mod test {
             &mut self,
             update: Update<MinSig, PublicKey>,
         ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
-            let mut sender = self.sender.clone();
+            let sender = self.sender.clone();
             let pk = self.pk.clone();
             Box::pin(async move {
                 let (callback_sender, callback_receiver) = oneshot::channel();
@@ -555,7 +554,7 @@ mod test {
                 HashSet::new()
             };
 
-            let (updates_in, mut updates_out) = mpsc::channel(0);
+            let (updates_in, mut updates_out) = mpsc::channel(1);
             let (restart_sender, mut restart_receiver) = mpsc::channel::<PublicKey>(10);
             team.start(
                 &ctx,
@@ -576,7 +575,7 @@ mod test {
             let (crash_sender, mut crash_receiver) = mpsc::channel::<()>(1);
             if let Some(Crash::Random { frequency, .. }) = &self.crash {
                 let frequency = *frequency;
-                let mut crash_sender = crash_sender.clone();
+                let crash_sender = crash_sender.clone();
                 ctx.clone().spawn(move |ctx| async move {
                     loop {
                         ctx.sleep(frequency).await;
@@ -590,7 +589,7 @@ mod test {
             let mut success_target_reached_epoch = None;
             loop {
                 select! {
-                    update = updates_out.next() => {
+                    update = updates_out.recv() => {
                         let Some(update) = update else {
                             return Err(anyhow!("update channel closed unexpectedly"));
                         };
@@ -717,7 +716,7 @@ mod test {
                         }
                         delayed_started = true;
                     },
-                    pk = restart_receiver.next() => {
+                    pk = restart_receiver.recv() => {
                         let Some(pk) = pk else {
                             continue;
                         };
@@ -741,7 +740,7 @@ mod test {
                             .await;
                         }
                     },
-                    _ = crash_receiver.next() => {
+                    _ = crash_receiver.recv() => {
                         // Crash ticker fired (only for Random crashes)
                         let Some(Crash::Random {
                             count, downtime, ..
@@ -768,7 +767,7 @@ mod test {
                             info!(pk = ?pk, "crashed participant");
 
                             // Schedule restart after downtime
-                            let mut restart_sender = restart_sender.clone();
+                            let restart_sender = restart_sender.clone();
                             let downtime = *downtime;
                             let pk_clone = pk.clone();
                             ctx.clone().spawn(move |ctx| async move {

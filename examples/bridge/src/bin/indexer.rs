@@ -25,10 +25,11 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{from_hex, ordered::Set, union, TryCollect};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+use commonware_utils::{
+    channels::{mpsc, oneshot},
+    from_hex,
+    ordered::Set,
+    union, TryCollect,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -151,12 +152,12 @@ fn main() {
         }
 
         // Create message handler
-        let (handler, mut receiver) = mpsc::unbounded();
+        let (handler, mut receiver) = mpsc::unbounded_channel();
 
         // Start handler
         let mut hasher = Sha256::new();
         context.with_label("handler").spawn(|mut ctx| async move {
-            while let Some(msg) = receiver.next().await {
+            while let Some(msg) = receiver.recv().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
                         // Ensure we care
@@ -274,7 +275,7 @@ fn main() {
 
             // Spawn message handler
             context.with_label("connection").spawn({
-                let mut handler = handler.clone();
+                let handler = handler.clone();
                 move |_| async move {
                     // Handle messages
                     while let Ok(msg) = receiver.recv().await {
@@ -296,7 +297,6 @@ fn main() {
                                         incoming: msg,
                                         response,
                                     })
-                                    .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
                                 let msg = Outbound::<Sha256Digest>::Success(success).encode();
@@ -312,7 +312,6 @@ fn main() {
                                         incoming: msg,
                                         response,
                                     })
-                                    .await
                                     .expect("failed to send message");
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {
@@ -339,7 +338,6 @@ fn main() {
                                         incoming: msg,
                                         response,
                                     })
-                                    .await
                                     .expect("failed to send message");
                                 let success = receiver.await.expect("failed to receive response");
                                 let msg = Outbound::<Sha256Digest>::Success(success).encode();
@@ -355,7 +353,6 @@ fn main() {
                                         incoming: msg,
                                         response,
                                     })
-                                    .await
                                     .expect("failed to send message");
                                 let response = receiver.await.expect("failed to receive response");
                                 match response {

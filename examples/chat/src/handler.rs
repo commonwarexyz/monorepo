@@ -1,13 +1,12 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::hex;
+use commonware_utils::{channels::mpsc, hex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{channel::mpsc, SinkExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -55,7 +54,7 @@ pub async fn run(
     let mut terminal = Terminal::new(backend).unwrap();
 
     // Listen for input
-    let (mut tx, mut rx) = mpsc::channel(100);
+    let (tx, mut rx) = mpsc::channel(100);
     context.with_label("keyboard").spawn(|_| async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
@@ -201,7 +200,7 @@ pub async fn run(
         // Handle input
         let formatted_me = format!("{}**{}", &me[..4], &me[me.len() - 4..]);
         select! {
-            event = rx.next() => {
+            event = rx.recv() => {
                 let event = match event {
                     Some(event) => event,
                     None => break,

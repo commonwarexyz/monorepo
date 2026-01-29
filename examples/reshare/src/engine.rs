@@ -27,8 +27,8 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
-use futures::{channel::mpsc, future::try_join_all};
+use commonware_utils::{channels::mpsc, ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
+use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,

@@ -6,8 +6,7 @@ use super::{
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::hex;
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channels::mpsc, hex};
 use rand::Rng;
 use tracing::info;
 
@@ -47,7 +46,7 @@ impl<R: Rng + Spawner, H: Hasher> Application<R, H> {
     }
 
     async fn run(mut self) {
-        while let Some(message) = self.mailbox.next().await {
+        while let Some(message) = self.mailbox.recv().await {
             match message {
                 Message::Genesis { epoch, response } => {
                     // Sanity check. We don't support multiple epochs.

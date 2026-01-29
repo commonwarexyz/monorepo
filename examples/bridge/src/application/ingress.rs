@@ -5,10 +5,7 @@ use commonware_consensus::{
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use commonware_utils::channels::{mpsc, oneshot};
 
 #[allow(clippy::large_enum_variant)]
 pub enum Message<D: Digest> {

@@ -5,10 +5,7 @@ use crate::{
 use commonware_macros::select_loop;
 use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
-};
+use commonware_utils::channels::{mpsc, oneshot};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -40,7 +37,7 @@ async fn run_loop<E, Si, St, M>(
         on_stopped => {
             debug!("context shutdown, terminating I/O task");
         },
-        outgoing = request_rx.next() => match outgoing {
+        outgoing = request_rx.recv() => match outgoing {
             Some(Request {
                 request,
                 response_tx,
