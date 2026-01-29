@@ -201,10 +201,9 @@ where
             return Ok(self.bounds().start);
         }
 
-        // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the
-        // journal's oldest retained location on restart from an unclean shutdown, and there would
-        // be no way to replay the items between the MMR tip and the journal's oldest retained
-        // location.
+        // Sync the MMR before pruning the journal, otherwise the MMR's last element could end up
+        // behind the journal's first element after a crash, and there would be no way to replay
+        // the items between the MMR's last element and the journal's first element.
         self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
