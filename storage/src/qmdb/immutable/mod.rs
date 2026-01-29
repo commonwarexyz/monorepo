@@ -200,8 +200,8 @@ impl<
         start_index: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.op_count().await;
-        self.historical_proof(op_count, start_index, max_ops).await
+        self.historical_proof(self.op_count().await, start_index, max_ops)
+            .await
     }
 
     /// Analogous to proof but with respect to the state of the database when it had `op_count`

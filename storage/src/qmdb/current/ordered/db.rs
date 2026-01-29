@@ -171,7 +171,6 @@ where
         let height = Self::grafting_height();
         let mmr = &self.any.log.mmr;
         let status = self.status.read().await;
-
         let proof = OperationProof::<H::Digest, N>::new(hasher, &*status, height, mmr, loc).await?;
 
         Ok(KeyValueProof {
