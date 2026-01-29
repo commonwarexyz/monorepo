@@ -21,6 +21,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
     pub mod bmt;
     pub mod cache;
+    pub mod queue;
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod archive;
