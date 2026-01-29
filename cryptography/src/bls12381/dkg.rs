@@ -303,7 +303,7 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::N3f1;
 use commonware_utils::{
     ordered::{Map, Quorum, Set},
-    Faults, Participant, TryCollect, TryFromIterator, NZU32,
+    Faults, Participant, TryCollect, NZU32,
 };
 use core::num::NonZeroU32;
 use rand_core::CryptoRngCore;
@@ -1018,9 +1018,15 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
                 let (reveals, acks): (Vec<_>, Vec<_>) =
                     map.iter_pairs().partition(|(_, a_r)| a_r.is_reveal());
                 DealerLogSummary::Ok {
-                    acks: Set::try_from_iter(acks.into_iter().map(|(p, _)| p.clone()))
+                    acks: acks
+                        .into_iter()
+                        .map(|(p, _)| p.clone())
+                        .try_collect()
                         .expect("map keys are deduped"),
-                    reveals: Set::try_from_iter(reveals.into_iter().map(|(p, _)| p.clone()))
+                    reveals: reveals
+                        .into_iter()
+                        .map(|(p, _)| p.clone())
+                        .try_collect()
                         .expect("map keys are deduped"),
                 }
             }
