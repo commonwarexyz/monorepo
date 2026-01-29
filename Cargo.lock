@@ -1112,7 +1112,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "criterion",
- "futures",
  "num-rational",
  "proptest",
  "rand 0.8.5",
