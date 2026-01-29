@@ -243,11 +243,9 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
         Ok(Some(value))
     }
 
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        // Update metrics
-        self.gets.inc();
-
-        // Fetch index
+    /// Find the index and record for a key by searching the in-memory key map
+    /// and verifying the key matches in storage.
+    async fn find_record_by_key(&self, key: &K) -> Result<Option<(u64, u64, Record<K>)>, Error> {
         let iter = self.keys.get(key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         for index in iter {
@@ -259,19 +257,13 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
             // Get index location
             let position = *self.indices.get(index).ok_or(Error::RecordCorrupted)?;
 
-            // Fetch index entry from index journal to verify key
+            // Fetch index record from index journal to verify key
             let section = self.section(*index);
-            let entry = self.oversized.get(section, position).await?;
+            let record = self.oversized.get(section, position).await?;
 
             // Verify key matches
-            if entry.key.as_ref() == key.as_ref() {
-                // Fetch value directly from blob storage (bypasses buffer pool)
-                let (value_offset, value_size) = entry.value_location();
-                let value = self
-                    .oversized
-                    .get_value(section, value_offset, value_size)
-                    .await?;
-                return Ok(Some(value));
+            if record.key.as_ref() == key.as_ref() {
+                return Ok(Some((*index, section, record)));
             }
             self.unnecessary_reads.inc();
         }
@@ -279,9 +271,30 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> Archive<T, E
         Ok(None)
     }
 
+    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        self.gets.inc();
+
+        let Some((_, section, record)) = self.find_record_by_key(key).await? else {
+            return Ok(None);
+        };
+
+        // Fetch value directly from blob storage (bypasses buffer pool)
+        let (value_offset, value_size) = record.value_location();
+        let value = self
+            .oversized
+            .get_value(section, value_offset, value_size)
+            .await?;
+        Ok(Some(value))
+    }
+
     fn has_index(&self, index: u64) -> bool {
-        // Check if index exists
         self.indices.contains_key(&index)
+    }
+
+    async fn index_of_key(&self, key: &K) -> Result<Option<u64>, Error> {
+        self.find_record_by_key(key)
+            .await
+            .map(|opt| opt.map(|(index, _, _)| index))
     }
 
     /// Prune `Archive` to the provided `min` (masked by the configured
@@ -391,6 +404,10 @@ impl<T: Translator, E: Storage + Metrics, K: Array, V: CodecShared> crate::archi
             Identifier::Index(index) => Ok(self.has_index(index)),
             Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
+    }
+
+    async fn index_of(&self, key: &K) -> Result<Option<u64>, Error> {
+        self.index_of_key(key).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {

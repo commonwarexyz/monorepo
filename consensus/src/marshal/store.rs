@@ -170,6 +170,23 @@ pub trait Blocks: Send + Sync + 'static {
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the store is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
+
+    /// Returns the height associated with a commitment, if it exists.
+    ///
+    /// This is more efficient than `get(Identifier::Key(commitment))` when only the
+    /// height is needed, as it may avoid loading the full block value.
+    ///
+    /// # Arguments
+    ///
+    /// * `commitment`: The block commitment to look up.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(height))` if the commitment exists, `Ok(None)` if not found, or `Err` on read failure.
+    fn height_of(
+        &self,
+        commitment: &<Self::Block as Committable>::Commitment,
+    ) -> impl Future<Output = Result<Option<Height>, Self::Error>> + Send;
 }
 
 impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
@@ -244,6 +261,17 @@ where
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
     }
+
+    async fn height_of(
+        &self,
+        commitment: &<Self::Block as Committable>::Commitment,
+    ) -> Result<Option<Height>, Self::Error> {
+        // immutable::Archive does not support index_of optimization,
+        // so we fall back to loading the full block.
+        <Self as Archive>::get(self, Identifier::Key(commitment))
+            .await
+            .map(|opt| opt.map(|b| b.height()))
+    }
 }
 
 impl<T, E, C, S> Certificates for prunable::Archive<T, E, C, Finalization<S, C>>
@@ -317,5 +345,15 @@ where
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
+    }
+
+    async fn height_of(
+        &self,
+        commitment: &<Self::Block as Committable>::Commitment,
+    ) -> Result<Option<Height>, Self::Error> {
+        // Use the optimized index_of method which avoids loading the full block
+        <Self as Archive>::index_of(self, commitment)
+            .await
+            .map(|opt| opt.map(Height::new))
     }
 }

@@ -288,6 +288,16 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Arc
         }
     }
 
+    async fn index_of(&self, _key: &K) -> Result<Option<u64>, Error> {
+        // The immutable archive's Freezer does not maintain a key-to-index mapping,
+        // so this optimization is not available. Callers should fall back to loading
+        // the full value when this returns None.
+        //
+        // A future optimization could add index tracking to the Freezer or maintain
+        // a commitment-to-index mapping during replay.
+        Ok(None)
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         self.syncs.inc();
 

@@ -186,6 +186,13 @@ impl ArchiveTrait for Archive {
             Self::Prunable(a) => a.destroy().await,
         }
     }
+
+    async fn index_of(&self, key: &Key) -> Result<Option<u64>, commonware_storage::archive::Error> {
+        match self {
+            Self::Immutable(a) => a.index_of(key).await,
+            Self::Prunable(a) => a.index_of(key).await,
+        }
+    }
 }
 
 /// Append `count` random (index,key,value) triples and sync once.
