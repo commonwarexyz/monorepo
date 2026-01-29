@@ -16,11 +16,13 @@ use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    channels::fallible::AsyncFallibleExt,
+    channels::{
+        fallible::AsyncFallibleExt,
+        mpsc::{Receiver, Sender},
+    },
     ordered::{Quorum, Set},
     N3f1,
 };
-use futures::channel::mpsc::{Receiver, Sender};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
@@ -324,7 +326,7 @@ where
     type Index = View;
 
     async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
-        let (tx, rx) = futures::channel::mpsc::channel(128);
+        let (tx, rx) = commonware_utils::channels::mpsc::channel(128);
         self.subscribers.lock().unwrap().push(tx);
         let latest = *self.latest.lock().unwrap();
         (latest, rx)

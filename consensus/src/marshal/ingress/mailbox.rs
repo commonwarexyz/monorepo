@@ -5,9 +5,11 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_storage::archive;
-use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec};
+use commonware_utils::{
+    channels::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    vec::NonEmptyVec,
+};
 use futures::{
-    channel::{mpsc, oneshot},
     future::BoxFuture,
     stream::{FuturesOrdered, Stream},
     FutureExt,

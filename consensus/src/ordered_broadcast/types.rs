@@ -12,8 +12,7 @@ use commonware_cryptography::{
     Digest, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{ordered::Set, union, N3f1};
-use futures::channel::oneshot;
+use commonware_utils::{channels::oneshot, ordered::Set, union, N3f1};
 use rand_core::CryptoRngCore;
 use std::{
     hash::{Hash, Hasher},
@@ -48,7 +47,7 @@ pub enum Error {
     // Application Verification Errors
     /// The verification was canceled by the application
     #[error("Application verify error: {0}")]
-    AppVerifyCanceled(oneshot::Canceled),
+    AppVerifyCanceled(oneshot::error::RecvError),
     /// The application tried to verify a chunk but no tip was found
     #[error("Application verified no tip")]
     AppVerifiedNoTip,

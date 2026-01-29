@@ -12,8 +12,7 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{union, N3f1};
-use futures::channel::oneshot;
+use commonware_utils::{channels::oneshot, union, N3f1};
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
 
@@ -23,7 +22,7 @@ pub enum Error {
     // Proposal Errors
     /// The proposal was canceled by the application
     #[error("Application verify error: {0}")]
-    AppProposeCanceled(oneshot::Canceled),
+    AppProposeCanceled(oneshot::error::RecvError),
 
     // P2P Errors
     /// Unable to send a message over the P2P network

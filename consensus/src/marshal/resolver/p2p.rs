@@ -8,7 +8,7 @@ use commonware_cryptography::PublicKey;
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
-use futures::channel::mpsc;
+use commonware_utils::channels::mpsc;
 use rand::Rng;
 use std::time::Duration;
 

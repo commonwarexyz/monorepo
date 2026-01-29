@@ -5,10 +5,9 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::Span;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
+use commonware_utils::{
+    channels::{mpsc, oneshot},
+    Span,
 };
 use std::{
     fmt::{Debug, Display},

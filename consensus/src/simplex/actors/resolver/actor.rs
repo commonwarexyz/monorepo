@@ -19,8 +19,11 @@ use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channels::fallible::OneshotExt, ordered::Quorum, sequence::U64};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{
+    channels::{fallible::OneshotExt, mpsc},
+    ordered::Quorum,
+    sequence::U64,
+};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
@@ -127,7 +130,7 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            mailbox = self.mailbox_receiver.next() => {
+            mailbox = self.mailbox_receiver.recv() => {
                 let Some(message) = mailbox else {
                     break;
                 };
@@ -143,7 +146,7 @@ impl<
                     }
                 }
             },
-            handler = handler_rx.next() => {
+            handler = handler_rx.recv() => {
                 let Some(message) = handler else {
                     break;
                 };

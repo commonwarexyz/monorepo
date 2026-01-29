@@ -2,8 +2,10 @@ use crate::{simplex::types::Certificate, types::View};
 use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::{channels::fallible::AsyncFallibleExt, sequence::U64};
-use futures::channel::{mpsc, oneshot};
+use commonware_utils::{
+    channels::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    sequence::U64,
+};
 
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {

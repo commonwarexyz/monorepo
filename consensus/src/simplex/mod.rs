@@ -341,7 +341,7 @@ mod tests {
     };
     use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
-    use futures::{future::join_all, StreamExt};
+    use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -668,7 +668,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -938,7 +938,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1107,7 +1107,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -1299,7 +1299,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1415,7 +1415,7 @@ mod tests {
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = reporter.subscribe().await;
             while latest < required_containers {
-                latest = monitor.next().await.expect("event missing");
+                latest = monitor.recv().await.expect("event missing");
             }
 
             // Ensure no blocked connections
@@ -1562,7 +1562,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1826,7 +1826,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2009,7 +2009,7 @@ mod tests {
                         .spawn(move |context| async move {
                             select! {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.next() => {
+                                _done = monitor.recv() => {
                                     panic!("engine should not notarize or finalize anything");
                                 },
                             }
@@ -2048,7 +2048,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2221,7 +2221,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2247,7 +2247,7 @@ mod tests {
                         .spawn(move |context| async move {
                             select! {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.next() => {
+                                _done = monitor.recv() => {
                                     panic!("engine should not notarize or finalize anything");
                                 },
                             }
@@ -2272,7 +2272,7 @@ mod tests {
                 let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2434,7 +2434,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2697,7 +2697,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2888,7 +2888,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3067,7 +3067,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3244,7 +3244,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3265,7 +3265,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 2) {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3332,7 +3332,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 3) {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3568,7 +3568,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3737,7 +3737,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3920,7 +3920,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4076,7 +4076,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4480,7 +4480,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4910,7 +4910,7 @@ mod tests {
                     finalizers.push(context.with_label("resume_finalizer").spawn(
                         move |_| async move {
                             while latest < target {
-                                latest = monitor.next().await.expect("event missing");
+                                latest = monitor.recv().await.expect("event missing");
                             }
                         },
                     ));
@@ -5219,7 +5219,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5241,7 +5241,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5303,7 +5303,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5809,7 +5809,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }

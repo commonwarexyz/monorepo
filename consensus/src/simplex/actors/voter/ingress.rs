@@ -1,7 +1,6 @@
 use crate::simplex::types::{Certificate, Proposal};
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channels::fallible::AsyncFallibleExt;
-use futures::channel::mpsc;
+use commonware_utils::channels::{fallible::AsyncFallibleExt, mpsc};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
