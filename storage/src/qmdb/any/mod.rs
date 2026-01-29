@@ -163,7 +163,7 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(super) fn fixed_db_config(suffix: &str) -> FixedConfig<TwoCap> {
+    pub(crate) fn fixed_db_config(suffix: &str) -> FixedConfig<TwoCap> {
         FixedConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -178,7 +178,7 @@ pub(crate) mod test {
         }
     }
 
-    pub(super) fn variable_db_config(suffix: &str) -> VariableConfig<TwoCap, ()> {
+    pub(crate) fn variable_db_config(suffix: &str) -> VariableConfig<TwoCap, ()> {
         VariableConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),

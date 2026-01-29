@@ -9,6 +9,7 @@
 pub use super::db::KeyValueProof;
 use crate::{
     bitmap::CleanBitMap,
+    index::unordered::Index,
     journal::contiguous::variable::Journal,
     mmr::{Location, StandardHasher},
     qmdb::{
@@ -31,7 +32,7 @@ use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
+    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N, S, D>;
 
 // Functionality for the Clean state - init only.
 impl<
@@ -118,7 +119,6 @@ mod test {
                 proof::RangeProof,
                 tests::{self, apply_random_ops},
                 unordered::{db::KeyValueProof, variable::Db},
-                VariableConfig as Config,
             },
             store::{
                 batch_tests,
@@ -128,33 +128,12 @@ mod test {
         },
         translator::TwoCap,
     };
+    use crate::qmdb::current::tests::unordered_variable_config;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _, Runner as _};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_runtime::{deterministic, Metrics as _, Runner as _};
+    use commonware_utils::NZU64;
     use rand::RngCore;
-    use std::num::{NonZeroU16, NonZeroUsize};
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
-
-    fn current_db_config(partition_prefix: &str) -> Config<TwoCap, ()> {
-        Config {
-            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
-            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("{partition_prefix}_log_partition"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (),
-            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
-            translator: TwoCap,
-            thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
     type CleanCurrentTest =
@@ -169,14 +148,14 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, current_db_config(&partition_prefix))
+        CleanCurrentTest::init(context, unordered_variable_config(&partition_prefix))
             .await
             .unwrap()
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_build_small_close_reopen() {
-        super::super::tests::test_build_small_close_reopen::<CleanCurrentTest, _, _>(open_db);
+        crate::qmdb::current::unordered::tests::test_build_small_close_reopen::<CleanCurrentTest, _, _>(open_db);
     }
 
     #[test_traced("WARN")]

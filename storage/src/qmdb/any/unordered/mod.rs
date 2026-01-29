@@ -27,6 +27,7 @@ use futures::future::try_join_all;
 use std::collections::BTreeMap;
 
 pub mod fixed;
+pub mod partitioned;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
@@ -498,7 +499,7 @@ pub(super) mod test {
     ///
     /// The `reopen_db` closure receives a unique index for each invocation to enable
     /// unique metric labels (the deterministic runtime panics on duplicates).
-    async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
+    pub(crate) async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
         mut db: D,
         mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) {

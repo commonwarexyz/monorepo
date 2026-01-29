@@ -9,6 +9,7 @@
 
 pub mod db;
 pub mod fixed;
+pub mod partitioned;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
 pub mod variable;
