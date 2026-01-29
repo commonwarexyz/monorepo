@@ -5,6 +5,4 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-mod minifuzz;
-
-pub use minifuzz::{test, Builder};
+pub mod minifuzz;

@@ -920,6 +920,7 @@ pub mod fuzz {
     use super::*;
     use crate::algebra::Ring;
     use arbitrary::{Arbitrary, Unstructured};
+    use commonware_test::minifuzz;
 
     fn arb_polynomial_vector(
         u: &mut Unstructured<'_>,
@@ -1065,7 +1066,7 @@ pub mod fuzz {
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
+        minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
