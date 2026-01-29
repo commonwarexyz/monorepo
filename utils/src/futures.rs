@@ -2,7 +2,6 @@
 
 use core::ops::{Deref, DerefMut};
 use futures::{
-    channel::oneshot,
     future::{self, AbortHandle, Abortable, Aborted},
     stream::{FuturesUnordered, SelectNextSome},
     StreamExt,
@@ -146,60 +145,6 @@ impl<T: Send> AbortablePool<T> {
     /// Creates a dummy future that never resolves.
     fn create_dummy_future() -> AbortablePooledFuture<T> {
         Box::pin(async { Ok(future::pending::<T>().await) })
-    }
-}
-
-/// A future that resolves when a [oneshot::Receiver] is dropped.
-///
-/// This future completes when the receiver end of the channel is dropped,
-/// allowing the caller to detect when the other side is no longer interested
-/// in the result.
-pub struct Closed<'a, T> {
-    sender: &'a mut oneshot::Sender<T>,
-}
-
-impl<'a, T> Closed<'a, T> {
-    /// Creates a new future that resolves when the receiver is dropped.
-    pub const fn new(sender: &'a mut oneshot::Sender<T>) -> Self {
-        Self { sender }
-    }
-}
-
-impl<T> Future for Closed<'_, T> {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        match self.sender.poll_canceled(cx) {
-            Poll::Ready(()) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-/// Extension trait to detect when a [oneshot::Receiver] is dropped.
-pub trait ClosedExt<T> {
-    /// Returns a future that resolves when the receiver is dropped.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use futures::channel::oneshot;
-    /// use commonware_utils::futures::ClosedExt;
-    ///
-    /// # futures::executor::block_on(async {
-    /// let (mut tx, rx) = oneshot::channel::<i32>();
-    ///
-    /// let closed = tx.closed();
-    /// drop(rx);
-    /// closed.await;
-    /// # });
-    /// ```
-    fn closed(&mut self) -> Closed<'_, T>;
-}
-
-impl<T> ClosedExt<T> for oneshot::Sender<T> {
-    fn closed(&mut self) -> Closed<'_, T> {
-        Closed::new(self)
     }
 }
 
@@ -522,60 +467,6 @@ mod tests {
             assert!(pool.is_empty());
 
             let _ = sender.send(());
-        });
-    }
-
-    #[test]
-    fn test_closed_on_receiver_drop() {
-        block_on(async {
-            let (mut tx, rx) = oneshot::channel::<i32>();
-
-            let closed = tx.closed();
-            drop(rx);
-
-            closed.await;
-        });
-    }
-
-    #[test]
-    fn test_closed_pending_when_receiver_alive() {
-        block_on(async {
-            let (mut tx, rx) = oneshot::channel::<i32>();
-
-            let closed = tx.closed();
-            let timeout = delay(Duration::from_millis(500));
-
-            pin_mut!(closed);
-            pin_mut!(timeout);
-
-            match select(closed, timeout).await {
-                Either::Left(_) => panic!("Closed resolved while receiver still alive"),
-                Either::Right(_) => {}
-            }
-
-            drop(rx);
-        });
-    }
-
-    #[test]
-    fn test_closed_multiple_polls() {
-        block_on(async {
-            let (mut tx, rx) = oneshot::channel::<i32>();
-
-            // Setup the closed future
-            let closed = tx.closed();
-            pin_mut!(closed);
-
-            // Poll the closed future
-            let waker = futures::task::noop_waker();
-            let mut cx = std::task::Context::from_waker(&waker);
-            assert!(closed.as_mut().poll(&mut cx).is_pending());
-
-            // Drop receiver
-            drop(rx);
-
-            // Now poll should be ready
-            assert!(closed.as_mut().poll(&mut cx).is_ready());
         });
     }
 
