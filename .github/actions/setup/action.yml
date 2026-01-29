@@ -33,3 +33,14 @@ runs:
         cache-on-failure: false
         cache-workspace-crates: true
         cache-directories: ${{ env.CARGO_TARGET_DIR }}
+    - name: Register post-build /mnt check (Linux)
+      if: runner.os == 'Linux'
+      uses: gacts/run-and-post-run@v1.4.3
+      with:
+        post: |
+          echo "=== /mnt disk usage after build ==="
+          df -h /mnt
+          echo "=== /mnt/.cargo summary ==="
+          du -sh /mnt/.cargo/* 2>/dev/null || echo "(empty)"
+          echo "=== /mnt/target summary ==="
+          du -sh /mnt/target 2>/dev/null || echo "(empty)"
