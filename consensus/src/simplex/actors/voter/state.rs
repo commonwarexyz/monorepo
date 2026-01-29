@@ -272,13 +272,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.set_leader(view.next(), Some(&nullification.certificate));
 
         // Track skipped view per leader if we know who the leader was
-        let added = self.create_round(view).add_nullification(nullification);
-        if added {
-            if let Some(leader) = self.views.get(&view).and_then(|round| round.leader()) {
-                self.nullifications_per_leader
-                    .get_or_create(&Peer::new(&leader.key))
-                    .inc();
-            }
+        let round = self.create_round(view);
+        let added = round.add_nullification(nullification);
+        if let Some(leader) = added.then(|| round.leader()).flatten() {
+            self.nullifications_per_leader
+                .get_or_create(&Peer::new(&leader.key))
+                .inc();
         }
 
         added

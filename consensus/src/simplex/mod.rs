@@ -1657,34 +1657,34 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
 
-            // Ensure we are skipping views
+            // Ensure online nodes are recording skips for the offline leader
             let encoded = context.encode();
-            let lines = encoded.lines();
-            let mut skipped_views = 0;
-            let mut nodes_skipping = 0;
-            for line in lines {
-                if line.contains("_skipped_views_total") {
+            let offline_peer_label = format!("peer=\"{}\"", offline);
+            let mut skips_for_offline_leader = 0;
+            let mut nodes_recording_skips = 0;
+            for line in encoded.lines() {
+                if line.contains("_skips_per_leader") && line.contains(&offline_peer_label) {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if let Some(number_str) = parts.last() {
                         if let Ok(number) = number_str.parse::<u64>() {
                             if number > 0 {
-                                nodes_skipping += 1;
+                                nodes_recording_skips += 1;
                             }
-                            if number > skipped_views {
-                                skipped_views = number;
+                            if number > skips_for_offline_leader {
+                                skips_for_offline_leader = number;
                             }
                         }
                     }
                 }
             }
             assert!(
-                skipped_views > 0,
-                "expected skipped views to be greater than 0"
+                skips_for_offline_leader > 0,
+                "expected skips for offline leader to be greater than 0"
             );
             assert_eq!(
-                nodes_skipping,
+                nodes_recording_skips,
                 n - 1,
-                "expected all online nodes to be skipping views"
+                "expected all online nodes to record skips for offline leader"
             );
         });
     }
