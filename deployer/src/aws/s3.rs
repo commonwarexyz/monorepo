@@ -13,11 +13,39 @@ use aws_sdk_s3::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::stream::{self, StreamExt, TryStreamExt};
-use std::{collections::HashMap, io::Read, path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tracing::{debug, info};
 
-/// Bucket name for caching deployer artifacts
-pub const BUCKET_NAME: &str = "commonware-deployer-cache";
+/// Path to the deployer config file that stores the bucket name.
+fn config_path() -> PathBuf {
+    let home = std::env::var("HOME").expect("$HOME is not configured");
+    PathBuf::from(home).join(".commonware-deployer")
+}
+
+/// Gets the bucket name, generating one if it doesn't exist.
+/// The bucket name is stored in ~/.commonware-deployer.
+pub fn get_bucket_name() -> String {
+    let path = config_path();
+
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        let name = contents.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+
+    let suffix = &uuid::Uuid::new_v4().simple().to_string()[..16];
+    let bucket_name = format!("commonware-deployer-{suffix}");
+
+    std::fs::write(&path, &bucket_name).expect("failed to write bucket config");
+
+    bucket_name
+}
 
 /// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
 pub const TOOLS_BINARIES_PREFIX: &str = "tools/binaries";
