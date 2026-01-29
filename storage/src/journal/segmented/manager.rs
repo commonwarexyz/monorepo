@@ -48,7 +48,7 @@ pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     ) -> impl Future<Output = Result<Self::Buffer, RError>> + Send;
 }
 
-/// Factory for creating [`Append`] buffers with pool caching.
+/// Factory for creating [`Append`] buffers with page caching.
 #[derive(Clone)]
 pub struct AppendFactory {
     /// The size of the write buffer.

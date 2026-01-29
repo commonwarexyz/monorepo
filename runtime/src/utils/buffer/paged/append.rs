@@ -551,7 +551,7 @@ impl<B: Blob> Append<B> {
             return Ok(());
         }
 
-        // Fast path: try to read *only* from pool cache without acquiring blob lock. This allows
+        // Fast path: try to read *only* from page cache without acquiring blob lock. This allows
         // concurrent reads even while a flush is in progress.
         let cached = self
             .cache_ref

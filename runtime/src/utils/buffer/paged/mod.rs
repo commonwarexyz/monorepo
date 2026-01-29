@@ -28,11 +28,11 @@ use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write
 use commonware_cryptography::{crc32, Crc32};
 
 mod append;
-mod page_cache;
+mod cache;
 mod read;
 
 pub use append::Append;
-pub use page_cache::CacheRef;
+pub use cache::CacheRef;
 pub use read::Replay;
 use tracing::{debug, error};
 
