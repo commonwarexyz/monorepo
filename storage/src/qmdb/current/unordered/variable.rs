@@ -8,7 +8,7 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
-    bitmap::MerkleizedBitMap,
+    index::unordered::Index,
     journal::contiguous::variable::Journal,
     mmr::{Location, StandardHasher},
     qmdb::{
@@ -30,8 +30,17 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
+pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> = super::db::Db<
+    E,
+    Journal<E, Operation<K, V>>,
+    K,
+    VariableEncoding<V>,
+    Index<T, Location>,
+    H,
+    N,
+    S,
+    D,
+>;
 
 // Functionality for the Merkleized state - init only.
 impl<
@@ -106,6 +115,121 @@ where
     }
 }
 
+pub mod partitioned {
+    //! A variant of [super] that uses a partitioned index for the snapshot.
+
+    pub use super::KeyValueProof;
+    use crate::{
+        bitmap::CleanBitMap,
+        index::partitioned::unordered::Index,
+        journal::contiguous::variable::Journal,
+        mmr::{Location, StandardHasher},
+        qmdb::{
+            any::{
+                unordered::variable::partitioned::{Db as AnyDb, Operation},
+                value::VariableEncoding,
+                VariableValue,
+            },
+            current::{
+                db::{merkleize_grafted_bitmap, root},
+                VariableConfig as Config,
+            },
+            Durable, Error, Merkleized,
+        },
+        translator::Translator,
+    };
+    use commonware_codec::{FixedSize, Read};
+    use commonware_cryptography::Hasher;
+    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+    use commonware_utils::Array;
+
+    /// A partitioned variant of [super::Db].
+    ///
+    /// The const generic `P` specifies the number of prefix bytes used for partitioning:
+    /// - `P = 1`: 256 partitions
+    /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
+    pub type Db<E, K, V, H, T, const P: usize, const N: usize, S = Merkleized<H>, D = Durable> =
+        crate::qmdb::current::unordered::db::Db<
+            E,
+            Journal<E, Operation<K, V>>,
+            K,
+            VariableEncoding<V>,
+            Index<T, Location, P>,
+            H,
+            N,
+            S,
+            D,
+        >;
+
+    impl<
+            E: RStorage + Clock + Metrics,
+            K: Array,
+            V: VariableValue,
+            H: Hasher,
+            T: Translator,
+            const P: usize,
+            const N: usize,
+        > Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+    where
+        Operation<K, V>: Read,
+    {
+        /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
+        /// the bitmap MMR if a thread pool is provided.
+        pub async fn init(
+            context: E,
+            config: Config<T, <Operation<K, V> as Read>::Cfg>,
+        ) -> Result<Self, Error> {
+            const {
+                assert!(
+                    N.is_multiple_of(H::Digest::SIZE),
+                    "chunk size must be some multiple of the digest size",
+                );
+                assert!(N.is_power_of_two(), "chunk size must be a power of 2");
+            }
+
+            let thread_pool = config.thread_pool.clone();
+            let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+
+            let mut hasher = StandardHasher::<H>::new();
+            let mut status = CleanBitMap::init(
+                context.with_label("bitmap"),
+                &bitmap_metadata_partition,
+                thread_pool,
+                &mut hasher,
+            )
+            .await?
+            .into_dirty();
+
+            // Initialize the anydb with a callback that initializes the status bitmap.
+            let last_known_inactivity_floor = Location::new_unchecked(status.len());
+            let any = AnyDb::<_, K, V, H, T, P>::init_with_callback(
+                context.with_label("any"),
+                config.into(),
+                Some(last_known_inactivity_floor),
+                |append: bool, loc: Option<Location>| {
+                    status.push(append);
+                    if let Some(loc) = loc {
+                        status.set_bit(*loc, false);
+                    }
+                },
+            )
+            .await?;
+
+            let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+
+            // Compute and cache the root
+            let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
+
+            Ok(Self {
+                any,
+                status,
+                cached_root,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::{
@@ -117,9 +241,8 @@ mod test {
             current::{
                 db::{Merkleized, Unmerkleized},
                 proof::RangeProof,
-                tests::{self, apply_random_ops},
+                tests::{apply_random_ops, variable_config},
                 unordered::{db::KeyValueProof, variable::Db},
-                VariableConfig as Config,
             },
             store::{
                 batch_tests,
@@ -132,31 +255,9 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner as _};
-    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use commonware_runtime::{deterministic, Metrics as _, Runner as _};
+    use commonware_utils::NZU64;
     use rand::RngCore;
-    use std::num::{NonZeroU16, NonZeroUsize};
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
-
-    fn current_db_config(partition_prefix: &str) -> Config<TwoCap, ()> {
-        Config {
-            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
-            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("{partition_prefix}_log_partition"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: (),
-            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
-            translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-        }
-    }
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
     type CleanCurrentTest =
@@ -171,30 +272,9 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, current_db_config(&partition_prefix))
+        CleanCurrentTest::init(context, variable_config::<TwoCap>(&partition_prefix))
             .await
             .unwrap()
-    }
-
-    #[test_traced("DEBUG")]
-    pub fn test_current_db_build_small_close_reopen() {
-        super::super::tests::test_build_small_close_reopen::<CleanCurrentTest, _, _>(open_db);
-    }
-
-    #[test_traced("WARN")]
-    fn test_current_db_build_big() {
-        // Expected values after commit + merkleize + prune for unordered variant.
-        tests::test_current_db_build_big::<CleanCurrentTest, _, _>(open_db, 1957, 838);
-    }
-
-    // Test that merkleization state changes don't reset `steps`.
-    #[test_traced("DEBUG")]
-    fn test_current_unordered_variable_db_steps_not_reset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context, "steps_test".to_string()).await;
-            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
-        });
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
@@ -514,13 +594,6 @@ mod test {
         });
     }
 
-    /// This test builds a random database, and makes sure that its state is correctly restored
-    /// after closing and re-opening.
-    #[test_traced("WARN")]
-    pub fn test_current_db_build_random_close_reopen() {
-        crate::qmdb::current::tests::test_build_random_close_reopen(open_db);
-    }
-
     /// Repeatedly update the same key to a new value and ensure we can prove its current value
     /// after each update.
     #[test_traced("WARN")]
@@ -565,23 +638,6 @@ mod test {
 
             db.destroy().await.unwrap();
         });
-    }
-
-    /// This test builds a random database and simulates we can recover from different types of
-    /// failure scenarios.
-    #[test_traced("WARN")]
-    pub fn test_current_db_simulate_write_failures() {
-        crate::qmdb::current::tests::test_simulate_write_failures(open_db);
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_current_db_different_pruning_delays_same_root() {
-        tests::test_different_pruning_delays_same_root::<CleanCurrentTest, _, _>(open_db);
-    }
-
-    #[test_traced("WARN")]
-    pub fn test_current_db_sync_persists_bitmap_pruning_boundary() {
-        tests::test_sync_persists_bitmap_pruning_boundary::<CleanCurrentTest, _, _>(open_db);
     }
 
     #[test_traced("DEBUG")]

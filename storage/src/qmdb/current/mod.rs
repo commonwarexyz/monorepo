@@ -150,6 +150,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
+    use super::{ordered, unordered, FixedConfig, VariableConfig};
     use crate::{
         kv::{Deletable as _, Updatable as _},
         qmdb::{
@@ -160,14 +161,60 @@ pub mod tests {
             },
             Error,
         },
+        translator::Translator,
     };
     use commonware_runtime::{
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Metrics as _, Runner as _,
     };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use std::num::{NonZeroU16, NonZeroUsize};
     use tracing::warn;
+
+    // Janky page & cache sizes to exercise boundary conditions.
+    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
+
+    /// Shared config factory for fixed-value Current QMDB tests.
+    pub(crate) fn fixed_config<T: Translator + Default>(partition_prefix: &str) -> FixedConfig<T> {
+        FixedConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: T::default(),
+            thread_pool: None,
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for variable-value Current QMDB tests with unit codec config.
+    pub(crate) fn variable_config<T: Translator + Default>(
+        partition_prefix: &str,
+    ) -> VariableConfig<T, ()> {
+        VariableConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: T::default(),
+            thread_pool: None,
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns a mutable db; callers should commit if needed.
@@ -606,6 +653,218 @@ pub mod tests {
                     assert!(db.get(&k).await.unwrap().is_none());
                 }
             }
+        });
+    }
+
+    // ============================================================
+    // Consolidated tests for all 8 Current QMDB variants
+    // ============================================================
+
+    use crate::translator::OneCap;
+    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::test_traced;
+
+    // Type aliases for all 12 variants (all use OneCap for collision coverage).
+    type OrderedFixedDb = ordered::fixed::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
+    type OrderedVariableDb = ordered::variable::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
+    type UnorderedFixedDb = unordered::fixed::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
+    type UnorderedVariableDb = unordered::variable::Db<Context, Digest, Digest, Sha256, OneCap, 32>;
+    type OrderedFixedP1Db =
+        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
+    type OrderedVariableP1Db =
+        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
+    type UnorderedFixedP1Db =
+        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
+    type UnorderedVariableP1Db =
+        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1, 32>;
+    type OrderedFixedP2Db =
+        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
+    type OrderedVariableP2Db =
+        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
+    type UnorderedFixedP2Db =
+        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
+    type UnorderedVariableP2Db =
+        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2, 32>;
+
+    // Helper macro to create an open_db closure for a specific variant.
+    macro_rules! open_db_fn {
+        ($db:ty, $cfg:ident) => {
+            |ctx: Context, partition: String| async move {
+                <$db>::init(ctx, $cfg::<OneCap>(&partition)).await.unwrap()
+            }
+        };
+    }
+
+    // Defines all 12 variants. Calls $cb!($($args)*, $label, $type, $config) for each.
+    macro_rules! with_all_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
+            $cb!($($args)*, "ov", OrderedVariableDb, variable_config);
+            $cb!($($args)*, "uf", UnorderedFixedDb, fixed_config);
+            $cb!($($args)*, "uv", UnorderedVariableDb, variable_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1Db, fixed_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1Db, fixed_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
+        };
+    }
+
+    // Defines 6 ordered variants.
+    macro_rules! with_ordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
+            $cb!($($args)*, "ov", OrderedVariableDb, variable_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1Db, fixed_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
+        };
+    }
+
+    // Defines 6 unordered variants.
+    macro_rules! with_unordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, "uf", UnorderedFixedDb, fixed_config);
+            $cb!($($args)*, "uv", UnorderedVariableDb, variable_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1Db, fixed_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
+        };
+    }
+
+    // Runner macros - receive common args followed by (label, type, config).
+    macro_rules! test_simple {
+        ($f:expr, $l:literal, $db:ty, $cfg:ident) => {
+            Box::pin(async {
+                $f(open_db_fn!($db, $cfg));
+            })
+            .await
+        };
+    }
+
+    macro_rules! test_with_db {
+        ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_", $sfx);
+            Box::pin(async {
+                $f(open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await).await
+            })
+            .await
+        }};
+    }
+
+    // Macro to run a test on DB variants.
+    macro_rules! for_all_variants {
+        (simple: $f:expr) => {{
+            with_all_variants!(test_simple!($f));
+        }};
+        (ordered: $f:expr) => {{
+            with_ordered_variants!(test_simple!($f));
+        }};
+        (unordered: $f:expr) => {{
+            with_unordered_variants!(test_simple!($f));
+        }};
+        ($ctx:expr, $sfx:expr, with_db: $f:expr) => {{
+            with_all_variants!(test_with_db!($ctx, $sfx, $f));
+        }};
+    }
+
+    // Wrapper functions for build_big tests with ordered/unordered expected values.
+    fn test_ordered_build_big<C, F, Fut>(open_db: F)
+    where
+        C: CleanAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        test_current_db_build_big::<C, F, Fut>(open_db, 4241, 3383);
+    }
+
+    fn test_unordered_build_big<C, F, Fut>(open_db: F)
+    where
+        C: CleanAny,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        test_current_db_build_big::<C, F, Fut>(open_db, 1957, 838);
+    }
+
+    #[test_traced("WARN")]
+    fn test_all_variants_build_random_close_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_build_random_close_reopen);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_all_variants_simulate_write_failures() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_simulate_write_failures);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_all_variants_different_pruning_delays_same_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_different_pruning_delays_same_root);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_all_variants_sync_persists_bitmap_pruning_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(simple: test_sync_persists_bitmap_pruning_boundary);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ordered_variants_build_big() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(ordered: test_ordered_build_big);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_unordered_variants_build_big() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(unordered: test_unordered_build_big);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_steps_not_reset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "snr", with_db: crate::qmdb::any::test::test_any_db_steps_not_reset);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_ordered_variants_build_small_close_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(ordered: ordered::tests::test_build_small_close_reopen);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_unordered_variants_build_small_close_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            for_all_variants!(unordered: unordered::tests::test_build_small_close_reopen);
         });
     }
 }
