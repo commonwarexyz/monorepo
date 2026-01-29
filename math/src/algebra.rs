@@ -337,7 +337,7 @@ pub mod test_suites {
     //! ```rust
     //! # use commonware_math::algebra::test_suites::*;
     //! # use commonware_math::test::F;
-    //! commonware_test::test(|u| fuzz_field::<F>(u));
+    //! commonware_test::minifuzz(|u| fuzz_field::<F>(u));
     //! ```
     use super::*;
     use arbitrary::Unstructured;
