@@ -413,10 +413,10 @@ where
                                 }
                                 Message::Ack(ack) => {
                                     if let Some(ref mut ds) = dealer_state {
-                                        let valid = ds
+                                        let added = ds
                                             .handle(&mut storage, epoch, sender_pk.clone(), ack)
                                             .await;
-                                        if valid {
+                                        if added {
                                             let _ = self
                                                 .latest_ack
                                                 .get_or_create(&Peer::new(&sender_pk))
