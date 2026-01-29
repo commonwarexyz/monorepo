@@ -1400,6 +1400,7 @@ dependencies = [
 name = "commonware-macros"
 version = "0.0.65"
 dependencies = [
+ "commonware-utils",
  "futures",
  "futures-timer",
  "proc-macro-crate",
