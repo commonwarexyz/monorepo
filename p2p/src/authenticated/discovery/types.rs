@@ -386,7 +386,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Clock, IoBuf, Runner};
+    use commonware_runtime::{deterministic, Clock, IoBuf, Runner, Timer};
     use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 

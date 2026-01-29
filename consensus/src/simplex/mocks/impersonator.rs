@@ -10,7 +10,7 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use rand_core::CryptoRngCore;
 use std::marker::PhantomData;
 use tracing::debug;
@@ -19,16 +19,14 @@ pub struct Config<S: Scheme> {
     pub scheme: S,
 }
 
-pub struct Impersonator<E: Clock + CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
+pub struct Impersonator<E: CryptoRngCore + Spawner, S: Scheme, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
 
     _hasher: PhantomData<H>,
 }
 
-impl<E: Clock + CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher>
-    Impersonator<E, S, H>
-{
+impl<E: CryptoRngCore + Spawner, S: scheme::Scheme<H::Digest>, H: Hasher> Impersonator<E, S, H> {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
             context: ContextCell::new(context),

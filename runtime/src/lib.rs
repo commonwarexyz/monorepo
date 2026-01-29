@@ -427,11 +427,10 @@ pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
 >;
 
-/// Interface that any task scheduler must implement to provide
-/// time-based operations.
+/// Interface for reading the current time.
 ///
-/// It is necessary to mock time to provide deterministic execution
-/// of arbitrary tasks.
+/// This is a subset of [Timer] that only provides time reading, without
+/// sleep functionality. Useful for timing operations where sleep is not needed.
 pub trait Clock:
     governor::clock::Clock<Instant = SystemTime>
     + governor::clock::ReasonablyRealtime
@@ -442,7 +441,14 @@ pub trait Clock:
 {
     /// Returns the current time.
     fn current(&self) -> SystemTime;
+}
 
+/// Interface that any task scheduler must implement to provide
+/// time-based operations.
+///
+/// It is necessary to mock time to provide deterministic execution
+/// of arbitrary tasks.
+pub trait Timer: Clock {
     /// Sleep for the given duration.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
 
@@ -455,7 +461,7 @@ pub trait Clock:
     ///
     /// ```
     /// use std::time::Duration;
-    /// use commonware_runtime::{deterministic, Error, Runner, Clock};
+    /// use commonware_runtime::{deterministic, Error, Runner, Timer};
     ///
     /// let executor = deterministic::Runner::default();
     /// executor.start(|context| async move {
@@ -490,7 +496,7 @@ pub trait Clock:
 cfg_if::cfg_if! {
     if #[cfg(feature = "external")] {
         /// Interface that runtimes can implement to constrain the execution latency of a future.
-        pub trait Pacer: Clock + Clone + Send + Sync + 'static {
+        pub trait Pacer: Timer + Clone + Send + Sync + 'static {
             /// Defer completion of a future until a specified `latency` has elapsed. If the future is
             /// not yet ready at the desired time of completion, the runtime will block until the future
             /// is ready.
@@ -799,7 +805,7 @@ mod tests {
 
     fn test_clock_sleep<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             // Capture initial time
@@ -815,7 +821,7 @@ mod tests {
 
     fn test_clock_sleep_until<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock + Metrics,
+        R::Context: Spawner + Timer + Metrics,
     {
         runner.start(|context| async move {
             // Trigger sleep
@@ -830,7 +836,7 @@ mod tests {
 
     fn test_clock_timeout<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             // Future completes before timeout
@@ -923,7 +929,7 @@ mod tests {
 
     fn test_panic_aborts_spawn<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             context.clone().spawn(|_| async move {
@@ -939,7 +945,7 @@ mod tests {
 
     fn test_panic_aborts_spawn_caught<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
             let result = context.clone().spawn(|_| async move {
@@ -952,7 +958,7 @@ mod tests {
 
     fn test_multiple_panics<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             context.clone().spawn(|_| async move {
@@ -974,7 +980,7 @@ mod tests {
 
     fn test_multiple_panics_caught<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         let (res1, res2, res3) = runner.start(|context| async move {
             let handle1 = context.clone().spawn(|_| async move {
@@ -1024,7 +1030,7 @@ mod tests {
     /// Ensure future fusing works as expected.
     fn test_select_loop<R: Runner>(runner: R)
     where
-        R::Context: Clock,
+        R::Context: Timer,
     {
         runner.start(|context| async move {
             // Should hit timeout
@@ -1419,7 +1425,7 @@ mod tests {
 
     fn test_shutdown<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Spawner + Metrics + Timer,
     {
         let kill = 9;
         runner.start(|context| async move {
@@ -1455,7 +1461,7 @@ mod tests {
 
     fn test_shutdown_multiple_signals<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Spawner + Metrics + Timer,
     {
         let kill = 42;
         runner.start(|context| async move {
@@ -1507,7 +1513,7 @@ mod tests {
 
     fn test_shutdown_timeout<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Spawner + Metrics + Timer,
     {
         let kill = 42;
         runner.start(|context| async move {
@@ -1533,7 +1539,7 @@ mod tests {
 
     fn test_shutdown_multiple_stop_calls<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Metrics + Clock,
+        R::Context: Spawner + Metrics + Timer,
     {
         let kill1 = 42;
         let kill2 = 43;
@@ -1627,7 +1633,7 @@ mod tests {
 
     fn test_spawn<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1665,7 +1671,7 @@ mod tests {
 
     fn test_spawn_abort_on_parent_abort<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1700,7 +1706,7 @@ mod tests {
 
     fn test_spawn_abort_on_parent_completion<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let child_handle = Arc::new(Mutex::new(None));
@@ -1732,7 +1738,7 @@ mod tests {
 
     fn test_spawn_cascading_abort<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             // We create the following tree of tasks. All tasks will run
@@ -1807,7 +1813,7 @@ mod tests {
 
     fn test_child_survives_sibling_completion<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let (child_started_tx, child_started_rx) = oneshot::channel();
@@ -1865,7 +1871,7 @@ mod tests {
 
     fn test_spawn_clone_chain<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let (parent_started_tx, parent_started_rx) = oneshot::channel();
@@ -1918,7 +1924,7 @@ mod tests {
 
     fn test_spawn_sparse_clone_chain<R: Runner>(runner: R)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let (leaf_started_tx, leaf_started_rx) = oneshot::channel();
@@ -1972,7 +1978,7 @@ mod tests {
 
     fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         runner.start(|context| async move {
             let context = if dedicated {
@@ -1994,7 +2000,7 @@ mod tests {
 
     fn test_spawn_blocking_panic_caught<R: Runner>(runner: R, dedicated: bool)
     where
-        R::Context: Spawner + Clock,
+        R::Context: Spawner + Timer,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
             let context = if dedicated {

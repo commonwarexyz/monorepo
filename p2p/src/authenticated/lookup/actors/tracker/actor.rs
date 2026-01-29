@@ -11,7 +11,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
+    spawn_cell, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, Timer,
 };
 use commonware_utils::{
     channels::fallible::{AsyncFallibleExt, FallibleExt},
@@ -26,7 +26,7 @@ use std::{
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: Spawner + Rng + Timer + RuntimeMetrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- Message-Passing ----------
@@ -53,7 +53,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, Set<C::PublicKey>)>>,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Rng + Timer + RuntimeMetrics, C: Signer> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
     pub fn new(
@@ -244,10 +244,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_runtime::{
-        deterministic::{self},
-        Clock, Quota, Runner,
-    };
+    use commonware_runtime::{deterministic, Quota, Runner, Timer};
     use commonware_utils::NZU32;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},

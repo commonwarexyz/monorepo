@@ -67,7 +67,7 @@ mod tests {
         Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{deterministic, Metrics, Quota, Runner, Timer};
     use futures::{channel::mpsc, StreamExt};
     use std::{num::NonZeroU32, time::Duration};
 

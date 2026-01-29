@@ -179,7 +179,7 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Quota, Runner as _, Spawner,
+        Handle, Quota, Runner as _, Spawner, Timer,
     };
     use commonware_utils::{union, N3f1, TryCollect};
     use futures::{

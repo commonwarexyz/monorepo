@@ -13,14 +13,14 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Sink, Spawner, Stream, Timer};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
+pub struct Actor<E: Spawner + Timer + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
@@ -38,7 +38,7 @@ pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Strea
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
+impl<E: Spawner + Timer + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]

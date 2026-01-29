@@ -58,7 +58,7 @@ use crate::{
     Reporter, VerifyingApplication,
 };
 use commonware_cryptography::{certificate::Scheme, Committable};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Spawner, Timer};
 use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
 use futures::{
     channel::oneshot::{self, Canceled},
@@ -104,7 +104,7 @@ type TasksMap<B> = HashMap<(Round, <B as Committable>::Commitment), oneshot::Rec
 #[derive(Clone)]
 pub struct Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock,
@@ -122,7 +122,7 @@ where
 
 impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -263,7 +263,7 @@ where
 
 impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -558,7 +558,7 @@ where
 
 impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: VerifyingApplication<
         E,
@@ -652,7 +652,7 @@ where
 
 impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
@@ -692,7 +692,7 @@ where
 
 impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
@@ -736,7 +736,7 @@ async fn fetch_parent<E, S, A, B>(
     marshal: &mut marshal::Mailbox<S, B>,
 ) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Timer,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Commitment, S::PublicKey>>,
     B: Block,

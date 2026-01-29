@@ -13,7 +13,7 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner,
+    spawn_cell, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, Timer,
 };
 use commonware_stream::Config as StreamConfig;
 use commonware_utils::union;
@@ -26,7 +26,7 @@ use tracing::{debug, info};
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Metrics, C: Signer> {
+pub struct Network<E: Spawner + Timer + CryptoRngCore + RNetwork + Metrics, C: Signer> {
     context: ContextCell<E>,
     cfg: Config<C>,
 
@@ -38,7 +38,7 @@ pub struct Network<E: Spawner + Clock + CryptoRngCore + RNetwork + Metrics, C: S
     listener: mpsc::Receiver<HashSet<IpAddr>>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> Network<E, C> {
+impl<E: Spawner + Timer + CryptoRngCore + RNetwork + Resolver + Metrics, C: Signer> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters

@@ -15,7 +15,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
+use commonware_runtime::{deterministic, Buf, BufMut, IoBuf, IoBufMut, Metrics, Runner, Timer};
 use futures::{
     channel::{mpsc, oneshot},
     StreamExt,

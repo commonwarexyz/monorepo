@@ -60,7 +60,7 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Recipients, Sender as _,
     };
-    use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{count_running_tasks, deterministic, Metrics, Quota, Runner, Timer};
     use commonware_utils::NZU32;
     use futures::StreamExt;
     use std::time::Duration;

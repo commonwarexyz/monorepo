@@ -73,7 +73,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{Clock, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream, Timer};
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
@@ -169,7 +169,7 @@ impl<S> Config<S> {
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
-pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
+pub async fn dial<R: CryptoRngCore + Timer, S: Signer, I: Stream, O: Sink>(
     mut ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
@@ -227,7 +227,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
 pub async fn listen<
-    R: CryptoRngCore + Clock,
+    R: CryptoRngCore + Timer,
     S: Signer,
     I: Stream,
     O: Sink,

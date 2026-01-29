@@ -21,8 +21,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
-    Metrics, Network, Spawner, Storage,
+    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, ContextCell, Handle,
+    Metrics, Network, Spawner, Storage, Timer,
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
 use futures::{channel::mpsc, StreamExt};
@@ -61,7 +61,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Timer + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -93,7 +93,7 @@ where
 
 impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Timer + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,

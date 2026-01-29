@@ -6,7 +6,7 @@
 use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
+    tokio as tokio_runtime, Metrics, Network, Runner, Spawner, Storage, Timer,
 };
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
@@ -62,7 +62,7 @@ async fn target_update_task<E, Op, D>(
     initial_target: sync::Target<D>,
 ) -> Result<(), Error>
 where
-    E: Clock,
+    E: Timer,
     Op: Read<Cfg = ()> + EncodeShared,
     D: commonware_cryptography::Digest,
 {
@@ -106,7 +106,7 @@ where
 /// Repeatedly sync an Any database to the server's state.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner,
+    E: Storage + Timer + Metrics + Network + Spawner,
 {
     info!("starting Any database sync process");
     let mut iteration = 0u32;
@@ -166,7 +166,7 @@ where
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner,
+    E: Storage + Timer + Metrics + Network + Spawner,
 {
     info!("starting Immutable database sync process");
     let mut iteration = 0u32;

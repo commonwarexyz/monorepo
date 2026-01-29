@@ -11,7 +11,7 @@ use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner, Timer};
 use commonware_utils::channels::fallible::{AsyncFallibleExt, OneshotExt};
 use futures::{
     channel::{mpsc, oneshot},
@@ -160,7 +160,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
     pub should_certify: Certifier<H::Digest>,
 }
 
-pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
+pub struct Application<E: Timer + RngCore + Spawner, H: Hasher, P: PublicKey> {
     context: ContextCell<E>,
     hasher: H,
     me: P,
@@ -182,7 +182,7 @@ pub struct Application<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> {
     verified: HashSet<H::Digest>,
 }
 
-impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
+impl<E: Timer + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     pub fn new(context: E, cfg: Config<H, P>) -> (Self, Mailbox<H::Digest, P>) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.me.clone());

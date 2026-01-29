@@ -184,7 +184,12 @@ where
     fn current(&self) -> SystemTime {
         self.as_present().current()
     }
+}
 
+impl<C> crate::Timer for Cell<C>
+where
+    C: crate::Timer,
+{
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         self.as_present().sleep(duration)
     }

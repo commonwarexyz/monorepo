@@ -132,7 +132,7 @@ mod tests {
         Manager,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Quota, Runner, Timer};
     use commonware_storage::{
         archive::{immutable, prunable},
         translator::EightCap,

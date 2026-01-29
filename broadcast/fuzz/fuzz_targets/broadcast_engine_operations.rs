@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
+use commonware_runtime::{deterministic, Buf, BufMut, Metrics, Quota, Runner, Timer};
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};

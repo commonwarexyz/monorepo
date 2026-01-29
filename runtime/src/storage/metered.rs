@@ -1,6 +1,9 @@
-use crate::{Buf, Error, IoBufs, IoBufsMut};
+use crate::{
+    telemetry::metrics::histogram::{Buckets, Timed},
+    Buf, Clock, Error, IoBufs, IoBufsMut,
+};
 use prometheus_client::{
-    metrics::{counter::Counter, gauge::Gauge},
+    metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
     registry::Registry,
 };
 use std::{
@@ -8,23 +11,36 @@ use std::{
     sync::Arc,
 };
 
-pub struct Metrics {
+pub struct Metrics<C: Clock> {
     pub open_blobs: Gauge,
     pub storage_reads: Counter,
     pub storage_read_bytes: Counter,
+    pub storage_read_latency: Timed<C>,
     pub storage_writes: Counter,
     pub storage_write_bytes: Counter,
+    pub storage_write_latency: Timed<C>,
+    pub storage_resize_latency: Timed<C>,
+    pub storage_sync_latency: Timed<C>,
 }
 
-impl Metrics {
+impl<C: Clock> Metrics<C> {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
-    fn new(registry: &mut Registry) -> Self {
+    fn new(clock: Arc<C>, registry: &mut Registry) -> Self {
+        let storage_read_latency = Histogram::new(Buckets::LOCAL);
+        let storage_write_latency = Histogram::new(Buckets::LOCAL);
+        let storage_resize_latency = Histogram::new(Buckets::LOCAL);
+        let storage_sync_latency = Histogram::new(Buckets::LOCAL);
+
         let metrics = Self {
             open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
             storage_read_bytes: Counter::default(),
+            storage_read_latency: Timed::new(storage_read_latency.clone(), clock.clone()),
             storage_writes: Counter::default(),
             storage_write_bytes: Counter::default(),
+            storage_write_latency: Timed::new(storage_write_latency.clone(), clock.clone()),
+            storage_resize_latency: Timed::new(storage_resize_latency.clone(), clock.clone()),
+            storage_sync_latency: Timed::new(storage_sync_latency.clone(), clock),
         };
 
         registry.register(
@@ -43,6 +59,11 @@ impl Metrics {
             metrics.storage_read_bytes.clone(),
         );
         registry.register(
+            "storage_read_latency",
+            "Latency of disk reads in seconds",
+            storage_read_latency,
+        );
+        registry.register(
             "storage_writes",
             "Total number of disk writes",
             metrics.storage_writes.clone(),
@@ -52,6 +73,21 @@ impl Metrics {
             "Total amount of data written to disk",
             metrics.storage_write_bytes.clone(),
         );
+        registry.register(
+            "storage_write_latency",
+            "Latency of disk writes in seconds",
+            storage_write_latency,
+        );
+        registry.register(
+            "storage_resize_latency",
+            "Latency of blob resize operations in seconds",
+            storage_resize_latency,
+        );
+        registry.register(
+            "storage_sync_latency",
+            "Latency of blob sync operations in seconds",
+            storage_sync_latency,
+        );
 
         metrics
     }
@@ -59,16 +95,16 @@ impl Metrics {
 
 /// A wrapper around a `Storage` implementation that tracks metrics.
 #[derive(Clone)]
-pub struct Storage<S> {
+pub struct Storage<C: Clock, S> {
     inner: S,
-    metrics: Arc<Metrics>,
+    metrics: Arc<Metrics<C>>,
 }
 
-impl<S> Storage<S> {
-    pub fn new(inner: S, registry: &mut Registry) -> Self {
+impl<C: Clock, S> Storage<C, S> {
+    pub fn new(clock: C, inner: S, registry: &mut Registry) -> Self {
         Self {
             inner,
-            metrics: Metrics::new(registry).into(),
+            metrics: Metrics::new(Arc::new(clock), registry).into(),
         }
     }
 
@@ -78,8 +114,8 @@ impl<S> Storage<S> {
     }
 }
 
-impl<S: crate::Storage> crate::Storage for Storage<S> {
-    type Blob = Blob<S::Blob>;
+impl<C: Clock, S: crate::Storage> crate::Storage for Storage<C, S> {
+    type Blob = Blob<C, S::Blob>;
 
     async fn open_versioned(
         &self,
@@ -87,9 +123,9 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.metrics.open_blobs.inc();
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
+        self.metrics.open_blobs.inc();
         Ok((
             Blob {
                 inner,
@@ -111,38 +147,39 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
 /// A wrapper around a `Blob` implementation that tracks metrics
 #[derive(Clone)]
-pub struct Blob<B> {
+pub struct Blob<C: Clock, B> {
     inner: B,
-    metrics: Arc<MetricsHandle>,
+    metrics: Arc<MetricsHandle<C>>,
 }
 
 /// A wrapper around a `Metrics` implementation that updates
 /// metrics when a blob (that may have been cloned multiple times)
 /// is dropped.
-struct MetricsHandle(Arc<Metrics>);
+struct MetricsHandle<C: Clock>(Arc<Metrics<C>>);
 
-impl Deref for MetricsHandle {
-    type Target = Metrics;
+impl<C: Clock> Deref for MetricsHandle<C> {
+    type Target = Metrics<C>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl Drop for MetricsHandle {
+impl<C: Clock> Drop for MetricsHandle<C> {
     fn drop(&mut self) {
         // Only decrement when the last reference to the blob is dropped
         self.0.open_blobs.dec();
     }
 }
 
-impl<B: crate::Blob> crate::Blob for Blob<B> {
+impl<C: Clock, B: crate::Blob> crate::Blob for Blob<C, B> {
     async fn read_at(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let buf = buf.into();
+        let _timer = self.metrics.storage_read_latency.timer();
         let read = self.inner.read_at(offset, buf).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(read.len() as u64);
@@ -152,6 +189,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let buf = buf.into();
         let buf_len = buf.remaining();
+        let _timer = self.metrics.storage_write_latency.timer();
         self.inner.write_at(offset, buf).await?;
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(buf_len as u64);
@@ -159,10 +197,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        let _timer = self.metrics.storage_resize_latency.timer();
         self.inner.resize(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        let _timer = self.metrics.storage_sync_latency.timer();
         self.inner.sync().await
     }
 }
@@ -171,61 +211,85 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
+        deterministic,
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
-        Blob, IoBufMut, Storage as _,
+        tokio as tokio_runtime, Blob, Clock, IoBufMut, Runner, Storage as _,
     };
     use prometheus_client::registry::Registry;
 
-    #[tokio::test]
-    async fn test_metered_storage() {
-        let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+    #[test]
+    fn test_metered_storage_deterministic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut registry = Registry::default();
+            let inner = MemoryStorage::default();
+            let storage = Storage::new(context, inner, &mut registry);
 
-        run_storage_tests(storage).await;
+            test_metered_blob_metrics(&storage).await;
+            test_metered_blob_multiple_blobs(&storage).await;
+            test_cloned_blobs_share_metrics(&storage).await;
+        });
     }
 
-    /// Test that metrics are updated correctly for basic operations.
-    #[tokio::test]
-    async fn test_metered_blob_metrics() {
-        let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+    #[test]
+    fn test_metered_storage_tokio() {
+        let cfg = tokio_runtime::Config::default()
+            .with_storage_directory(std::env::temp_dir().join("metered_storage_tokio_test"));
+        let runner = tokio_runtime::Runner::new(cfg);
+        runner.start(|context| async move {
+            let mut registry = Registry::default();
+            let inner = MemoryStorage::default();
+            let storage = Storage::new(context, inner, &mut registry);
+
+            run_storage_tests(storage.clone()).await;
+            test_metered_blob_metrics(&storage).await;
+        });
+    }
+
+    async fn test_metered_blob_metrics<C: Clock, S: crate::Storage>(storage: &Storage<C, S>)
+    where
+        S::Blob: Send + Sync,
+    {
+        let initial_open_blobs = storage.metrics.open_blobs.get();
+        let initial_writes = storage.metrics.storage_writes.get();
+        let initial_write_bytes = storage.metrics.storage_write_bytes.get();
+        let initial_reads = storage.metrics.storage_reads.get();
+        let initial_read_bytes = storage.metrics.storage_read_bytes.get();
 
         // Open a blob
-        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("metered_test", b"test_blob").await.unwrap();
 
         // Verify that the open_blobs metric is incremented
-        let open_blobs = storage.metrics.open_blobs.get();
         assert_eq!(
-            open_blobs, 1,
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
             "open_blobs metric was not incremented after opening a blob"
         );
 
         // Write data to the blob
         blob.write_at(0, b"hello world").await.unwrap();
-        let writes = storage.metrics.storage_writes.get();
-        let write_bytes = storage.metrics.storage_write_bytes.get();
         assert_eq!(
-            writes, 1,
+            storage.metrics.storage_writes.get() - initial_writes,
+            1,
             "storage_writes metric was not incremented after write"
         );
         assert_eq!(
-            write_bytes, 11,
+            storage.metrics.storage_write_bytes.get() - initial_write_bytes,
+            11,
             "storage_write_bytes metric was not updated correctly after write"
         );
 
         // Read data from the blob
         let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
         assert_eq!(read.coalesce(), b"hello world");
-        let reads = storage.metrics.storage_reads.get();
-        let read_bytes = storage.metrics.storage_read_bytes.get();
         assert_eq!(
-            reads, 1,
+            storage.metrics.storage_reads.get() - initial_reads,
+            1,
             "storage_reads metric was not incremented after read"
         );
         assert_eq!(
-            read_bytes, 11,
+            storage.metrics.storage_read_bytes.get() - initial_read_bytes,
+            11,
             "storage_read_bytes metric was not updated correctly after read"
         );
 
@@ -234,28 +298,27 @@ mod tests {
         drop(blob);
 
         // Verify that the open_blobs metric is decremented
-        let open_blobs_after_drop = storage.metrics.open_blobs.get();
         assert_eq!(
-            open_blobs_after_drop, 0,
+            storage.metrics.open_blobs.get(),
+            initial_open_blobs,
             "open_blobs metric was not decremented after dropping the blob"
         );
     }
 
-    /// Test that metrics are updated correctly when multiple blobs are opened and dropped.
-    #[tokio::test]
-    async fn test_metered_blob_multiple_blobs() {
-        let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+    async fn test_metered_blob_multiple_blobs<C: Clock, S: crate::Storage>(storage: &Storage<C, S>)
+    where
+        S::Blob: Send + Sync,
+    {
+        let initial_open_blobs = storage.metrics.open_blobs.get();
 
         // Open multiple blobs
-        let (blob1, _) = storage.open("partition", b"blob1").await.unwrap();
-        let (blob2, _) = storage.open("partition", b"blob2").await.unwrap();
+        let (blob1, _) = storage.open("metered_test", b"blob1").await.unwrap();
+        let (blob2, _) = storage.open("metered_test", b"blob2").await.unwrap();
 
         // Verify that the open_blobs metric is incremented correctly
-        let open_blobs = storage.metrics.open_blobs.get();
         assert_eq!(
-            open_blobs, 2,
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            2,
             "open_blobs metric was not updated correctly after opening multiple blobs"
         );
 
@@ -264,9 +327,9 @@ mod tests {
         drop(blob1);
 
         // Verify that the open_blobs metric is decremented correctly
-        let open_blobs_after_close_one = storage.metrics.open_blobs.get();
         assert_eq!(
-            open_blobs_after_close_one, 1,
+            storage.metrics.open_blobs.get() - initial_open_blobs,
+            1,
             "open_blobs metric was not decremented correctly after dropping one blob"
         );
 
@@ -274,27 +337,28 @@ mod tests {
         blob2.sync().await.unwrap();
         drop(blob2);
 
-        // Verify that the open_blobs metric is decremented to zero
-        let open_blobs_after_drop_all = storage.metrics.open_blobs.get();
+        // Verify that the open_blobs metric is decremented to initial value
         assert_eq!(
-            open_blobs_after_drop_all, 0,
-            "open_blobs metric was not decremented to zero after dropping all blobs"
+            storage.metrics.open_blobs.get(),
+            initial_open_blobs,
+            "open_blobs metric was not decremented correctly after dropping all blobs"
         );
     }
 
-    /// Test that cloned blobs share the same metrics and only decrement when the last clone is dropped.
-    #[tokio::test]
-    async fn test_cloned_blobs_share_metrics() {
-        let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
-        let storage = Storage::new(inner, &mut registry);
+    async fn test_cloned_blobs_share_metrics<C: Clock, S: crate::Storage>(storage: &Storage<C, S>)
+    where
+        S::Blob: Send + Sync,
+    {
+        let initial_open_blobs = storage.metrics.open_blobs.get();
+        let initial_writes = storage.metrics.storage_writes.get();
+        let initial_reads = storage.metrics.storage_reads.get();
 
         // Open a blob
-        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let (blob, _) = storage.open("metered_test", b"clone_blob").await.unwrap();
 
         // Verify that the open_blobs metric is incremented
         assert_eq!(
-            storage.metrics.open_blobs.get(),
+            storage.metrics.open_blobs.get() - initial_open_blobs,
             1,
             "open_blobs metric was not incremented after opening a blob"
         );
@@ -305,7 +369,7 @@ mod tests {
 
         // Verify that cloning doesn't change the open_blobs metric
         assert_eq!(
-            storage.metrics.open_blobs.get(),
+            storage.metrics.open_blobs.get() - initial_open_blobs,
             1,
             "open_blobs metric should not change when blobs are cloned"
         );
@@ -318,13 +382,13 @@ mod tests {
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(
-            storage.metrics.storage_writes.get(),
+            storage.metrics.storage_writes.get() - initial_writes,
             2,
             "Operations on cloned blobs should update shared metrics"
         );
 
         assert_eq!(
-            storage.metrics.storage_reads.get(),
+            storage.metrics.storage_reads.get() - initial_reads,
             2,
             "Operations on cloned blobs should update shared metrics"
         );
@@ -332,23 +396,23 @@ mod tests {
         // Drop individual clones and verify the metric doesn't change
         drop(clone1);
         assert_eq!(
-            storage.metrics.open_blobs.get(),
+            storage.metrics.open_blobs.get() - initial_open_blobs,
             1,
             "open_blobs metric should not change when individual clones are dropped"
         );
 
         drop(clone2);
         assert_eq!(
-            storage.metrics.open_blobs.get(),
+            storage.metrics.open_blobs.get() - initial_open_blobs,
             1,
             "open_blobs metric should not change when individual clones are dropped"
         );
 
-        // Sync and drop the original blob - this should finally decrement the counter
+        // Drop the original blob - this should finally decrement the counter
         drop(blob);
         assert_eq!(
             storage.metrics.open_blobs.get(),
-            0,
+            initial_open_blobs,
             "open_blobs metric should be decremented only when the last blob reference is dropped"
         );
     }

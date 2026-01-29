@@ -9,7 +9,7 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
-    deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
+    deterministic, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner, Timer,
 };
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
@@ -289,7 +289,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + Timer + Metrics + RNetwork + RngCore>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -332,7 +332,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities<C: Clock>(
+async fn setup_network_identities<C: Timer>(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
 ) -> Vec<PeerIdentity<C>> {
@@ -369,7 +369,7 @@ async fn setup_network_identities<C: Clock>(
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links<C: Clock>(
+async fn setup_network_links<C: Timer>(
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     identities: &[PeerIdentity<C>],
     latencies: &Latencies,
@@ -394,7 +394,7 @@ async fn setup_network_links<C: Clock>(
 }
 
 /// Spawn jobs for all peers in the simulation
-fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
+fn spawn_peer_jobs<C: Spawner + Metrics + Timer>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
@@ -487,7 +487,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 }
 
 /// Check if a single command would succeed without executing side effects
-async fn process_single_command_check<C: Clock>(
+async fn process_single_command_check<C: Timer>(
     ctx: &C,
     command_ctx: &CommandContext,
     command: &(usize, Command),
@@ -553,7 +553,7 @@ async fn process_single_command_check<C: Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Clock>(
+async fn process_command<C: Timer>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,

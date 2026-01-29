@@ -28,7 +28,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, Timer,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -58,7 +58,7 @@ enum Pending<S: Scheme, D: Digest> {
 
 /// The type returned by the `pending` pool, used by the application to return which digest is
 /// associated with the given height.
-struct DigestRequest<D: Digest, E: Clock> {
+struct DigestRequest<D: Digest, E: Timer> {
     /// The height in question.
     height: Height,
 
@@ -71,7 +71,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: Timer + Spawner + Storage + Metrics + CryptoRngCore,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D> + Clone,
@@ -154,7 +154,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: Timer + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D> + Clone,

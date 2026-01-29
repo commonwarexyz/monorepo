@@ -68,7 +68,7 @@ cfg_if::cfg_if! {
         use commonware_utils::channels::fallible::OneshotExt;
         use futures::channel::{oneshot, mpsc};
         use std::future::Future;
-        use commonware_runtime::{Spawner, Metrics, Clock};
+        use commonware_runtime::{Spawner, Metrics, Timer};
         use rand::Rng;
         use crate::marshal::ingress::mailbox::AncestorStream;
         use crate::types::Round;
@@ -157,7 +157,7 @@ cfg_if::cfg_if! {
         /// of epoched blocks.
         pub trait Application<E>: Clone + Send + 'static
         where
-            E: Rng + Spawner + Metrics + Clock
+            E: Rng + Spawner + Metrics + Timer
         {
             /// The signing scheme used by the application.
             type SigningScheme: Scheme;
@@ -190,7 +190,7 @@ cfg_if::cfg_if! {
         /// hidden from the application.
         pub trait VerifyingApplication<E>: Application<E>
         where
-            E: Rng + Spawner + Metrics + Clock
+            E: Rng + Spawner + Metrics + Timer
         {
             /// Verify a block produced by the application's proposer, relative to its ancestry.
             fn verify(
