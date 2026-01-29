@@ -554,6 +554,26 @@ mod tests {
         }
     }
 
+    /// Parses encoded metrics for a given metric suffix and peer label.
+    /// Returns (max_value, nodes_recording_nonzero).
+    fn parse_metric(encoded: &str, metric_suffix: &str, peer_label: &str) -> (u64, u32) {
+        let mut max_value = 0;
+        let mut nodes_recording = 0;
+        for line in encoded.lines() {
+            if line.contains(metric_suffix) && line.contains(peer_label) {
+                if let Some(number) = line.split_whitespace().last().and_then(|s| s.parse().ok()) {
+                    if number > 0 {
+                        nodes_recording += 1;
+                    }
+                    if number > max_value {
+                        max_value = number;
+                    }
+                }
+            }
+        }
+        (max_value, nodes_recording)
+    }
+
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1657,35 +1677,19 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
 
-            // Ensure online nodes are recording skips for the offline leader
+            // Ensure online nodes are recording skips/nullifications for the offline leader
             let encoded = context.encode();
             let offline_peer_label = format!("peer=\"{}\"", offline);
-            let mut skips_for_offline_leader = 0;
-            let mut nodes_recording_skips = 0;
-            for line in encoded.lines() {
-                if line.contains("_skips_per_leader") && line.contains(&offline_peer_label) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(number_str) = parts.last() {
-                        if let Ok(number) = number_str.parse::<u64>() {
-                            if number > 0 {
-                                nodes_recording_skips += 1;
-                            }
-                            if number > skips_for_offline_leader {
-                                skips_for_offline_leader = number;
-                            }
-                        }
-                    }
-                }
+            for metric in ["_skips_per_leader", "_nullifications_per_leader"] {
+                let (max_value, nodes_recording) =
+                    parse_metric(&encoded, metric, &offline_peer_label);
+                assert!(max_value > 0, "expected {metric} for offline leader > 0");
+                assert_eq!(
+                    nodes_recording,
+                    n - 1,
+                    "expected all online nodes to record {metric} for offline leader"
+                );
             }
-            assert!(
-                skips_for_offline_leader > 0,
-                "expected skips for offline leader to be greater than 0"
-            );
-            assert_eq!(
-                nodes_recording_skips,
-                n - 1,
-                "expected all online nodes to record skips for offline leader"
-            );
         });
     }
 
