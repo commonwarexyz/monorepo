@@ -78,7 +78,7 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
+        deterministic, telemetry::traces::collector::TraceStorage, Metrics, Quota, Runner, Timer,
     };
     use commonware_utils::{NZUsize, NZU16};
     use futures::{channel::mpsc, FutureExt, StreamExt};

@@ -13,7 +13,7 @@ use crate::{
     Viewable,
 };
 use commonware_cryptography::{certificate, Digest};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Timer};
 use commonware_utils::futures::Aborter;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rand_core::CryptoRngCore;
@@ -43,7 +43,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
+pub struct State<E: Timer + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
     context: E,
     scheme: S,
     elector: L::Elector,
@@ -65,7 +65,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     skipped_views: Counter,
 }
 
-impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
+impl<E: Timer + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
@@ -626,7 +626,7 @@ mod tests {
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::futures::AbortablePool;
     use std::time::Duration;
 

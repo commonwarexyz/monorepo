@@ -9,8 +9,8 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, KeyedRateLimiter, Metrics as RuntimeMetrics,
-    Quota, Spawner,
+    telemetry::metrics::status::GaugeExt, KeyedRateLimiter, Metrics as RuntimeMetrics, Quota,
+    Spawner, Timer,
 };
 use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt, TryCollect};
 use rand::{seq::IteratorRandom, Rng};
@@ -44,7 +44,7 @@ pub struct Config {
 }
 
 /// Represents a collection of records for all peers.
-pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
+pub struct Directory<E: Rng + Timer + RuntimeMetrics, C: PublicKey> {
     context: E,
 
     // ---------- Configuration ----------
@@ -87,7 +87,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     metrics: Metrics,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
+impl<E: Spawner + Rng + Timer + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
     pub fn init(
         context: E,
@@ -491,7 +491,7 @@ mod tests {
     use super::*;
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_runtime::{deterministic, Runner, Timer};
     use commonware_utils::{bitmap::BitMap, NZU32};
     use std::net::SocketAddr;
 

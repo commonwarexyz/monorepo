@@ -6,7 +6,7 @@ use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     tokio as tokio_runtime, Clock, Listener, Metrics, Network, Runner, RwLock, SinkOf, Spawner,
-    Storage, StreamOf,
+    Storage, StreamOf, Timer,
 };
 use commonware_storage::qmdb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -297,7 +297,7 @@ async fn handle_client<DB, E>(
 where
     DB: Syncable + Send + Sync + 'static,
     DB::Operation: Read<Cfg = ()> + Send,
-    E: Storage + Clock + Metrics + Network + Spawner,
+    E: Storage + Timer + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
 
@@ -408,7 +408,7 @@ async fn run_helper<DB, E>(
 where
     DB: Syncable + Send + Sync + 'static,
     DB::Operation: Read<Cfg = ()> + Send,
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: Storage + Timer + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());
 
@@ -464,7 +464,7 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: Storage + Timer + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
     let db_config = any::create_config();
@@ -476,7 +476,7 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
+    E: Storage + Timer + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
     let db_config = immutable::create_config();

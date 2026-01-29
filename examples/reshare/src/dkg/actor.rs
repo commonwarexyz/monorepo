@@ -23,8 +23,8 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, Buf, BufMut, Clock, ContextCell, Handle, Metrics, Spawner,
-    Storage as RuntimeStorage,
+    spawn_cell, Buf, BufMut, ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
+    Timer,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use futures::{channel::mpsc, StreamExt};
@@ -96,7 +96,7 @@ pub struct Config<C: Signer, P> {
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRngCore + Timer + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,
@@ -117,7 +117,7 @@ where
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRngCore + Timer + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
     H: Hasher,
     C: Signer,

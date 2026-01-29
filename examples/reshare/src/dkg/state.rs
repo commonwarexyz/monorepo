@@ -25,7 +25,7 @@ use commonware_cryptography::{
     PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{buffer::PoolRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage};
+use commonware_runtime::{buffer::PoolRef, Buf, BufMut, Metrics, Storage as RuntimeStorage, Timer};
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
@@ -169,7 +169,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
-pub struct Storage<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
+pub struct Storage<E: Timer + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
     states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
@@ -178,7 +178,7 @@ pub struct Storage<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
+impl<E: Timer + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V, P> {
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
@@ -520,7 +520,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics>(
+    pub async fn handle<E: Timer + RuntimeStorage + Metrics>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -597,7 +597,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics, M: Faults>(
+    pub async fn handle<E: Timer + RuntimeStorage + Metrics, M: Faults>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,

@@ -193,7 +193,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{
-        count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
+        count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner, Timer,
     };
     use commonware_utils::{hostname, ordered::Map, NZU32};
     use futures::{channel::mpsc, SinkExt, StreamExt};

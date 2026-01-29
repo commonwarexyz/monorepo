@@ -59,7 +59,7 @@ use crate::{
         MetricEncoder, Panicker,
     },
     validate_label, Clock as ClockTrait, Error, Execution, Handle, ListenerOf, Metrics as _,
-    Panicked, RawClock, Spawner as _, METRICS_PREFIX,
+    Panicked, Spawner as _, Timer as TimerTrait, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -822,13 +822,13 @@ impl GClock for Clock {
 
 impl ReasonablyRealtime for Clock {}
 
-impl crate::RawClock for Clock {
+impl crate::Clock for Clock {
     fn current(&self) -> SystemTime {
         *self.time.lock().unwrap()
     }
 }
 
-/// Implementation of [crate::Spawner], [crate::Clock],
+/// Implementation of [crate::Spawner], [crate::Timer],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
 pub struct Context {
@@ -1299,13 +1299,13 @@ impl Future for Sleeper {
     }
 }
 
-impl crate::RawClock for Context {
+impl crate::Clock for Context {
     fn current(&self) -> SystemTime {
         self.clock.current()
     }
 }
 
-impl ClockTrait for Context {
+impl crate::Timer for Context {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         let deadline = self
             .current()

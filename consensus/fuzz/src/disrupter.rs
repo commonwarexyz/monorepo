@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
+use commonware_runtime::{Handle, IoBuf, Spawner, Timer};
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -29,7 +29,7 @@ pub enum Mutation {
 }
 
 /// Byzantine actor that disrupts consensus by sending malformed/mutated messages.
-pub struct Disrupter<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> {
+pub struct Disrupter<E: Timer + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> {
     context: E,
     validator: PublicKey,
     scheme: S,
@@ -41,7 +41,7 @@ pub struct Disrupter<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>
     last_notarized: u64,
 }
 
-impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> Disrupter<E, S>
+impl<E: Timer + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>> Disrupter<E, S>
 where
     <S::Certificate as Read>::Cfg: Default,
 {

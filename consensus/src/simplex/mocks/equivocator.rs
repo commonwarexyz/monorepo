@@ -12,7 +12,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
 use commonware_utils::ordered::Quorum;
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
@@ -25,12 +25,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub hasher: H,
 }
 
-pub struct Equivocator<
-    E: Clock + Rng + Spawner,
-    S: Scheme<H::Digest>,
-    L: ElectorConfig<S>,
-    H: Hasher,
-> {
+pub struct Equivocator<E: Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher> {
     context: ContextCell<E>,
     scheme: S,
     elector: L::Elector,
@@ -40,7 +35,7 @@ pub struct Equivocator<
     sent: HashSet<View>,
 }
 
-impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
+impl<E: Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Hasher>
     Equivocator<E, S, L, H>
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {

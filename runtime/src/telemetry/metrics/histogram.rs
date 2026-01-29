@@ -1,6 +1,6 @@
 //! Utilities for working with histograms.
 
-use crate::RawClock;
+use crate::Clock;
 use prometheus_client::metrics::histogram::Histogram;
 use std::{sync::Arc, time::SystemTime};
 
@@ -57,7 +57,7 @@ impl HistogramExt for Histogram {
 
 /// A wrapper around a histogram that includes a clock.
 #[derive(Clone)]
-pub struct Timed<C: RawClock> {
+pub struct Timed<C: Clock> {
     /// The histogram to record durations in.
     histogram: Histogram,
 
@@ -65,7 +65,7 @@ pub struct Timed<C: RawClock> {
     clock: Arc<C>,
 }
 
-impl<C: RawClock> Timed<C> {
+impl<C: Clock> Timed<C> {
     /// Create a new timed histogram.
     pub const fn new(histogram: Histogram, clock: Arc<C>) -> Self {
         Self { histogram, clock }
@@ -94,7 +94,7 @@ impl<C: RawClock> Timed<C> {
 }
 
 /// A timer that records a duration when dropped.
-pub struct Timer<C: RawClock> {
+pub struct Timer<C: Clock> {
     /// The histogram to record durations in.
     histogram: Histogram,
 
@@ -108,7 +108,7 @@ pub struct Timer<C: RawClock> {
     canceled: bool,
 }
 
-impl<C: RawClock> Timer<C> {
+impl<C: Clock> Timer<C> {
     /// Record the duration and cancel the timer.
     pub fn observe(&mut self) {
         self.canceled = true;
@@ -122,7 +122,7 @@ impl<C: RawClock> Timer<C> {
     }
 }
 
-impl<C: RawClock> Drop for Timer<C> {
+impl<C: Clock> Drop for Timer<C> {
     fn drop(&mut self) {
         if self.canceled {
             return;

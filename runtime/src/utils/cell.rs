@@ -177,18 +177,18 @@ where
     }
 }
 
-impl<C> crate::RawClock for Cell<C>
+impl<C> crate::Clock for Cell<C>
 where
-    C: crate::RawClock,
+    C: crate::Clock,
 {
     fn current(&self) -> SystemTime {
         self.as_present().current()
     }
 }
 
-impl<C> crate::Clock for Cell<C>
+impl<C> crate::Timer for Cell<C>
 where
-    C: crate::Clock,
+    C: crate::Timer,
 {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         self.as_present().sleep(duration)

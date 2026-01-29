@@ -18,8 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    Clock as ClockTrait, Error, Execution, Handle, Metrics as _, RawClock, SinkOf, Spawner as _,
-    StreamOf, METRICS_PREFIX,
+    Clock as ClockTrait, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
+    Timer as TimerTrait, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
@@ -380,13 +380,13 @@ impl GClock for Clock {
 
 impl ReasonablyRealtime for Clock {}
 
-impl crate::RawClock for Clock {
+impl crate::Clock for Clock {
     fn current(&self) -> SystemTime {
         SystemTime::now()
     }
 }
 
-impl ClockTrait for Clock {
+impl crate::Timer for Clock {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         tokio::time::sleep(duration)
     }
@@ -635,13 +635,13 @@ impl crate::Metrics for Context {
     }
 }
 
-impl crate::RawClock for Context {
+impl crate::Clock for Context {
     fn current(&self) -> SystemTime {
         Clock.current()
     }
 }
 
-impl ClockTrait for Context {
+impl crate::Timer for Context {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         Clock.sleep(duration)
     }

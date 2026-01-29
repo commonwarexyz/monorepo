@@ -37,7 +37,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, Timer,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum};
@@ -55,7 +55,7 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 /// Represents a pending verification request to the automaton.
-struct Verify<C: PublicKey, D: Digest, E: Clock> {
+struct Verify<C: PublicKey, D: Digest, E: Timer> {
     timer: histogram::Timer<E>,
     context: Context<C>,
     payload: D,
@@ -64,7 +64,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
+    E: Timer + Spawner + CryptoRngCore + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -202,7 +202,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
+        E: Timer + Spawner + CryptoRngCore + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,

@@ -580,7 +580,7 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
-        IoBufMut, KeyedRateLimiter, Quota, Runner as _, RwLock,
+        IoBufMut, KeyedRateLimiter, Quota, Runner as _, RwLock, Timer,
     };
     use commonware_utils::NZU32;
     use std::{fmt, sync::Arc, time::Duration};

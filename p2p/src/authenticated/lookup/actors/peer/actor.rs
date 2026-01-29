@@ -9,7 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream, Timer,
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
@@ -19,7 +19,7 @@ use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + Timer + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
@@ -35,7 +35,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     _phantom: std::marker::PhantomData<C>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + Timer + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);

@@ -1,6 +1,6 @@
 use crate::{
     telemetry::metrics::histogram::{Buckets, Timed},
-    Buf, Error, IoBufs, IoBufsMut, RawClock,
+    Buf, Clock, Error, IoBufs, IoBufsMut,
 };
 use prometheus_client::{
     metrics::{counter::Counter, gauge::Gauge, histogram::Histogram},
@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-pub struct Metrics<C: RawClock> {
+pub struct Metrics<C: Clock> {
     pub open_blobs: Gauge,
     pub storage_reads: Counter,
     pub storage_read_bytes: Counter,
@@ -23,7 +23,7 @@ pub struct Metrics<C: RawClock> {
     pub storage_sync_latency: Timed<C>,
 }
 
-impl<C: RawClock> Metrics<C> {
+impl<C: Clock> Metrics<C> {
     /// Initialize the `Metrics` struct and register the metrics in the provided registry.
     fn new(clock: Arc<C>, registry: &mut Registry) -> Self {
         let storage_read_latency = Histogram::new(Buckets::LOCAL);
@@ -95,12 +95,12 @@ impl<C: RawClock> Metrics<C> {
 
 /// A wrapper around a `Storage` implementation that tracks metrics.
 #[derive(Clone)]
-pub struct Storage<C: RawClock, S> {
+pub struct Storage<C: Clock, S> {
     inner: S,
     metrics: Arc<Metrics<C>>,
 }
 
-impl<C: RawClock, S> Storage<C, S> {
+impl<C: Clock, S> Storage<C, S> {
     pub fn new(clock: C, inner: S, registry: &mut Registry) -> Self {
         Self {
             inner,
@@ -114,7 +114,7 @@ impl<C: RawClock, S> Storage<C, S> {
     }
 }
 
-impl<C: RawClock, S: crate::Storage> crate::Storage for Storage<C, S> {
+impl<C: Clock, S: crate::Storage> crate::Storage for Storage<C, S> {
     type Blob = Blob<C, S::Blob>;
 
     async fn open_versioned(
@@ -147,7 +147,7 @@ impl<C: RawClock, S: crate::Storage> crate::Storage for Storage<C, S> {
 
 /// A wrapper around a `Blob` implementation that tracks metrics
 #[derive(Clone)]
-pub struct Blob<C: RawClock, B> {
+pub struct Blob<C: Clock, B> {
     inner: B,
     metrics: Arc<MetricsHandle<C>>,
 }
@@ -155,9 +155,9 @@ pub struct Blob<C: RawClock, B> {
 /// A wrapper around a `Metrics` implementation that updates
 /// metrics when a blob (that may have been cloned multiple times)
 /// is dropped.
-struct MetricsHandle<C: RawClock>(Arc<Metrics<C>>);
+struct MetricsHandle<C: Clock>(Arc<Metrics<C>>);
 
-impl<C: RawClock> Deref for MetricsHandle<C> {
+impl<C: Clock> Deref for MetricsHandle<C> {
     type Target = Metrics<C>;
 
     fn deref(&self) -> &Self::Target {
@@ -165,14 +165,14 @@ impl<C: RawClock> Deref for MetricsHandle<C> {
     }
 }
 
-impl<C: RawClock> Drop for MetricsHandle<C> {
+impl<C: Clock> Drop for MetricsHandle<C> {
     fn drop(&mut self) {
         // Only decrement when the last reference to the blob is dropped
         self.0.open_blobs.dec();
     }
 }
 
-impl<C: RawClock, B: crate::Blob> crate::Blob for Blob<C, B> {
+impl<C: Clock, B: crate::Blob> crate::Blob for Blob<C, B> {
     async fn read_at(
         &self,
         offset: u64,

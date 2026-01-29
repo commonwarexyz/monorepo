@@ -46,7 +46,7 @@ mod tests {
         Recipients,
     };
     use commonware_runtime::{
-        count_running_tasks, deterministic, Clock, Error, Metrics, Quota, Runner,
+        count_running_tasks, deterministic, Clock, Error, Metrics, Quota, Runner, Timer,
     };
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 

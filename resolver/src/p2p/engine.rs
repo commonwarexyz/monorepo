@@ -18,7 +18,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    Clock, ContextCell, Handle, Metrics, Spawner, Timer,
 };
 use commonware_utils::{futures::Pool as FuturesPool, Span};
 use futures::{
@@ -40,7 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + Spawner + Rng + Metrics,
+    E: Timer + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Manager<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -94,7 +94,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + Metrics,
+        E: Timer + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Manager<PublicKey = P>,
         B: Blocker<PublicKey = P>,
