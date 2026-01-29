@@ -21,7 +21,7 @@
 //! use futures::executor::block_on;
 //! use commonware_utils::channels::tracked;
 //! block_on(async {
-//!     let (mut sender, mut receiver) = tracked::bounded::<String, u64>(10);
+//!     let (sender, mut receiver) = tracked::bounded::<String, u64>(10);
 //
 //!     // Send a message with batch ID
 //!     let sequence = sender.send(Some(1), "hello".to_string()).await.unwrap();
@@ -46,10 +46,11 @@
 //! });
 //! ```
 
-use futures::{
-    channel::mpsc::{self, Receiver as FutReceiver, SendError, Sender as FutSender, TrySendError},
-    SinkExt, Stream, StreamExt,
+use super::mpsc::{
+    self,
+    error::{SendError, TryRecvError, TrySendError},
 };
+use futures::Stream;
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -176,13 +177,13 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
 /// A sender that wraps `Sender` and tracks message delivery.
 #[derive(Clone)]
 pub struct Sender<T, B: Eq + Hash + Clone> {
-    inner: FutSender<Message<T, B>>,
+    inner: mpsc::Sender<Message<T, B>>,
     tracker: Tracker<B>,
 }
 
 impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     /// Sends a message with an optional batch ID and returns a delivery guard.
-    pub async fn send(&mut self, batch: Option<B>, data: T) -> Result<u64, SendError> {
+    pub async fn send(&self, batch: Option<B>, data: T) -> Result<u64, SendError<Message<T, B>>> {
         // Create the guard
         let guard = Arc::new(self.tracker.guard(batch));
         let watermark = guard.sequence;
@@ -195,11 +196,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     }
 
     /// Tries to send a message without blocking.
-    pub fn try_send(
-        &mut self,
-        batch: Option<B>,
-        data: T,
-    ) -> Result<u64, TrySendError<Message<T, B>>> {
+    pub fn try_send(&self, batch: Option<B>, data: T) -> Result<u64, TrySendError<Message<T, B>>> {
         // Create the guard
         let guard = Arc::new(self.tracker.guard(batch));
         let watermark = guard.sequence;
@@ -229,20 +226,20 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     }
 }
 
-/// A receiver that wraps [FutReceiver] and provides tracked messages.
+/// A receiver that wraps [mpsc::Receiver] and provides tracked messages.
 pub struct Receiver<T, B: Eq + Hash + Clone> {
-    inner: FutReceiver<Message<T, B>>,
+    inner: mpsc::Receiver<Message<T, B>>,
 }
 
 impl<T, B: Eq + Hash + Clone> Receiver<T, B> {
     /// Receives the next message.
     pub async fn recv(&mut self) -> Option<Message<T, B>> {
-        self.inner.next().await
+        self.inner.recv().await
     }
 
     /// Tries to receive a message without blocking.
-    pub fn try_recv(&mut self) -> Option<Message<T, B>> {
-        self.inner.try_next().ok().flatten()
+    pub fn try_recv(&mut self) -> Result<Message<T, B>, TryRecvError> {
+        self.inner.try_recv()
     }
 }
 
@@ -250,7 +247,7 @@ impl<T, B: Eq + Hash + Clone> Stream for Receiver<T, B> {
     type Item = Message<T, B>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+        self.inner.poll_recv(cx)
     }
 }
 
@@ -273,7 +270,7 @@ mod tests {
     #[test]
     fn test_basic() {
         block_on(async move {
-            let (mut sender, mut receiver) = bounded::<i32, u64>(10);
+            let (sender, mut receiver) = bounded::<i32, u64>(10);
 
             // Send a message without batch ID
             let watermark = sender.send(None, 42).await.unwrap();
@@ -294,7 +291,7 @@ mod tests {
     #[test]
     fn test_batch_tracking() {
         block_on(async move {
-            let (mut sender, mut receiver) = bounded::<String, u64>(10);
+            let (sender, mut receiver) = bounded::<String, u64>(10);
 
             // Send messages with different batch IDs
             let watermark1 = sender.send(Some(100), "msg1".to_string()).await.unwrap();
@@ -330,7 +327,7 @@ mod tests {
     #[test]
     fn test_cloned_guards() {
         block_on(async move {
-            let (mut sender, mut receiver) = bounded::<&str, u64>(10);
+            let (sender, mut receiver) = bounded::<&str, u64>(10);
 
             let watermark = sender.send(Some(1), "test").await.unwrap();
             assert_eq!(watermark, 1);
@@ -362,7 +359,7 @@ mod tests {
     #[test]
     fn test_try_send() {
         block_on(async move {
-            let (mut sender, mut receiver) = bounded::<i32, u64>(2);
+            let (sender, mut receiver) = bounded::<i32, u64>(2);
 
             // Try send should work when buffer has space
             let watermark1 = sender.try_send(Some(10), 1).unwrap();
@@ -389,7 +386,7 @@ mod tests {
     #[test]
     fn test_channel_closure() {
         block_on(async move {
-            let (mut sender, receiver) = bounded::<i32, u64>(10);
+            let (sender, receiver) = bounded::<i32, u64>(10);
 
             let _guard = sender.send(None, 1).await.unwrap();
 

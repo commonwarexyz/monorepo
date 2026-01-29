@@ -30,7 +30,7 @@ fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::SendReceive { batch, data } => {
             block_on(async {
-                let (mut sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(10);
+                let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(10);
 
                 if let Ok(_seq) = sender.send(batch, data.clone()).await {
                     if let Some(b) = batch {
@@ -48,7 +48,7 @@ fn fuzz(input: FuzzInput) {
 
         FuzzInput::MultipleSends { batches, data } => {
             block_on(async {
-                let (mut sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(100);
+                let (sender, mut receiver) = tracked::bounded::<Vec<u8>, u32>(100);
 
                 for (batch, d) in batches.iter().zip(data.iter()) {
                     let _ = sender.send(*batch, d.clone()).await;
@@ -56,7 +56,7 @@ fn fuzz(input: FuzzInput) {
 
                 let _ = sender.watermark();
 
-                while let Some(msg) = receiver.try_recv() {
+                while let Ok(msg) = receiver.try_recv() {
                     drop(msg);
                 }
             });
@@ -68,7 +68,7 @@ fn fuzz(input: FuzzInput) {
             num_clones,
         } => {
             block_on(async {
-                let (mut sender, mut receiver) = tracked::bounded::<u64, u32>(10);
+                let (sender, mut receiver) = tracked::bounded::<u64, u32>(10);
 
                 if let Ok(_seq) = sender.send(batch, data).await {
                     if let Some(msg) = receiver.recv().await {
@@ -89,12 +89,12 @@ fn fuzz(input: FuzzInput) {
 
         FuzzInput::TrySend { batch, data } => {
             block_on(async {
-                let (mut sender, mut receiver) = tracked::bounded::<String, u32>(5);
+                let (sender, mut receiver) = tracked::bounded::<String, u32>(5);
 
                 let _ = sender.try_send(batch, data.clone());
                 let _ = sender.watermark();
 
-                while let Some(msg) = receiver.try_recv() {
+                while let Ok(msg) = receiver.try_recv() {
                     drop(msg);
                 }
             });

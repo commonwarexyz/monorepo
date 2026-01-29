@@ -196,11 +196,11 @@ impl<F: Future> Future for OptionFuture<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::oneshot;
     use futures::{
-        channel::oneshot,
         executor::block_on,
         future::{self, select, Either},
-        pin_mut, FutureExt,
+        pin_mut,
     };
     use std::{
         sync::{
@@ -218,7 +218,9 @@ mod tests {
             thread::sleep(duration);
             sender.send(()).unwrap();
         });
-        receiver.map(|_| ())
+        async move {
+            let _ = receiver.await;
+        }
     }
 
     #[test]
