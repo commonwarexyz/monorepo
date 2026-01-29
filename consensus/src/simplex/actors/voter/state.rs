@@ -64,7 +64,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    skipped_views: Counter,
+    skips_per_leader: Family<Peer, Counter>,
     nullifications_per_leader: Family<Peer, Counter>,
 }
 
@@ -74,17 +74,22 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let skipped_views = Counter::default();
+        let skips_per_leader = Family::<Peer, Counter>::default();
         let nullifications_per_leader = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("skipped_views", "skipped views", skipped_views.clone());
+        context.register(
+            "skips_per_leader",
+            "skipped views per leader",
+            skips_per_leader.clone(),
+        );
         context.register(
             "nullifications_per_leader",
             "nullifications per leader",
             nullifications_per_leader.clone(),
         );
         for participant in cfg.scheme.participants().iter() {
+            let _ = skips_per_leader.get_or_create(&Peer::new(participant));
             let _ = nullifications_per_leader.get_or_create(&Peer::new(participant));
         }
 
@@ -108,7 +113,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
-            skipped_views,
+            skips_per_leader,
             nullifications_per_leader,
         }
     }
@@ -390,10 +395,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
     pub fn expire_round(&mut self, view: View) {
         let now = self.context.current();
-        self.create_round(view).set_deadlines(now, now);
+        let round = self.create_round(view);
+        round.set_deadlines(now, now);
 
         // Update metrics
-        self.skipped_views.inc();
+        if let Some(leader) = round.leader() {
+            self.skips_per_leader
+                .get_or_create(&Peer::new(&leader.key))
+                .inc();
+        }
     }
 
     /// Attempt to propose a new block.
