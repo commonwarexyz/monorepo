@@ -3,10 +3,9 @@ use crate::{authenticated::UnboundedMailbox, Address, Channel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
-    channels::{fallible::FallibleExt, ring},
+    channels::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::{Map, Set},
 };
-use futures::channel::{mpsc, oneshot};
 use rand_distr::Normal;
 use std::time::Duration;
 
@@ -259,7 +258,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 
     /// Subscribe to notifications when new peer sets are added.
     async fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         self.sender.0.send_lossy(Message::Subscribe { sender });
         receiver
     }

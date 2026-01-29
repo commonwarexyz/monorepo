@@ -18,8 +18,10 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::time::SYSTEM_TIME_PRECISION;
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{
+    channels::mpsc::{self, error::TrySendError},
+    time::SYSTEM_TIME_PRECISION,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -160,7 +162,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
-                        msg_control = self.control.next() => {
+                        msg_control = self.control.recv() => {
                             let msg = match msg_control {
                                 Some(msg_control) => msg_control,
                                 None => return Err(Error::PeerDisconnected),
@@ -184,7 +186,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             )
                             .await?;
                         },
-                        msg_high = self.high.next() => {
+                        msg_high = self.high.recv() => {
                             // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
                             Self::send_encoded(
@@ -195,7 +197,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             )
                             .await?;
                         },
-                        msg_low = self.low.next() => {
+                        msg_low = self.low.recv() => {
                             // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
                             Self::send_encoded(
@@ -336,7 +338,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // peer connection to stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender.try_send((peer.clone(), data.message)) {
-                                if e.is_full() {
+                                if matches!(e, TrySendError::Full(_)) {
                                     self.dropped_messages
                                         .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                         .inc();

@@ -10,10 +10,9 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channels::fallible::FallibleExt,
+    channels::{fallible::FallibleExt, mpsc, oneshot},
     ordered::{Map, Set},
 };
-use futures::channel::{mpsc, oneshot};
 use std::net::IpAddr;
 
 /// Messages that can be sent to the tracker actor.
@@ -166,7 +165,7 @@ impl<C: PublicKey> UnboundedMailbox<Message<C>> {
 }
 
 /// Allows releasing reservations
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
     sender: UnboundedMailbox<Message<C>>,
 }
@@ -233,7 +232,7 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
             .request(|responder| Message::Subscribe { responder })
             .await
             .unwrap_or_else(|| {
-                let (_, rx) = mpsc::unbounded();
+                let (_, rx) = mpsc::unbounded_channel();
                 rx
             })
     }

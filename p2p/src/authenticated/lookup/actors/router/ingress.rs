@@ -12,10 +12,9 @@ use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::IoBufMut;
 use commonware_utils::{
-    channels::{fallible::AsyncFallibleExt, ring},
+    channels::{fallible::AsyncFallibleExt, oneshot, ring},
     NZUsize,
 };
-use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]

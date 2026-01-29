@@ -42,6 +42,7 @@ use thiserror::Error;
 #[error("channel closed")]
 pub struct ChannelClosed;
 
+#[derive(Debug)]
 struct Shared<T: Send + Sync> {
     buffer: VecDeque<T>,
     capacity: usize,
@@ -159,6 +160,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
 ///
 /// The stream terminates (returns `None`) when all senders have been dropped
 /// and all buffered items have been consumed.
+#[derive(Debug)]
 pub struct Receiver<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }

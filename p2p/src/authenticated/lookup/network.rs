@@ -16,8 +16,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner,
 };
 use commonware_stream::Config as StreamConfig;
-use commonware_utils::union;
-use futures::channel::mpsc;
+use commonware_utils::{channels::mpsc, union};
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, net::IpAddr};
 use tracing::{debug, info};

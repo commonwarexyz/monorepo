@@ -14,7 +14,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::channels::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -108,7 +108,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
             on_stopped => {
                 debug!("context shutdown, stopping spawner");
             },
-            msg = self.receiver.next() => {
+            msg = self.receiver.recv() => {
                 let Some(msg) = msg else {
                     debug!("mailbox closed, stopping spawner");
                     break;

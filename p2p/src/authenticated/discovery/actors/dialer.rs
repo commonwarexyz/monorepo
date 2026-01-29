@@ -209,7 +209,6 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_stream::Config as StreamConfig;
-    use futures::StreamExt;
     use std::{
         net::{Ipv4Addr, SocketAddr},
         time::Duration,
@@ -260,7 +259,7 @@ mod tests {
                 Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
                 .with_label("supervisor")
-                .spawn(|_| async move { while supervisor_rx.next().await.is_some() {} });
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
 
             // Start the dialer
             let _handle = dialer.start(tracker_mailbox, supervisor);
@@ -270,7 +269,7 @@ mod tests {
             let deadline = context.current() + dial_frequency * 3;
             loop {
                 select! {
-                    msg = tracker_rx.next() => match msg {
+                    msg = tracker_rx.recv() => match msg {
                         Some(tracker::Message::Dialable { responder }) => {
                             let _ = responder.send(peers.clone());
                         }
