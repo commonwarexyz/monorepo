@@ -150,6 +150,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
+    use super::{FixedConfig, VariableConfig};
     use crate::{
         kv::{Deletable as _, Updatable as _},
         qmdb::{
@@ -160,14 +161,94 @@ pub mod tests {
             },
             Error,
         },
+        translator::{OneCap, TwoCap},
     };
     use commonware_runtime::{
+        buffer::PoolRef,
         deterministic::{self, Context},
         Metrics as _, Runner as _,
     };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
+    use std::num::{NonZeroU16, NonZeroUsize};
     use tracing::warn;
+
+    // Janky page & cache sizes to exercise boundary conditions.
+    const PAGE_SIZE: NonZeroU16 = NZU16!(88);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
+
+    /// Shared config factory for ordered fixed Current QMDB tests.
+    pub(crate) fn ordered_fixed_config(partition_prefix: &str) -> FixedConfig<OneCap> {
+        FixedConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: OneCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for ordered variable Current QMDB tests.
+    pub(crate) fn ordered_variable_config(partition_prefix: &str) -> VariableConfig<OneCap, ()> {
+        VariableConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: OneCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for unordered fixed Current QMDB tests.
+    pub(crate) fn unordered_fixed_config(partition_prefix: &str) -> FixedConfig<TwoCap> {
+        FixedConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
+
+    /// Shared config factory for unordered variable Current QMDB tests.
+    pub(crate) fn unordered_variable_config(partition_prefix: &str) -> VariableConfig<TwoCap, ()> {
+        VariableConfig {
+            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
+            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_items_per_blob: NZU64!(11),
+            mmr_write_buffer: NZUsize!(1024),
+            log_partition: format!("{partition_prefix}_partition_prefix"),
+            log_items_per_blob: NZU64!(7),
+            log_write_buffer: NZUsize!(1024),
+            log_compression: None,
+            log_codec_config: (),
+            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            translator: TwoCap,
+            thread_pool: None,
+            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        }
+    }
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns a mutable db; callers should commit if needed.

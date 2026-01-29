@@ -4,7 +4,7 @@
 //! used by both fixed and variable unordered QMDB implementations.
 
 use crate::{
-    index::unordered::Index,
+    index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
     mmr::Location,
@@ -18,7 +18,6 @@ use crate::{
         store, DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    translator::Translator,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
@@ -29,8 +28,11 @@ use commonware_utils::Array;
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 
 /// The generic Db type for unordered Current QMDB variants.
-pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
-    super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, D>;
+///
+/// This type is generic over the index type `I`, allowing it to be used with both regular
+/// and partitioned indices.
+pub type Db<E, C, K, V, I, H, const N: usize, S = Merkleized<H>, D = Durable> =
+    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N, S, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
 impl<
@@ -38,12 +40,12 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        T: Translator,
         const N: usize,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, K, V, H, T, N, M, D>
+    > Db<E, C, K, V, I, H, N, M, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -74,11 +76,11 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        T: Translator,
         const N: usize,
         D: store::State,
-    > Db<E, C, K, V, H, T, N, Merkleized<H>, D>
+    > Db<E, C, K, V, I, H, N, Merkleized<H>, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -112,10 +114,10 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        T: Translator,
         const N: usize,
-    > Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    > Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -164,12 +166,12 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        T: Translator,
         const N: usize,
         M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, H, T, N, M, D>
+    > kv::Gettable for Db<E, C, K, V, I, H, N, M, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -189,10 +191,10 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        T: Translator,
         const N: usize,
-    > kv::Updatable for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    > kv::Updatable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -208,10 +210,10 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
+        I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        T: Translator,
         const N: usize,
-    > kv::Deletable for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    > kv::Deletable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -222,14 +224,14 @@ where
 }
 
 // Batchable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<E, C, K, V, T, H, const N: usize> Batchable
-    for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+impl<E, C, K, V, I, H, const N: usize> Batchable
+    for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item = Operation<K, V>>,
     K: Array,
     V: ValueEncoding,
-    T: Translator,
+    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,

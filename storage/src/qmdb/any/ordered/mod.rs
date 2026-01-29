@@ -37,6 +37,7 @@ use std::{
 };
 
 pub mod fixed;
+pub mod partitioned;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
@@ -1057,10 +1058,14 @@ mod test {
     /// A type alias for the concrete [variable::Db] type used in these unit tests.
     type VariableDb = variable::Db<Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
-    /// A type alias for a variable db with Digest keys (for generic tests).
+    /// A type alias for a fixed db with Digest keys (for generic/shared tests).
+    type DigestFixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap>;
+
+    /// A type alias for a variable db with Digest keys (for generic/shared tests).
     type DigestVariableDb = variable::Db<Context, Digest, Digest, Sha256, TwoCap>;
 
-    /// Helper trait for testing Any databases that cycle through all four states.
+    /// Helper trait for testing Any databases with FixedBytes<4> keys.
+    /// Used for edge case tests that require specific key patterns.
     trait TestableAnyDb<V>:
         CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
     {
@@ -1068,6 +1073,18 @@ mod test {
 
     impl<T, V> TestableAnyDb<V> for T where
         T: CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
+    {
+    }
+
+    /// Helper trait for testing Any databases with Digest keys.
+    /// Used for generic tests that can be shared with partitioned variants.
+    pub(crate) trait DigestTestableAnyDb<V>:
+        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+    {
+    }
+
+    impl<T, V> DigestTestableAnyDb<V> for T where
+        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
     {
     }
 
@@ -1085,11 +1102,260 @@ mod test {
             .unwrap()
     }
 
+    /// Return a fixed db with Digest keys for generic tests.
+    async fn open_digest_fixed_db(context: Context) -> DigestFixedDb {
+        DigestFixedDb::init(context, fixed_db_config("digest_partition"))
+            .await
+            .unwrap()
+    }
+
     /// Return a variable db with Digest keys for generic tests.
     async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
         DigestVariableDb::init(context, variable_db_config("digest_partition"))
             .await
             .unwrap()
+    }
+
+    /// Test an empty database with Digest keys.
+    ///
+    /// This function is pub(crate) so partitioned variants can call it.
+    pub(crate) async fn test_digest_ordered_any_db_empty<D: DigestTestableAnyDb<Digest>>(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+    ) {
+        assert_eq!(db.op_count(), 1);
+        assert!(db.get_metadata().await.unwrap().is_none());
+        assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+
+        // Make sure closing/reopening gets us back to the same state, even after adding an
+        // uncommitted op, and even without a clean shutdown.
+        let d1 = Sha256::fill(1u8);
+        let d2 = Sha256::fill(2u8);
+        let root = db.root();
+        let mut db = db.into_mutable();
+        db.update(d1, d2).await.unwrap();
+        let db = reopen_db(context.with_label("reopen1")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.op_count(), 1);
+
+        // Test calling commit on an empty db.
+        let metadata = Sha256::fill(3u8);
+        let db = db.into_mutable();
+        let (db, range) = db.commit(Some(metadata)).await.unwrap();
+        let mut db = db.into_merkleized().await.unwrap();
+        assert_eq!(range.start, Location::new_unchecked(1));
+        assert_eq!(range.end, Location::new_unchecked(2));
+        assert_eq!(db.op_count(), 2); // floor op added
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        let root = db.root();
+        assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+
+        // Re-opening the DB without a clean shutdown should still recover the correct state.
+        let db = reopen_db(context.with_label("reopen2")).await;
+        assert_eq!(db.op_count(), 2);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+        assert_eq!(db.root(), root);
+
+        // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
+        let mut mutable_db = db.into_mutable();
+        for _ in 1..100 {
+            let (durable_db, _) = mutable_db.commit(None).await.unwrap();
+            assert_eq!(durable_db.op_count() - 1, durable_db.inactivity_floor_loc());
+            mutable_db = durable_db.into_mutable();
+        }
+        mutable_db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap()
+            .destroy()
+            .await
+            .unwrap();
+    }
+
+    /// Test basic CRUD and commit behavior with Digest keys.
+    ///
+    /// This function is pub(crate) so partitioned variants can call it.
+    pub(crate) async fn test_digest_ordered_any_db_basic<D: DigestTestableAnyDb<Digest>>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+    ) {
+        // Build a db with 2 keys and make sure updates and deletions of those keys work as
+        // expected.
+        let key1 = Sha256::fill(1u8);
+        let key2 = Sha256::fill(2u8);
+        let val1 = Sha256::fill(3u8);
+        let val2 = Sha256::fill(4u8);
+
+        assert!(db.get(&key1).await.unwrap().is_none());
+        assert!(db.get(&key2).await.unwrap().is_none());
+
+        let mut db = db.into_mutable();
+        assert!(db.create(key1, val1).await.unwrap());
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
+        assert!(db.get(&key2).await.unwrap().is_none());
+
+        assert!(db.create(key2, val2).await.unwrap());
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
+
+        db.delete(key1).await.unwrap();
+        assert!(db.get(&key1).await.unwrap().is_none());
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
+
+        let new_val = Sha256::fill(5u8);
+        db.update(key1, new_val).await.unwrap();
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
+
+        db.update(key2, new_val).await.unwrap();
+        assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
+
+        // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
+        assert_eq!(db.op_count(), 9);
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
+
+        // Make sure create won't modify active keys.
+        assert!(!db.create(key1, val1).await.unwrap());
+        assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
+
+        // Delete all keys.
+        assert!(db.delete(key1).await.unwrap());
+        assert!(db.delete(key2).await.unwrap());
+        assert!(db.get(&key1).await.unwrap().is_none());
+        assert!(db.get(&key2).await.unwrap().is_none());
+
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
+
+        // Multiple deletions of the same key should be a no-op.
+        let prev_op_count = db.op_count();
+        let mut db = db.into_mutable();
+        // Note: commit always adds a floor op, so op_count will increase by 1 after commit.
+        assert!(!db.delete(key1).await.unwrap());
+        assert_eq!(db.op_count(), prev_op_count);
+
+        // Deletions of non-existent keys should be a no-op.
+        let key3 = Sha256::fill(6u8);
+        assert!(!db.delete(key3).await.unwrap());
+        assert_eq!(db.op_count(), prev_op_count);
+
+        // Make sure closing/reopening gets us back to the same state.
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
+        let op_count = db.op_count();
+        let root = db.root();
+        let db = reopen_db(context.with_label("reopen1")).await;
+        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.root(), root);
+        let mut db = db.into_mutable();
+
+        // Re-activate the keys by updating them.
+        db.update(key1, val1).await.unwrap();
+        db.update(key2, val2).await.unwrap();
+        db.delete(key1).await.unwrap();
+        db.update(key2, val1).await.unwrap();
+        db.update(key1, val2).await.unwrap();
+
+        let db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
+
+        // Confirm close/reopen gets us back to the same state.
+        let op_count = db.op_count();
+        let root = db.root();
+        let db = reopen_db(context.with_label("reopen2")).await;
+
+        assert_eq!(db.root(), root);
+        assert_eq!(db.op_count(), op_count);
+
+        // Commit will raise the inactivity floor, which won't affect state but will affect the
+        // root.
+        let db = db.into_mutable();
+        let mut db = db
+            .commit(None)
+            .await
+            .unwrap()
+            .0
+            .into_merkleized()
+            .await
+            .unwrap();
+
+        assert!(db.root() != root);
+
+        // Pruning inactive ops should not affect current state or root.
+        let root = db.root();
+        db.prune(db.inactivity_floor_loc()).await.unwrap();
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced("WARN")]
+    fn test_digest_ordered_any_fixed_db_empty() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_digest_fixed_db(context.with_label("initial")).await;
+            test_digest_ordered_any_db_empty(context, db, |ctx| Box::pin(open_digest_fixed_db(ctx)))
+                .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_digest_ordered_any_variable_db_empty() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_digest_variable_db(context.with_label("initial")).await;
+            test_digest_ordered_any_db_empty(context, db, |ctx| {
+                Box::pin(open_digest_variable_db(ctx))
+            })
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_digest_ordered_any_fixed_db_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_digest_fixed_db(context.with_label("initial")).await;
+            test_digest_ordered_any_db_basic(context, db, |ctx| Box::pin(open_digest_fixed_db(ctx)))
+                .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_digest_ordered_any_variable_db_basic() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let db = open_digest_variable_db(context.with_label("initial")).await;
+            test_digest_ordered_any_db_basic(context, db, |ctx| {
+                Box::pin(open_digest_variable_db(ctx))
+            })
+            .await;
+        });
     }
 
     async fn test_ordered_any_db_empty<D: TestableAnyDb<Digest>>(

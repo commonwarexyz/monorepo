@@ -1,6 +1,6 @@
 //! Test trait implementations for the ordered Current QMDB.
 
-use super::{fixed, variable};
+use super::{fixed, partitioned, variable};
 use crate::{
     mmr::Location,
     qmdb::{
@@ -236,6 +236,246 @@ impl<
         T: Translator,
         const N: usize,
     > BitmapPrunedBits for variable::Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+where
+    VariableOperation<K, V>: Read,
+{
+    fn pruned_bits(&self) -> u64 {
+        self.status.pruned_bits()
+    }
+
+    fn get_bit(&self, index: u64) -> bool {
+        self.status.get_bit(index)
+    }
+
+    fn oldest_retained(&self) -> u64 {
+        *self.oldest_retained_loc()
+    }
+}
+
+// =============================================================================
+// Partitioned Fixed variant test trait implementations
+// =============================================================================
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > CleanAny for partitioned::fixed::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+{
+    type Mutable = partitioned::fixed::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > UnmerkleizedDurableAny
+    for partitioned::fixed::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>
+{
+    type Digest = H::Digest;
+    type Operation = FixedOperation<K, V>;
+    type Mutable = partitioned::fixed::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
+    type Merkleized = partitioned::fixed::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized().await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > MerkleizedNonDurableAny
+    for partitioned::fixed::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>
+{
+    type Mutable = partitioned::fixed::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > MutableAny for partitioned::fixed::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>
+{
+    type Digest = H::Digest;
+    type Operation = FixedOperation<K, V>;
+    type Durable = partitioned::fixed::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>;
+    type Merkleized = partitioned::fixed::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>;
+
+    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized().await
+    }
+
+    fn steps(&self) -> u64 {
+        self.any.durable_state.steps
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > BitmapPrunedBits for partitioned::fixed::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+{
+    fn pruned_bits(&self) -> u64 {
+        self.status.pruned_bits()
+    }
+
+    fn get_bit(&self, index: u64) -> bool {
+        self.status.get_bit(index)
+    }
+
+    fn oldest_retained(&self) -> u64 {
+        *self.oldest_retained_loc()
+    }
+}
+
+// =============================================================================
+// Partitioned Variable variant test trait implementations
+// =============================================================================
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > CleanAny for partitioned::variable::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+where
+    VariableOperation<K, V>: Read,
+{
+    type Mutable = partitioned::variable::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > UnmerkleizedDurableAny
+    for partitioned::variable::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>
+where
+    VariableOperation<K, V>: Read,
+{
+    type Digest = H::Digest;
+    type Operation = VariableOperation<K, V>;
+    type Mutable = partitioned::variable::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
+    type Merkleized = partitioned::variable::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized().await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > MerkleizedNonDurableAny
+    for partitioned::variable::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>
+where
+    VariableOperation<K, V>: Read,
+{
+    type Mutable = partitioned::variable::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
+
+    fn into_mutable(self) -> Self::Mutable {
+        self.into_mutable()
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > MutableAny for partitioned::variable::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>
+where
+    VariableOperation<K, V>: Read,
+{
+    type Digest = H::Digest;
+    type Operation = VariableOperation<K, V>;
+    type Durable = partitioned::variable::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>;
+    type Merkleized = partitioned::variable::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>;
+
+    async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
+        self.commit(metadata).await
+    }
+
+    async fn into_merkleized(self) -> Result<Self::Merkleized, Error> {
+        self.into_merkleized().await
+    }
+
+    fn steps(&self) -> u64 {
+        self.any.durable_state.steps
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+    > BitmapPrunedBits for partitioned::variable::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
 where
     VariableOperation<K, V>: Read,
 {
