@@ -427,12 +427,11 @@ pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
     governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
 >;
 
-/// Interface that any task scheduler must implement to provide
-/// time-based operations.
+/// Interface for reading the current time.
 ///
-/// It is necessary to mock time to provide deterministic execution
-/// of arbitrary tasks.
-pub trait Clock:
+/// This is a subset of [Clock] that only provides time reading, without
+/// sleep functionality. Useful for timing operations where sleep is not needed.
+pub trait RawClock:
     governor::clock::Clock<Instant = SystemTime>
     + governor::clock::ReasonablyRealtime
     + Clone
@@ -442,7 +441,14 @@ pub trait Clock:
 {
     /// Returns the current time.
     fn current(&self) -> SystemTime;
+}
 
+/// Interface that any task scheduler must implement to provide
+/// time-based operations.
+///
+/// It is necessary to mock time to provide deterministic execution
+/// of arbitrary tasks.
+pub trait Clock: RawClock {
     /// Sleep for the given duration.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
 

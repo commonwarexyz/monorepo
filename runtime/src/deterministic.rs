@@ -58,7 +58,7 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked, RawClock,
     Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
@@ -300,7 +300,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<BoxDynRng>,
-    time: Mutex<SystemTime>,
+    clock: DeterministicClock,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
@@ -317,7 +317,7 @@ impl Executor {
         #[cfg(feature = "external")]
         std::thread::sleep(self.cycle);
 
-        let mut time = self.time.lock().unwrap();
+        let mut time = self.clock.time.lock().unwrap();
         *time = time
             .checked_add(self.cycle)
             .expect("executor time overflowed");
@@ -346,7 +346,7 @@ impl Executor {
         }
 
         skip_until.map_or(current, |deadline| {
-            let mut time = self.time.lock().unwrap();
+            let mut time = self.clock.time.lock().unwrap();
             *time = deadline;
             let now = *time;
             trace!(now = now.epoch_millis(), "time skipped");
@@ -387,7 +387,7 @@ pub struct Checkpoint {
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
     rng: Mutex<BoxDynRng>,
-    time: Mutex<SystemTime>,
+    clock: DeterministicClock,
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
@@ -476,7 +476,7 @@ impl Runner {
         let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
-                let current = executor.time.lock().unwrap();
+                let current = executor.clock.time.lock().unwrap();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
                         // Drop the lock before panicking to avoid mutex poisoning.
@@ -624,7 +624,7 @@ impl Runner {
             deadline: executor.deadline,
             auditor: executor.auditor,
             rng: executor.rng,
-            time: executor.time,
+            clock: executor.clock,
             storage,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
@@ -798,7 +798,45 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
+type Storage = MeteredStorage<DeterministicClock, AuditedStorage<MemStorage>>;
+
+/// A lightweight clock implementation for the deterministic runtime.
+#[derive(Clone)]
+pub struct DeterministicClock {
+    time: Arc<Mutex<SystemTime>>,
+}
+
+impl DeterministicClock {
+    const fn new(time: Arc<Mutex<SystemTime>>) -> Self {
+        Self { time }
+    }
+}
+
+impl GClock for DeterministicClock {
+    type Instant = SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        *self.time.lock().unwrap()
+    }
+}
+
+impl ReasonablyRealtime for DeterministicClock {}
+
+impl crate::RawClock for DeterministicClock {
+    fn current(&self) -> SystemTime {
+        *self.time.lock().unwrap()
+    }
+}
+
+impl Clock for DeterministicClock {
+    fn sleep(&self, _duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        std::future::pending()
+    }
+
+    fn sleep_until(&self, _deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        std::future::pending()
+    }
+}
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -807,6 +845,7 @@ pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
     executor: Weak<Executor>,
+    clock: DeterministicClock,
     network: Arc<Network>,
     storage: Arc<Storage>,
     tree: Arc<Tree>,
@@ -821,6 +860,7 @@ impl Clone for Context {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
             executor: self.executor.clone(),
+            clock: self.clock.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
 
@@ -843,8 +883,10 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
+        let clock = DeterministicClock::new(Arc::new(Mutex::new(start_time)));
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
+            clock.clone(),
             AuditedStorage::new(MemStorage::default(), auditor.clone()),
             runtime_registry,
         );
@@ -862,7 +904,7 @@ impl Context {
             metrics,
             auditor,
             rng: Mutex::new(cfg.rng),
-            time: Mutex::new(start_time),
+            clock: clock.clone(),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
@@ -875,6 +917,7 @@ impl Context {
                 name: String::new(),
                 attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
+                clock,
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 tree: Tree::root(),
@@ -917,7 +960,7 @@ impl Context {
             deadline: checkpoint.deadline,
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
-            time: checkpoint.time,
+            clock: checkpoint.clock.clone(),
             dns: checkpoint.dns,
 
             // New state for the new runtime
@@ -934,6 +977,7 @@ impl Context {
                 name: String::new(),
                 attributes: Vec::new(),
                 executor: Arc::downgrade(&executor),
+                clock: checkpoint.clock,
                 network: Arc::new(network),
                 storage: checkpoint.storage,
                 tree: Tree::root(),
@@ -1249,7 +1293,7 @@ impl Future for Sleeper {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let executor = self.executor();
         {
-            let current_time = *executor.time.lock().unwrap();
+            let current_time = executor.clock.current();
             if current_time >= self.time {
                 return Poll::Ready(());
             }
@@ -1265,11 +1309,13 @@ impl Future for Sleeper {
     }
 }
 
-impl Clock for Context {
+impl crate::RawClock for Context {
     fn current(&self) -> SystemTime {
-        *self.executor().time.lock().unwrap()
+        self.clock.current()
     }
+}
 
+impl Clock for Context {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         let deadline = self
             .current()
@@ -1327,7 +1373,7 @@ where
 
         // Only allow the task to progress once the sampled delay has elapsed.
         let executor = this.executor.upgrade().expect("executor already dropped");
-        let current_time = *executor.time.lock().unwrap();
+        let current_time = executor.clock.current();
         if current_time < *this.target {
             // Register exactly once with the deterministic sleeper queue so the executor
             // wakes us once the clock reaches the scheduled target time.
