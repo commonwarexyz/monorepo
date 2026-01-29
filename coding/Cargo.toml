@@ -36,7 +36,6 @@ bench = false
 [dev-dependencies]
 commonware-conformance.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 

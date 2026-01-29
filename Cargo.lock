@@ -1115,7 +1115,6 @@ dependencies = [
  "criterion",
  "futures",
  "num-rational",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1262,6 +1261,7 @@ dependencies = [
  "commonware-conformance",
  "commonware-math",
  "commonware-parallel",
+ "commonware-test",
  "commonware-utils",
  "crc",
  "crc-fast",
@@ -1273,7 +1273,6 @@ dependencies = [
  "num-rational",
  "num-traits",
  "p256 0.13.2",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1420,11 +1419,20 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-parallel",
+ "commonware-test",
  "commonware-utils",
- "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "commonware-math-fuzz"
+version = "0.0.65"
+dependencies = [
+ "arbitrary",
+ "commonware-math",
+ "libfuzzer-sys",
 ]
 
 [[package]]
@@ -1681,6 +1689,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-test"
+version = "0.0.65"
+dependencies = [
+ "arbitrary",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
 ]
 
 [[package]]

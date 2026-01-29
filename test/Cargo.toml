@@ -1,0 +1,26 @@
+[package]
+name = "commonware-test"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Simplify testing and fuzzing of distributed systems."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/test"
+documentation = "https://docs.rs/commonware-test"
+
+[lints]
+workspace = true
+
+[dependencies]
+arbitrary.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+rand_chacha.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+
+[lib]
+bench = false

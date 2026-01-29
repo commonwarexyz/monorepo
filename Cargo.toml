@@ -17,6 +17,7 @@ members = [
     "runtime",
     "storage",
     "stream",
+    "test",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -33,6 +34,7 @@ members = [
     "collector/fuzz",
     "consensus/fuzz",
     "cryptography/fuzz",
+    "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
     "stream/fuzz",
@@ -97,6 +99,7 @@ commonware-resolver = { version = "0.0.65", path = "resolver" }
 commonware-runtime = { version = "0.0.65", path = "runtime" }
 commonware-storage = { version = "0.0.65", path = "storage", default-features = false }
 commonware-stream = { version = "0.0.65", path = "stream" }
+commonware-test = { version = "0.0.65", path = "test" }
 commonware-utils = { version = "0.0.65", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 crc = "3.4.0"
@@ -130,6 +133,7 @@ proc-macro-crate = "3.4.0"
 proc-macro2 = "1.0"
 prometheus-client = "0.24.0"
 proptest = "1.8.0"
+proptest-derive = "0.5.1"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quote = "1.0"
