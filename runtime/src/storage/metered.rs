@@ -237,10 +237,9 @@ mod tests {
             .with_storage_directory(std::env::temp_dir().join("metered_storage_tokio_test"));
         let runner = tokio_runtime::Runner::new(cfg);
         runner.start(|context| async move {
-            context.remove("metered_test", None).await.ok();
-
             let mut registry = Registry::default();
-            let storage = Storage::new(tokio_runtime::TokioClock, context.clone(), &mut registry);
+            let inner = MemoryStorage::default();
+            let storage = Storage::new(context, inner, &mut registry);
 
             run_storage_tests(storage.clone()).await;
             test_metered_blob_metrics(&storage).await;

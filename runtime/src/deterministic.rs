@@ -58,8 +58,8 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked, RawClock,
-    Spawner as _, METRICS_PREFIX,
+    validate_label, Clock as ClockTrait, Error, Execution, Handle, ListenerOf, Metrics as _,
+    Panicked, RawClock, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -300,7 +300,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<BoxDynRng>,
-    clock: DeterministicClock,
+    clock: Clock,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     shutdown: Mutex<Stopper>,
@@ -387,7 +387,7 @@ pub struct Checkpoint {
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
     rng: Mutex<BoxDynRng>,
-    clock: DeterministicClock,
+    clock: Clock,
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
@@ -798,21 +798,21 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<DeterministicClock, AuditedStorage<MemStorage>>;
+type Storage = MeteredStorage<Clock, AuditedStorage<MemStorage>>;
 
 /// A lightweight clock implementation for the deterministic runtime.
 #[derive(Clone)]
-pub struct DeterministicClock {
+pub struct Clock {
     time: Arc<Mutex<SystemTime>>,
 }
 
-impl DeterministicClock {
+impl Clock {
     const fn new(time: Arc<Mutex<SystemTime>>) -> Self {
         Self { time }
     }
 }
 
-impl GClock for DeterministicClock {
+impl GClock for Clock {
     type Instant = SystemTime;
 
     fn now(&self) -> Self::Instant {
@@ -820,9 +820,9 @@ impl GClock for DeterministicClock {
     }
 }
 
-impl ReasonablyRealtime for DeterministicClock {}
+impl ReasonablyRealtime for Clock {}
 
-impl crate::RawClock for DeterministicClock {
+impl crate::RawClock for Clock {
     fn current(&self) -> SystemTime {
         *self.time.lock().unwrap()
     }
@@ -835,7 +835,7 @@ pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
     executor: Weak<Executor>,
-    clock: DeterministicClock,
+    clock: Clock,
     network: Arc<Network>,
     storage: Arc<Storage>,
     tree: Arc<Tree>,
@@ -873,7 +873,7 @@ impl Context {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let clock = DeterministicClock::new(Arc::new(Mutex::new(start_time)));
+        let clock = Clock::new(Arc::new(Mutex::new(start_time)));
         let auditor = Arc::new(Auditor::default());
         let storage = MeteredStorage::new(
             clock.clone(),
@@ -1305,7 +1305,7 @@ impl crate::RawClock for Context {
     }
 }
 
-impl Clock for Context {
+impl ClockTrait for Context {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         let deadline = self
             .current()

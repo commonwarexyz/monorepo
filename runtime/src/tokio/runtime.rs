@@ -18,8 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    Clock, Error, Execution, Handle, Metrics as _, RawClock, SinkOf, Spawner as _, StreamOf,
-    METRICS_PREFIX,
+    Clock as ClockTrait, Error, Execution, Handle, Metrics as _, RawClock, SinkOf, Spawner as _,
+    StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
@@ -279,7 +279,7 @@ impl crate::Runner for Runner {
         runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize storage
-        let clock = TokioClock;
+        let clock = Clock;
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
                 let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
@@ -368,9 +368,9 @@ impl crate::Runner for Runner {
 
 /// A lightweight clock implementation for the tokio runtime.
 #[derive(Clone, Copy)]
-pub struct TokioClock;
+pub struct Clock;
 
-impl GClock for TokioClock {
+impl GClock for Clock {
     type Instant = SystemTime;
 
     fn now(&self) -> Self::Instant {
@@ -378,15 +378,15 @@ impl GClock for TokioClock {
     }
 }
 
-impl ReasonablyRealtime for TokioClock {}
+impl ReasonablyRealtime for Clock {}
 
-impl crate::RawClock for TokioClock {
+impl crate::RawClock for Clock {
     fn current(&self) -> SystemTime {
         SystemTime::now()
     }
 }
 
-impl Clock for TokioClock {
+impl ClockTrait for Clock {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         tokio::time::sleep(duration)
     }
@@ -401,9 +401,9 @@ impl Clock for TokioClock {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<TokioClock, IoUringStorage>;
+        type Storage = MeteredStorage<Clock, IoUringStorage>;
     } else {
-        type Storage = MeteredStorage<TokioClock, TokioStorage>;
+        type Storage = MeteredStorage<Clock, TokioStorage>;
     }
 }
 
@@ -637,17 +637,17 @@ impl crate::Metrics for Context {
 
 impl crate::RawClock for Context {
     fn current(&self) -> SystemTime {
-        TokioClock.current()
+        Clock.current()
     }
 }
 
-impl Clock for Context {
+impl ClockTrait for Context {
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        TokioClock.sleep(duration)
+        Clock.sleep(duration)
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        TokioClock.sleep_until(deadline)
+        Clock.sleep_until(deadline)
     }
 }
 
