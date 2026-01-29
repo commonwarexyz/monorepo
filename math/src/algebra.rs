@@ -317,234 +317,214 @@ pub trait Random {
     fn random(rng: impl CryptoRngCore) -> Self;
 }
 
-#[cfg(any(feature = "test_strategies", test))]
+#[cfg(any(test, feature = "arbitrary"))]
 pub mod test_suites {
     use super::*;
-    use proptest::{
-        prelude::*,
-        test_runner::{Config, TestRunner},
-    };
 
-    // This alias exists because I got tired of typing this out so many times.
-    type TestResult = Result<(), TestCaseError>;
-
-    fn run_proptest<T: Debug>(
-        file: &'static str,
-        strat: &impl Strategy<Value = T>,
-        test: impl Fn(T) -> TestResult,
-    ) {
-        let config = Config::default().clone_with_source_file(file);
-        TestRunner::new(config).run(strat, test).unwrap()
-    }
-
-    fn check_add_assign<T: Additive>((a, b): (T, T)) -> TestResult {
+    fn check_add_assign<T: Additive>(a: T, b: T) {
         let mut acc = a.clone();
         acc += &b;
-        prop_assert_eq!(acc, a + &b, "+= does not match +");
-        Ok(())
+        assert_eq!(acc, a + &b, "+= does not match +");
     }
 
-    fn check_add_commutes<T: Additive>((a, b): (T, T)) -> TestResult {
-        prop_assert_eq!(a.clone() + &b, b + &a, "+ not commutative");
-        Ok(())
+    fn check_add_commutes<T: Additive>(a: T, b: T) {
+        assert_eq!(a.clone() + &b, b + &a, "+ not commutative");
     }
 
-    fn check_add_associates<T: Additive>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!((a.clone() + &b) + &c, a + &(b + &c), "+ not associative");
-        Ok(())
+    fn check_add_associates<T: Additive>(a: T, b: T, c: T) {
+        assert_eq!((a.clone() + &b) + &c, a + &(b + &c), "+ not associative");
     }
 
-    fn check_add_zero<T: Additive>(a: T) -> TestResult {
-        prop_assert_eq!(T::zero() + &a, a, "a + 0 != a");
-        Ok(())
+    fn check_add_zero<T: Additive>(a: T) {
+        assert_eq!(T::zero() + &a, a, "a + 0 != a");
     }
 
-    fn check_add_neg_self<T: Additive>(a: T) -> TestResult {
+    fn check_add_neg_self<T: Additive>(a: T) {
         let neg_a = -a.clone();
-        prop_assert_eq!(T::zero(), a + &neg_a, "a - a != 0");
-        Ok(())
+        assert_eq!(T::zero(), a + &neg_a, "a - a != 0");
     }
 
-    fn check_sub_vs_add_neg<T: Additive>((a, b): (T, T)) -> TestResult {
-        prop_assert_eq!(a.clone() - &b, a + &-b, "a - b != a + (-b)");
-        Ok(())
+    fn check_sub_vs_add_neg<T: Additive>(a: T, b: T) {
+        assert_eq!(a.clone() - &b, a + &-b, "a - b != a + (-b)");
     }
 
-    fn check_sub_assign<T: Additive>((a, b): (T, T)) -> TestResult {
+    fn check_sub_assign<T: Additive>(a: T, b: T) {
         let mut acc = a.clone();
         acc -= &b;
-        prop_assert_eq!(acc, a - &b, "-= different from -");
-        Ok(())
+        assert_eq!(acc, a - &b, "-= different from -");
     }
 
     /// Run the test suite for the [`Additive`] trait.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_additive<T: Additive>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        let strat2 = &(strat, strat);
-        let strat3 = &(strat, strat, strat);
-
-        run_proptest(file, strat2, check_add_assign);
-        run_proptest(file, strat2, check_add_commutes);
-        run_proptest(file, strat3, check_add_associates);
-        run_proptest(file, strat, check_add_zero);
-        run_proptest(file, strat, check_add_neg_self);
-        run_proptest(file, strat2, check_sub_vs_add_neg);
-        run_proptest(file, strat2, check_sub_assign);
+    pub fn test_additive<T: Additive + for<'a> arbitrary::Arbitrary<'a>>() {
+        commonware_test::test(|u| {
+            let a: T = u.arbitrary()?;
+            let b: T = u.arbitrary()?;
+            let c: T = u.arbitrary()?;
+            check_add_assign(a.clone(), b.clone());
+            check_add_commutes(a.clone(), b.clone());
+            check_add_associates(a.clone(), b.clone(), c);
+            check_add_zero(a.clone());
+            check_add_neg_self(a.clone());
+            check_sub_vs_add_neg(a.clone(), b.clone());
+            check_sub_assign(a, b);
+            Ok(())
+        });
     }
 
-    fn check_mul_assign<T: Multiplicative>((a, b): (T, T)) -> TestResult {
+    fn check_mul_assign<T: Multiplicative>(a: T, b: T) {
         let mut acc = a.clone();
         acc *= &b;
-        prop_assert_eq!(acc, a * &b, "*= different from *");
-        Ok(())
+        assert_eq!(acc, a * &b, "*= different from *");
     }
 
-    fn check_mul_commutes<T: Multiplicative>((a, b): (T, T)) -> TestResult {
-        prop_assert_eq!(a.clone() * &b, b * &a, "* not commutative");
-        Ok(())
+    fn check_mul_commutes<T: Multiplicative>(a: T, b: T) {
+        assert_eq!(a.clone() * &b, b * &a, "* not commutative");
     }
 
-    fn check_mul_associative<T: Multiplicative>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!((a.clone() * &b) * &c, a * &(b * &c), "* not associative");
-        Ok(())
+    fn check_mul_associative<T: Multiplicative>(a: T, b: T, c: T) {
+        assert_eq!((a.clone() * &b) * &c, a * &(b * &c), "* not associative");
     }
 
     /// Run the test suite for the [`Multiplicative`] trait.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_multiplicative<T: Multiplicative>(
-        file: &'static str,
-        strat: &impl Strategy<Value = T>,
-    ) {
-        let strat2 = &(strat, strat);
-        let strat3 = &(strat, strat, strat);
-
-        run_proptest(file, strat2, check_mul_assign);
-        run_proptest(file, strat2, check_mul_commutes);
-        run_proptest(file, strat3, check_mul_associative);
+    pub fn test_multiplicative<T: Multiplicative + for<'a> arbitrary::Arbitrary<'a>>() {
+        commonware_test::test(|u| {
+            let a: T = u.arbitrary()?;
+            let b: T = u.arbitrary()?;
+            let c: T = u.arbitrary()?;
+            check_mul_assign(a.clone(), b.clone());
+            check_mul_commutes(a.clone(), b.clone());
+            check_mul_associative(a, b, c);
+            Ok(())
+        });
     }
 
-    fn check_mul_one<T: Ring>(a: T) -> TestResult {
-        prop_assert_eq!(T::one() * &a, a, "a * 1 != a");
-        Ok(())
+    fn check_mul_one<T: Ring>(a: T) {
+        assert_eq!(T::one() * &a, a, "a * 1 != a");
     }
 
-    fn check_mul_distributes<T: Ring>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!(
+    fn check_mul_distributes<T: Ring>(a: T, b: T, c: T) {
+        assert_eq!(
             (a.clone() + &b) * &c,
             a * &c + &(b * &c),
             "(a + b) * c != a * c + b * c"
         );
-        Ok(())
     }
 
     /// Run the test suite for the [`Ring`] trait.
     ///
     /// This will also run [`test_additive`] and [`test_multiplicative`].
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_ring<T: Ring>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        test_additive(file, strat);
-        test_multiplicative(file, strat);
+    pub fn test_ring<T: Ring + for<'a> arbitrary::Arbitrary<'a>>() {
+        test_additive::<T>();
+        test_multiplicative::<T>();
 
-        let strat3 = &(strat, strat, strat);
-
-        run_proptest(file, strat, check_mul_one);
-        run_proptest(file, strat3, check_mul_distributes);
+        commonware_test::test(|u| {
+            let a: T = u.arbitrary()?;
+            let b: T = u.arbitrary()?;
+            let c: T = u.arbitrary()?;
+            check_mul_one(a.clone());
+            check_mul_distributes(a, b, c);
+            Ok(())
+        });
     }
 
-    fn check_inv<T: Field>(a: T) -> TestResult {
+    fn check_inv<T: Field>(a: T) {
         if a == T::zero() {
-            prop_assert_eq!(T::zero(), a.inv(), "0.inv() != 0");
+            assert_eq!(T::zero(), a.inv(), "0.inv() != 0");
         } else {
-            prop_assert_eq!(a.inv() * &a, T::one(), "a * a.inv() != 1");
+            assert_eq!(a.inv() * &a, T::one(), "a * a.inv() != 1");
         }
-        Ok(())
     }
 
     /// Run the test suite for the [`Field`] trait.
     ///
     /// This will also run [`test_ring`].
-    ///
-    /// Ue `file!()` for the first argument.
-    pub fn test_field<T: Field>(file: &'static str, strat: &impl Strategy<Value = T>) {
-        test_ring(file, strat);
+    pub fn test_field<T: Field + for<'a> arbitrary::Arbitrary<'a>>() {
+        test_ring::<T>();
 
-        run_proptest(file, strat, check_inv);
+        commonware_test::test(|u| {
+            let a: T = u.arbitrary()?;
+            check_inv(a);
+            Ok(())
+        });
     }
 
-    fn check_scale_distributes<R, K: Space<R>>((a, b, x): (K, K, R)) -> TestResult {
-        prop_assert_eq!((a.clone() + &b) * &x, a * &x + &(b * &x));
-        Ok(())
+    fn check_scale_distributes<R, K: Space<R>>(a: K, b: K, x: R) {
+        assert_eq!((a.clone() + &b) * &x, a * &x + &(b * &x));
     }
 
-    fn check_scale_assign<R, K: Space<R>>((a, b): (K, R)) -> TestResult {
+    fn check_scale_assign<R, K: Space<R>>(a: K, b: R) {
         let mut acc = a.clone();
         acc *= &b;
-        prop_assert_eq!(acc, a * &b);
-        Ok(())
+        assert_eq!(acc, a * &b);
     }
 
-    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> TestResult {
+    fn check_msm_eq_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) {
         use commonware_parallel::Sequential;
-        prop_assert_eq!(
+        assert_eq!(
             msm_naive(points, scalars),
             K::msm(points, scalars, &Sequential)
         );
-        Ok(())
     }
 
     /// Run tests for [`Space`], assuming nothing about the scalar `R`.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_space<R: Debug, K: Space<R>>(
-        file: &'static str,
-        r_strat: &impl Strategy<Value = R>,
-        k_strat: &impl Strategy<Value = K>,
-    ) {
-        run_proptest(file, &(k_strat, k_strat, r_strat), check_scale_distributes);
-        run_proptest(file, &(k_strat, r_strat), check_scale_assign);
-        run_proptest(
-            file,
-            &(0..Config::default().max_default_size_range).prop_flat_map(|len| {
-                (
-                    prop::collection::vec(k_strat, len),
-                    prop::collection::vec(r_strat, len),
-                )
-            }),
-            |(points, scalars)| check_msm_eq_naive(&points, &scalars),
-        );
+    pub fn test_space<
+        R: Debug + for<'a> arbitrary::Arbitrary<'a>,
+        K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
+    >() {
+        commonware_test::test(|u| {
+            let a: K = u.arbitrary()?;
+            let b: K = u.arbitrary()?;
+            let x: R = u.arbitrary()?;
+            check_scale_distributes(a.clone(), b, x);
+            Ok(())
+        });
+        commonware_test::test(|u| {
+            let a: K = u.arbitrary()?;
+            let b: R = u.arbitrary()?;
+            check_scale_assign(a, b);
+            Ok(())
+        });
+        commonware_test::test(|u| {
+            let len: usize = u.int_in_range(0..=16)?;
+            let points: Vec<K> = (0..len)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let scalars: Vec<R> = (0..len)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            check_msm_eq_naive(&points, &scalars);
+            Ok(())
+        });
     }
 
-    fn check_scale_compat<R: Multiplicative, K: Space<R>>((a, b, c): (K, R, R)) -> TestResult {
-        prop_assert_eq!((a.clone() * &b) * &c, a * &(b * &c));
-        Ok(())
+    fn check_scale_compat<R: Multiplicative, K: Space<R>>(a: K, b: R, c: R) {
+        assert_eq!((a.clone() * &b) * &c, a * &(b * &c));
     }
 
     /// Run tests for [`Space`], assuming `R` is [`Multiplicative`].
     ///
     /// This will also run [`test_space`], but check additional compatibility
     /// properties with `R` having multiplication.
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_space_multiplicative<R: Multiplicative, K: Space<R>>(
-        file: &'static str,
-        r_strat: &impl Strategy<Value = R>,
-        k_strat: &impl Strategy<Value = K>,
-    ) {
-        test_space(file, r_strat, k_strat);
-        run_proptest(file, &(k_strat, r_strat, r_strat), check_scale_compat);
+    pub fn test_space_multiplicative<
+        R: Multiplicative + for<'a> arbitrary::Arbitrary<'a>,
+        K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
+    >() {
+        test_space::<R, K>();
+        commonware_test::test(|u| {
+            let a: K = u.arbitrary()?;
+            let b: R = u.arbitrary()?;
+            let c: R = u.arbitrary()?;
+            check_scale_compat(a, b, c);
+            Ok(())
+        });
     }
 
-    fn check_scale_one<R: Ring, K: Space<R>>(a: K) -> TestResult {
-        prop_assert_eq!(a.clone(), a * &R::one());
-        Ok(())
+    fn check_scale_one<R: Ring, K: Space<R>>(a: K) {
+        assert_eq!(a.clone(), a * &R::one());
     }
 
-    fn check_scale_zero<R: Ring, K: Space<R>>(a: K) -> TestResult {
-        prop_assert_eq!(K::zero(), a * &R::zero());
-        Ok(())
+    fn check_scale_zero<R: Ring, K: Space<R>>(a: K) {
+        assert_eq!(K::zero(), a * &R::zero());
     }
 
     /// Run tests for [`Space`] assuming that `R` is a [`Ring`].
@@ -553,34 +533,38 @@ pub mod test_suites {
     ///
     /// This additionally checks compatibility with [`Ring::one()`] and
     /// [`Additive::zero()`].
-    ///
-    /// Use `file!()` for the first argument.
-    pub fn test_space_ring<R: Ring, K: Space<R>>(
-        file: &'static str,
-        r_strat: &impl Strategy<Value = R>,
-        k_strat: &impl Strategy<Value = K>,
-    ) {
-        test_space_multiplicative(file, r_strat, k_strat);
+    pub fn test_space_ring<
+        R: Ring + for<'a> arbitrary::Arbitrary<'a>,
+        K: Space<R> + for<'a> arbitrary::Arbitrary<'a>,
+    >() {
+        test_space_multiplicative::<R, K>();
 
-        run_proptest(file, k_strat, check_scale_one);
-        run_proptest(file, k_strat, check_scale_zero);
+        commonware_test::test(|u| {
+            let a: K = u.arbitrary()?;
+            check_scale_one::<R, K>(a.clone());
+            check_scale_zero::<R, K>(a);
+            Ok(())
+        });
     }
 
-    fn check_hash_to_group<G: HashToGroup>(data: [[u8; 4]; 4]) -> TestResult {
+    fn check_hash_to_group<G: HashToGroup>(data: [[u8; 4]; 4]) {
         let (dst0, m0, dst1, m1) = (&data[0], &data[1], &data[2], &data[3]);
-        prop_assert_eq!(
+        assert_eq!(
             (dst0, m0) == (dst1, m1),
             G::hash_to_group(dst0, m0) == G::hash_to_group(dst1, m1)
         );
-        Ok(())
     }
 
     /// Run tests for [`HashToGroup`].
     ///
     /// This doesn't run any tests related to [`CryptoGroup`], just the hash
     /// to group functionality itself.
-    pub fn test_hash_to_group<G: HashToGroup>(file: &'static str) {
-        run_proptest(file, &any::<[[u8; 4]; 4]>(), check_hash_to_group::<G>);
+    pub fn test_hash_to_group<G: HashToGroup>() {
+        commonware_test::test(|u| {
+            let data: [[u8; 4]; 4] = u.arbitrary()?;
+            check_hash_to_group::<G>(data);
+            Ok(())
+        });
     }
 }
 
@@ -605,29 +589,29 @@ pub mod fuzz {
     impl Plan {
         pub fn run(self) {
             match self {
-                Plan::ExpOne(x) => {
+                Self::ExpOne(x) => {
                     assert_eq!(x.exp(&[1]), x);
                 }
-                Plan::ExpZero(x) => {
+                Self::ExpZero(x) => {
                     assert_eq!(x.exp(&[]), F::one());
                 }
-                Plan::Exp(x, a, b) => {
+                Self::Exp(x, a, b) => {
                     let a = u64::from(a);
                     let b = u64::from(b);
                     assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
                 }
-                Plan::ScaleOne(x) => {
+                Self::ScaleOne(x) => {
                     assert_eq!(x.scale(&[1]), x);
                 }
-                Plan::ScaleZero(x) => {
+                Self::ScaleZero(x) => {
                     assert_eq!(x.scale(&[]), F::zero());
                 }
-                Plan::Scale(x, a, b) => {
+                Self::Scale(x, a, b) => {
                     let a = u64::from(a);
                     let b = u64::from(b);
                     assert_eq!(x.scale(&[a + b]), x.scale(&[a]) + x.scale(&[b]));
                 }
-                Plan::Msm2(a, b) => {
+                Self::Msm2(a, b) => {
                     assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
                 }
             }

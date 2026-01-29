@@ -243,29 +243,6 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
-#[cfg(any(test, feature = "test_strategies"))]
-mod impl_proptest_arbitrary {
-    use super::*;
-    use proptest::prelude::*;
-
-    impl Arbitrary for F {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<u8>().prop_map_into().boxed()
-        }
-    }
-
-    impl Arbitrary for G {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<F>().prop_map(|x| Self::generator() * &x).boxed()
-        }
-    }
-}
 
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
@@ -282,10 +259,10 @@ pub mod fuzz {
     impl Plan {
         pub fn run(self) {
             match self {
-                Plan::FCodec(x) => {
+                Self::FCodec(x) => {
                     assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
                 }
-                Plan::GCodec(x) => {
+                Self::GCodec(x) => {
                     assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
                 }
             }
@@ -306,16 +283,15 @@ pub mod fuzz {
 mod test {
     use super::*;
     use crate::algebra;
-    use proptest::prelude::Arbitrary;
 
     #[test]
     fn test_field() {
-        algebra::test_suites::test_field(file!(), &F::arbitrary());
+        algebra::test_suites::test_field::<F>();
     }
 
     #[test]
     fn test_group() {
-        algebra::test_suites::test_space(file!(), &F::arbitrary(), &G::arbitrary());
+        algebra::test_suites::test_space::<F, G>();
     }
 
     #[cfg(feature = "arbitrary")]
