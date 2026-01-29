@@ -250,6 +250,7 @@ pub mod fuzz {
     use crate::algebra::test_suites;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::Encode as _;
+    use commonware_test::minifuzz;
 
     #[derive(Debug, Arbitrary)]
     pub enum Plan {
@@ -281,7 +282,7 @@ pub mod fuzz {
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
+        minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 

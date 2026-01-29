@@ -577,9 +577,7 @@ pub mod test_suites {
     ///
     /// Takes arbitrary data and checks that the hash function is deterministic.
     /// This doesn't check any properties related to [`CryptoGroup`].
-    pub fn fuzz_hash_to_group<G: HashToGroup>(
-        u: &mut Unstructured<'_>,
-    ) -> arbitrary::Result<()> {
+    pub fn fuzz_hash_to_group<G: HashToGroup>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let data: [[u8; 4]; 4] = u.arbitrary()?;
         check_hash_to_group::<G>(data);
         Ok(())
@@ -639,6 +637,6 @@ pub mod fuzz {
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
+        commonware_test::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }

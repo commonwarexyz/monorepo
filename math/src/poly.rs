@@ -490,8 +490,10 @@ mod impl_arbitrary {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::algebra::test_suites;
-    use crate::test::{F, G};
+    use crate::{
+        algebra::test_suites,
+        test::{F, G},
+    };
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
@@ -602,7 +604,7 @@ pub mod fuzz {
 
     #[test]
     fn test_fuzz() {
-        commonware_test::test(|u| u.arbitrary::<Plan>()?.run(u));
+        commonware_test::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
