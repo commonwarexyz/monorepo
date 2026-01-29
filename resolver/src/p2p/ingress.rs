@@ -1,7 +1,10 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{channels::fallible::AsyncFallibleExt, vec::NonEmptyVec, Span};
-use futures::channel::mpsc;
+use commonware_utils::{
+    channels::{fallible::AsyncFallibleExt, mpsc},
+    vec::NonEmptyVec,
+    Span,
+};
 
 type Predicate<K> = Box<dyn Fn(&K) -> bool + Send>;
 

@@ -41,8 +41,7 @@
 //! depends on the rate-limiting configuration of the underlying P2P network.
 
 use bytes::Bytes;
-use commonware_utils::Span;
-use futures::channel::oneshot;
+use commonware_utils::{channels::oneshot, Span};
 use std::future::Future;
 
 mod config;
@@ -86,7 +85,6 @@ mod tests {
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{non_empty_vec, NZU32};
-    use futures::StreamExt;
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
@@ -260,7 +258,7 @@ mod tests {
 
             mailbox1.fetch(key.clone()).await;
 
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -300,7 +298,7 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
             mailbox1.cancel(key.clone()).await;
 
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
@@ -370,7 +368,7 @@ mod tests {
 
             mailbox1.fetch(key.clone()).await;
 
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -412,7 +410,7 @@ mod tests {
             context.sleep(Duration::from_secs(5)).await;
             mailbox1.cancel(key.clone()).await;
 
-            let event = cons_out1.next().await.expect("Consumer channel closed");
+            let event = cons_out1.recv().await.expect("Consumer channel closed");
             match event {
                 Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
@@ -491,8 +489,8 @@ mod tests {
 
                 // Collect both events without assuming order
                 let mut events = Vec::new();
-                events.push(cons_out1.next().await.expect("Consumer channel closed"));
-                events.push(cons_out1.next().await.expect("Consumer channel closed"));
+                events.push(cons_out1.recv().await.expect("Consumer channel closed"));
+                events.push(cons_out1.recv().await.expect("Consumer channel closed"));
 
                 // Check that both keys were successfully fetched
                 let mut found_key2 = false;
@@ -562,7 +560,7 @@ mod tests {
             // Cancel before sending the fetch request, expecting no effect
             mailbox1.cancel(key.clone()).await;
             select! {
-                _ = cons_out1.next() => {
+                _ = cons_out1.recv() => {
                     panic!("unexpected event");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
@@ -570,7 +568,7 @@ mod tests {
 
             // Initiate fetch and wait for data to be delivered
             mailbox1.fetch(key.clone()).await;
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -582,7 +580,7 @@ mod tests {
             // Attempt to cancel after data has been delivered, expecting no effect
             mailbox1.cancel(key.clone()).await;
             select! {
-                _ = cons_out1.next() => {
+                _ = cons_out1.recv() => {
                     panic!("unexpected event");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
@@ -594,7 +592,7 @@ mod tests {
             mailbox1.cancel(key.clone()).await;
 
             // Make sure we receive a failure event
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
@@ -679,7 +677,7 @@ mod tests {
                 mailbox1.fetch(key_a.clone()).await;
 
                 // Wait for success event for keyA
-                let event = cons_out1.next().await.unwrap();
+                let event = cons_out1.recv().await.unwrap();
                 match event {
                     Event::Success(key_actual, value) => {
                         assert_eq!(key_actual, key_a);
@@ -699,7 +697,7 @@ mod tests {
             mailbox1.cancel(key_b.clone()).await;
 
             // Wait for failure event for keyB
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key_b);
@@ -762,7 +760,7 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should receive the data only once
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -773,7 +771,7 @@ mod tests {
 
             // Make sure we don't receive a second event for the duplicate fetch
             select! {
-                _ = cons_out1.next() => {
+                _ = cons_out1.recv() => {
                     panic!("Unexpected second event received for duplicate fetch");
                 },
                 _ = context.sleep(Duration::from_millis(500)) => {
@@ -835,7 +833,7 @@ mod tests {
             mailbox1.fetch(key1.clone()).await;
 
             // Wait for successful fetch
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key1);
@@ -864,7 +862,7 @@ mod tests {
             mailbox1.fetch(key2.clone()).await;
 
             // Wait for successful fetch
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key2);
@@ -950,7 +948,7 @@ mod tests {
                 .await;
 
             // Should eventually succeed from peer 3
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -1053,7 +1051,7 @@ mod tests {
             // Wait enough time for targets to fail and retry multiple times
             // The fetch should not succeed because peer 4 (which has data) is not targeted
             select! {
-                event = cons_out1.next() => {
+                event = cons_out1.recv() => {
                     panic!("Fetch should not succeed, but got: {event:?}");
                 },
                 _ = context.sleep(Duration::from_secs(3)) => {
@@ -1162,7 +1160,7 @@ mod tests {
             // Collect all three events
             let mut results = HashMap::new();
             for _ in 0..3 {
-                let event = cons_out1.next().await.unwrap();
+                let event = cons_out1.recv().await.unwrap();
                 match event {
                     Event::Success(key, value) => {
                         results.insert(key, value);
@@ -1255,7 +1253,7 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should now succeed from peer 3 (who has data but wasn't originally targeted)
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -1338,7 +1336,7 @@ mod tests {
 
             // Should still succeed from peer 3 (who has data but wasn't in the targeted call)
             // because the original fetch was "all" and shouldn't be restricted
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -1389,7 +1387,7 @@ mod tests {
             // Retain before fetching should have no effect
             mailbox1.retain(|_| true).await;
             select! {
-                _ = cons_out1.next() => {
+                _ = cons_out1.recv() => {
                     panic!("unexpected event");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
@@ -1404,7 +1402,7 @@ mod tests {
             mailbox1.retain(move |k| k != &key_clone).await;
 
             // Consumer should receive failed event
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
@@ -1420,7 +1418,7 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -1472,7 +1470,7 @@ mod tests {
             // Clear before fetching should have no effect
             mailbox1.clear().await;
             select! {
-                _ = cons_out1.next() => {
+                _ = cons_out1.recv() => {
                     panic!("unexpected event");
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
@@ -1485,7 +1483,7 @@ mod tests {
             mailbox1.clear().await;
 
             // Consumer should receive failed event
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Failed(key_actual) => {
                     assert_eq!(key_actual, key);
@@ -1501,7 +1499,7 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -1594,7 +1592,7 @@ mod tests {
             // Collect results
             let mut results = HashMap::new();
             for _ in 0..2 {
-                let event = cons_out1.next().await.unwrap();
+                let event = cons_out1.recv().await.unwrap();
                 match event {
                     Event::Success(key, value) => {
                         results.insert(key.clone(), value);
@@ -1687,7 +1685,7 @@ mod tests {
             // All 3 should eventually succeed (after rate limit resets)
             let mut results = HashMap::new();
             for _ in 0..3 {
-                let event = cons_out1.next().await.unwrap();
+                let event = cons_out1.recv().await.unwrap();
                 match event {
                     Event::Success(key, value) => {
                         results.insert(key.clone(), value);
@@ -1771,7 +1769,7 @@ mod tests {
             mailbox1.fetch(key.clone()).await;
 
             // Should succeed (from peer 2)
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(key_actual, value) => {
                     assert_eq!(key_actual, key);
@@ -1858,7 +1856,7 @@ mod tests {
 
             // Fetch to verify network is functional
             mailboxes[0].fetch(key.clone()).await;
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
@@ -1930,7 +1928,7 @@ mod tests {
 
             // Verify network is functional
             mailboxes[0].fetch(key.clone()).await;
-            let event = cons_out1.next().await.unwrap();
+            let event = cons_out1.recv().await.unwrap();
             match event {
                 Event::Success(_, value) => assert_eq!(value, Bytes::from("data for key 1")),
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),

@@ -20,12 +20,12 @@ use commonware_runtime::{
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{futures::Pool as FuturesPool, Span};
-use futures::{
-    channel::{mpsc, oneshot},
-    future::{self, Either},
-    StreamExt,
+use commonware_utils::{
+    channels::{mpsc, oneshot},
+    futures::Pool as FuturesPool,
+    Span,
 };
+use futures::future::{self, Either};
 use rand::Rng;
 use std::{collections::HashMap, marker::PhantomData};
 use tracing::{debug, error, trace, warn};
@@ -35,7 +35,7 @@ struct Serve<E: Clock, P: PublicKey> {
     timer: histogram::Timer<E>,
     peer: P,
     id: u64,
-    result: Result<Bytes, oneshot::Canceled>,
+    result: Result<Bytes, oneshot::error::RecvError>,
 }
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
@@ -191,7 +191,7 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            peer_set_update = peer_set_subscription.next() => {
+            peer_set_update = peer_set_subscription.recv() => {
                 let Some((id, _, all)) = peer_set_update else {
                     debug!("peer set subscription closed");
                     return;
@@ -217,7 +217,7 @@ impl<
                 self.fetcher.fetch(&mut sender).await;
             },
             // Handle mailbox messages
-            msg = self.mailbox.next() => {
+            msg = self.mailbox.recv() => {
                 let Some(msg) = msg else {
                     error!("mailbox closed");
                     return;
@@ -324,7 +324,7 @@ impl<
                     Ok(_) => {
                         self.metrics.serve.inc(Status::Success);
                     }
-                    Err(err) => {
+                    Err(ref err) => {
                         debug!(?err, ?peer, ?id, "serve failed");
                         timer.cancel();
                         self.metrics.serve.inc(Status::Failure);
@@ -373,7 +373,7 @@ impl<
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
         peer: P,
         id: u64,
-        response: Result<Bytes, oneshot::Canceled>,
+        response: Result<Bytes, oneshot::error::RecvError>,
         priority: bool,
     ) {
         // Encode message
