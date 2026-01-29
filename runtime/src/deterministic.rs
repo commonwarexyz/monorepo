@@ -828,16 +828,6 @@ impl crate::RawClock for DeterministicClock {
     }
 }
 
-impl Clock for DeterministicClock {
-    fn sleep(&self, _duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        std::future::pending()
-    }
-
-    fn sleep_until(&self, _deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        std::future::pending()
-    }
-}
-
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
 /// runtime.
