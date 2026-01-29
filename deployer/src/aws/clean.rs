@@ -1,7 +1,10 @@
 //! `clean` subcommand for `ec2`
 
 use crate::aws::{
-    s3::{self, delete_bucket_and_contents, get_bucket_name, is_no_such_bucket_error},
+    s3::{
+        self, delete_bucket_and_contents, delete_bucket_config, get_bucket_name,
+        is_no_such_bucket_error,
+    },
     Error, MONITORING_REGION,
 };
 use aws_config::Region;
@@ -26,11 +29,15 @@ pub async fn clean() -> Result<(), Error> {
                     bucket = bucket_name.as_str(),
                     "bucket does not exist, nothing to clean"
                 );
-                return Ok(());
+            } else {
+                return Err(e);
             }
-            return Err(e);
         }
     }
+
+    // Delete the config file so a new bucket name is generated on next use
+    delete_bucket_config();
+    info!("deleted bucket config");
 
     Ok(())
 }

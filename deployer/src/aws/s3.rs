@@ -21,16 +21,18 @@ use std::{
 };
 use tracing::{debug, info};
 
-/// Path to the deployer config file that stores the bucket name.
-fn config_path() -> PathBuf {
+/// Path to the bucket config file that stores the bucket name.
+fn bucket_config_path() -> PathBuf {
     let home = std::env::var("HOME").expect("$HOME is not configured");
-    PathBuf::from(home).join(".commonware-deployer")
+    PathBuf::from(home)
+        .join(".commonware_deployer")
+        .join("bucket")
 }
 
 /// Gets the bucket name, generating one if it doesn't exist.
-/// The bucket name is stored in ~/.commonware-deployer.
+/// The bucket name is stored in ~/.commonware_deployer/bucket.
 pub fn get_bucket_name() -> String {
-    let path = config_path();
+    let path = bucket_config_path();
 
     if let Ok(contents) = std::fs::read_to_string(&path) {
         let name = contents.trim();
@@ -42,9 +44,18 @@ pub fn get_bucket_name() -> String {
     let suffix = &uuid::Uuid::new_v4().simple().to_string()[..16];
     let bucket_name = format!("commonware-deployer-{suffix}");
 
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("failed to create deployer directory");
+    }
     std::fs::write(&path, &bucket_name).expect("failed to write bucket config");
 
     bucket_name
+}
+
+/// Deletes the bucket config file so a new bucket name is generated on next use.
+pub fn delete_bucket_config() {
+    let path = bucket_config_path();
+    let _ = std::fs::remove_file(path);
 }
 
 /// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
