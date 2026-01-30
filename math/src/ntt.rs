@@ -842,7 +842,13 @@ impl EvaluationVector {
     }
 
     /// Create an empty element of this struct, with no filled rows.
+    ///
+    /// `2^lg_rows` must be a valid `usize`.
     pub fn empty(lg_rows: usize, cols: usize) -> Self {
+        assert!(
+            lg_rows < usize::BITS as usize,
+            "2^lg_rows must be a valid usize"
+        );
         let data = Matrix::zero(1 << lg_rows, cols);
         let active = BitMap::zeroes(data.rows as u64);
         Self {

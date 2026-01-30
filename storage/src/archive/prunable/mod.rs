@@ -10,7 +10,7 @@
 //!
 //! # Format
 //!
-//! [Archive] uses a two-journal structure for efficient buffer pool usage:
+//! [Archive] uses a two-journal structure for efficient page cache usage:
 //!
 //! **Index Journal (segmented/fixed)** - Fixed-size entries for fast startup replay:
 //! ```text
@@ -21,7 +21,7 @@
 //! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
 //!
-//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no buffer pool):
+//! **Value Blob** - Raw values with CRC32 checksums (direct reads, no page cache):
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! |     Compressed Data (variable)    |   CRC32   |
@@ -93,8 +93,8 @@
 //!
 //! All reads (by index or key) first read the index entry from the index journal to get the
 //! value location (offset and size), then read the value from the value blob. The index journal
-//! uses a buffer pool for caching, so hot entries are served from memory. Values are read directly
-//! from disk without caching to avoid polluting the buffer pool with large values.
+//! uses a page cache for caching, so hot entries are served from memory. Values are read directly
+//! from disk without caching to avoid polluting the page cache with large values.
 //!
 //! # Compression
 //!
@@ -111,7 +111,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::PoolRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -128,7 +128,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo_index".into(),
-//!         key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo_value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -148,7 +148,7 @@
 //! ```
 
 use crate::translator::Translator;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
@@ -166,8 +166,8 @@ pub struct Config<T: Translator, C> {
     /// The partition to use for the key journal (stores index+key metadata).
     pub key_partition: String,
 
-    /// The buffer pool to use for the key journal.
-    pub key_buffer_pool: PoolRef,
+    /// The page cache to use for the key journal.
+    pub key_page_cache: CacheRef,
 
     /// The partition to use for the value blob (stores values).
     pub value_partition: String,
@@ -199,6 +199,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier},
         journal::Error as JournalError,
+        kv::tests::test_key,
         translator::{FourCap, TwoCap},
     };
     use commonware_codec::{DecodeExt, Error as CodecError};
@@ -214,14 +215,6 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_key(key: &str) -> FixedBytes<64> {
-        let mut buf = [0u8; 64];
-        let key = key.as_bytes();
-        assert!(key.len() <= buf.len());
-        buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
-    }
-
     #[test_traced]
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
@@ -231,7 +224,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -262,7 +255,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -300,7 +293,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -365,7 +358,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -424,7 +417,7 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -512,7 +505,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,
@@ -573,7 +566,7 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test_index".into(),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test_value".into(),
                 codec_config: (),
                 compression: None,

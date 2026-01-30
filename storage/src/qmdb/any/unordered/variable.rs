@@ -62,7 +62,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
             thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
+            page_cache: cfg.page_cache.clone(),
         };
 
         let journal_config = JournalConfig {
@@ -70,7 +70,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             items_per_section: cfg.log_items_per_blob,
             compression: cfg.log_compression,
             codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
             write_buffer: cfg.log_write_buffer,
         };
 
@@ -115,7 +115,7 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::PoolRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Runner as _,
     };
@@ -139,7 +139,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

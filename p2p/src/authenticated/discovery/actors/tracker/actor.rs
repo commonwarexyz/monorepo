@@ -140,7 +140,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     break;
                 };
                 self.handle_msg(msg).await;
-            }
+            },
         }
     }
 

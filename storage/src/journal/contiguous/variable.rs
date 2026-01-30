@@ -12,7 +12,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
@@ -70,8 +70,8 @@ pub struct Config<C> {
     /// [Codec] configuration for encoding/decoding items.
     pub codec_config: C,
 
-    /// Buffer pool for caching data.
-    pub buffer_pool: PoolRef,
+    /// Page cache for caching data.
+    pub page_cache: CacheRef,
 
     /// Write buffer size for each section.
     pub write_buffer: NonZeroUsize,
@@ -179,7 +179,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 partition: data_partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool.clone(),
+                page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
         )
@@ -191,7 +191,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             fixed::Config {
                 partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
         )
@@ -235,7 +235,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 partition: cfg.data_partition(),
                 compression: cfg.compression,
                 codec_config: cfg.codec_config.clone(),
-                buffer_pool: cfg.buffer_pool.clone(),
+                page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
         )
@@ -247,7 +247,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             fixed::Config {
                 partition: cfg.offsets_partition(),
                 items_per_blob: cfg.items_per_section,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
             size,
@@ -894,7 +894,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::pool::PoolRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
@@ -920,7 +920,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -975,7 +975,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1040,7 +1040,7 @@ mod tests {
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
-                            buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                            page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                             write_buffer: NZUsize!(1024),
                         },
                     )
@@ -1062,7 +1062,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1150,7 +1150,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1233,7 +1233,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1295,7 +1295,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1332,7 +1332,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1388,7 +1388,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1456,7 +1456,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1516,7 +1516,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1583,7 +1583,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1625,7 +1625,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1658,7 +1658,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1697,7 +1697,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1731,7 +1731,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1784,7 +1784,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1827,7 +1827,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1881,7 +1881,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1932,7 +1932,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1989,7 +1989,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2036,7 +2036,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2071,7 +2071,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2102,7 +2102,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2148,7 +2148,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -2186,7 +2186,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data in multiple sections
@@ -2256,7 +2256,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             #[allow(clippy::reversed_empty_ranges)]
@@ -2281,7 +2281,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data exactly matching sync range
@@ -2351,7 +2351,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data beyond sync range
@@ -2397,7 +2397,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with stale data
@@ -2452,7 +2452,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data at section boundaries
@@ -2521,7 +2521,7 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data in multiple sections
@@ -2592,7 +2592,7 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2777,7 +2777,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                buffer_pool: PoolRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
 

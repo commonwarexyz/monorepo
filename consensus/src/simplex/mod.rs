@@ -336,8 +336,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::PoolRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner,
-        Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
+        Runner, Spawner,
     };
     use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -554,6 +554,20 @@ mod tests {
         }
     }
 
+    /// Counts lines where all patterns match and the trailing value is non-zero.
+    fn count_nonzero_metric_lines(encoded: &str, patterns: &[&str]) -> u32 {
+        encoded
+            .lines()
+            .filter(|line| patterns.iter().all(|p| line.contains(p)))
+            .filter(|line| {
+                line.split_whitespace()
+                    .last()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|n| n > 0)
+            })
+            .count() as u32
+    }
+
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -651,7 +665,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -921,7 +935,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1090,7 +1104,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1136,7 +1150,7 @@ mod tests {
                             }
                         }
                         true
-                    }
+                    },
                 };
 
                 // Ensure no blocked connections
@@ -1282,7 +1296,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1402,7 +1416,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1545,7 +1559,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1657,35 +1671,16 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
 
-            // Ensure we are skipping views
+            // Ensure online nodes are recording skips/nullifications for the offline leader
             let encoded = context.encode();
-            let lines = encoded.lines();
-            let mut skipped_views = 0;
-            let mut nodes_skipping = 0;
-            for line in lines {
-                if line.contains("_skipped_views_total") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(number_str) = parts.last() {
-                        if let Ok(number) = number_str.parse::<u64>() {
-                            if number > 0 {
-                                nodes_skipping += 1;
-                            }
-                            if number > skipped_views {
-                                skipped_views = number;
-                            }
-                        }
-                    }
-                }
+            let peer_label = format!("peer=\"{}\"", offline);
+            for metric in ["_skips_per_leader", "_nullifications_per_leader"] {
+                assert_eq!(
+                    count_nonzero_metric_lines(&encoded, &[metric, &peer_label]),
+                    n - 1,
+                    "expected all online nodes to record {metric} for offline leader"
+                );
             }
-            assert!(
-                skipped_views > 0,
-                "expected skipped views to be greater than 0"
-            );
-            assert_eq!(
-                nodes_skipping,
-                n - 1,
-                "expected all online nodes to be skipping views"
-            );
         });
     }
 
@@ -1809,7 +1804,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1988,7 +1983,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2011,7 +2006,7 @@ mod tests {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
                                 _done = monitor.next() => {
                                     panic!("engine should not notarize or finalize anything");
-                                }
+                                },
                             }
                         }),
                 );
@@ -2204,7 +2199,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2249,7 +2244,7 @@ mod tests {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
                                 _done = monitor.next() => {
                                     panic!("engine should not notarize or finalize anything");
-                                }
+                                },
                             }
                         }),
                 );
@@ -2417,7 +2412,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2684,7 +2679,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2873,7 +2868,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -3054,7 +3049,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3231,7 +3226,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
@@ -3321,7 +3316,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -3555,7 +3550,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3724,7 +3719,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3907,7 +3902,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -4059,7 +4054,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4238,7 +4233,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4463,7 +4458,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4709,7 +4704,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine =
                         Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
@@ -5046,7 +5041,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5196,7 +5191,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5292,7 +5287,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
@@ -5736,7 +5731,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
@@ -5793,7 +5788,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 

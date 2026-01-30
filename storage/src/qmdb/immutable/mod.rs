@@ -18,7 +18,7 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -70,8 +70,8 @@ pub struct Config<T: Translator, C> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -258,7 +258,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
             thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
+            page_cache: cfg.page_cache.clone(),
         };
 
         let journal_cfg = JournalConfig {
@@ -266,7 +266,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             items_per_section: cfg.log_items_per_section,
             compression: cfg.log_compression,
             codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool.clone(),
+            page_cache: cfg.page_cache.clone(),
             write_buffer: cfg.log_write_buffer,
         };
 
@@ -555,7 +555,7 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

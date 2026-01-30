@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
     qmdb::current::{ordered::fixed::Db as Current, FixedConfig as Config},
@@ -95,7 +95,7 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
         };
 

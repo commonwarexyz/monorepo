@@ -178,7 +178,7 @@ pub trait SystemTimeExt {
     fn limit() -> SystemTime;
 
     /// Adds `delta` to the current time, saturating at the platform maximum instead of overflowing.
-    fn saturating_add(&self, delta: Duration) -> SystemTime;
+    fn saturating_add_ext(&self, delta: Duration) -> SystemTime;
 }
 
 impl SystemTimeExt for SystemTime {
@@ -201,7 +201,7 @@ impl SystemTimeExt for SystemTime {
             .expect("maximum system time must be representable")
     }
 
-    fn saturating_add(&self, delta: Duration) -> SystemTime {
+    fn saturating_add_ext(&self, delta: Duration) -> SystemTime {
         if delta.is_zero() {
             return *self;
         }
@@ -328,8 +328,8 @@ mod tests {
     #[test]
     fn system_time_saturating_add() {
         let max = SystemTime::limit();
-        assert_eq!(max.saturating_add(Duration::from_nanos(1)), max);
-        assert_eq!(max.saturating_add(Duration::from_secs(1)), max);
+        assert_eq!(max.saturating_add_ext(Duration::from_nanos(1)), max);
+        assert_eq!(max.saturating_add_ext(Duration::from_secs(1)), max);
     }
 
     #[test]

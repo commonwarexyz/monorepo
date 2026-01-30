@@ -139,60 +139,78 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         .await?;
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
-            let peer = peer.clone();
-            let mut tracker = tracker.clone();
-            let mailbox = self.mailbox.clone();
-            let rate_limits = rate_limits.clone();
-            move |context| async move {
-                // Set the initial deadline to now to start gossiping immediately
-                let mut deadline = context.current();
+        let mut send_handler: Handle<Result<(), Error>> =
+            self.context.with_label("sender").spawn({
+                let peer = peer.clone();
+                let mut tracker = tracker.clone();
+                let mailbox = self.mailbox.clone();
+                let rate_limits = rate_limits.clone();
+                move |context| async move {
+                    // Set the initial deadline to now to start gossiping immediately
+                    let mut deadline = context.current();
 
-                // Enter into the main loop
-                select_loop! {
-                    context,
-                    on_stopped => {},
-                    _ = context.sleep_until(deadline) => {
-                        // Get latest bitset from tracker (also used as ping)
-                        tracker.construct(peer.clone(), mailbox.clone());
+                    // Enter into the main loop
+                    select_loop! {
+                        context,
+                        on_stopped => {},
+                        _ = context.sleep_until(deadline) => {
+                            // Get latest bitset from tracker (also used as ping)
+                            tracker.construct(peer.clone(), mailbox.clone());
 
-                        // Reset ticker
-                        deadline = context.current() + self.gossip_bit_vec_frequency;
-                    },
-                    msg_control = self.control.next() => {
-                        let msg = match msg_control {
-                            Some(msg_control) => msg_control,
-                            None => return Err(Error::PeerDisconnected),
-                        };
-                        let (metric, payload) = match msg {
-                            Message::BitVec(bit_vec) =>
-                                (metrics::Message::new_bit_vec(&peer), types::Payload::BitVec(bit_vec)),
-                            Message::Peers(peers) =>
-                                (metrics::Message::new_peers(&peer), types::Payload::Peers(peers)),
-                            Message::Kill => {
-                                return Err(Error::PeerKilled(peer.to_string()))
-                            }
-                        };
-                        Self::send_payload(&mut conn_sender, &self.sent_messages, metric, payload)
+                            // Reset ticker
+                            deadline = context.current() + self.gossip_bit_vec_frequency;
+                        },
+                        msg_control = self.control.next() => {
+                            let msg = match msg_control {
+                                Some(msg_control) => msg_control,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            let (metric, payload) = match msg {
+                                Message::BitVec(bit_vec) => (
+                                    metrics::Message::new_bit_vec(&peer),
+                                    types::Payload::BitVec(bit_vec),
+                                ),
+                                Message::Peers(peers) => (
+                                    metrics::Message::new_peers(&peer),
+                                    types::Payload::Peers(peers),
+                                ),
+                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                            };
+                            Self::send_payload(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metric,
+                                payload,
+                            )
                             .await?;
-                    },
-                    msg_high = self.high.next() => {
-                        // Data is already pre-encoded, just forward to stream
-                        let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
+                        },
+                        msg_high = self.high.next() => {
+                            // Data is already pre-encoded, just forward to stream
+                            let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                            Self::send_encoded(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metrics::Message::new_data(&peer, encoded.channel),
+                                encoded.payload,
+                            )
                             .await?;
-                    },
-                    msg_low = self.low.next() => {
-                        // Data is already pre-encoded, just forward to stream
-                        let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
+                        },
+                        msg_low = self.low.next() => {
+                            // Data is already pre-encoded, just forward to stream
+                            let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                            Self::send_encoded(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metrics::Message::new_data(&peer, encoded.channel),
+                                encoded.payload,
+                            )
                             .await?;
+                        },
                     }
-                }
 
-                Ok(())
-            }
-        });
+                    Ok(())
+                }
+            });
         let mut receive_handler: Handle<Result<(), Error>> = self
             .context
             .with_label("receiver")
@@ -349,12 +367,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                 debug!("context shutdown, stopping peer");
                 Ok(Ok(()))
             },
-            send_result = &mut send_handler => {
-                send_result
-            },
-            receive_result = &mut receive_handler => {
-                receive_result
-            }
+            send_result = &mut send_handler => send_result,
+            receive_result = &mut receive_handler => receive_result,
         };
 
         // Parse result

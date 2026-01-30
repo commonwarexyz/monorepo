@@ -246,7 +246,7 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
                         drop(reservation);
                     }
                 });
-            }
+            },
         }
     }
 }

@@ -1417,16 +1417,14 @@ mod tests {
 
             // Should NOT receive any certificate for the finalized view
             select! {
-                msg = voter_receiver.next() => {
-                    match msg {
-                        Some(voter::Message::Proposal(_)) => {},
-                        Some(voter::Message::Verified(cert, _)) if cert.view() == view2 => {
-                            panic!("should not receive any certificate for the finalized view");
-                        },
-                        _ => {},
+                msg = voter_receiver.next() => match msg {
+                    Some(voter::Message::Proposal(_)) => {}
+                    Some(voter::Message::Verified(cert, _)) if cert.view() == view2 => {
+                        panic!("should not receive any certificate for the finalized view");
                     }
+                    _ => {}
                 },
-                _ = context.sleep(Duration::from_millis(200)) => { },
+                _ = context.sleep(Duration::from_millis(200)) => {},
             };
         });
     }
