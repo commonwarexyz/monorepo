@@ -97,7 +97,8 @@ regenerate-conformance *args='':
 # Packages to exclude from stability checks (examples, fuzz targets)
 stability_excludes := "--exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-reshare --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
-# Check stability builds. Optionally specify level (1-4 or name) and/or crate (-p <crate>).
+# Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
+# ALPHA (level 0) is the default state and doesn't require a cfg flag.
 # Examples: just check-stability, just check-stability 3, just check-stability DELTA, just check-stability GAMMA -p commonware-cryptography
 check-stability *args='':
     #!/usr/bin/env bash
@@ -106,7 +107,7 @@ check-stability *args='':
     extra_args=""
     # Level names in order (index 0-4)
     declare -a LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
-    # Convert name to number
+    # Convert name to number (returns empty for ALPHA since it's the default)
     name_to_num() {
         case "$1" in
             ALPHA) echo 0 ;;
@@ -126,6 +127,11 @@ check-stability *args='':
     else
         num=$(name_to_num "$first_arg")
         if [ -n "$num" ]; then
+            if [ "$num" = "0" ]; then
+                echo "Error: ALPHA is the default stability level (no cfg flag needed)."
+                echo "Use 'cargo build' directly or specify BETA/GAMMA/DELTA/EPSILON."
+                exit 1
+            fi
             level="$num"
             extra_args="${all_args#* }"
             if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
