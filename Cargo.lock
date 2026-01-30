@@ -1405,22 +1405,23 @@ name = "commonware-macros"
 version = "0.0.65"
 dependencies = [
  "commonware-macros-impl",
- "futures",
- "futures-timer",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
 name = "commonware-macros-impl"
 version = "0.0.65"
 dependencies = [
+ "commonware-macros",
+ "futures",
+ "futures-timer",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn",
  "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
