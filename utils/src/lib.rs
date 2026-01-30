@@ -6,14 +6,12 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use alloc::{boxed::Box, string::String, vec::Vec};
-
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    extern crate alloc;
+
+    #[cfg(not(feature = "std"))]
+    use alloc::{boxed::Box, string::String, vec::Vec};
 
     use bytes::{BufMut, BytesMut};
     use core::{

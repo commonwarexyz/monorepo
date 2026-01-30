@@ -56,11 +56,10 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
-#[cfg(not(feature = "std"))]
-#[allow(unused_extern_crates)]
-extern crate alloc;
-
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    extern crate alloc;
+
     use cfg_if::cfg_if;
     use core::fmt;
 
@@ -73,7 +72,6 @@ commonware_macros::stability_scope!(BETA {
             };
             use std::{num::NonZeroUsize, sync::Arc};
         } else {
-            #[allow(unused_imports)]
             use alloc::vec::Vec;
         }
     }
