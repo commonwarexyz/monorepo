@@ -20,7 +20,9 @@ commonware_macros::stability_scope!(BETA {
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View, Round};
+    use types::{Epoch, Height, View};
+    #[cfg(not(target_arch = "wasm32"))]
+    use types::Round;
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -125,6 +127,7 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// This trait is required by consensus implementations (like Simplex) that support a certification
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
+    #[cfg(not(target_arch = "wasm32"))]
     pub trait CertifiableAutomaton: Automaton {
         /// Determine whether a verified payload is safe to commit.
         ///
