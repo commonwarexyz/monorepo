@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Field, Multiplicative, Object, Ring};
+use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 #[cfg(test)]
@@ -186,38 +186,6 @@ impl F {
     /// [Self::zero] will return [Self::zero].
     pub fn inv(self) -> Self {
         self.exp(&[P - 2])
-    }
-
-    /// Construct a 2^lg_k root of unity.
-    ///
-    /// This will fail for lg_k > 32.
-    pub fn root_of_unity(lg_k: u8) -> Option<Self> {
-        if lg_k > 32 {
-            return None;
-        }
-        let mut out = Self::ROOT_OF_UNITY;
-        for _ in 0..(32 - lg_k) {
-            out = out * out;
-        }
-        Some(out)
-    }
-
-    /// Return self / 2.
-    pub fn div_2(self) -> Self {
-        // Check the first bit of self
-        if self.0 & 1 == 0 {
-            // self is even, just divide by 2.
-            Self(self.0 >> 1)
-        } else {
-            // P is odd, so adding it creates an even number, and doesn't
-            // change the value mod P.
-            // Is (x + P) / 2 < P?
-            // x < P, so x + P < 2P, therefore (x + P) / 2 < P.
-            let (addition, carry) = self.0.overflowing_add(P);
-            // This is doing the above operation, treating carry .. addition as
-            // a 65 bit integer.
-            Self((u64::from(carry) << 63) | (addition >> 1))
-        }
     }
 
     /// Convert a stream of u64s into a stream of field elements.
@@ -425,6 +393,38 @@ impl Field for F {
     }
 }
 
+impl FieldNTT for F {
+    const MAX_LG_ROOT_ORDER: u8 = 32;
+
+    fn root_of_unity(lg: u8) -> Option<Self> {
+        if lg > Self::MAX_LG_ROOT_ORDER {
+            return None;
+        }
+        let mut out = Self::ROOT_OF_UNITY;
+        for _ in 0..(Self::MAX_LG_ROOT_ORDER - lg) {
+            out = out * out;
+        }
+        Some(out)
+    }
+
+    fn coset_shift() -> Self {
+        Self::NOT_ROOT_OF_UNITY
+    }
+
+    fn coset_shift_inv() -> Self {
+        Self::NOT_ROOT_OF_UNITY_INV
+    }
+
+    fn div_2(&self) -> Self {
+        if self.0 & 1 == 0 {
+            Self(self.0 >> 1)
+        } else {
+            let (addition, carry) = self.0.overflowing_add(P);
+            Self((u64::from(carry) << 63) | (addition >> 1))
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -494,8 +494,8 @@ mod test {
     }
 
     #[test]
-    fn test_field() {
-        algebra::test_suites::test_field(file!(), &F::arbitrary());
+    fn test_field_ntt() {
+        algebra::test_suites::test_field_ntt(file!(), &F::arbitrary());
     }
 
     #[cfg(feature = "arbitrary")]

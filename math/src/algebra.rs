@@ -259,6 +259,42 @@ pub trait Field: Ring {
     fn inv(&self) -> Self;
 }
 
+/// A [`Field`] which supports operations allowing for efficient NTTs.
+///
+/// Fields implementing this trait must have characteristic not equal to 2
+/// (so that 2 is invertible), and must have a multiplicative group with
+/// sufficiently large 2-adic order.
+pub trait FieldNTT: Field {
+    /// The maximum (lg) of the power of two root of unity this fields supports.
+    const MAX_LG_ROOT_ORDER: u8;
+
+    /// A root of unity of order `2^lg`.
+    ///
+    /// In other words, for `r = root_of_unity(lg)`, `k = 2^lg` should be the
+    /// smallest power such that `r^k = 1`.
+    ///
+    /// This function should return `None` only for `lg > MAX_ROOT_ORDER`.
+    fn root_of_unity(lg: u8) -> Option<Self>;
+
+    /// An element which is not a power of a root of unity.
+    ///
+    /// In other words, for any `lg`, `k`, this element should not equal
+    /// `Self::root_of_unity(lg)^k`.
+    fn coset_shift() -> Self;
+
+    fn coset_shift_inv() -> Self {
+        Self::coset_shift().inv()
+    }
+
+    /// Return the result of dividing this element by `2`.
+    ///
+    /// This is equivalent to `self * (1 + 1)^-1`, but is usually implementable
+    /// in a more efficient way.
+    fn div_2(&self) -> Self {
+        (Self::one() + &Self::one()).inv() * self
+    }
+}
+
 /// A group suitable for use in cryptography.
 ///
 /// This is a cyclic group, with a specified generator.
@@ -322,6 +358,7 @@ pub mod test_suites {
     use super::*;
     use proptest::{
         prelude::*,
+        strategy::Just,
         test_runner::{Config, TestRunner},
     };
 
@@ -581,6 +618,66 @@ pub mod test_suites {
     /// to group functionality itself.
     pub fn test_hash_to_group<G: HashToGroup>(file: &'static str) {
         run_proptest(file, &any::<[[u8; 4]; 4]>(), check_hash_to_group::<G>);
+    }
+
+    fn check_root_of_unity_order<T: FieldNTT>(lg: u8) -> TestResult {
+        if lg > T::MAX_LG_ROOT_ORDER {
+            prop_assert!(T::root_of_unity(lg).is_none(), "root_of_unity should be None for lg > MAX");
+            return Ok(());
+        }
+        let root = T::root_of_unity(lg).expect("root_of_unity should be Some for lg <= MAX");
+
+        let mut order = Vec::new();
+        let mut remaining = lg;
+        while remaining >= 64 {
+            order.push(0u64);
+            remaining -= 64;
+        }
+        order.push(1u64 << remaining);
+
+        prop_assert_eq!(root.exp(&order), T::one(), "root^(2^lg) should equal 1");
+        if lg > 0 {
+            let last = order.len() - 1;
+            order[0] = order[0].wrapping_sub(1);
+            for i in 0..last {
+                if order[i] == u64::MAX {
+                    order[i + 1] = order[i + 1].wrapping_sub(1);
+                }
+            }
+            prop_assert_ne!(root.exp(&order), T::one(), "root^(2^lg - 1) should not equal 1");
+        }
+        Ok(())
+    }
+
+    fn check_div_2<T: FieldNTT>(a: T) -> TestResult {
+        let two = T::one() + &T::one();
+        prop_assert_eq!(a.div_2() * &two, a, "div_2(a) * 2 should equal a");
+        Ok(())
+    }
+
+    fn check_coset_shift_inv<T: FieldNTT>(_: ()) -> TestResult {
+        prop_assert_eq!(
+            T::coset_shift() * &T::coset_shift_inv(),
+            T::one(),
+            "coset_shift * coset_shift_inv should equal 1"
+        );
+        Ok(())
+    }
+
+    /// Run the test suite for the [`FieldNTT`] trait.
+    ///
+    /// This will also run [`test_field`].
+    ///
+    /// Use `file!()` for the first argument.
+    pub fn test_field_ntt<T: FieldNTT>(file: &'static str, strat: &impl Strategy<Value = T>) {
+        test_field(file, strat);
+
+        for lg in 0..=T::MAX_LG_ROOT_ORDER + 1 {
+            check_root_of_unity_order::<T>(lg).expect("root of unity check failed");
+        }
+
+        run_proptest(file, strat, check_div_2);
+        run_proptest(file, &Just(()), check_coset_shift_inv::<T>);
     }
 }
 
