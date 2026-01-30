@@ -78,6 +78,7 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
     let mut names: Vec<_> = ((level + 1)..=4)
         .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
         .collect();
+
     // RESERVED excludes all stability-marked items, leaving only unmarked ones
     names.push(format_ident!("commonware_stability_RESERVED"));
     names
