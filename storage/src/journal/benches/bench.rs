@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::PoolRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     journal::contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -32,7 +32,7 @@ const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
 
-/// The number of pages to cache in the buffer pool. Make it big enough to be
+/// The number of pages to cache in the page cache. Make it big enough to be
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
@@ -53,7 +53,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
 }
@@ -91,7 +91,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         items_per_section,
         compression: None,
         codec_config: (),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
     };
     VariableJournal::init(context, journal_config)

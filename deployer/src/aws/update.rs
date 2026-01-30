@@ -59,6 +59,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
+    let bucket_name = get_bucket_name();
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
 
     // Collect unique binary and config paths (dedup before hashing)
@@ -104,13 +105,14 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
             Ok::<_, Error>(
                 try_join_all(binary_digests.iter().map(|(digest, path)| {
                     let s3_client = s3_client.clone();
+                    let bucket_name = bucket_name.clone();
                     let digest = digest.clone();
                     let key = binary_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            BUCKET_NAME,
+                            &bucket_name,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -128,13 +130,14 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
             Ok::<_, Error>(
                 try_join_all(config_digests.iter().map(|(digest, path)| {
                     let s3_client = s3_client.clone();
+                    let bucket_name = bucket_name.clone();
                     let digest = digest.clone();
                     let key = config_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            BUCKET_NAME,
+                            &bucket_name,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,

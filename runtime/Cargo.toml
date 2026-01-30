@@ -75,6 +75,6 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [[bench]]
-name = "buffer_pool"
+name = "buffer_paged"
 harness = false
 path = "src/utils/buffer/benches/bench.rs"

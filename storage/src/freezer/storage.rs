@@ -641,7 +641,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
-            index_buffer_pool: config.key_buffer_pool.clone(),
+            index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
             compression: config.value_compression,
@@ -1211,7 +1211,7 @@ mod tests {
     use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::PoolRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
@@ -1238,7 +1238,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1297,7 +1297,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_buffer_pool: PoolRef::new(NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

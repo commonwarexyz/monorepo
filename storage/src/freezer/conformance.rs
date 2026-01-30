@@ -2,7 +2,7 @@
 
 use crate::freezer::Config;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use core::num::{NonZeroU16, NonZeroUsize};
 use rand::Rng;
@@ -20,7 +20,7 @@ impl Conformance for Freezer {
             let config = Config {
                 key_partition: format!("freezer-key-conformance-{seed}"),
                 key_write_buffer: WRITE_BUFFER,
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: format!("freezer-value-conformance-{seed}"),
                 value_compression: None,
                 value_write_buffer: WRITE_BUFFER,
