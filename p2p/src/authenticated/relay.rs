@@ -1,4 +1,4 @@
-use commonware_utils::channels::mpsc::{self, error::TrySendError};
+use commonware_utils::channel::mpsc::{self, error::TrySendError};
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {

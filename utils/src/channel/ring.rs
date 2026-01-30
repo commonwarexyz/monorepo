@@ -9,7 +9,7 @@
 //! ```
 //! use futures::executor::block_on;
 //! use futures::{SinkExt, StreamExt};
-//! use commonware_utils::{NZUsize, channels::ring};
+//! use commonware_utils::{NZUsize, channel::ring};
 //!
 //! block_on(async {
 //!     let (mut sender, mut receiver) = ring::channel::<u32>(NZUsize!(2));

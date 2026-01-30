@@ -21,7 +21,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channels::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     futures::Pool as FuturesPool,
     Span,
 };

@@ -12,7 +12,7 @@ use commonware_cryptography::{
     Digest,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{channels::oneshot, union, N3f1};
+use commonware_utils::{channel::oneshot, union, N3f1};
 use rand_core::CryptoRngCore;
 use std::hash::Hash;
 

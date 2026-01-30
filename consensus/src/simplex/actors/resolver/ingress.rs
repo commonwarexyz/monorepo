@@ -3,7 +3,7 @@ use bytes::Bytes;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
-    channels::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     sequence::U64,
 };
 

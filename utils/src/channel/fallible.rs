@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use commonware_utils::channels::fallible::FallibleExt;
+//! use commonware_utils::channel::fallible::FallibleExt;
 //!
 //! // Fire-and-forget: silently ignore disconnection
 //! sender.send_lossy(Message::Shutdown);

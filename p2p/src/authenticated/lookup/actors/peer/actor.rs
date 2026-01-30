@@ -13,7 +13,7 @@ use commonware_runtime::{
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::{
-    channels::mpsc::{self, error::TrySendError},
+    channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,
 };
 use prometheus_client::metrics::{counter::Counter, family::Family};

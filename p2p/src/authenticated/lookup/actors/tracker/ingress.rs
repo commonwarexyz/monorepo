@@ -10,7 +10,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channels::{fallible::FallibleExt, mpsc, oneshot},
+    channel::{fallible::FallibleExt, mpsc, oneshot},
     ordered::{Map, Set},
 };
 use std::net::IpAddr;

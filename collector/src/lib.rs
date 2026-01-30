@@ -13,7 +13,7 @@
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::channels::oneshot;
+use commonware_utils::channel::oneshot;
 use std::future::Future;
 use thiserror::Error;
 

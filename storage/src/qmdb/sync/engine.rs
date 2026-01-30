@@ -17,7 +17,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Metrics as _;
-use commonware_utils::{channels::mpsc, NZU64};
+use commonware_utils::{channel::mpsc, NZU64};
 use futures::{future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
@@ -531,7 +531,7 @@ mod tests {
     use super::*;
     use crate::mmr::Proof;
     use commonware_cryptography::sha256;
-    use commonware_utils::channels::oneshot;
+    use commonware_utils::channel::oneshot;
 
     #[test]
     fn test_outstanding_requests() {

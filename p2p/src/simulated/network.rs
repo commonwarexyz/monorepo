@@ -20,7 +20,7 @@ use commonware_runtime::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    channels::{fallible::FallibleExt, mpsc, oneshot, ring},
+    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
     NZUsize, TryCollect,
 };

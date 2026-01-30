@@ -20,7 +20,7 @@ use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
-    channels::{fallible::OneshotExt, mpsc},
+    channel::{fallible::OneshotExt, mpsc},
     ordered::Quorum,
     sequence::U64,
 };

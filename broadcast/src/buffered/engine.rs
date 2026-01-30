@@ -12,7 +12,7 @@ use commonware_runtime::{
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::channels::{fallible::OneshotExt, mpsc, oneshot};
+use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use std::collections::{BTreeMap, VecDeque};
 use tracing::{debug, error, trace, warn};
 

@@ -9,7 +9,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channels::{fallible::FallibleExt, mpsc, oneshot},
+    channel::{fallible::FallibleExt, mpsc, oneshot},
     ordered::Set,
 };
 

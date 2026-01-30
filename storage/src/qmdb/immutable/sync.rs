@@ -133,7 +133,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner as _, RwLock};
-    use commonware_utils::{channels::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore as _;
     use rstest::rstest;
     use std::{

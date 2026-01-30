@@ -1,5 +1,5 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
-use commonware_utils::channels::oneshot;
+use commonware_utils::channel::oneshot;
 use futures::{
     future::{select, Either},
     pin_mut,

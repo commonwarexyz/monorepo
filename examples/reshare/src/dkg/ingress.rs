@@ -10,7 +10,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channels::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     Acknowledgement,
 };
 use tracing::error;

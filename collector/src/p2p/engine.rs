@@ -14,7 +14,7 @@ use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channels::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::Pool,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};

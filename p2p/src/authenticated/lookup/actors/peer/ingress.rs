@@ -1,5 +1,5 @@
 use crate::authenticated::Mailbox;
-use commonware_utils::channels::fallible::AsyncFallibleExt;
+use commonware_utils::channel::fallible::AsyncFallibleExt;
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]

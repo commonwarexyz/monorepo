@@ -13,7 +13,7 @@ use commonware_sync::{
     any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
 use commonware_utils::{
-    channels::mpsc::{self, error::TrySendError},
+    channel::mpsc::{self, error::TrySendError},
     DurationExt,
 };
 use rand::Rng;

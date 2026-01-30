@@ -182,7 +182,7 @@ mod test {
         Clock, Handle, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{
-        channels::{mpsc, oneshot},
+        channel::{mpsc, oneshot},
         union, N3f1, TryCollect,
     };
     use rand::seq::SliceRandom;

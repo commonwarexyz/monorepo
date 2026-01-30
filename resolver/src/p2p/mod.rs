@@ -41,7 +41,7 @@
 //! depends on the rate-limiting configuration of the underlying P2P network.
 
 use bytes::Bytes;
-use commonware_utils::{channels::oneshot, Span};
+use commonware_utils::{channel::oneshot, Span};
 use std::future::Future;
 
 mod config;

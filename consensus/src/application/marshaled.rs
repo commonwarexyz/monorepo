@@ -60,7 +60,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Committable};
 use commonware_macros::select;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
-use commonware_utils::channels::{
+use commonware_utils::channel::{
     fallible::OneshotExt,
     oneshot::{self, error::RecvError},
 };

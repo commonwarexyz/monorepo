@@ -1,4 +1,4 @@
-use commonware_utils::channels::mpsc;
+use commonware_utils::channel::mpsc;
 
 /// A mailbox wraps a sender for messages of type `T`.
 #[derive(Debug)]

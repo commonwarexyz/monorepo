@@ -28,7 +28,7 @@ pub mod acknowledgement;
 pub use acknowledgement::Acknowledgement;
 pub mod bitmap;
 #[cfg(feature = "std")]
-pub mod channels;
+pub mod channel;
 pub mod hex_literal;
 pub mod hostname;
 pub use hostname::Hostname;

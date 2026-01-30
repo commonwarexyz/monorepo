@@ -24,7 +24,7 @@ use commonware_runtime::{
     buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
     Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channels::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};

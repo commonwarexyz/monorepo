@@ -5,7 +5,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
-use commonware_utils::channels::oneshot;
+use commonware_utils::channel::oneshot;
 use tracing::trace;
 
 #[derive(Clone)]

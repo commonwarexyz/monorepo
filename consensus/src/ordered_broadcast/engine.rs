@@ -40,7 +40,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::{channels::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
+use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
     future::{self, Either},
     pin_mut, StreamExt,

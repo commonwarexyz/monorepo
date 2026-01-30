@@ -196,7 +196,7 @@ impl<F: Future> Future for OptionFuture<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::oneshot;
+    use crate::channel::oneshot;
     use futures::{
         executor::block_on,
         future::{self, select, Either},

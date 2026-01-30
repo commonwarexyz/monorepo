@@ -11,7 +11,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
 };
-use commonware_utils::channels::{mpsc, oneshot};
+use commonware_utils::channel::{mpsc, oneshot};
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,

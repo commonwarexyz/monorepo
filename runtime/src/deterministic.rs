@@ -1501,7 +1501,7 @@ mod tests {
     use crate::{
         deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
     };
-    use commonware_utils::channels::oneshot;
+    use commonware_utils::channel::oneshot;
     use futures::{
         stream::{FuturesUnordered, StreamExt as _},
         task::noop_waker,
@@ -1531,7 +1531,7 @@ mod tests {
     }
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
-    use commonware_utils::channels::mpsc;
+    use commonware_utils::channel::mpsc;
     #[cfg(not(feature = "external"))]
     use futures::future::pending;
     #[cfg(feature = "external")]

@@ -26,7 +26,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::{listen, Config as StreamConfig};
 use commonware_utils::{
-    channels::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     from_hex,
     ordered::Set,
     union, TryCollect,

@@ -2,7 +2,7 @@
 
 use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
-use commonware_utils::channels::oneshot;
+use commonware_utils::channel::oneshot;
 use std::sync::{Arc, Mutex};
 
 /// Default read buffer size for the stream's local buffer (64 KB).

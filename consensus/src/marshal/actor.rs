@@ -39,7 +39,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channels::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,

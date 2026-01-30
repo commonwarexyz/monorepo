@@ -195,7 +195,7 @@ mod tests {
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channels::mpsc, hostname, ordered::Map, NZU32};
+    use commonware_utils::{channel::mpsc, hostname, ordered::Map, NZU32};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},

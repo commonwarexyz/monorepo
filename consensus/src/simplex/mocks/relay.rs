@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::channels::mpsc;
+use commonware_utils::channel::mpsc;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     sync::Mutex,

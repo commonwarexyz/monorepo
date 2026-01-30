@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{deterministic, Metrics, Runner as _, RwLock};
-use commonware_utils::{channels::mpsc, NZU64};
+use commonware_utils::{channel::mpsc, NZU64};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 

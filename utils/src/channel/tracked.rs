@@ -19,7 +19,7 @@
 //!
 //! ```
 //! use futures::executor::block_on;
-//! use commonware_utils::channels::tracked;
+//! use commonware_utils::channel::tracked;
 //! block_on(async {
 //!     let (sender, mut receiver) = tracked::bounded::<String, u64>(10);
 //

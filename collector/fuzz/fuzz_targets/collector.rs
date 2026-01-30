@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
-use commonware_utils::channels::{mpsc, oneshot};
+use commonware_utils::channel::{mpsc, oneshot};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{

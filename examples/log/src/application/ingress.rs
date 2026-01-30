@@ -3,7 +3,7 @@ use commonware_consensus::{
     Relay as Re,
 };
 use commonware_cryptography::{ed25519::PublicKey, Digest};
-use commonware_utils::channels::{mpsc, oneshot};
+use commonware_utils::channel::{mpsc, oneshot};
 
 pub enum Message<D: Digest> {
     Genesis {

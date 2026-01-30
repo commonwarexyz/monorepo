@@ -12,7 +12,7 @@ use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, BufMut, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
-use commonware_utils::channels::{
+use commonware_utils::channel::{
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
     oneshot,

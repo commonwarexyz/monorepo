@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent via a [commonware_utils::channels::mpsc] channel to a dedicated io_uring event loop
-//! running in another thread. Operation results are returned via a [commonware_utils::channels::oneshot] channel.
+//! I/O operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop
+//! running in another thread. Operation results are returned via a [commonware_utils::channel::oneshot] channel.
 //!
 //! ## Memory Safety
 //!
@@ -27,7 +27,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_utils::{
-    channels::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     from_hex, hex,
 };
 use futures::executor::block_on;

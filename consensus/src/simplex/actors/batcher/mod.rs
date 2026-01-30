@@ -68,7 +68,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::channels::mpsc;
+    use commonware_utils::channel::mpsc;
     use std::{num::NonZeroU32, time::Duration};
 
     /// Default rate limit set high enough to not interfere with normal operation

@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::channels::tracked;
+use commonware_utils::channel::tracked;
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 

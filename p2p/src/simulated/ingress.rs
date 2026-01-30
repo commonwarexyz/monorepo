@@ -3,7 +3,7 @@ use crate::{authenticated::UnboundedMailbox, Address, Channel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
-    channels::{fallible::FallibleExt, mpsc, oneshot, ring},
+    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::{Map, Set},
 };
 use rand_distr::Normal;

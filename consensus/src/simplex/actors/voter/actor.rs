@@ -26,7 +26,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    channels::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     futures::AbortablePool,
 };
 use core::{future::Future, panic};

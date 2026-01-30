@@ -58,7 +58,7 @@
 //! 4. Cleans up and exits
 
 use crate::{IoBuf, IoBufMut};
-use commonware_utils::channels::{
+use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
     oneshot,
 };
@@ -469,7 +469,7 @@ pub const fn should_retry(return_value: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::iouring::{Config, IoBuf, IoBufMut, Op};
-    use commonware_utils::channels::{
+    use commonware_utils::channel::{
         mpsc,
         oneshot::{self, error::RecvError},
     };

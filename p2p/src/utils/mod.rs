@@ -3,7 +3,7 @@
 use crate::Manager;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channels::{
+    channel::{
         fallible::FallibleExt,
         mpsc::{self, UnboundedReceiver, UnboundedSender},
     },

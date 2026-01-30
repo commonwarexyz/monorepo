@@ -1,5 +1,5 @@
 use crate::{types::Epoch, Monitor as M};
-use commonware_utils::channels::{fallible::AsyncFallibleExt, mpsc};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 use std::sync::{Arc, Mutex};
 
 struct Inner {

@@ -4,7 +4,7 @@ use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
 use commonware_storage::{mmr::Location, qmdb::sync};
-use commonware_utils::channels::{mpsc, oneshot};
+use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
 
 /// Network resolver that works directly with generic wire messages.

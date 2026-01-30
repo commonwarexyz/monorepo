@@ -245,7 +245,7 @@ mod tests {
         count_running_tasks, deterministic, tokio, Clock, Handle, IoBuf, Metrics,
         Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
-    use commonware_utils::{channels::mpsc, hostname, ordered::Set, TryCollect, NZU32};
+    use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32};
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
         collections::HashSet,

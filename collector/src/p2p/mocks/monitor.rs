@@ -1,6 +1,6 @@
 use super::types::Response;
 use commonware_cryptography::ed25519::PublicKey;
-use commonware_utils::channels::mpsc;
+use commonware_utils::channel::mpsc;
 
 /// A mock [crate::Monitor] collected a response.
 #[derive(Debug, Clone)]

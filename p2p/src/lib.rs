@@ -12,7 +12,7 @@
 
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{IoBuf, IoBufMut};
-use commonware_utils::{channels::mpsc, ordered::Set};
+use commonware_utils::{channel::mpsc, ordered::Set};
 use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
 pub mod authenticated;

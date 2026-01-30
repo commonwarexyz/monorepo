@@ -80,7 +80,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
-    use commonware_utils::{channels::mpsc, NZUsize, NZU16};
+    use commonware_utils::{channel::mpsc, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},

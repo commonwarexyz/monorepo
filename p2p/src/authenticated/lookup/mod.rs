@@ -184,7 +184,7 @@ mod tests {
         Resolver, Runner, Spawner,
     };
     use commonware_utils::{
-        channels::mpsc,
+        channel::mpsc,
         hostname,
         ordered::{Map, Set},
         Hostname, TryCollect, NZU32,

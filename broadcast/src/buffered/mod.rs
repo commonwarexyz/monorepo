@@ -48,7 +48,7 @@ mod tests {
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, Error, Metrics, Quota, Runner,
     };
-    use commonware_utils::channels::oneshot::error::TryRecvError;
+    use commonware_utils::channel::oneshot::error::TryRecvError;
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender

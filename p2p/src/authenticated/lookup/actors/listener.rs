@@ -12,7 +12,7 @@ use commonware_runtime::{
     SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::{listen, Config as StreamConfig};
-use commonware_utils::{channels::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
+use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
 use std::{

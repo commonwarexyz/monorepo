@@ -765,7 +765,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
     use commonware_utils::{
-        channels::{mpsc, oneshot},
+        channel::{mpsc, oneshot},
         NZUsize,
     };
     use futures::{

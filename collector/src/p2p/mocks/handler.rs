@@ -1,6 +1,6 @@
 use super::types::{Request, Response};
 use commonware_cryptography::ed25519::PublicKey;
-use commonware_utils::channels::{fallible::OneshotExt, mpsc, oneshot};
+use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use std::collections::HashMap;
 
 /// A mock [crate::Handler] received a request.

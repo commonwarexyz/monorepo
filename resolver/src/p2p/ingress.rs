@@ -1,7 +1,7 @@
 use crate::Resolver;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channels::{fallible::AsyncFallibleExt, mpsc},
+    channel::{fallible::AsyncFallibleExt, mpsc},
     vec::NonEmptyVec,
     Span,
 };

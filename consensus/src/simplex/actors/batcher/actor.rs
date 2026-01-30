@@ -23,7 +23,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channels::{fallible::OneshotExt, mpsc},
+    channel::{fallible::OneshotExt, mpsc},
     ordered::{Quorum, Set},
 };
 use prometheus_client::metrics::{

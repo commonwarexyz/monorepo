@@ -20,7 +20,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, RwLock, Storage};
-use commonware_utils::{channels::oneshot, Array};
+use commonware_utils::{channel::oneshot, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Result from a fetch operation

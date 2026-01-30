@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufMut, Quota};
-use commonware_utils::channels::mpsc;
+use commonware_utils::channel::mpsc;
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and

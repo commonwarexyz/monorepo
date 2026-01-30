@@ -105,7 +105,7 @@ mod tests {
         Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{
-        channels::{fallible::OneshotExt, oneshot},
+        channel::{fallible::OneshotExt, oneshot},
         test_rng, NZUsize, NonZeroDuration, NZU16,
     };
     use futures::future::join_all;

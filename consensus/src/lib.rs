@@ -65,7 +65,7 @@ pub trait CertifiableBlock: Block {
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::Digest;
-        use commonware_utils::channels::{fallible::OneshotExt, mpsc, oneshot};
+        use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
         use std::future::Future;
         use commonware_runtime::{Spawner, Metrics, Clock};
         use rand::Rng;

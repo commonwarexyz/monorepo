@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
-use commonware_utils::channels::{mpsc, oneshot};
+use commonware_utils::channel::{mpsc, oneshot};
 use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 

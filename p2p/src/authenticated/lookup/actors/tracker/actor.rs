@@ -14,7 +14,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::{
-    channels::{
+    channel::{
         fallible::{AsyncFallibleExt, FallibleExt},
         mpsc,
     },

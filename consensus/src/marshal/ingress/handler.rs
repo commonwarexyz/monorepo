@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_resolver::{p2p::Producer, Consumer};
 use commonware_utils::{
-    channels::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     Span,
 };
 use std::{

@@ -1,7 +1,7 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::{channels::mpsc, hex};
+use commonware_utils::{channel::mpsc, hex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,

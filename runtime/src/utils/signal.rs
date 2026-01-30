@@ -1,6 +1,6 @@
 //! Mechanisms for coordinating actions across many tasks.
 
-use commonware_utils::channels::oneshot::{self, error::RecvError};
+use commonware_utils::channel::oneshot::{self, error::RecvError};
 use futures::{future::Shared, FutureExt};
 use std::{
     future::Future,
@@ -51,7 +51,7 @@ use std::{
 /// ```rust
 /// use commonware_macros::select;
 /// use commonware_runtime::{Clock, Spawner, Runner, deterministic, Metrics, signal::Signaler};
-/// use commonware_utils::channels::oneshot;
+/// use commonware_utils::channel::oneshot;
 /// use std::time::Duration;
 ///
 /// let executor = deterministic::Runner::default();

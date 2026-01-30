@@ -4,7 +4,7 @@
 //! implemented to make consensus logging easier to follow.
 
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::channels::mpsc;
+use commonware_utils::channel::mpsc;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,

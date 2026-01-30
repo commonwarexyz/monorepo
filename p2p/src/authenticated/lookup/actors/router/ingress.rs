@@ -12,7 +12,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::IoBufMut;
 use commonware_utils::{
-    channels::{fallible::AsyncFallibleExt, oneshot, ring},
+    channel::{fallible::AsyncFallibleExt, oneshot, ring},
     NZUsize,
 };
 

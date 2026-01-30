@@ -1,5 +1,5 @@
 use crate::{mocks, Error, IoBufs};
-use commonware_utils::channels::mpsc;
+use commonware_utils::channel::mpsc;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},

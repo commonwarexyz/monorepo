@@ -5,7 +5,7 @@ use crate::{
 use commonware_macros::select_loop;
 use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use commonware_utils::channels::{mpsc, oneshot};
+use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::HashMap;
 use tracing::debug;
 

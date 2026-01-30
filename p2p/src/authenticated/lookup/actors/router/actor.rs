@@ -15,7 +15,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
-    channels::{mpsc, ring},
+    channel::{mpsc, ring},
     NZUsize,
 };
 use futures::SinkExt;

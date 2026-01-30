@@ -1,5 +1,5 @@
 use crate::Span;
-use commonware_utils::channels::{fallible::FallibleExt, mpsc};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc};
 use std::collections::HashMap;
 
 /// An event that indicates the messages that were sent to the consumer
