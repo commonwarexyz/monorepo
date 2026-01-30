@@ -1505,10 +1505,17 @@ mod tests {
     use crate::{
         deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
     };
+    use commonware_macros::test_traced;
+    #[cfg(feature = "external")]
+    use commonware_utils::channel::mpsc;
     use commonware_utils::channel::oneshot;
+    #[cfg(not(feature = "external"))]
+    use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{stream::FuturesUnordered, task::noop_waker};
+    #[cfg(feature = "external")]
+    use futures::{SinkExt, StreamExt};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1532,13 +1539,6 @@ mod tests {
             (context.auditor().state(), outputs)
         })
     }
-    use commonware_macros::test_traced;
-    #[cfg(feature = "external")]
-    use commonware_utils::channel::mpsc;
-    #[cfg(not(feature = "external"))]
-    use futures::future::pending;
-    #[cfg(feature = "external")]
-    use futures::{SinkExt, StreamExt};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
