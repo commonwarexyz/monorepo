@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Is it ready yet?</title>
+    <meta name="description" content="TBD">
+    <meta name="author" content="Patrick O’Grady">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/is-it-ready-yet" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/is-it-ready-yet-card.png" />
+    <meta property="og:title" content="Is it ready yet?" />
+    <meta property="og:description" content="TBD" />
+    <meta property="article:author" content="Patrick O’Grady" />
+    <meta property="article:published_time" content="2026-01-30T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-01-30T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/is-it-ready-yet" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/is-it-ready-yet" />
+    <meta property="twitter:title" content="Is it ready yet?" />
+    <meta property="twitter:description" content="TBD" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/is-it-ready-yet-card.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+
+    </head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Is it ready yet?</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/_patrickogrady">Patrick
+O’Grady</a></div>
+                        <div class="date">January 30th, 2026</div>
+        </div>
+        <div class="sourceCode" id="cb1"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware::</span><span class="op">{</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    <span class="pp">consensus::simplex::</span><span class="op">{</span>Simplex<span class="op">,</span> SimplexConfig<span class="op">},</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>    <span class="pp">storage::</span><span class="op">{</span>MemoryStorage<span class="op">,</span> MemoryStorageConfig<span class="op">},</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    <span class="pp">transport::</span><span class="op">{</span>InMemoryTransport<span class="op">,</span> InMemoryTransportConfig<span class="op">},</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="op">};</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> config <span class="op">=</span> <span class="pp">SimplexConfig::</span><span class="kw">default</span>()<span class="op">;</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> storage <span class="op">=</span> <span class="pp">MemoryStorage::</span>new(<span class="pp">MemoryStorageConfig::</span><span class="kw">default</span>())<span class="op">;</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> transport <span class="op">=</span> <span class="pp">InMemoryTransport::</span>new(<span class="pp">InMemoryTransportConfig::</span><span class="kw">default</span>())<span class="op">;</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> simplex <span class="op">=</span> <span class="pp">Simplex::</span>new(config<span class="op">,</span> storage<span class="op">,</span> transport)<span class="op">;</span></span></code></pre></div>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
