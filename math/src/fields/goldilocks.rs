@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Ring};
+use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
 use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use rand_core::CryptoRngCore;
@@ -278,11 +278,12 @@ impl F {
     pub const fn to_le_bytes(&self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
+}
 
-    /// Create a random field element.
-    ///
-    /// This will be uniformly distributed.
-    pub fn rand(mut rng: impl CryptoRngCore) -> Self {
+impl Object for F {}
+
+impl Random for F {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         // this fails only about once every 2^32 attempts
         loop {
             let x = rng.next_u64();
@@ -292,8 +293,6 @@ impl F {
         }
     }
 }
-
-impl Object for F {}
 
 impl Add for F {
     type Output = Self;
