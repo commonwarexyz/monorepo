@@ -191,9 +191,11 @@ where
         // Use a labeled context for the probe init. If we need to recreate, we'll use the original
         // context (different metric prefix) to avoid duplicate metric registration since destroy
         // doesn't unregister metrics.
-        let journal =
-            DB::Journal::init(journal_context.with_label("journal"), journal_config.clone())
-                .await?;
+        let journal = DB::Journal::init(
+            journal_context.with_label("journal"),
+            journal_config.clone(),
+        )
+        .await?;
         let size = journal.size();
 
         let journal = if size == 0 {
