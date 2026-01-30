@@ -2,6 +2,7 @@ set positional-arguments := true
 
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
+rustfmt := env("RUSTFMT", "rustfmt")
 
 alias f := fix-fmt
 alias l := lint
@@ -22,7 +23,7 @@ pre-pr: lint test-docs test check-stability
 
 # Fixes the formatting of the workspace
 fix-fmt:
-    git ls-files '*.rs' | xargs rustfmt {{ nightly_version }} --edition 2021
+    git ls-files '*.rs' | xargs {{ rustfmt }} {{ nightly_version }} --edition 2021
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -30,7 +31,7 @@ fix-toml-fmt:
 
 # Check the formatting of the workspace
 check-fmt:
-    git ls-files '*.rs' | xargs rustfmt {{ nightly_version }} --edition 2021 --check
+    git ls-files '*.rs' | xargs {{ rustfmt }} {{ nightly_version }} --edition 2021 --check
 
 # Run clippy lints
 clippy *args='':
