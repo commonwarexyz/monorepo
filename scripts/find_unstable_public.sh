@@ -43,8 +43,9 @@ check_crate() {
     
     # Generate rustdoc JSON at RESERVED stability level
     # Use both RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
+    # Allow broken intra-doc links since stability-gated types won't be available
     if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
-        RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG" \
+        RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG -Arustdoc::broken_intra_doc_links" \
         cargo +nightly doc -p "$crate" --no-deps 2>/dev/null; then
         echo "  Warning: Could not generate rustdoc for $crate" >&2
         return 1

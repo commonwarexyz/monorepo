@@ -56,24 +56,23 @@
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
-use cfg_if::cfg_if;
-use core::fmt;
-
-cfg_if! {
-    if #[cfg(feature = "std")] {
-        use rayon::{
-            iter::{IntoParallelIterator, ParallelIterator},
-            ThreadPool as RThreadPool, ThreadPoolBuilder,
-            ThreadPoolBuildError
-        };
-        use std::{num::NonZeroUsize, sync::Arc};
-    } else {
-        extern crate alloc;
-        use alloc::vec::Vec;
-    }
-}
-
 commonware_macros::stability_scope!(BETA {
+    use cfg_if::cfg_if;
+    use core::fmt;
+
+    cfg_if! {
+        if #[cfg(feature = "std")] {
+            use rayon::{
+                iter::{IntoParallelIterator, ParallelIterator},
+                ThreadPool as RThreadPool, ThreadPoolBuilder,
+                ThreadPoolBuildError
+            };
+            use std::{num::NonZeroUsize, sync::Arc};
+        } else {
+            extern crate alloc;
+            use alloc::vec::Vec;
+        }
+    }
     /// A strategy for executing fold operations.
     ///
     /// This trait abstracts over sequential and parallel execution, allowing algorithms

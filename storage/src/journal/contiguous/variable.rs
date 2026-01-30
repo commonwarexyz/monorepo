@@ -14,10 +14,13 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
+#[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
-use tracing::{debug, warn};
+#[commonware_macros::stability(ALPHA)]
+use tracing::debug;
+use tracing::warn;
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -594,6 +597,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         self.data.clear().await?;
 
