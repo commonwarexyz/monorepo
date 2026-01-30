@@ -87,6 +87,7 @@ std = [
 	"chacha20poly1305/getrandom",
 	"chacha20poly1305/std",
 	"commonware-codec/std",
+	"commonware-macros/std",
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",

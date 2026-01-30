@@ -4,8 +4,8 @@ members = [
     "codec",
     "coding",
     "collector",
-    "conformance/macros",
     "conformance",
+    "conformance/macros",
     "consensus",
     "cryptography",
     "deployer",
@@ -92,7 +92,8 @@ commonware-conformance-macros = { version = "0.0.65", path = "conformance/macros
 commonware-consensus = { version = "0.0.65", path = "consensus" }
 commonware-cryptography = { version = "0.0.65", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.65", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.65", path = "macros" }
+commonware-macros = { version = "0.0.65", path = "macros", default-features = false }
+commonware-macros-impl = { version = "0.0.65", path = "macros/impl" }
 commonware-math = { version = "0.0.65", path = "math", default-features = false }
 commonware-p2p = { version = "0.0.65", path = "p2p" }
 commonware-parallel = { version = "0.0.65", path = "parallel", default-features = false }
