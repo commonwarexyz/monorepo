@@ -597,13 +597,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))] // ALPHA
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
         self.data.clear().await?;
 
