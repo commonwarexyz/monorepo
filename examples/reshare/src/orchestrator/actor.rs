@@ -21,8 +21,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle,
-    Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell,
+    Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
@@ -83,7 +83,7 @@ where
 
     muxer_size: usize,
     partition_prefix: String,
-    pool_ref: PoolRef,
+    page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
 
@@ -109,7 +109,7 @@ where
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-        let pool_ref = PoolRef::new(NZU16!(16_384), NZUsize!(10_000));
+        let page_cache_ref = CacheRef::new(NZU16!(16_384), NZUsize!(10_000));
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = Gauge::default();
@@ -126,7 +126,7 @@ where
                 strategy: config.strategy,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                pool_ref,
+                page_cache_ref,
                 latest_epoch,
                 _phantom: PhantomData,
             },
@@ -329,7 +329,7 @@ where
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
-                buffer_pool: self.pool_ref.clone(),
+                page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
             },
         );

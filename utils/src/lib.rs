@@ -11,177 +11,269 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{Buf, BufMut, BytesMut};
-use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::{BufMut, BytesMut};
 use core::{
     fmt::{Debug, Write as FmtWrite},
     time::Duration,
 };
 
-pub mod faults;
-pub use faults::{Faults, N3f1, N5f1};
-pub mod sequence;
-pub use sequence::{Array, Span};
-#[cfg(feature = "std")]
-pub mod acknowledgement;
-#[cfg(feature = "std")]
-pub use acknowledgement::Acknowledgement;
-pub mod bitmap;
-#[cfg(feature = "std")]
-pub mod channel;
-pub mod hex_literal;
-pub mod hostname;
-pub use hostname::Hostname;
-#[cfg(feature = "std")]
-pub mod net;
-pub mod ordered;
-pub mod vec;
+commonware_macros::stability_scope!(BETA {
+    pub mod faults;
+    pub use faults::{Faults, N3f1, N5f1};
 
-/// Represents a participant/validator index within a consensus committee.
-///
-/// Participant indices are used to identify validators in attestations,
-/// votes, and certificates. The index corresponds to the position of the
-/// validator's public key in the ordered participant set.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Participant(u32);
+    pub mod sequence;
+    pub use sequence::{Array, Span};
 
-impl Participant {
-    /// Creates a new participant from a u32 index.
-    pub const fn new(index: u32) -> Self {
-        Self(index)
+    pub mod hostname;
+    pub use hostname::Hostname;
+
+    pub mod bitmap;
+    pub mod ordered;
+
+    use bytes::Buf;
+    use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+
+    /// Represents a participant/validator index within a consensus committee.
+    ///
+    /// Participant indices are used to identify validators in attestations,
+    /// votes, and certificates. The index corresponds to the position of the
+    /// validator's public key in the ordered participant set.
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    pub struct Participant(u32);
+
+    impl Participant {
+        /// Creates a new participant from a u32 index.
+        pub const fn new(index: u32) -> Self {
+            Self(index)
+        }
+
+        /// Creates a new participant from a usize index.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `index` exceeds `u32::MAX`.
+        pub fn from_usize(index: usize) -> Self {
+            Self(u32::try_from(index).expect("participant index exceeds u32::MAX"))
+        }
+
+        /// Returns the underlying u32 index.
+        pub const fn get(self) -> u32 {
+            self.0
+        }
     }
 
-    /// Creates a new participant from a usize index.
+    impl From<Participant> for usize {
+        fn from(p: Participant) -> Self {
+            p.0 as Self
+        }
+    }
+
+    impl core::fmt::Display for Participant {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl Read for Participant {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            let value: u32 = UInt::read(buf)?.into();
+            Ok(Self(value))
+        }
+    }
+
+    impl Write for Participant {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            UInt(self.0).write(buf);
+        }
+    }
+
+    impl EncodeSize for Participant {
+        fn encode_size(&self) -> usize {
+            UInt(self.0).encode_size()
+        }
+    }
+
+    /// A type that can be constructed from an iterator, possibly failing.
+    pub trait TryFromIterator<T>: Sized {
+        /// The error type returned when construction fails.
+        type Error;
+
+        /// Attempts to construct `Self` from an iterator.
+        fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error>;
+    }
+
+    /// Extension trait for iterators that provides fallible collection.
+    pub trait TryCollect: Iterator + Sized {
+        /// Attempts to collect elements into a collection that may fail.
+        fn try_collect<C: TryFromIterator<Self::Item>>(self) -> Result<C, C::Error> {
+            C::try_from_iter(self)
+        }
+    }
+
+    impl<I: Iterator> TryCollect for I {}
+
+    /// Alias for boxed errors that are `Send` and `Sync`.
+    pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
+
+    /// Converts bytes to a hexadecimal string.
+    pub fn hex(bytes: &[u8]) -> String {
+        let mut hex = String::new();
+        for byte in bytes.iter() {
+            write!(hex, "{byte:02x}").expect("writing to string should never fail");
+        }
+        hex
+    }
+
+    /// Converts a hexadecimal string to bytes.
+    pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
+        let bytes = hex.as_bytes();
+        if !bytes.len().is_multiple_of(2) {
+            return None;
+        }
+
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| {
+                let hi = decode_hex_digit(chunk[0])?;
+                let lo = decode_hex_digit(chunk[1])?;
+                Some((hi << 4) | lo)
+            })
+            .collect()
+    }
+
+    /// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
+    /// in testing to encode external test vectors without modification.
+    pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
+        let hex = hex.replace(['\t', '\n', '\r', ' '], "");
+        let res = hex.strip_prefix("0x").unwrap_or(&hex);
+        from_hex(res)
+    }
+
+    /// Computes the union of two byte slices.
+    pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
+        let mut union = Vec::with_capacity(a.len() + b.len());
+        union.extend_from_slice(a);
+        union.extend_from_slice(b);
+        union
+    }
+
+    /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
+    ///
+    /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
+    pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
+        use commonware_codec::EncodeSize;
+        let len_prefix = namespace.len();
+        let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
+        len_prefix.write(&mut buf);
+        BufMut::put_slice(&mut buf, namespace);
+        BufMut::put_slice(&mut buf, msg);
+        buf.into()
+    }
+
+    /// Compute the modulo of bytes interpreted as a big-endian integer.
+    ///
+    /// This function is used to select a random entry from an array when the bytes are a random seed.
     ///
     /// # Panics
     ///
-    /// Panics if `index` exceeds `u32::MAX`.
-    pub fn from_usize(index: usize) -> Self {
-        Self(u32::try_from(index).expect("participant index exceeds u32::MAX"))
+    /// Panics if `n` is zero.
+    pub fn modulo(bytes: &[u8], n: u64) -> u64 {
+        assert_ne!(n, 0, "modulus must be non-zero");
+
+        let n = n as u128;
+        let mut result = 0u128;
+        for &byte in bytes {
+            result = (result << 8) | (byte as u128);
+            result %= n;
+        }
+
+        // Result is either 0 or modulo `n`, so we can safely cast to u64
+        result as u64
     }
 
-    /// Returns the underlying u32 index.
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
+    /// A wrapper around `Duration` that guarantees the duration is non-zero.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct NonZeroDuration(Duration);
 
-impl From<Participant> for usize {
-    fn from(p: Participant) -> Self {
-        p.0 as Self
-    }
-}
+    impl NonZeroDuration {
+        /// Creates a `NonZeroDuration` if the given duration is non-zero.
+        pub fn new(duration: Duration) -> Option<Self> {
+            if duration == Duration::ZERO {
+                None
+            } else {
+                Some(Self(duration))
+            }
+        }
 
-impl core::fmt::Display for Participant {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+        /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
+        pub fn new_panic(duration: Duration) -> Self {
+            Self::new(duration).expect("duration must be non-zero")
+        }
 
-impl Read for Participant {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let value: u32 = UInt::read(buf)?.into();
-        Ok(Self(value))
-    }
-}
-
-impl Write for Participant {
-    fn write(&self, buf: &mut impl BufMut) {
-        UInt(self.0).write(buf);
-    }
-}
-
-impl EncodeSize for Participant {
-    fn encode_size(&self) -> usize {
-        UInt(self.0).encode_size()
-    }
-}
-
-/// A type that can be constructed from an iterator, possibly failing.
-pub trait TryFromIterator<T>: Sized {
-    /// The error type returned when construction fails.
-    type Error;
-
-    /// Attempts to construct `Self` from an iterator.
-    fn try_from_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, Self::Error>;
-}
-
-/// Extension trait for iterators that provides fallible collection.
-pub trait TryCollect: Iterator + Sized {
-    /// Attempts to collect elements into a collection that may fail.
-    fn try_collect<C: TryFromIterator<Self::Item>>(self) -> Result<C, C::Error> {
-        C::try_from_iter(self)
-    }
-}
-
-impl<I: Iterator> TryCollect for I {}
-#[cfg(feature = "std")]
-pub use net::IpAddrExt;
-#[cfg(feature = "std")]
-pub mod time;
-#[cfg(feature = "std")]
-pub use time::{DurationExt, SystemTimeExt};
-#[cfg(feature = "std")]
-pub mod rational;
-#[cfg(feature = "std")]
-pub use rational::BigRationalExt;
-#[cfg(feature = "std")]
-mod priority_set;
-#[cfg(feature = "std")]
-pub use priority_set::PrioritySet;
-#[cfg(feature = "std")]
-pub mod concurrency;
-#[cfg(feature = "std")]
-pub mod futures;
-
-/// Returns a seeded RNG for deterministic testing.
-///
-/// Uses seed 0 by default to ensure reproducible test results.
-#[cfg(feature = "std")]
-pub fn test_rng() -> rand::rngs::StdRng {
-    rand::SeedableRng::seed_from_u64(0)
-}
-
-/// Returns a seeded RNG with a custom seed for deterministic testing.
-///
-/// Use this when you need multiple independent RNG streams in the same test,
-/// or when a helper function needs its own RNG that won't collide with the caller's.
-#[cfg(feature = "std")]
-pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
-    rand::SeedableRng::seed_from_u64(seed)
-}
-
-/// Alias for boxed errors that are `Send` and `Sync`.
-pub type BoxedError = Box<dyn core::error::Error + Send + Sync>;
-
-/// Converts bytes to a hexadecimal string.
-pub fn hex(bytes: &[u8]) -> String {
-    let mut hex = String::new();
-    for byte in bytes.iter() {
-        write!(hex, "{byte:02x}").expect("writing to string should never fail");
-    }
-    hex
-}
-
-/// Converts a hexadecimal string to bytes.
-pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
-    let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return None;
+        /// Returns the wrapped `Duration`.
+        pub const fn get(self) -> Duration {
+            self.0
+        }
     }
 
-    bytes
-        .chunks_exact(2)
-        .map(|chunk| {
-            let hi = decode_hex_digit(chunk[0])?;
-            let lo = decode_hex_digit(chunk[1])?;
-            Some((hi << 4) | lo)
-        })
-        .collect()
-}
+    impl From<NonZeroDuration> for Duration {
+        fn from(nz_duration: NonZeroDuration) -> Self {
+            nz_duration.0
+        }
+    }
+});
+commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+    pub mod acknowledgement;
+    pub use acknowledgement::Acknowledgement;
+
+    pub mod net;
+    pub use net::IpAddrExt;
+
+    pub mod time;
+    pub use time::{DurationExt, SystemTimeExt};
+
+    pub mod rational;
+    pub use rational::BigRationalExt;
+
+    mod priority_set;
+    pub use priority_set::PrioritySet;
+
+    pub mod channel;
+    pub mod concurrency;
+    pub mod futures;
+
+    /// Returns a seeded RNG for deterministic testing.
+    ///
+    /// Uses seed 0 by default to ensure reproducible test results.
+    pub fn test_rng() -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(0)
+    }
+
+    /// Returns a seeded RNG with a custom seed for deterministic testing.
+    ///
+    /// Use this when you need multiple independent RNG streams in the same test,
+    /// or when a helper function needs its own RNG that won't collide with the caller's.
+    pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
+        rand::SeedableRng::seed_from_u64(seed)
+    }
+});
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+pub mod hex_literal;
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
+pub mod vec;
 
 #[inline]
 const fn decode_hex_digit(byte: u8) -> Option<u8> {
@@ -191,55 +283,6 @@ const fn decode_hex_digit(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
-}
-
-/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
-/// in testing to encode external test vectors without modification.
-pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
-    let hex = hex.replace(['\t', '\n', '\r', ' '], "");
-    let res = hex.strip_prefix("0x").unwrap_or(&hex);
-    from_hex(res)
-}
-
-/// Computes the union of two byte slices.
-pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
-    let mut union = Vec::with_capacity(a.len() + b.len());
-    union.extend_from_slice(a);
-    union.extend_from_slice(b);
-    union
-}
-
-/// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
-///
-/// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
-pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    let len_prefix = namespace.len();
-    let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
-    len_prefix.write(&mut buf);
-    BufMut::put_slice(&mut buf, namespace);
-    BufMut::put_slice(&mut buf, msg);
-    buf.into()
-}
-
-/// Compute the modulo of bytes interpreted as a big-endian integer.
-///
-/// This function is used to select a random entry from an array when the bytes are a random seed.
-///
-/// # Panics
-///
-/// Panics if `n` is zero.
-pub fn modulo(bytes: &[u8], n: u64) -> u64 {
-    assert_ne!(n, 0, "modulus must be non-zero");
-
-    let n = n as u128;
-    let mut result = 0u128;
-    for &byte in bytes {
-        result = (result << 8) | (byte as u128);
-        result %= n;
-    }
-
-    // Result is either 0 or modulo `n`, so we can safely cast to u64
-    result as u64
 }
 
 /// A macro to create a `NonZeroUsize` from a value, panicking if the value is zero.
@@ -310,37 +353,6 @@ macro_rules! NZU64 {
         // This will panic at runtime if $val is zero.
         ::core::num::NonZeroU64::new($val).expect("value must be non-zero")
     };
-}
-
-/// A wrapper around `Duration` that guarantees the duration is non-zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NonZeroDuration(Duration);
-
-impl NonZeroDuration {
-    /// Creates a `NonZeroDuration` if the given duration is non-zero.
-    pub fn new(duration: Duration) -> Option<Self> {
-        if duration == Duration::ZERO {
-            None
-        } else {
-            Some(Self(duration))
-        }
-    }
-
-    /// Creates a `NonZeroDuration` from the given duration, panicking if it's zero.
-    pub fn new_panic(duration: Duration) -> Self {
-        Self::new(duration).expect("duration must be non-zero")
-    }
-
-    /// Returns the wrapped `Duration`.
-    pub const fn get(self) -> Duration {
-        self.0
-    }
-}
-
-impl From<NonZeroDuration> for Duration {
-    fn from(nz_duration: NonZeroDuration) -> Self {
-        nz_duration.0
-    }
 }
 
 /// A macro to create a `NonZeroDuration` from a duration, panicking if the duration is zero.
@@ -448,7 +460,7 @@ mod tests {
     #[test]
     fn test_union() {
         // Test case 0: empty slices
-        assert_eq!(union(&[], &[]), []);
+        assert_eq!(union(&[], &[]), Vec::<u8>::new());
 
         // Test case 1: empty and non-empty slices
         assert_eq!(union(&[], &hex!("0x010203")), hex!("0x010203"));

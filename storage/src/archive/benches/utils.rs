@@ -1,7 +1,7 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
-use commonware_runtime::{buffer::PoolRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
@@ -20,10 +20,10 @@ const ITEMS_PER_SECTION: u64 = 16_384;
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Page size for the buffer pool.
+/// Page size for the page cache.
 const PAGE_SIZE: NonZeroU16 = NZU16!(4_096);
 
-/// The number of pages to cache in the buffer pool (8,192 × 4KB = 32MB).
+/// The number of pages to cache in the page cache (8,192 × 4KB = 32MB).
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 
 /// Key type (fixed-length) and value type (variable-length for large values).
@@ -68,7 +68,7 @@ impl Archive {
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
                     freezer_key_partition: "archive_bench_key".into(),
-                    freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     freezer_value_partition: "archive_bench_value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
@@ -86,7 +86,7 @@ impl Archive {
                 let cfg = prunable::Config {
                     translator: TwoCap,
                     key_partition: "archive_bench_key".into(),
-                    key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     value_partition: "archive_bench_value".into(),
                     compression,
                     codec_config: (RangeCfg::new(..), ()),

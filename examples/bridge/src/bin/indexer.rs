@@ -24,7 +24,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
-use commonware_stream::{listen, Config as StreamConfig};
+use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
     channel::{mpsc, oneshot},
     from_hex,

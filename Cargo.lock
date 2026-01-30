@@ -1079,6 +1079,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "commonware-conformance",
+ "commonware-macros",
  "paste",
  "proptest",
  "rand 0.8.5",
@@ -1107,6 +1108,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-macros",
  "commonware-math",
  "commonware-parallel",
  "commonware-storage",
@@ -1259,6 +1261,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-math",
  "commonware-parallel",
  "commonware-utils",
@@ -1316,6 +1319,7 @@ dependencies = [
  "chrono",
  "clap",
  "commonware-cryptography",
+ "commonware-macros",
  "futures",
  "reqwest",
  "serde",
@@ -1418,6 +1422,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
  "proptest",
@@ -1475,6 +1480,7 @@ name = "commonware-parallel"
 version = "0.0.65"
 dependencies = [
  "cfg-if",
+ "commonware-macros",
  "proptest",
  "rayon",
 ]

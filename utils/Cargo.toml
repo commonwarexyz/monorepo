@@ -18,6 +18,7 @@ arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
+commonware-macros.workspace = true
 futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"], optional = true }
 hashbrown.workspace = true

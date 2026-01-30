@@ -18,7 +18,7 @@ build *args='':
     cargo build $@
 
 # Runs pre-flight lints + tests before making a pull-request
-pre-pr: lint test-docs test
+pre-pr: lint test-docs test check-stability
 
 # Fixes the formatting of the workspace
 fix-fmt:
@@ -93,3 +93,60 @@ test-conformance *args='':
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+
+# Packages to exclude from stability checks (examples, fuzz targets)
+stability_excludes := "--exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-reshare --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
+
+# Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
+# ALPHA (level 0) is the default state and doesn't require a cfg flag.
+# Examples: just check-stability, just check-stability 3, just check-stability DELTA, just check-stability GAMMA -p commonware-cryptography
+check-stability *args='':
+    #!/usr/bin/env bash
+    all_args="{{ args }}"
+    level=""
+    extra_args=""
+    # Level names in order (index 0-4)
+    declare -a LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
+    # Convert name to number (returns empty for ALPHA since it's the default)
+    name_to_num() {
+        case "$1" in
+            ALPHA) echo 0 ;;
+            BETA) echo 1 ;;
+            GAMMA) echo 2 ;;
+            DELTA) echo 3 ;;
+            EPSILON) echo 4 ;;
+            *) echo "" ;;
+        esac
+    }
+    # Check if first arg is a level (number 1-4 or name)
+    first_arg="${all_args%% *}"
+    if [[ "$first_arg" =~ ^[1-4]$ ]]; then
+        level="$first_arg"
+        extra_args="${all_args#* }"
+        if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
+    else
+        num=$(name_to_num "$first_arg")
+        if [ -n "$num" ]; then
+            if [ "$num" = "0" ]; then
+                echo "Error: ALPHA is the default stability level (no cfg flag needed)."
+                echo "Use 'cargo build' directly or specify BETA/GAMMA/DELTA/EPSILON."
+                exit 1
+            fi
+            level="$num"
+            extra_args="${all_args#* }"
+            if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
+        else
+            extra_args="$all_args"
+        fi
+    fi
+    if [ -z "$level" ]; then
+        for l in 1 2 3 4; do
+            echo "Checking commonware_stability_${LEVEL_NAMES[$l]}..."
+            RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$l]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+        done
+        echo "All stability levels pass!"
+    else
+        echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
+        RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$level]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args
+    fi
+

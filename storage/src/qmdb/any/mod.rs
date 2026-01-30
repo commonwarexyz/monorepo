@@ -21,7 +21,7 @@ use crate::{
 use commonware_codec::CodecFixedShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub(crate) mod db;
@@ -64,8 +64,8 @@ pub struct FixedConfig<T: Translator> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
@@ -104,8 +104,8 @@ pub struct VariableConfig<T: Translator, C> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
@@ -127,14 +127,14 @@ pub(crate) async fn init_fixed_authenticated_log<
         items_per_blob: cfg.mmr_items_per_blob,
         write_buffer: cfg.mmr_write_buffer,
         thread_pool: cfg.thread_pool,
-        buffer_pool: cfg.buffer_pool.clone(),
+        page_cache: cfg.page_cache.clone(),
     };
 
     let journal_config = JConfig {
         partition: cfg.log_journal_partition,
         items_per_blob: cfg.log_items_per_blob,
         write_buffer: cfg.log_write_buffer,
-        buffer_pool: cfg.buffer_pool,
+        page_cache: cfg.page_cache,
     };
 
     let log = AuthenticatedLog::new(
@@ -174,7 +174,7 @@ pub(crate) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -191,7 +191,7 @@ pub(crate) mod test {
             log_codec_config: (),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
