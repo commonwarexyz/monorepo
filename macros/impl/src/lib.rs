@@ -613,13 +613,8 @@ impl Parse for SelectInput {
 
 /// Select the first future that completes (biased by order).
 ///
-/// This macro is powered by the [futures](https://docs.rs/futures) crate
-/// and is not bound to a particular executor or context.
-///
-/// # Fusing
-///
-/// This macro handles the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
-/// futures in a `select`-specific scope.
+/// This macro is powered by [tokio::select!](https://docs.rs/tokio/latest/tokio/macro.select.html)
+/// in biased mode and is not bound to a particular executor or context.
 ///
 /// # Example
 ///
@@ -656,9 +651,9 @@ pub fn select(input: TokenStream) -> TokenStream {
         body,
     } in branches.into_iter()
     {
-        // Generate branch for `select_biased!` macro
+        // Generate branch for `select!` macro
         let branch_code = quote! {
-            #pattern = (#future).fuse() => #body,
+            #pattern = #future => #body,
         };
         select_branches.push(branch_code);
     }
@@ -666,9 +661,8 @@ pub fn select(input: TokenStream) -> TokenStream {
     // Generate the final output code
     quote! {
         {
-            use ::commonware_macros::__reexport::futures::FutureExt as _;
-
-            ::commonware_macros::__reexport::futures::select_biased! {
+            ::commonware_macros::__reexport::tokio::select! {
+                biased;
                 #(#select_branches)*
             }
         }

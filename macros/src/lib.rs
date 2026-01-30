@@ -19,5 +19,5 @@ pub use commonware_macros_impl::{
 
 #[doc(hidden)]
 pub mod __reexport {
-    pub use futures;
+    pub use tokio;
 }
