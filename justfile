@@ -22,7 +22,7 @@ pre-pr: lint test-docs test check-stability
 
 # Fixes the formatting of the workspace
 fix-fmt:
-    cargo {{ nightly_version }} fmt --all
+    git ls-files '*.rs' | xargs rustfmt {{ nightly_version }} --edition 2021
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -30,7 +30,7 @@ fix-toml-fmt:
 
 # Check the formatting of the workspace
 check-fmt:
-    cargo {{ nightly_version }} fmt --all -- --check
+    git ls-files '*.rs' | xargs rustfmt {{ nightly_version }} --edition 2021 --check
 
 # Run clippy lints
 clippy *args='':
