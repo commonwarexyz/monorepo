@@ -59,10 +59,15 @@ fn count_stability_cfgs() -> usize {
 fn main() {
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    println!("cargo:rerun-if-env-changed=PROFILE");
+
+    // Skip stability warnings for development profiles (debug, test)
+    let profile = env::var("PROFILE").unwrap_or_default();
+    let is_dev_profile = matches!(profile.as_str(), "debug" | "test");
 
     // Print a warning if no stability cfg is set or if multiple stability cfgs are set.
     let count = count_stability_cfgs();
-    if count == 0 {
+    if count == 0 && !is_dev_profile {
         println!(
             "cargo:warning=stability cfg not set; set RUSTFLAGS=\"--cfg commonware_stability_X\" (ALPHA/BETA/GAMMA/DELTA/EPSILON) to enforce stability gating"
         );
