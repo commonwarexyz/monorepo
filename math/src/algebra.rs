@@ -622,7 +622,10 @@ pub mod test_suites {
 
     fn check_root_of_unity_order<T: FieldNTT>(lg: u8) -> TestResult {
         if lg > T::MAX_LG_ROOT_ORDER {
-            prop_assert!(T::root_of_unity(lg).is_none(), "root_of_unity should be None for lg > MAX");
+            prop_assert!(
+                T::root_of_unity(lg).is_none(),
+                "root_of_unity should be None for lg > MAX"
+            );
             return Ok(());
         }
         let root = T::root_of_unity(lg).expect("root_of_unity should be Some for lg <= MAX");
@@ -644,7 +647,11 @@ pub mod test_suites {
                     order[i + 1] = order[i + 1].wrapping_sub(1);
                 }
             }
-            prop_assert_ne!(root.exp(&order), T::one(), "root^(2^lg - 1) should not equal 1");
+            prop_assert_ne!(
+                root.exp(&order),
+                T::one(),
+                "root^(2^lg - 1) should not equal 1"
+            );
         }
         Ok(())
     }
