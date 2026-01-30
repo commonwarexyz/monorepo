@@ -327,8 +327,8 @@ pub struct StrongShard<D: Digest> {
     data_bytes: usize,
     root: D,
     inclusion_proof: Proof<D>,
-    rows: Matrix,
-    checksum: Arc<Matrix>,
+    rows: Matrix<F>,
+    checksum: Arc<Matrix<F>>,
 }
 
 impl<D: Digest> PartialEq for StrongShard<D> {
@@ -376,8 +376,8 @@ impl<D: Digest> Read for StrongShard<D> {
             data_bytes,
             root: ReadExt::read(buf)?,
             inclusion_proof: Read::read_cfg(buf, &max_els)?,
-            rows: Read::read_cfg(buf, &max_els)?,
-            checksum: Arc::new(Read::read_cfg(buf, &max_els)?),
+            rows: Read::read_cfg(buf, &(max_els, ()))?,
+            checksum: Arc::new(Read::read_cfg(buf, &(max_els, ()))?),
         })
     }
 }
@@ -401,7 +401,7 @@ where
 #[derive(Clone, Debug)]
 pub struct WeakShard<D: Digest> {
     inclusion_proof: Proof<D>,
-    shard: Matrix,
+    shard: Matrix<F>,
 }
 
 impl<D: Digest> PartialEq for WeakShard<D> {
@@ -437,7 +437,7 @@ impl<D: Digest> Read for WeakShard<D> {
         Ok(Self {
             // Worst case: every row is one data element, and the sample size is all rows.
             inclusion_proof: Read::read_cfg(buf, &max_data_els)?,
-            shard: Read::read_cfg(buf, &max_data_els)?,
+            shard: Read::read_cfg(buf, &(max_data_els, ()))?,
         })
     }
 }
@@ -459,7 +459,7 @@ where
 #[derive(Clone)]
 pub struct CheckedShard {
     index: usize,
-    shard: Matrix,
+    shard: Matrix<F>,
 }
 
 /// Take indices up to `total`, and shuffle them.
@@ -481,7 +481,7 @@ fn shuffle_indices(transcript: &Transcript, total: usize) -> Vec<u32> {
 /// Create a checking matrix of the right shape.
 ///
 /// This matrix is random, using the transcript as a deterministic source of randomness.
-fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
+fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix<F> {
     Matrix::rand(
         &mut transcript.noise(b"checking matrix"),
         topology.data_cols,
@@ -494,8 +494,8 @@ fn checking_matrix(transcript: &Transcript, topology: &Topology) -> Matrix {
 pub struct CheckingData<D: Digest> {
     topology: Topology,
     root: D,
-    checking_matrix: Matrix,
-    encoded_checksum: Matrix,
+    checking_matrix: Matrix<F>,
+    encoded_checksum: Matrix<F>,
     shuffled_indices: Vec<u32>,
 }
 
@@ -513,7 +513,7 @@ impl<D: Digest> CheckingData<D> {
         commitment: &Summary,
         data_bytes: usize,
         root: D,
-        checksum: &Matrix,
+        checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
         let topology = Topology::reckon(config, data_bytes);
         let mut transcript = Transcript::new(NAMESPACE);
@@ -769,7 +769,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         if shards.len() < min_shards {
             return Err(Error::InsufficientShards(shards.len(), min_shards));
         }
-        let mut evaluation = EvaluationVector::empty(encoded_rows.ilog2() as usize, data_cols);
+        let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         for shard in shards {
             let indices =
                 &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
