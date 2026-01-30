@@ -18,19 +18,19 @@ use crate::{
             VariableValue,
         },
         current::{
-            db::{merkleize_grafted_bitmap, root},
+            db::{merkleize_grafted_bitmap, root, Clean},
             VariableConfig as Config,
         },
-        Durable, Error, Merkleized,
+        Durable, Error,
     },
     translator::Translator,
 };
 use commonware_codec::{FixedSize, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
+pub type Db<E, K, V, H, T, const N: usize, S = Clean<DigestOf<H>>, D = Durable> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
 
 // Functionality for the Clean state - init only.
@@ -41,7 +41,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+    > Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>
 where
     Operation<K, V>: Read,
 {
@@ -96,12 +96,12 @@ where
         let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
 
         // Compute and cache the root
-        let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
+        let cached_root = root(&mut hasher, &status, &any.log.mmr).await?;
 
         Ok(Self {
             any,
             status,
-            cached_root,
+            state: Clean { cached_root },
         })
     }
 }
@@ -115,6 +115,7 @@ mod test {
         qmdb::{
             any::unordered::variable::Operation,
             current::{
+                db::{Clean, Dirty},
                 proof::RangeProof,
                 tests::{self, apply_random_ops},
                 unordered::{db::KeyValueProof, variable::Db},
@@ -124,7 +125,7 @@ mod test {
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
             },
-            Durable, Error, Merkleized, NonDurable, Unmerkleized,
+            Durable, Error, NonDurable,
         },
         translator::TwoCap,
     };
@@ -156,13 +157,13 @@ mod test {
         }
     }
 
-    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
+    /// A type alias for the concrete [Db] type used in these unit tests (Clean, Durable).
     type CleanCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Merkleized<Sha256>, Durable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Clean<Digest>, Durable>;
 
-    /// A type alias for the Mutable (Unmerkleized, NonDurable) variant of CurrentTest.
+    /// A type alias for the Mutable (Dirty, NonDurable) variant of CurrentTest.
     type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Unmerkleized, NonDurable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Dirty, NonDurable>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(

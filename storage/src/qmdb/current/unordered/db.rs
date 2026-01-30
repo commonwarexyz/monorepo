@@ -14,9 +14,11 @@ use crate::{
             unordered::{Operation, Update},
             ValueEncoding,
         },
-        current::proof::OperationProof,
-        store, DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable,
-        Unmerkleized,
+        current::{
+            db::{Clean, Dirty, State},
+            proof::OperationProof,
+        },
+        store, DurabilityState, Durable, Error, NonDurable,
     },
     translator::Translator,
 };
@@ -29,7 +31,7 @@ use commonware_utils::Array;
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 
 /// The generic Db type for unordered Current QMDB variants.
-pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
+pub type Db<E, C, K, V, H, T, const N: usize, S = Clean<DigestOf<H>>, D = Durable> =
     super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
@@ -41,9 +43,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        M: MerkleizationState<DigestOf<H>>,
+        S: State<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, K, V, H, T, N, M, D>
+    > Db<E, C, K, V, H, T, N, S, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -68,7 +70,7 @@ where
     }
 }
 
-// Functionality for any Merkleized state (both Durable and NonDurable).
+// Functionality for any Clean state (both Durable and NonDurable).
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -78,7 +80,7 @@ impl<
         T: Translator,
         const N: usize,
         D: store::State,
-    > Db<E, C, K, V, H, T, N, Merkleized<H>, D>
+    > Db<E, C, K, V, H, T, N, Clean<DigestOf<H>>, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -115,7 +117,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    > Db<E, C, K, V, H, T, N, Dirty, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -167,9 +169,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        M: MerkleizationState<DigestOf<H>>,
+        S: State<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, H, T, N, M, D>
+    > kv::Gettable for Db<E, C, K, V, H, T, N, S, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -183,7 +185,7 @@ where
     }
 }
 
-// StoreMut for (Unmerkleized, NonDurable) (aka mutable) state
+// StoreMut for (Dirty, NonDurable) (aka mutable) state
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -192,7 +194,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > kv::Updatable for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    > kv::Updatable for Db<E, C, K, V, H, T, N, Dirty, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -202,7 +204,7 @@ where
     }
 }
 
-// StoreDeletable for (Unmerkleized, NonDurable) (aka mutable) state
+// StoreDeletable for (Dirty, NonDurable) (aka mutable) state
 impl<
         E: Storage + Clock + Metrics,
         C: MutableContiguous<Item = Operation<K, V>>,
@@ -211,7 +213,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > kv::Deletable for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    > kv::Deletable for Db<E, C, K, V, H, T, N, Dirty, NonDurable>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -221,9 +223,9 @@ where
     }
 }
 
-// Batchable for (Unmerkleized, NonDurable) (aka mutable) state
+// Batchable for (Dirty, NonDurable) (aka mutable) state
 impl<E, C, K, V, T, H, const N: usize> Batchable
-    for Db<E, C, K, V, H, T, N, Unmerkleized, NonDurable>
+    for Db<E, C, K, V, H, T, N, Dirty, NonDurable>
 where
     E: Storage + Clock + Metrics,
     C: MutableContiguous<Item = Operation<K, V>>,
