@@ -48,7 +48,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
         let translator = cfg.translator.clone();
-        let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+        let mut log = init_fixed_authenticated_log(context.with_label("log"), cfg).await?;
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
             let mut dirty_log = log.into_dirty();
@@ -60,7 +60,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         }
 
         let log = Self::init_from_log(
-            Index::new(context.clone(), translator),
+            Index::new(context.with_label("index"), translator),
             log,
             known_inactivity_floor,
             callback,
@@ -141,7 +141,7 @@ pub mod partitioned {
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
             let translator = cfg.translator.clone();
-            let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
+            let mut log = init_fixed_authenticated_log(context.with_label("log"), cfg).await?;
             if log.size() == 0 {
                 warn!("Authenticated log is empty, initializing new db");
                 log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
@@ -150,7 +150,7 @@ pub mod partitioned {
             }
 
             let log = Self::init_from_log(
-                Index::new(context.clone(), translator),
+                Index::new(context.with_label("index"), translator),
                 log,
                 known_inactivity_floor,
                 callback,
