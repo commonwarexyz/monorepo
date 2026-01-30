@@ -72,14 +72,31 @@ fn level_name(level: u8) -> &'static str {
     }
 }
 
-/// Generates cfg exclusion identifiers for levels above the given level.
-/// Always includes `commonware_stability_RESERVED` to allow finding unmarked items.
+/// Generates cfg identifiers that should exclude an item at the given stability level.
+///
+/// The stability system works by excluding items when building at higher stability levels.
+/// For example, an item marked `#[stability(BETA)]` (level 1) should be excluded when
+/// building with `--cfg commonware_stability_GAMMA` (level 2) or higher.
+///
+/// This function returns identifiers for all levels above the given level, plus `RESERVED`.
+/// The generated `#[cfg(not(any(...)))]` attribute ensures the item is included only when
+/// none of the higher-level cfgs are set.
+///
+/// ```text
+/// Level 0 (ALPHA)   -> excludes at: BETA, GAMMA, DELTA, EPSILON, RESERVED
+/// Level 1 (BETA)    -> excludes at: GAMMA, DELTA, EPSILON, RESERVED
+/// Level 2 (GAMMA)   -> excludes at: DELTA, EPSILON, RESERVED
+/// Level 3 (DELTA)   -> excludes at: EPSILON, RESERVED
+/// Level 4 (EPSILON) -> excludes at: RESERVED
+/// ```
+///
+/// `RESERVED` is a special level used by `scripts/find_unstable_public.sh` to exclude ALL
+/// stability-marked items, leaving only unmarked public items visible in rustdoc output.
 fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
     let mut names: Vec<_> = ((level + 1)..=4)
         .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
         .collect();
 
-    // RESERVED excludes all stability-marked items, leaving only unmarked ones
     names.push(format_ident!("commonware_stability_RESERVED"));
     names
 }
@@ -97,6 +114,24 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
 ///
 /// #[stability(BETA)]  // excluded at GAMMA, DELTA, EPSILON
 /// pub struct StableApi { }
+/// ```
+///
+/// # Limitation: `#[macro_export]` macros
+///
+/// Due to a Rust limitation ([rust-lang/rust#52234](https://github.com/rust-lang/rust/issues/52234)),
+/// `#[macro_export]` macros cannot be placed inside `stability_scope!` or use `#[stability]`.
+/// Macro-expanded `#[macro_export]` macros cannot be referenced by absolute paths.
+///
+/// For `#[macro_export]` macros, use manual cfg attributes instead:
+/// ```rust,ignore
+/// #[cfg(not(any(
+///     commonware_stability_GAMMA,
+///     commonware_stability_DELTA,
+///     commonware_stability_EPSILON,
+///     commonware_stability_RESERVED
+/// )))] // BETA
+/// #[macro_export]
+/// macro_rules! my_macro { ... }
 /// ```
 #[proc_macro_attribute]
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -226,6 +261,12 @@ impl Parse for StabilityScopeInput {
 ///     pub mod std_only_module;
 /// });
 /// ```
+///
+/// # Limitation: `#[macro_export]` macros
+///
+/// `#[macro_export]` macros cannot be placed inside `stability_scope!` due to a Rust
+/// limitation ([rust-lang/rust#52234](https://github.com/rust-lang/rust/issues/52234)).
+/// Use manual cfg attributes instead. See [`stability`] for details.
 #[proc_macro]
 pub fn stability_scope(input: TokenStream) -> TokenStream {
     let StabilityScopeInput {
