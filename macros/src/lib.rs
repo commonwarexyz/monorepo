@@ -101,10 +101,6 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
 #[proc_macro_attribute]
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
-
-    // Generate a single cfg(not(any(...))) for all levels above this item's level.
-    // #[stability(ALPHA)] expands to #[cfg(not(any(commonware_stability_BETA, commonware_stability_GAMMA, commonware_stability_DELTA, commonware_stability_EPSILON, commonware_stability_RESERVED)))]
-    // RESERVED is always included so that building with --cfg commonware_stability_RESERVED excludes ALL marked items.
     let exclude_names = exclusion_cfg_names(level.value);
 
     let item2: proc_macro2::TokenStream = item.into();
