@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::DecodeExt;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -25,7 +25,7 @@ impl Conformance for ArchivePrunable {
             let config = prunable::Config {
                 translator: TwoCap,
                 key_partition: format!("archive-prunable-key-{seed}"),
-                key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: format!("archive-prunable-value-{seed}"),
                 compression: None,
                 codec_config: (),
@@ -70,7 +70,7 @@ impl Conformance for ArchiveImmutable {
                 freezer_table_resize_frequency: 2,
                 freezer_table_resize_chunk_size: 32,
                 freezer_key_partition: format!("archive-immutable-key-{seed}"),
-                freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: format!("archive-immutable-value-{seed}"),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: None,

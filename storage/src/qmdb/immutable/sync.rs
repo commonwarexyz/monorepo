@@ -69,7 +69,7 @@ where
                     items_per_blob: db_config.mmr_items_per_blob,
                     write_buffer: db_config.mmr_write_buffer,
                     thread_pool: db_config.thread_pool.clone(),
-                    buffer_pool: db_config.buffer_pool.clone(),
+                    page_cache: db_config.page_cache.clone(),
                 },
                 range: Position::try_from(range.start)?
                     ..Position::try_from(range.end.saturating_add(1))?,
@@ -132,7 +132,9 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner as _, RwLock};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Metrics, Runner as _, RwLock,
+    };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use futures::{channel::mpsc, SinkExt as _};
     use rand::RngCore as _;
@@ -181,7 +183,7 @@ mod tests {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
