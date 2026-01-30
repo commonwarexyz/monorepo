@@ -96,12 +96,12 @@ where
         let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
 
         // Compute and cache the root
-        let cached_root = root(&mut hasher, &status, &any.log.mmr).await?;
+        let root = root(&mut hasher, &status, &any.log.mmr).await?;
 
         Ok(Self {
             any,
             status,
-            state: Merkleized { root: cached_root },
+            state: Merkleized { root },
         })
     }
 }

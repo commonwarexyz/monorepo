@@ -315,12 +315,12 @@ where
         status.prune_to_bit(*any.inactivity_floor_loc)?;
 
         // Compute and cache the root
-        let cached_root = root(hasher, &status, &any.log.mmr).await?;
+        let root = root(hasher, &status, &any.log.mmr).await?;
 
         Ok(Db {
             any,
             status,
-            state: Merkleized { root: cached_root },
+            state: Merkleized { root },
         })
     }
 }
@@ -361,12 +361,12 @@ where
         status.prune_to_bit(*any.inactivity_floor_loc)?;
 
         // Compute and cache the root
-        let cached_root = root(hasher, &status, &any.log.mmr).await?;
+        let root = root(hasher, &status, &any.log.mmr).await?;
 
         Ok(Db {
             any,
             status,
-            state: Merkleized { root: cached_root },
+            state: Merkleized { root },
         })
     }
 

@@ -96,12 +96,12 @@ where
         let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
 
         // Compute and cache the root
-        let cached_root = root(&mut hasher, &status, &any.log.mmr).await?;
+        let root = root(&mut hasher, &status, &any.log.mmr).await?;
 
         Ok(Self {
             any,
             status,
-            state: Merkleized { root: cached_root },
+            state: Merkleized { root },
         })
     }
 }
@@ -115,7 +115,7 @@ mod test {
         qmdb::{
             any::ordered::variable::Operation,
             current::{
-                db::{Unmerkleized, Merkleized},
+                db::{Merkleized, Unmerkleized},
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
                 tests::{self, apply_random_ops},
@@ -327,7 +327,9 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                MerkleizedAuthenticatedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
+                MerkleizedAuthenticatedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
+                    *active_loc
+                ),
                 MerkleizedAuthenticatedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
                     *proof_inactive.proof.loc
                 )
