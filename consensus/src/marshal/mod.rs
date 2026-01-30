@@ -132,7 +132,9 @@ mod tests {
         Manager,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+    };
     use commonware_storage::{
         archive::{immutable, prunable},
         translator::EightCap,
@@ -223,7 +225,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -275,7 +277,7 @@ mod tests {
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
@@ -318,7 +320,7 @@ mod tests {
                     "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
@@ -795,7 +797,7 @@ mod tests {
 
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
-            let buffer_pool = PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let control = oracle.control(validator.clone());
 
             // Closure to initialize marshal with prunable archives
@@ -804,7 +806,7 @@ mod tests {
                 let validator = validator.clone();
                 let schemes = schemes.clone();
                 let partition_prefix = partition_prefix.clone();
-                let buffer_pool = buffer_pool.clone();
+                let page_cache = page_cache.clone();
                 let control = control.clone();
                 let oracle_manager = oracle.manager();
                 async move {
@@ -821,7 +823,7 @@ mod tests {
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
-                        buffer_pool: buffer_pool.clone(),
+                        page_cache: page_cache.clone(),
                         strategy: Sequential,
                     };
 
@@ -862,7 +864,7 @@ mod tests {
                                 "{}-finalizations-by-height-key",
                                 partition_prefix
                             ),
-                            key_buffer_pool: buffer_pool.clone(),
+                            key_page_cache: page_cache.clone(),
                             value_partition: format!(
                                 "{}-finalizations-by-height-value",
                                 partition_prefix
@@ -883,7 +885,7 @@ mod tests {
                         prunable::Config {
                             translator: EightCap,
                             key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                            key_buffer_pool: buffer_pool.clone(),
+                            key_page_cache: page_cache.clone(),
                             value_partition: format!("{}-finalized-blocks-value", partition_prefix),
                             compression: None,
                             codec_config: config.block_codec_config,
@@ -2448,10 +2450,7 @@ mod tests {
             // Use select with timeout to detect never-resolving receiver
             select! {
                 result = certify_a => {
-                    assert!(
-                        result.unwrap(),
-                        "Block A certification should succeed"
-                    );
+                    assert!(result.unwrap(), "Block A certification should succeed");
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("Block A certification timed out");

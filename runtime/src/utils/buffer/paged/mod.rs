@@ -1,10 +1,10 @@
-//! Blob wrappers for reading and writing data with integrity guarantees, plus a buffer pool that
+//! Blob wrappers for reading and writing data with integrity guarantees, plus a page cache that
 //! manages read caching over the data.
 //!
 //! # Page-oriented structure
 //!
-//! Blob data is stored in _pages_ having a logical `page_size` dictated by the managing buffer
-//! pool. A _physical page_ consists of `page_size` bytes of data followed by a 12-byte _CRC
+//! Blob data is stored in _pages_ having a logical `page_size` dictated by the managing page cache.
+//! A _physical page_ consists of `page_size` bytes of data followed by a 12-byte _CRC
 //! record_ containing:
 //!
 //! ```text
@@ -28,11 +28,11 @@ use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write
 use commonware_cryptography::{crc32, Crc32};
 
 mod append;
-mod page_cache;
+mod cache;
 mod read;
 
 pub use append::Append;
-pub use page_cache::PoolRef;
+pub use cache::CacheRef;
 pub use read::Replay;
 use tracing::{debug, error};
 

@@ -910,7 +910,7 @@ mod tests {
                                     // Channel closed due to shutdown
                                     break;
                                 }
-                            }
+                            },
                         }
                     }
                 });
@@ -1206,8 +1206,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1433,8 +1437,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1523,7 +1531,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     // Expected: timeout with no message
-                }
+                },
             }
         });
     }

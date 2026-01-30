@@ -21,7 +21,7 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
-//! use commonware_runtime::{buffer::PoolRef, deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _};
 //!
 //! use std::num::NonZeroU16;
 //! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);
@@ -36,7 +36,7 @@
 //!         log_codec_config: (),
 //!         log_items_per_section: NZU64!(4),
 //!         translator: TwoCap,
-//!         buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!         page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -95,7 +95,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::Read;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -122,8 +122,8 @@ pub struct Config<T: Translator, C> {
     /// The [Translator] used by the [Index].
     pub translator: T,
 
-    /// The [PoolRef] to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The [CacheRef] to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -275,7 +275,7 @@ where
                 items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.log_write_buffer,
             },
         )
@@ -626,7 +626,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             translator: TwoCap,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         TestStore::init(context, cfg).await.unwrap()
     }

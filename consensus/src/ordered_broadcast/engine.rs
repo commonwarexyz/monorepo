@@ -31,7 +31,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef,
+    buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{
         histogram,
@@ -156,8 +156,8 @@ pub struct Engine<
     // Compression level for the journal.
     journal_compression: Option<u8>,
 
-    // Buffer pool for the journal.
-    journal_buffer_pool: PoolRef,
+    // Page cache for the journal.
+    journal_page_cache: CacheRef,
 
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
@@ -240,7 +240,7 @@ impl<
             journal_write_buffer: cfg.journal_write_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
-            journal_buffer_pool: cfg.journal_buffer_pool,
+            journal_page_cache: cfg.journal_page_cache,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, P::Scheme, D>::new(),
             ack_manager: AckManager::<C::PublicKey, P::Scheme, D>::new(),
@@ -374,7 +374,10 @@ impl<
                 };
 
                 // Propose the chunk
-                if let Err(err) = self.propose(context.clone(), payload, &mut node_sender).await {
+                if let Err(err) = self
+                    .propose(context.clone(), payload, &mut node_sender)
+                    .await
+                {
                     warn!(?err, ?context, "propose new failed");
                     continue;
                 }
@@ -414,7 +417,12 @@ impl<
                 // Handle the parent certificate
                 if let Some(parent_chunk) = result {
                     let parent = node.parent.as_ref().unwrap();
-                    self.handle_certificate(&parent_chunk, parent.epoch, parent.certificate.clone()).await;
+                    self.handle_certificate(
+                        &parent_chunk,
+                        parent.epoch,
+                        parent.certificate.clone(),
+                    )
+                    .await;
                 }
 
                 // Process the node
@@ -459,7 +467,12 @@ impl<
 
             // Handle completed verification futures.
             verify = self.pending_verifies.next_completed() => {
-                let Verify { timer, context, payload, result } = verify;
+                let Verify {
+                    timer,
+                    context,
+                    payload,
+                    result,
+                } = verify;
                 drop(timer); // Record metric. Explicitly reference timer to avoid lint warning.
                 match result {
                     Err(err) => {
@@ -473,10 +486,13 @@ impl<
                     Ok(true) => {
                         debug!(?context, "verified");
                         self.metrics.verify.inc(Status::Success);
-                        if let Err(err) = self.handle_app_verified(&context, &payload, &mut ack_sender).await {
+                        if let Err(err) = self
+                            .handle_app_verified(&context, &payload, &mut ack_sender)
+                            .await
+                        {
                             debug!(?err, ?context, ?payload, "verified handle failed");
                         }
-                    },
+                    }
                 }
             },
         }
@@ -1014,7 +1030,7 @@ impl<
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
-            buffer_pool: self.journal_buffer_pool.clone(),
+            page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(

@@ -314,9 +314,7 @@ mod tests {
                 v = stream.recv(5) => {
                     panic!("unexpected value: {v:?}");
                 },
-                _ = context.sleep(Duration::from_millis(100)) => {
-                    "timeout"
-                },
+                _ = context.sleep(Duration::from_millis(100)) => "timeout",
             };
         });
     }

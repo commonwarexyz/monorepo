@@ -118,7 +118,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        buffer::PoolRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Metrics, Runner,
     };
@@ -139,7 +139,7 @@ mod tests {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test_key".into(),
-            key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test_value".into(),
             compression,
             codec_config: (),
@@ -162,7 +162,7 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: "test_key".into(),
-            freezer_key_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: "test_value".into(),
             freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,

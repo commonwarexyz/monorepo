@@ -99,7 +99,7 @@ fn mmr_config_from_fixed<T: Translator>(config: &FixedConfig<T>) -> MmrConfig {
         items_per_blob: config.mmr_items_per_blob,
         write_buffer: config.mmr_write_buffer,
         thread_pool: config.thread_pool.clone(),
-        buffer_pool: config.buffer_pool.clone(),
+        page_cache: config.page_cache.clone(),
     }
 }
 
@@ -111,7 +111,7 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
         items_per_blob: config.mmr_items_per_blob,
         write_buffer: config.mmr_write_buffer,
         thread_pool: config.thread_pool.clone(),
-        buffer_pool: config.buffer_pool.clone(),
+        page_cache: config.page_cache.clone(),
     }
 }
 

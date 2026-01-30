@@ -136,7 +136,11 @@ where
             command = self.mailbox.next() => {
                 if let Some(command) = command {
                     match command {
-                        Message::Send { request, recipients, responder } => {
+                        Message::Send {
+                            request,
+                            recipients,
+                            responder,
+                        } => {
                             // Track commitment (if not already tracked)
                             let commitment = request.commitment();
                             let entry = self.tracked.entry(commitment).or_insert_with(|| {
@@ -145,11 +149,10 @@ where
                             });
 
                             // Send the request to recipients
-                            match req_tx.send(
-                                recipients,
-                                request,
-                                self.priority_request
-                            ).await {
+                            match req_tx
+                                .send(recipients, request, self.priority_request)
+                                .await
+                            {
                                 Ok(recipients) => {
                                     entry.0.extend(recipients.iter().cloned());
                                     responder.send_lossy(Ok(recipients));
@@ -159,7 +162,7 @@ where
                                     responder.send_lossy(Err(Error::SendFailed(err.into())));
                                 }
                             }
-                        },
+                        }
                         Message::Cancel { commitment } => {
                             if self.tracked.remove(&commitment).is_none() {
                                 debug!(?commitment, "ignoring removal of unknown commitment");
@@ -179,11 +182,9 @@ where
                 self.responses.inc();
 
                 // Send the response
-                let _ = res_tx.send(
-                    Recipients::One(peer),
-                    reply,
-                    self.priority_response
-                ).await;
+                let _ = res_tx
+                    .send(Recipients::One(peer), reply, self.priority_response)
+                    .await;
             },
 
             // Request from an originator
@@ -210,9 +211,7 @@ where
                 // Handle the request
                 let (tx, rx) = oneshot::channel();
                 self.handler.process(peer.clone(), msg, tx).await;
-                processed.push(async move {
-                    Ok((peer, rx.await?))
-                });
+                processed.push(async move { Ok((peer, rx.await?)) });
             },
 
             // Response from a handler

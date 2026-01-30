@@ -20,8 +20,8 @@ blake3 = { workspace = true, features = ["zeroize"] }
 blst = { workspace = true, features = ["no-threads"] }
 bytes.workspace = true
 cfg-if.workspace = true
-chacha20poly1305 = { workspace = true, default-features = false, features = ["alloc"] }
 commonware-codec.workspace = true
+commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
@@ -41,8 +41,13 @@ x25519-dalek = { workspace = true, features = ["zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-# aws-lc-rs provides optimized P-256 verification on x86_64 and aarch64.
+# aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
 aws-lc-rs.workspace = true
+
+[target.'cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.chacha20poly1305]
+workspace = true
+default-features = false
+features = ["alloc"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable "js" feature when WASM is target

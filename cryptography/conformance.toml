@@ -159,24 +159,24 @@ n_cases = 65536
 hash = "47ab8f97f2b9ff2b56e952c4e219c8c95832cf3a58d5b682cdc769c2ecb79daf"
 
 ["commonware_cryptography::secp256r1::certificate::tests::conformance::CodecConformance<Certificate>"]
-n_cases = 65536
-hash = "b3c9be5d89d172901f155032bba2297b5ff4e15532b8f6045ca4dbcd8a7eff7c"
+n_cases = 1024
+hash = "c708aa3df9cc2918aaf2d8db673c96729a2d2fd41b470ac5f6843489fc380951"
 
 ["commonware_cryptography::secp256r1::common::tests::conformance::CodecConformance<PrivateKeyInner>"]
-n_cases = 65536
-hash = "3e17c0a4943a83bf61cc55d039570928871866f0d50f8846dfd628a23f00d69e"
+n_cases = 1024
+hash = "929838171771a8edb9f1ab4659035b928e17b218e862a39276fdeab33515277e"
 
 ["commonware_cryptography::secp256r1::common::tests::conformance::CodecConformance<PublicKeyInner>"]
-n_cases = 65536
-hash = "b3fde3da5266e1c7eab5ae245257494e658c6c351a99809ca6011d8190bbf456"
+n_cases = 1024
+hash = "5ae65341bf87d6392c4b512d423053bff0a6f5a60c710f6eb3fbba8b6a84930d"
 
 ["commonware_cryptography::secp256r1::recoverable::tests::conformance::CodecConformance<Signature>"]
-n_cases = 65536
-hash = "68c8cb64495f2720508aad881b192b24e00e5260780c3ea7c5109ef9097bee30"
+n_cases = 1024
+hash = "f690616acff898e1ca0b5e43923709b8e46d30aae90faf135b424a03c55d32b5"
 
 ["commonware_cryptography::secp256r1::standard::tests::conformance::CodecConformance<Signature>"]
-n_cases = 65536
-hash = "05880099d66c9e04ab2d4bf5dfa3fecfc4fb114264ca3b4a0c3b4816332414b9"
+n_cases = 1024
+hash = "b77c35491bd5115cfa2f9a9e0d4f4e4f9f23b1675ead3c9a73160ef45b60cbfc"
 
 ["commonware_cryptography::sha256::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536

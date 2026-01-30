@@ -309,7 +309,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(5_000)) => {
                     // Expected: no events
-                }
+                },
             }
         });
     }
@@ -476,7 +476,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(5_000)) => {
                     // Expected: no more responses
-                }
+                },
             }
         });
     }
@@ -629,7 +629,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no events
-                }
+                },
             }
         });
     }
@@ -673,7 +673,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no events
-                }
+                },
             }
         });
     }
@@ -851,7 +851,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(1_000)) => {
                     // Expected: no more events
-                }
+                },
             }
         });
     }

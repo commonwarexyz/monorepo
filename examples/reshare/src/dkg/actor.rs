@@ -23,15 +23,31 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, Buf, BufMut, Clock, ContextCell, Handle, Metrics, Spawner,
-    Storage as RuntimeStorage,
+    spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, Clock, ContextCell, Handle,
+    Metrics, Spawner, Storage as RuntimeStorage,
 };
 use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use futures::{channel::mpsc, StreamExt};
-use prometheus_client::metrics::counter::Counter;
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
+};
 use rand_core::CryptoRngCore;
 use std::num::NonZeroU32;
 use tracing::{debug, info, warn};
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct Peer {
+    peer: String,
+}
+
+impl Peer {
+    fn new<P: PublicKey>(pk: &P) -> Self {
+        Self {
+            peer: pk.to_string(),
+        }
+    }
+}
 
 /// Wire message type for DKG protocol communication.
 pub enum Message<V: Variant, P: PublicKey> {
@@ -113,6 +129,8 @@ where
     failed_epochs: Counter,
     our_reveals: Counter,
     all_reveals: Counter,
+    latest_share: Family<Peer, Gauge>,
+    latest_ack: Family<Peer, Gauge>,
 }
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
@@ -133,6 +151,8 @@ where
         let failed_epochs = Counter::default();
         let our_reveals = Counter::default();
         let all_reveals = Counter::default();
+        let latest_share = Family::<Peer, Gauge>::default();
+        let latest_ack = Family::<Peer, Gauge>::default();
         context.register(
             "successful_epochs",
             "successful epochs",
@@ -141,6 +161,16 @@ where
         context.register("failed_epochs", "failed epochs", failed_epochs.clone());
         context.register("our_reveals", "our share was revealed", our_reveals.clone());
         context.register("all_reveals", "all share reveals", all_reveals.clone());
+        context.register(
+            "latest_share",
+            "epoch of latest valid share received per dealer",
+            latest_share.clone(),
+        );
+        context.register(
+            "latest_ack",
+            "epoch of latest valid ack received per player",
+            latest_ack.clone(),
+        );
 
         (
             Self {
@@ -155,6 +185,8 @@ where
                 failed_epochs,
                 our_reveals,
                 all_reveals,
+                latest_share,
+                latest_ack,
             },
             Mailbox::new(sender),
         )
@@ -359,9 +391,19 @@ where
                                             )
                                             .await;
                                         if let Some(ack) = response {
-                                            let payload = Message::<V, C::PublicKey>::Ack(ack).encode();
+                                            let _ = self
+                                                .latest_share
+                                                .get_or_create(&Peer::new(&sender_pk))
+                                                .try_set_max(epoch.get());
+
+                                            let payload =
+                                                Message::<V, C::PublicKey>::Ack(ack).encode();
                                             if let Err(e) = round_sender
-                                                .send(Recipients::One(sender_pk.clone()), payload, true)
+                                                .send(
+                                                    Recipients::One(sender_pk.clone()),
+                                                    payload,
+                                                    true,
+                                                )
                                                 .await
                                             {
                                                 warn!(?epoch, dealer = ?sender_pk, ?e, "failed to send ack");
@@ -371,7 +413,15 @@ where
                                 }
                                 Message::Ack(ack) => {
                                     if let Some(ref mut ds) = dealer_state {
-                                        ds.handle(&mut storage, epoch, sender_pk, ack).await;
+                                        let added = ds
+                                            .handle(&mut storage, epoch, sender_pk.clone(), ack)
+                                            .await;
+                                        if added {
+                                            let _ = self
+                                                .latest_ack
+                                                .get_or_create(&Peer::new(&sender_pk))
+                                                .try_set_max(epoch.get());
+                                        }
                                     }
                                 }
                             }
@@ -399,7 +449,9 @@ where
                             }
                         }
                         MailboxMessage::Finalized { block, response } => {
-                            let bounds = epocher.containing(block.height).expect("block height covered by epoch strategy");
+                            let bounds = epocher
+                                .containing(block.height)
+                                .expect("block height covered by epoch strategy");
                             let block_epoch = bounds.epoch();
                             let phase = bounds.phase();
                             let relative_height = bounds.relative();
@@ -458,39 +510,41 @@ where
 
                             // Finalize the round before acknowledging
                             let logs = storage.logs(epoch);
-                            let (success, next_round, next_output, next_share) =
-                                if let Some(ps) = player_state.take() {
-                                    match ps.finalize::<N3f1>(logs, &Sequential) {
-                                        Ok((new_output, new_share)) => (
-                                            true,
-                                            epoch_state.round + 1,
-                                            Some(new_output),
-                                            Some(new_share),
-                                        ),
-                                        Err(_) => (
-                                            false,
-                                            epoch_state.round,
-                                            epoch_state.output.clone(),
-                                            epoch_state.share.clone(),
-                                        ),
-                                    }
-                                } else {
-                                    match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
-                                        Ok(output) => (true, epoch_state.round + 1, Some(output), None),
-                                        Err(_) => (
-                                            false,
-                                            epoch_state.round,
-                                            epoch_state.output.clone(),
-                                            epoch_state.share.clone(),
-                                        ),
-                                    }
-                                };
+                            let (success, next_round, next_output, next_share) = if let Some(ps) =
+                                player_state.take()
+                            {
+                                match ps.finalize::<N3f1>(logs, &Sequential) {
+                                    Ok((new_output, new_share)) => (
+                                        true,
+                                        epoch_state.round + 1,
+                                        Some(new_output),
+                                        Some(new_share),
+                                    ),
+                                    Err(_) => (
+                                        false,
+                                        epoch_state.round,
+                                        epoch_state.output.clone(),
+                                        epoch_state.share.clone(),
+                                    ),
+                                }
+                            } else {
+                                match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
+                                    Ok(output) => (true, epoch_state.round + 1, Some(output), None),
+                                    Err(_) => (
+                                        false,
+                                        epoch_state.round,
+                                        epoch_state.output.clone(),
+                                        epoch_state.share.clone(),
+                                    ),
+                                }
+                            };
                             if success {
                                 info!(?epoch, "epoch succeeded");
                                 self.successful_epochs.inc();
 
                                 // Record reveals
-                                let output = next_output.as_ref().expect("output exists on success");
+                                let output =
+                                    next_output.as_ref().expect("output exists on success");
                                 let revealed = output.revealed();
                                 self.all_reveals.inc_by(revealed.len() as u64);
                                 if revealed.position(&self_pk).is_some() {
@@ -527,9 +581,7 @@ where
                             };
 
                             // Exit the engine for this epoch now that the boundary is finalized
-                            orchestrator
-                                .exit(epoch)
-                                .await;
+                            orchestrator.exit(epoch).await;
 
                             // If the update is stop, wait forever.
                             if let PostUpdate::Stop = callback.on_update(update).await {

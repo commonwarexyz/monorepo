@@ -22,7 +22,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::futures::AbortablePool;
@@ -109,7 +109,7 @@ pub struct Actor<
     partition: String,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
-    buffer_pool: PoolRef,
+    page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
@@ -185,7 +185,7 @@ impl<
                 partition: cfg.partition,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 journal: None,
 
                 mailbox_receiver,
@@ -687,7 +687,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
                 codec_config: self.certificate_config.clone(),
-                buffer_pool: self.buffer_pool.clone(),
+                page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
             },
         )
@@ -841,11 +841,17 @@ impl<
                 debug!("context shutdown, stopping voter");
 
                 // Sync and drop journal
-                self.journal.take().unwrap().sync_all().await.expect("unable to sync journal");
+                self.journal
+                    .take()
+                    .unwrap()
+                    .sync_all()
+                    .await
+                    .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
                 // Trigger the timeout
-                self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender).await;
+                self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
+                    .await;
                 view = self.state.current_view();
             },
             (context, proposed) = propose_wait => {
@@ -870,11 +876,7 @@ impl<
                 }
 
                 // Construct proposal
-                let proposal = Proposal::new(
-                    context.round,
-                    context.parent.0,
-                    proposed,
-                );
+                let proposal = Proposal::new(context.round, context.parent.0, proposed);
                 if !self.state.proposed(proposal) {
                     warn!(round = ?context.round, "dropped our proposal");
                     continue;
@@ -894,13 +896,17 @@ impl<
                     Ok(true) => {
                         // Mark verification complete
                         self.state.verified(view);
-                    },
+                    }
                     Ok(false) => {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
-                            .await;
-                    },
+                        self.handle_timeout(
+                            &mut batcher,
+                            &mut vote_sender,
+                            &mut certificate_sender,
+                        )
+                        .await;
+                    }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
                     }
@@ -976,7 +982,8 @@ impl<
                             }
                             Certificate::Nullification(nullification) => {
                                 trace!(%view, from_resolver, "received nullification");
-                                if let Some(floor) = self.handle_nullification(nullification).await {
+                                if let Some(floor) = self.handle_nullification(nullification).await
+                                {
                                     warn!(?floor, "broadcasting nullification floor");
                                     self.broadcast_certificate(&mut certificate_sender, floor)
                                         .await;

@@ -206,8 +206,7 @@ impl<
                     }) => {
                         current = new_current;
                         finalized = new_finalized;
-                        work
-                            .entry(current)
+                        work.entry(current)
                             .or_insert_with(|| self.new_round())
                             .set_leader(leader);
 
@@ -228,13 +227,7 @@ impl<
                     Some(Message::Constructed(message)) => {
                         // If the view isn't interesting, we can skip
                         let view = message.view();
-                        if !interesting(
-                            self.activity_timeout,
-                            finalized,
-                            current,
-                            view,
-                            false,
-                        ) {
+                        if !interesting(self.activity_timeout, finalized, current, view, false) {
                             continue;
                         }
 
@@ -301,19 +294,14 @@ impl<
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(
-                            &mut self.context,
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
+                        if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
                             warn!(?sender, %view, "blocking peer for invalid notarization");
                             self.blocker.block(sender).await;
                             continue;
                         }
 
                         // Store and forward to voter
-                        work
-                            .entry(view)
+                        work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_notarization(notarization.clone());
                         voter
@@ -339,8 +327,7 @@ impl<
                         }
 
                         // Store and forward to voter
-                        work
-                            .entry(view)
+                        work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_nullification(nullification.clone());
                         voter
@@ -355,19 +342,14 @@ impl<
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(
-                            &mut self.context,
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
+                        if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
                             warn!(?sender, %view, "blocking peer for invalid finalization");
                             self.blocker.block(sender).await;
                             continue;
                         }
 
                         // Store and forward to voter
-                        work
-                            .entry(view)
+                        work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_finalization(finalization.clone());
                         voter
@@ -410,13 +392,7 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(
-                    self.activity_timeout,
-                    finalized,
-                    current,
-                    view,
-                    false,
-                ) {
+                if !interesting(self.activity_timeout, finalized, current, view, false) {
                     continue;
                 }
 
@@ -426,15 +402,16 @@ impl<
                     .entry(view)
                     .or_insert_with(|| self.new_round())
                     .add_network(sender, message)
-                    .await {
-                        self.added.inc();
+                    .await
+                {
+                    self.added.inc();
 
-                        // Update per-peer latest vote metric (only if higher than current)
-                        let _ = self
-                            .latest_vote
-                            .get_or_create(&peer)
-                            .try_set_max(view.get());
-                    }
+                    // Update per-peer latest vote metric (only if higher than current)
+                    let _ = self
+                        .latest_vote
+                        .get_or_create(&peer)
+                        .try_set_max(view.get());
+                }
                 updated_view = view;
             },
             on_end => {

@@ -3,7 +3,9 @@
 use crate::aws::{
     deployer_directory,
     ec2::{self, *},
-    s3::{self, delete_prefix, is_no_such_bucket_error, Region, BUCKET_NAME, DEPLOYMENTS_PREFIX},
+    s3::{
+        self, delete_prefix, get_bucket_name, is_no_such_bucket_error, Region, DEPLOYMENTS_PREFIX,
+    },
     Config, Error, Metadata, DESTROYED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
 };
@@ -59,13 +61,17 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
     }
 
     // Clean up S3 deployment data (preserves cached tools)
-    info!(bucket = BUCKET_NAME, "cleaning up S3 deployment data");
+    let bucket_name = get_bucket_name();
+    info!(
+        bucket = bucket_name.as_str(),
+        "cleaning up S3 deployment data"
+    );
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
     let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, &tag);
-    match delete_prefix(&s3_client, BUCKET_NAME, &deployment_prefix).await {
+    match delete_prefix(&s3_client, &bucket_name, &deployment_prefix).await {
         Ok(()) => {
             info!(
-                bucket = BUCKET_NAME,
+                bucket = bucket_name.as_str(),
                 prefix = deployment_prefix.as_str(),
                 "deleted S3 deployment data"
             );
@@ -73,11 +79,11 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
         Err(e) => {
             if is_no_such_bucket_error(&e) {
                 info!(
-                    bucket = BUCKET_NAME,
+                    bucket = bucket_name.as_str(),
                     "bucket does not exist, skipping S3 cleanup"
                 );
             } else {
-                warn!(bucket = BUCKET_NAME, %e, "failed to delete S3 deployment data, continuing with destroy");
+                warn!(bucket = bucket_name.as_str(), %e, "failed to delete S3 deployment data, continuing with destroy");
             }
         }
     }
