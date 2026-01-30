@@ -1,6 +1,6 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::aws::Error;
+use crate::aws::{deployer_directory, Error};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
@@ -13,12 +13,7 @@ use aws_sdk_s3::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::stream::{self, StreamExt, TryStreamExt};
-use std::{
-    collections::HashMap,
-    io::Read,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashMap, io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
 /// File name for the bucket config (stores the S3 bucket name).
@@ -27,7 +22,7 @@ const BUCKET_CONFIG_FILE: &str = "bucket";
 /// Gets the bucket name, generating one if it doesn't exist.
 /// The bucket name is stored in ~/.commonware_deployer/bucket.
 pub fn get_bucket_name() -> String {
-    let path = super::deployer_directory(None).join(BUCKET_CONFIG_FILE);
+    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
 
     if let Ok(contents) = std::fs::read_to_string(&path) {
         let name = contents.trim();
@@ -49,7 +44,7 @@ pub fn get_bucket_name() -> String {
 
 /// Deletes the bucket config file so a new bucket name is generated on next use.
 pub fn delete_bucket_config() {
-    let path = super::deployer_directory(None).join(BUCKET_CONFIG_FILE);
+    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
 
     // If the bucket config file doesn't exist yet, do nothing (clean may have been run
     // out-of-order)
