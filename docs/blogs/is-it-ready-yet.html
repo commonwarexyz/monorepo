@@ -9,7 +9,9 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Is it ready yet?</title>
-    <meta name="description" content="TBD">
+    <meta name="description" content="Large parts of the Commonware
+Library are now BETA. Stability levels tell you exactly which parts are
+ready for production and which are still evolving.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -18,7 +20,9 @@
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/is-it-ready-yet-card.png" />
     <meta property="og:title" content="Is it ready yet?" />
-    <meta property="og:description" content="TBD" />
+    <meta property="og:description" content="Large parts of the
+Commonware Library are now BETA. Stability levels tell you exactly which
+parts are ready for production and which are still evolving." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-01-30T00:00:00Z" />
     <meta property="article:modified_time" content="2026-01-30T00:00:00Z" />
@@ -29,7 +33,9 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/is-it-ready-yet" />
     <meta property="twitter:title" content="Is it ready yet?" />
-    <meta property="twitter:description" content="TBD" />
+    <meta property="twitter:description" content="Large parts of the
+Commonware Library are now BETA. Stability levels tell you exactly which
+parts are ready for production and which are still evolving." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/is-it-ready-yet-card.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
@@ -86,18 +92,115 @@
 O’Grady</a></div>
                         <div class="date">January 30th, 2026</div>
         </div>
+        <p>“Is it ready?”</p>
+        <p>It’s the most common question I get about the <a
+        href="https://github.com/commonwarexyz/monorepo">Commonware
+        Library</a>. The problem is that it’s the wrong question.
+        Libraries don’t ship all at once. Some primitives have been
+        battle-tested for over a year. Others landed last week.</p>
+        <p>The real question is: which parts are ready for your use
+        case?</p>
+        <h2 id="using-the-compiler-to-enforce-stability">Using the
+        Compiler to Enforce Stability</h2>
+        <p>Every public API in the Commonware Library is now annotated
+        with a stability level. These annotations aren’t just labels -
+        they’re <code>cfg</code> flags that Rust’s compiler
+        understands.</p>
+        <p>Filter rustdoc to show only APIs at your desired stability
+        level:</p>
         <div class="sourceCode" id="cb1"><pre
-        class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware::</span><span class="op">{</span></span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    <span class="pp">consensus::simplex::</span><span class="op">{</span>Simplex<span class="op">,</span> SimplexConfig<span class="op">},</span></span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>    <span class="pp">storage::</span><span class="op">{</span>MemoryStorage<span class="op">,</span> MemoryStorageConfig<span class="op">},</span></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    <span class="pp">transport::</span><span class="op">{</span>InMemoryTransport<span class="op">,</span> InMemoryTransportConfig<span class="op">},</span></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="op">};</span></span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> config <span class="op">=</span> <span class="pp">SimplexConfig::</span><span class="kw">default</span>()<span class="op">;</span></span>
-<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> storage <span class="op">=</span> <span class="pp">MemoryStorage::</span>new(<span class="pp">MemoryStorageConfig::</span><span class="kw">default</span>())<span class="op">;</span></span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> transport <span class="op">=</span> <span class="pp">InMemoryTransport::</span>new(<span class="pp">InMemoryTransportConfig::</span><span class="kw">default</span>())<span class="op">;</span></span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> simplex <span class="op">=</span> <span class="pp">Simplex::</span>new(config<span class="op">,</span> storage<span class="op">,</span> transport)<span class="op">;</span></span></code></pre></div>
+        class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="dt">\</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTDOCFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA -A rustdoc::broken_intra_doc_links&quot;</span> <span class="dt">\</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> doc <span class="at">--open</span></span></code></pre></div>
+        <p>Fail your build if you depend on an unstable API:</p>
+        <div class="sourceCode" id="cb2"><pre
+        class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="ex">cargo</span> build <span class="at">-p</span> my-app</span></code></pre></div>
+        <p>Verify stability annotations are internally consistent:</p>
+        <div class="sourceCode" id="cb3"><pre
+        class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">just</span> check-stability</span></code></pre></div>
+        <p>This works transitively. If a BETA function internally calls
+        an ALPHA function, that’s our problem to fix - not yours to
+        discover in production.</p>
+        <h2 id="the-levels">The Levels</h2>
+        <table>
+        <colgroup>
+        <col style="width: 48%" />
+        <col style="width: 51%" />
+        </colgroup>
+        <thead>
+        <tr>
+        <th>Level</th>
+        <th>What it Means</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+        <td><strong>ALPHA</strong></td>
+        <td>Expect breaking changes. No migration path.</td>
+        </tr>
+        <tr>
+        <td><strong>BETA</strong></td>
+        <td>Wire and storage formats stable. Breaking changes come with
+        migrations.</td>
+        </tr>
+        <tr>
+        <td><strong>GAMMA</strong></td>
+        <td>API stable. Extensively tested and fuzzed.</td>
+        </tr>
+        <tr>
+        <td><strong>DELTA</strong></td>
+        <td>Battle-tested. Bug bounty eligible.</td>
+        </tr>
+        <tr>
+        <td><strong>EPSILON</strong></td>
+        <td>Feature-frozen. Bug fixes only.</td>
+        </tr>
+        </tbody>
+        </table>
+        <p><strong>BETA is the threshold for serious use.</strong> If
+        you’re building something real, you want BETA or higher. The
+        wire format won’t change out from under you. If we do make
+        breaking changes, we’ll provide a migration path.</p>
+        <h2 id="whats-beta-now">What’s BETA Now</h2>
+        <p>The core building blocks are ready:</p>
+        <ul>
+        <li><strong>runtime</strong> - async execution with
+        deterministic testing</li>
+        <li><strong>cryptography</strong> - Ed25519, BLS12-381,
+        signatures, DKG</li>
+        <li><strong>codec</strong> - zero-copy serialization</li>
+        <li><strong>p2p</strong> - authenticated peer-to-peer
+        networking</li>
+        <li><strong>storage</strong> - persistent key-value storage</li>
+        <li><strong>stream</strong> - encrypted message streams</li>
+        <li><strong>broadcast</strong> - reliable data
+        dissemination</li>
+        <li><strong>consensus</strong> - BFT agreement (Simplex)</li>
+        <li><strong>resolver</strong> - content-addressed data
+        retrieval</li>
+        <li><strong>utils</strong> - common utilities</li>
+        <li><strong>math</strong> - numerical primitives</li>
+        <li><strong>parallel</strong> - parallel execution helpers</li>
+        </ul>
+        <p>This isn’t a collection of experiments. These primitives
+        power <a href="https://github.com/commonwarexyz/alto">Alto</a>,
+        our reference blockchain implementation. They’ve been tested
+        under adversarial conditions, fuzzed extensively, and optimized
+        for performance.</p>
+        <h2 id="date-versioning">Date Versioning</h2>
+        <p>We’re also moving to date-based versions:
+        <code>v2026.1.30</code>.</p>
+        <p>Primitives evolve at their own pace. We add new ones when
+        they’re ready. We stabilize existing ones when they’ve proven
+        themselves. The stability level tells you what’s ready - the
+        version just tells you when it was released.</p>
+        <h2 id="whats-next">What’s Next</h2>
+        <p>More primitives will reach BETA. Some will reach GAMMA as
+        fuzzing coverage expands. A few battle-tested ones will
+        eventually hit DELTA.</p>
+        <p>You’ll always know exactly where each one stands.</p>
+        <p>Build something: <a
+        href="https://github.com/commonwarexyz/monorepo">github.com/commonwarexyz/monorepo</a></p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
