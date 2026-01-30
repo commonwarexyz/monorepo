@@ -118,7 +118,7 @@ fn fixed_config(
     FixedConfig {
         partition: partition.to_string(),
         items_per_blob: NZU64!(items_per_section),
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(page_size, page_cache_size),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::new(page_size, page_cache_size),
         write_buffer,
     }
 }
@@ -135,7 +135,7 @@ fn variable_config(
         items_per_section: NZU64!(items_per_section),
         compression: None,
         codec_config: (),
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(page_size, page_cache_size),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::new(page_size, page_cache_size),
         write_buffer,
     }
 }

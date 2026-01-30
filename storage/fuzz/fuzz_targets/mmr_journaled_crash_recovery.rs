@@ -4,7 +4,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics as _, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config},
     Location, Position, StandardHasher,
@@ -98,7 +98,7 @@ fn mmr_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
-        buffer_pool: PoolRef::new(page_size, page_cache_size),
+        page_cache: CacheRef::new(page_size, page_cache_size),
     }
 }
 
