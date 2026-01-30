@@ -504,6 +504,7 @@ mod tests {
         iouring,
         network::{
             iouring::{Config, Network},
+            proxy::ProxyConfig,
             tests,
         },
         Listener as _, Network as _, Sink as _, Stream as _,
@@ -738,5 +739,65 @@ mod tests {
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_trusted_source_parses_header() {
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("127.0.0.0/8")
+            .unwrap();
+
+        let network = Network::start(
+            Config {
+                proxy: Some(proxy_config),
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Use a channel to coordinate send/recv ordering
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the proxied address, not 127.0.0.1
+            assert_eq!(client_addr.ip().to_string(), "192.168.1.100");
+            assert_eq!(client_addr.port(), 56789);
+
+            // Read first message
+            let data1 = stream.recv(5).await.unwrap();
+            assert_eq!(data1.coalesce(), b"hello");
+
+            // Signal that first read is done, second send can proceed
+            tx.send(()).unwrap();
+
+            // Read second message (sent after first read completed)
+            let data2 = stream.recv(5).await.unwrap();
+            assert_eq!(data2.coalesce(), b"world");
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+
+        // Send PROXY header in pieces to test partial read handling
+        sink.send(b"PROXY TCP4 ").await.unwrap();
+        sink.send(b"192.168.1.100 10.0.0.1 ").await.unwrap();
+        sink.send(b"56789 443\r\n").await.unwrap();
+        sink.send(b"hello").await.unwrap();
+
+        // Wait for server to read first message
+        rx.await.unwrap();
+
+        // Send second message
+        sink.send(b"world").await.unwrap();
+
+        server.await.unwrap();
     }
 }
