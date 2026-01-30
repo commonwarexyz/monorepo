@@ -55,25 +55,27 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 
 ## Stability
 
-Each public API item in the Commonware Library is annotated with a stability level:
+All public primitives (and primitive dialects) in the Commonware Library are annotated with a stability level:
 
 | Level        | Index | Description                                                                              |
 |--------------|-------|------------------------------------------------------------------------------------------|
-| **ALPHA**    | 0     | Significant breaking changes expected with no migration path. Critical vulnerabilities possible. |
-| **BETA**     | 1     | Wire and storage format stable. All breaking changes include a migration path.           |
-| **GAMMA**    | 2     | API stable. Audited multiple times and fuzzed extensively.                               |
-| **DELTA**    | 3     | Battle-tested. Only changes expected are performance optimizations.                      |
-| **EPSILON**  | 4     | Primitive is frozen. No changes expected.                                                |
+| **ALPHA**    | 0     | Significant breaking changes expected with no migration path. |
+| **BETA**     | 1     | Disk and/or wire-format stable. All breaking format changes include a migration path.           |
+| **GAMMA**    | 2     | API stable. Fuzzed and tested extensively.                               |
+| **DELTA**    | 3     | Battle-tested and bug bounty eligible.                     |
+| **EPSILON**  | 4     | Feature-frozen. Changes only introduced for bugs and significant performance improvement.                                              |
 
-Higher stability code can only depend on code with equal or higher stability. This is enforced at compile time:
+Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
 
 ```bash
-# Generate docs for only code with stability >= GAMMA (level 2)
-RUSTFLAGS="--cfg commonware_stability_GAMMA" RUSTDOCFLAGS="--cfg commonware_stability_GAMMA" cargo doc
+# Generate docs for only code with stability >= BETA (level 1)
+RUSTFLAGS="--cfg commonware_stability_BETA" cargo doc
 
-# Check if your application only uses commonware APIs with stability >= GAMMA
-RUSTFLAGS="--cfg commonware_stability_GAMMA" cargo build -p my-app
+# Check if your application only uses commonware APIs with stability >= BETA
+RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
+
+_All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future)._
 
 ## Licensing
 
