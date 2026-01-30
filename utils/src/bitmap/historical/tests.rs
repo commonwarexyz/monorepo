@@ -1,19 +1,19 @@
 use super::*;
 use crate::{bitmap::Prunable, hex};
 
-/// Test basic batch lifecycle: creation, operations, commit, and abort.
+/// Test basic dirty lifecycle: creation, operations, commit, and abort.
 #[test]
-fn test_batch_lifecycle_and_operations() {
+fn test_dirty_lifecycle_and_operations() {
     // Empty initialization
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
     assert_eq!(bitmap.len(), 0);
     assert!(bitmap.is_empty());
     assert_eq!(bitmap.commits().count(), 0);
 
     // Basic push and commit
-    bitmap
-        .with_batch(1, |batch| {
-            batch.push(true).push(false).push(true);
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push(true).push(false).push(true);
         })
         .unwrap();
     assert_eq!(bitmap.len(), 3);
@@ -22,73 +22,59 @@ fn test_batch_lifecycle_and_operations() {
     assert!(bitmap.get_bit(2));
     assert_eq!(bitmap.commits().count(), 1);
 
-    // Batch abort (drop without commit)
-    {
-        let mut batch = bitmap.start_batch();
-        batch.push(true).push(true);
-        // Drop here - should abort
-    }
+    // Abort
+    let mut dirty = bitmap.into_dirty();
+    dirty.push(true).push(true);
+    let bitmap = dirty.abort();
     assert_eq!(bitmap.len(), 3); // Unchanged
 
     // Read-through semantics
-    let mut batch = bitmap.start_batch();
-    assert!(batch.get_bit(0)); // Read unmodified
-    batch.set_bit(1, true); // Modify
-    assert!(batch.get_bit(1)); // See modification in batch
-    batch.push(false); // Append
-    assert!(!batch.get_bit(3)); // See appended bit
-    batch.commit(2).unwrap();
+    let mut dirty = bitmap.into_dirty();
+    assert!(dirty.get_bit(0)); // Read unmodified
+    dirty.set_bit(1, true); // Modify
+    assert!(dirty.get_bit(1)); // See modification in dirty
+    dirty.push(false); // Append
+    assert!(!dirty.get_bit(3)); // See appended bit
+    let bitmap = dirty.commit(2).unwrap();
 
     // After commit, changes persisted
     assert_eq!(bitmap.len(), 4);
     assert!(bitmap.get_bit(1));
     assert!(!bitmap.get_bit(3));
 
-    // Empty batch commit
-    bitmap.with_batch(3, |_batch| {}).unwrap();
+    // Empty dirty commit
+    let bitmap = bitmap.apply(3, |_dirty| {}).unwrap();
     assert_eq!(bitmap.len(), 4);
     assert!(bitmap.commit_exists(3));
 
-    // Method chaining with batch.set_bit()
-    bitmap
-        .with_batch(4, |batch| {
-            batch.set_bit(0, false).push_byte(0xAA);
+    // Method chaining with dirty.set_bit()
+    let bitmap = bitmap
+        .apply(4, |dirty| {
+            dirty.set_bit(0, false).push_byte(0xAA);
         })
         .unwrap();
     assert_eq!(bitmap.len(), 12); // 4 + 8 bits
     assert!(!bitmap.get_bit(0)); // Modified
 }
 
-/// Test that only one batch can be active at a time.
+/// Test dirty operations: push, pop, prune, push_byte, push_chunk, and get_chunk.
 #[test]
-#[should_panic(expected = "batch already active")]
-fn test_cannot_start_batch_when_active() {
-    let mut bitmap: BitMap<4> = BitMap::new();
-    let _batch1 = bitmap.start_batch();
-    // This should panic because a batch is already active
-    // We need to use core::mem::forget to prevent drop from clearing the batch
-    core::mem::forget(_batch1);
-    let _batch2 = bitmap.start_batch();
-}
-
-/// Test batch operations: push, pop, prune, push_byte, push_chunk, and get_chunk.
-#[test]
-fn test_batch_operations_push_pop_prune() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+fn test_dirty_operations_push_pop_prune() {
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Push, modify, and append operations
-    bitmap
-        .with_batch(1, |batch| {
-            batch.push(false).push(false).push(false);
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push(false).push(false).push(false);
         })
         .unwrap();
 
-    bitmap
-        .with_batch(2, |batch| {
-            batch.set_bit(0, true); // Modify
-            batch.set_bit(1, true); // Modify
-            batch.push(true); // Append
-            batch.push(true); // Append
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.set_bit(0, true); // Modify
+            dirty.set_bit(1, true); // Modify
+            dirty.push(true); // Append
+            dirty.push(true); // Append
         })
         .unwrap();
 
@@ -98,28 +84,28 @@ fn test_batch_operations_push_pop_prune() {
     assert!(!bitmap.get_bit(2));
 
     // Pop operations
-    bitmap
-        .with_batch(3, |batch| {
-            batch.push(false); // Add bit 5
-            let popped = batch.pop(); // Remove it
+    let _bitmap = bitmap
+        .apply(3, |dirty| {
+            dirty.push(false); // Add bit 5
+            let popped = dirty.pop(); // Remove it
             assert!(!popped);
-            assert_eq!(batch.len(), 5); // Back to original
+            assert_eq!(dirty.len(), 5); // Back to original
         })
         .unwrap();
 
     // Bulk push operations (push_chunk, push_byte)
     // Start fresh with 32 bits so chunks align cleanly
-    let mut bitmap: BitMap<4> = BitMap::new();
-    bitmap
-        .with_batch(1, |b| {
-            b.push_chunk(&hex!("0x00000000"));
+    let bitmap: BitMap<4> = BitMap::new();
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push_chunk(&hex!("0x00000000"));
         })
         .unwrap();
 
-    bitmap
-        .with_batch(2, |batch| {
-            batch.push_chunk(&hex!("0xAABBCCDD")); // 32 bits at offset 32
-            batch.push_byte(0xFF); // 8 bits at offset 64
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.push_chunk(&hex!("0xAABBCCDD")); // 32 bits at offset 32
+            dirty.push_byte(0xFF); // 8 bits at offset 64
         })
         .unwrap();
 
@@ -130,19 +116,19 @@ fn test_batch_operations_push_pop_prune() {
         assert!(bitmap.get_bit(i)); // Verify pushed byte
     }
 
-    // get_chunk with modifications in batch
-    let mut batch = bitmap.start_batch();
-    batch.set_bit(32, true); // First bit of second chunk
-    batch.set_bit(39, true); // 8th bit of second chunk
-    let chunk = batch.get_chunk(32);
+    // get_chunk with modifications in dirty
+    let mut dirty = bitmap.into_dirty();
+    dirty.set_bit(32, true); // First bit of second chunk
+    dirty.set_bit(39, true); // 8th bit of second chunk
+    let chunk = dirty.get_chunk(32);
     assert_eq!(chunk[0] & 0x01, 0x01); // bit 32 (0 in chunk) set
     assert_eq!(chunk[0] & 0x80, 0x80); // bit 39 (7 in chunk) set
-    batch.commit(3).unwrap();
+    let bitmap = dirty.commit(3).unwrap();
 
     // Prune operations
-    bitmap
-        .with_batch(4, |batch| {
-            batch.prune_to_bit(32);
+    let bitmap = bitmap
+        .apply(4, |dirty| {
+            dirty.prune_to_bit(32);
         })
         .unwrap();
 
@@ -153,18 +139,19 @@ fn test_batch_operations_push_pop_prune() {
 /// Test commit history management.
 #[test]
 fn test_commit_history_management() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Validate monotonic commit numbers
-    bitmap
-        .with_batch(5, |b| {
-            b.push(true);
+    let bitmap = bitmap
+        .apply(5, |dirty| {
+            dirty.push(true);
         })
         .unwrap();
 
     let err = bitmap
-        .with_batch(5, |b| {
-            b.push(false);
+        .clone()
+        .apply(5, |dirty| {
+            dirty.push(false);
         })
         .unwrap_err();
     match err {
@@ -179,8 +166,9 @@ fn test_commit_history_management() {
     }
 
     let err = bitmap
-        .with_batch(3, |b| {
-            b.push(false);
+        .clone()
+        .apply(3, |dirty| {
+            dirty.push(false);
         })
         .unwrap_err();
     match err {
@@ -194,20 +182,21 @@ fn test_commit_history_management() {
         _ => panic!("Expected NonMonotonicCommit error"),
     }
 
-    bitmap
-        .with_batch(10, |b| {
-            b.push(false);
+    let _bitmap = bitmap
+        .apply(10, |dirty| {
+            dirty.push(false);
         })
         .unwrap(); // Should succeed
 
     // Commit queries (need fresh instance)
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
     assert!(bitmap.earliest_commit().is_none());
     assert!(bitmap.latest_commit().is_none());
+    let mut bitmap = bitmap;
     for i in 1..=5 {
-        bitmap
-            .with_batch(i * 10, |b| {
-                b.push(true);
+        bitmap = bitmap
+            .apply(i * 10, |dirty| {
+                dirty.push(true);
             })
             .unwrap();
     }
@@ -236,18 +225,18 @@ fn test_commit_history_management() {
 /// Test historical reconstruction with bit modifications across multiple commits.
 #[test]
 fn test_historical_reconstruction_with_modifications() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Simple modification scenario
-    bitmap
-        .with_batch(1, |b| {
-            b.push(true).push(false).push(true);
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push(true).push(false).push(true);
         })
         .unwrap();
-    bitmap
-        .with_batch(2, |b| {
-            b.set_bit(0, false);
-            b.push(false);
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.set_bit(0, false);
+            dirty.push(false);
         })
         .unwrap();
 
@@ -262,22 +251,22 @@ fn test_historical_reconstruction_with_modifications() {
     assert!(!state_at_2.get_bit(3)); // Appended
 
     // Multiple successive modifications
-    let mut bitmap: BitMap<4> = BitMap::new();
-    bitmap
-        .with_batch(1, |b| {
-            b.push_chunk(&hex!("0xFF00FF00"));
+    let bitmap: BitMap<4> = BitMap::new();
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push_chunk(&hex!("0xFF00FF00"));
         })
         .unwrap();
-    bitmap
-        .with_batch(2, |b| {
-            b.set_bit(0, false);
-            b.set_bit(8, true);
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.set_bit(0, false);
+            dirty.set_bit(8, true);
         })
         .unwrap();
-    bitmap
-        .with_batch(3, |b| {
-            b.set_bit(16, false);
-            b.set_bit(24, true);
+    let bitmap = bitmap
+        .apply(3, |dirty| {
+            dirty.set_bit(16, false);
+            dirty.set_bit(24, true);
         })
         .unwrap();
 
@@ -295,24 +284,24 @@ fn test_historical_reconstruction_with_modifications() {
     assert!(state_at_3.get_bit(24)); // Modified
 
     // Modifications combined with appends
-    let mut bitmap: BitMap<4> = BitMap::new();
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap: BitMap<4> = BitMap::new();
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..4 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
-    bitmap
-        .with_batch(2, |b| {
-            b.set_bit(0, false).set_bit(2, false);
-            b.push(false).push(false);
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.set_bit(0, false).set_bit(2, false);
+            dirty.push(false).push(false);
         })
         .unwrap();
-    bitmap
-        .with_batch(3, |b| {
-            b.set_bit(1, false).set_bit(3, false);
-            b.push(true).push(true);
+    let bitmap = bitmap
+        .apply(3, |dirty| {
+            dirty.set_bit(1, false).set_bit(3, false);
+            dirty.push(true).push(true);
         })
         .unwrap();
 
@@ -337,22 +326,22 @@ fn test_historical_reconstruction_with_modifications() {
 /// Test historical reconstruction with length-changing operations (appends and pops).
 #[test]
 fn test_historical_reconstruction_with_length_changes() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Pure append operations
-    bitmap
-        .with_batch(1, |b| {
-            b.push(true).push(false);
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push(true).push(false);
         })
         .unwrap();
-    bitmap
-        .with_batch(2, |b| {
-            b.push(true).push(true);
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.push(true).push(true);
         })
         .unwrap();
-    bitmap
-        .with_batch(3, |b| {
-            b.push(false).push(false);
+    let bitmap = bitmap
+        .apply(3, |dirty| {
+            dirty.push(false).push(false);
         })
         .unwrap();
 
@@ -361,23 +350,23 @@ fn test_historical_reconstruction_with_length_changes() {
     assert_eq!(bitmap.get_at_commit(3).unwrap().len(), 6);
 
     // Pops followed by appends
-    let mut bitmap: BitMap<4> = BitMap::new();
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap: BitMap<4> = BitMap::new();
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for i in 0..5 {
-                b.push(i % 2 == 0);
+                dirty.push(i % 2 == 0);
             }
         })
         .unwrap();
-    bitmap
-        .with_batch(2, |b| {
-            b.pop();
-            b.pop();
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.pop();
+            dirty.pop();
         })
         .unwrap();
-    bitmap
-        .with_batch(3, |b| {
-            b.push(true).push(true).push(true);
+    let bitmap = bitmap
+        .apply(3, |dirty| {
+            dirty.push(true).push(true).push(true);
         })
         .unwrap();
 
@@ -399,20 +388,20 @@ fn test_historical_reconstruction_with_length_changes() {
 /// Test historical reconstruction with bitmap chunk pruning.
 #[test]
 fn test_historical_reconstruction_with_pruning() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Commit 1: Create 64 bits (2 chunks), no pruning
-    bitmap
-        .with_batch(1, |b| {
-            b.push_chunk(&hex!("0xAABBCCDD"));
-            b.push_chunk(&hex!("0x11223344"));
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push_chunk(&hex!("0xAABBCCDD"));
+            dirty.push_chunk(&hex!("0x11223344"));
         })
         .unwrap();
 
     // Commit 2: Prune first chunk
-    bitmap
-        .with_batch(2, |b| {
-            b.prune_to_bit(32);
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.prune_to_bit(32);
         })
         .unwrap();
     assert_eq!(bitmap.pruned_chunks(), 1);
@@ -434,11 +423,11 @@ fn test_historical_reconstruction_with_pruning() {
 /// Test edge cases in historical reconstruction.
 #[test]
 fn test_historical_reconstruction_edge_cases() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
-    bitmap
-        .with_batch(10, |b| {
-            b.push(true);
+    let bitmap = bitmap
+        .apply(10, |dirty| {
+            dirty.push(true);
         })
         .unwrap();
 
@@ -448,12 +437,13 @@ fn test_historical_reconstruction_edge_cases() {
     assert!(bitmap.get_at_commit(10).is_some());
 
     // After pruning commit history
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
+    let mut bitmap = bitmap;
     for i in 1..=5 {
-        bitmap
-            .with_batch(i, |b| {
+        bitmap = bitmap
+            .apply(i, |dirty| {
                 for _ in 0..i {
-                    b.push(true);
+                    dirty.push(true);
                 }
             })
             .unwrap();
@@ -471,52 +461,52 @@ fn test_historical_reconstruction_edge_cases() {
     assert_eq!(bitmap.get_at_commit(3).unwrap().len(), 6); // 1+2+3 bits
 }
 
-/// Test batch modifications on appended bits (regression tests).
+/// Test dirty modifications on appended bits (regression tests).
 #[test]
-fn test_batch_modifications_on_appended_bits() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+fn test_dirty_modifications_on_appended_bits() {
+    let bitmap: BitMap<4> = BitMap::new();
 
-    // Modify appended bit in same batch
-    bitmap
-        .with_batch(1, |batch| {
-            batch.push(true); // Append bit 0
-            batch.set_bit(0, false); // Modify that appended bit
+    // Modify appended bit in same dirty state
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push(true); // Append bit 0
+            dirty.set_bit(0, false); // Modify that appended bit
         })
         .unwrap();
     assert_eq!(bitmap.len(), 1);
     assert!(!bitmap.get_bit(0)); // Should be false after modification
 
     // Push, modify, then pop (should cancel out cleanly)
-    bitmap
-        .with_batch(2, |batch| {
-            batch.push(true); // Append bit 1
-            batch.set_bit(1, false); // Modify that appended bit
-            batch.pop(); // Remove bit 1
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.push(true); // Append bit 1
+            dirty.set_bit(1, false); // Modify that appended bit
+            dirty.pop(); // Remove bit 1
         })
         .unwrap();
     assert_eq!(bitmap.len(), 1); // Only bit 0 remains
 }
 
-/// Test pop() behavior with batch modifications (regression tests).
+/// Test pop() behavior with dirty modifications (regression tests).
 #[test]
 fn test_pop_behavior_with_modifications() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Create initial bits
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..10 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
 
     // pop() should return modified value
     let mut popped_value = true;
-    bitmap
-        .with_batch(2, |batch| {
-            batch.set_bit(9, false); // Modify bit 9 in batch
-            popped_value = batch.pop(); // Should return false (modified)
+    let _bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.set_bit(9, false); // Modify bit 9 in dirty
+            popped_value = dirty.pop(); // Should return false (modified)
         })
         .unwrap();
     assert!(
@@ -529,37 +519,37 @@ fn test_pop_behavior_with_modifications() {
 #[test]
 #[should_panic(expected = "out of bounds")]
 fn test_read_popped_bit_panics() {
-    let mut bitmap: BitMap<4> = BitMap::new();
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap: BitMap<4> = BitMap::new();
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..10 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
 
-    let mut batch = bitmap.start_batch();
-    batch.pop();
-    batch.pop();
-    batch.get_bit(8); // Should panic - bit 8 is now out of bounds
+    let mut dirty = bitmap.into_dirty();
+    dirty.pop();
+    dirty.pop();
+    dirty.get_bit(8); // Should panic - bit 8 is now out of bounds
 }
 
 /// Test pruning beyond bitmap length should fail.
 #[test]
 #[should_panic(expected = "beyond projected length")]
 fn test_prune_beyond_length_panics() {
-    let mut bitmap: BitMap<4> = BitMap::new();
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap: BitMap<4> = BitMap::new();
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..10 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
 
-    let mut batch = bitmap.start_batch();
-    batch.pop(); // projected_len = 9
-    batch.prune_to_bit(100); // Should panic - bit 100 is beyond projected length
+    let mut dirty = bitmap.into_dirty();
+    dirty.pop(); // projected_len = 9
+    dirty.prune_to_bit(100); // Should panic - bit 100 is beyond projected length
 }
 
 /// Test that get_chunk can read entirely appended chunks.
@@ -575,18 +565,18 @@ fn test_prune_beyond_length_panics() {
 /// panics because that chunk doesn't exist in current.
 #[test]
 fn test_get_chunk_on_appended_only_chunk() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Start with empty bitmap
-    let mut batch = bitmap.start_batch();
+    let mut dirty = bitmap.into_dirty();
 
     // Push 32 bits (fills chunk 0 entirely)
     for i in 0..32 {
-        batch.push(i % 2 == 0); // Alternating pattern: true, false, true, false...
+        dirty.push(i % 2 == 0); // Alternating pattern: true, false, true, false...
     }
 
     // Now try to read chunk 0 - this chunk is entirely appended
-    let chunk = batch.get_chunk(0);
+    let chunk = dirty.get_chunk(0);
 
     // Verify the alternating pattern: true, false, true, false...
     assert_ne!(chunk[0] & 0x01, 0, "bit 0 should be true");
@@ -610,25 +600,25 @@ fn test_get_chunk_on_appended_only_chunk() {
 /// after commit.
 #[test]
 fn test_pop_zeros_chunk_tail() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Setup: Create 33 bits (chunk 0 has bits 0-31 all true, chunk 1 has bit 32 true)
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..33 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
 
-    // Start a new batch and pop 2 bits
-    let mut batch = bitmap.start_batch();
-    batch.pop(); // projected_len = 32
-    batch.pop(); // projected_len = 31
+    // Start a new dirty and pop 2 bits
+    let mut dirty = bitmap.into_dirty();
+    dirty.pop(); // projected_len = 32
+    dirty.pop(); // projected_len = 31
 
     // Now bit 31 is out of bounds (projected_len = 31)
     // get_chunk(0) returns chunk 0, which contains bits 0-31
-    let chunk = batch.get_chunk(0);
+    let chunk = dirty.get_chunk(0);
 
     // Bit 31 should be zeroed since it's >= projected_len
     let byte_31 = chunk[31 / 8]; // byte 3
@@ -638,7 +628,7 @@ fn test_pop_zeros_chunk_tail() {
     assert!(!bit_31_set);
 }
 
-/// Test pruning a chunk that was just appended in the same batch.
+/// Test pruning a chunk that was just appended in the same dirty state.
 ///
 /// This tests the scenario where:
 /// 1. We have a bitmap with some bits (not chunk-aligned)
@@ -649,89 +639,89 @@ fn test_pop_zeros_chunk_tail() {
 /// but the new chunk only exists in appended_bits, causing a panic.
 #[test]
 fn test_prune_freshly_appended_chunk() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Start with 10 bits (chunk 0 is partial, no chunk 1)
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..10 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
 
     assert_eq!(bitmap.current().chunks_len(), 1); // Only chunk 0 exists
 
-    // Now in a new batch, append 54 more bits
-    // This creates chunk 1 (bits 32-63) entirely within the batch
-    let mut batch = bitmap.start_batch();
+    // Now in a new dirty, append 54 more bits
+    // This creates chunk 1 (bits 32-63) entirely within the dirty state
+    let mut dirty = bitmap.into_dirty();
     for _ in 0..54 {
-        batch.push(true);
+        dirty.push(true);
     }
 
     // projected_len = 64, we now have chunks 0 and 1
     // But chunk 1 is ONLY in appended_bits, not in current
-    assert_eq!(batch.len(), 64);
+    assert_eq!(dirty.len(), 64);
 
     // Try to prune to bit 64 (prune chunks 0 and 1)
     // This should capture chunk 0 from current (OK)
     // But chunk 1 doesn't exist in current yet!
-    batch.prune_to_bit(64);
+    dirty.prune_to_bit(64);
 
     // Should commit successfully
-    batch.commit(2).unwrap();
+    let _bitmap = dirty.commit(2).unwrap();
 }
 
-/// Test that batch reads correctly see appended bits after pops.
+/// Test that dirty reads correctly see appended bits after pops.
 ///
 /// This tests the scenario where:
 /// 1. We start with a bitmap of length N
 /// 2. Pop some bits (reducing length to M < N)
 /// 3. Push new bits (growing length back toward N)
-/// 4. Read those newly pushed bits within the same batch
+/// 4. Read those newly pushed bits within the same dirty state
 ///
 /// The bug was that `get_bit` and `get_chunk_containing` checked `bit >= base_len`
 /// to identify appended bits, but after net pops, the appended region actually
 /// starts at `projected_len - appended_bits.len()`, which is less than `base_len`.
 /// This caused reads to fall through to the stale underlying bitmap instead of
-/// reading from the batch's `appended_bits` vector.
+/// reading from the dirty's `appended_bits` vector.
 #[test]
 fn test_read_appended_bits_after_pops() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Setup: Create bitmap with 10 bits, all set to true
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for _ in 0..10 {
-                b.push(true);
+                dirty.push(true);
             }
         })
         .unwrap();
 
-    // Start batch: pop 3 bits, then push 2 bits with value false
-    let mut batch = bitmap.start_batch();
-    batch.pop(); // projected_len = 9
-    batch.pop(); // projected_len = 8
-    batch.pop(); // projected_len = 7
-    batch.push(false); // projected_len = 8, appended_bits = [false]
-    batch.push(false); // projected_len = 9, appended_bits = [false, false]
+    // Start dirty: pop 3 bits, then push 2 bits with value false
+    let mut dirty = bitmap.into_dirty();
+    dirty.pop(); // projected_len = 9
+    dirty.pop(); // projected_len = 8
+    dirty.pop(); // projected_len = 7
+    dirty.push(false); // projected_len = 8, appended_bits = [false]
+    dirty.push(false); // projected_len = 9, appended_bits = [false, false]
 
     // The appended region is now [7, 9), not [10, 12)
     // Verify get_bit sees the new false values, not the old true values
-    assert!(!batch.get_bit(7));
-    assert!(!batch.get_bit(8));
+    assert!(!dirty.get_bit(7));
+    assert!(!dirty.get_bit(8));
 
     // Verify get_chunk also reconstructs correctly
-    let chunk = batch.get_chunk(0); // Chunk containing bits 0..31
+    let chunk = dirty.get_chunk(0); // Chunk containing bits 0..31
     assert_eq!(chunk[0] & 0x80, 0, "bit 7 should be false in chunk");
     assert_eq!(chunk[1] & 0x01, 0, "bit 8 should be false in chunk");
 
     // Also verify we can modify appended bits
-    batch.set_bit(7, true);
-    assert!(batch.get_bit(7));
+    dirty.set_bit(7, true);
+    assert!(dirty.get_bit(7));
 
     // Commit and verify the final state
-    batch.commit(2).unwrap();
+    let bitmap = dirty.commit(2).unwrap();
     assert_eq!(bitmap.len(), 9);
     assert!(bitmap.get_bit(7));
     assert!(!bitmap.get_bit(8));
@@ -748,13 +738,13 @@ fn test_read_appended_bits_after_pops() {
 /// allowing reconstruction even though that chunk no longer exists in current state.
 #[test]
 fn test_reconstruct_less_pruned_from_more_pruned() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Commit 1: Create 64 bits (2 chunks) with pattern
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for i in 0..64 {
-                b.push(i < 32); // First chunk all true, second chunk all false
+                dirty.push(i < 32); // First chunk all true, second chunk all false
             }
         })
         .unwrap();
@@ -762,9 +752,9 @@ fn test_reconstruct_less_pruned_from_more_pruned() {
     assert_eq!(bitmap.pruned_chunks(), 0);
 
     // Commit 2: Prune first chunk
-    bitmap
-        .with_batch(2, |b| {
-            b.prune_to_bit(32); // Prune chunk 0
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.prune_to_bit(32); // Prune chunk 0
         })
         .unwrap();
     assert_eq!(bitmap.len(), 64);
@@ -804,13 +794,13 @@ fn test_reconstruct_less_pruned_from_more_pruned() {
 /// return an empty bitmap with the correct pruning metadata.
 #[test]
 fn test_reconstruct_fully_pruned_commit() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Commit 1: Create 32 bits (1 complete chunk)
-    bitmap
-        .with_batch(1, |b| {
+    let bitmap = bitmap
+        .apply(1, |dirty| {
             for i in 0..32 {
-                b.push(i % 2 == 0); // Alternating pattern
+                dirty.push(i % 2 == 0); // Alternating pattern
             }
         })
         .unwrap();
@@ -818,9 +808,9 @@ fn test_reconstruct_fully_pruned_commit() {
     assert_eq!(bitmap.pruned_chunks(), 0);
 
     // Commit 2: Prune the entire chunk
-    bitmap
-        .with_batch(2, |b| {
-            b.prune_to_bit(32); // Prune chunk 0 (bits 0..32)
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.prune_to_bit(32); // Prune chunk 0 (bits 0..32)
         })
         .unwrap();
     assert_eq!(bitmap.len(), 32);
@@ -880,70 +870,70 @@ fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
         let initial_len = ground_truth.len();
         let initial_pruned = ground_truth.pruned_chunks();
 
-        bitmap
-            .with_batch(commit_num, |batch| {
-                // Track current state within this batch (changes as we apply operations)
-                let mut current_len = initial_len;
-                let mut current_pruned = initial_pruned;
+        // Track current state within this dirty state (changes as we apply operations)
+        let mut current_len = initial_len;
+        let mut current_pruned = initial_pruned;
 
-                for _ in 0..OPERATIONS_PER_COMMIT {
-                    // Pick a random operation based on probability distribution
-                    let op_choice = rng.gen_range(0..100);
+        let mut dirty = bitmap.into_dirty();
 
-                    // Special case: if bitmap is empty, we can only push
-                    if current_len == 0 {
-                        let bit_value = rng.gen_bool(0.5);
-                        batch.push(bit_value);
-                        ground_truth.push(bit_value);
-                        current_len += 1;
-                        continue;
-                    }
+        for _ in 0..OPERATIONS_PER_COMMIT {
+            // Pick a random operation based on probability distribution
+            let op_choice = rng.gen_range(0..100);
 
-                    // Operation: PUSH (55% probability)
-                    if op_choice < PROB_PUSH {
-                        let bit_value = rng.gen_bool(0.5);
-                        batch.push(bit_value);
-                        ground_truth.push(bit_value);
-                        current_len += 1;
-                    }
-                    // Operation: MODIFY existing bit (20% probability)
-                    else if op_choice < PROB_MODIFY {
-                        let bit = rng.gen_range(0..current_len);
-                        let new_value = rng.gen_bool(0.5);
+            // Special case: if bitmap is empty, we can only push
+            if current_len == 0 {
+                let bit_value = rng.gen_bool(0.5);
+                dirty.push(bit_value);
+                ground_truth.push(bit_value);
+                current_len += 1;
+                continue;
+            }
 
-                        // Safety: Only modify bits that aren't pruned
-                        let chunk_idx = Prunable::<4>::unpruned_chunk(bit);
-                        if chunk_idx >= current_pruned {
-                            batch.set_bit(bit, new_value);
-                            ground_truth.set_bit(bit, new_value);
-                        }
-                    }
-                    // Operation: POP last bit (15% probability)
-                    else if op_choice < PROB_POP {
-                        batch.pop();
-                        ground_truth.pop();
-                        current_len -= 1;
-                    }
-                    // Operation: PRUNE to random chunk boundary (10% probability)
-                    else if op_choice < PROB_PRUNE {
-                        // Calculate the maximum chunk we can prune to (keep at least 1 chunk of data)
-                        let total_chunks = (current_len / CHUNK_SIZE_BITS) as usize;
-                        let max_prune_chunk = total_chunks.saturating_sub(1);
+            // Operation: PUSH (55% probability)
+            if op_choice < PROB_PUSH {
+                let bit_value = rng.gen_bool(0.5);
+                dirty.push(bit_value);
+                ground_truth.push(bit_value);
+                current_len += 1;
+            }
+            // Operation: MODIFY existing bit (20% probability)
+            else if op_choice < PROB_MODIFY {
+                let bit = rng.gen_range(0..current_len);
+                let new_value = rng.gen_bool(0.5);
 
-                        // Only prune if there's at least one unpruned complete chunk we can prune
-                        if max_prune_chunk > current_pruned {
-                            // Randomly pick a chunk boundary to prune to (between current_pruned+1 and max)
-                            let prune_chunk = rng.gen_range((current_pruned + 1)..=max_prune_chunk);
-                            let prune_to = (prune_chunk as u64) * CHUNK_SIZE_BITS;
-
-                            batch.prune_to_bit(prune_to);
-                            ground_truth.prune_to_bit(prune_to);
-                            current_pruned = prune_chunk;
-                        }
-                    }
+                // Safety: Only modify bits that aren't pruned
+                let chunk_idx = Prunable::<4>::unpruned_chunk(bit);
+                if chunk_idx >= current_pruned {
+                    dirty.set_bit(bit, new_value);
+                    ground_truth.set_bit(bit, new_value);
                 }
-            })
-            .unwrap();
+            }
+            // Operation: POP last bit (15% probability)
+            else if op_choice < PROB_POP {
+                dirty.pop();
+                ground_truth.pop();
+                current_len -= 1;
+            }
+            // Operation: PRUNE to random chunk boundary (10% probability)
+            else if op_choice < PROB_PRUNE {
+                // Calculate the maximum chunk we can prune to (keep at least 1 chunk of data)
+                let total_chunks = (current_len / CHUNK_SIZE_BITS) as usize;
+                let max_prune_chunk = total_chunks.saturating_sub(1);
+
+                // Only prune if there's at least one unpruned complete chunk we can prune
+                if max_prune_chunk > current_pruned {
+                    // Randomly pick a chunk boundary to prune to (between current_pruned+1 and max)
+                    let prune_chunk = rng.gen_range((current_pruned + 1)..=max_prune_chunk);
+                    let prune_to = (prune_chunk as u64) * CHUNK_SIZE_BITS;
+
+                    dirty.prune_to_bit(prune_to);
+                    ground_truth.prune_to_bit(prune_to);
+                    current_pruned = prune_chunk;
+                }
+            }
+        }
+
+        bitmap = dirty.commit(commit_num).unwrap();
 
         // Save checkpoint for verification
         checkpoints.push((commit_num, ground_truth.clone()));
@@ -993,19 +983,19 @@ fn test_randomized_with_multiple_seeds() {
 #[test]
 #[should_panic(expected = "bit pruned: 31")]
 fn test_pop_into_pruned_region_panics() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Create a bitmap with 64 bits (2 chunks), then prune first chunk
-    bitmap
-        .with_batch(1, |b| {
-            b.push_chunk(&[0xFF; 4]);
-            b.push_chunk(&[0xFF; 4]);
+    let bitmap = bitmap
+        .apply(1, |dirty| {
+            dirty.push_chunk(&[0xFF; 4]);
+            dirty.push_chunk(&[0xFF; 4]);
         })
         .unwrap();
 
-    bitmap
-        .with_batch(2, |b| {
-            b.prune_to_bit(32);
+    let bitmap = bitmap
+        .apply(2, |dirty| {
+            dirty.prune_to_bit(32);
         })
         .unwrap();
 
@@ -1015,31 +1005,32 @@ fn test_pop_into_pruned_region_panics() {
 
     // Try to pop past the prune boundary
     // This should panic with "cannot pop into pruned region"
-    let mut batch = bitmap.start_batch();
+    let mut dirty = bitmap.into_dirty();
     for _ in 0..33 {
         // Pop 33 times (32 live bits + 1 pruned bit)
-        batch.pop();
+        dirty.pop();
     }
 }
 
 #[test]
 fn test_commit_u64_max_is_reserved() {
-    let mut bitmap: BitMap<4> = BitMap::new();
+    let bitmap: BitMap<4> = BitMap::new();
 
     // Verify that u64::MAX cannot be used as a commit number
-    let result = bitmap.with_batch(u64::MAX, |b| {
-        b.push(true);
+    let result = bitmap.apply(u64::MAX, |dirty| {
+        dirty.push(true);
     });
 
     assert!(matches!(result, Err(Error::ReservedCommitNumber)));
-    assert_eq!(bitmap.len(), 0); // Batch was rejected
 
     // Verify that u64::MAX - 1 can be used
-    let result = bitmap.with_batch(u64::MAX - 1, |b| {
-        b.push(true);
+    let bitmap: BitMap<4> = BitMap::new();
+    let result = bitmap.apply(u64::MAX - 1, |dirty| {
+        dirty.push(true);
     });
 
     assert!(result.is_ok());
+    let bitmap = result.unwrap();
     assert_eq!(bitmap.len(), 1);
 
     // Verify get_at_commit returns None for u64::MAX

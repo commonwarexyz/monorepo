@@ -1,11 +1,86 @@
-use super::{batch::Batch, Error};
-use crate::bitmap::{historical::BatchGuard, Prunable};
+use super::Error;
+use crate::bitmap::Prunable;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-/// Type of change to a chunk.
+/// Sealed trait for bitmap state types.
+mod private {
+    pub trait Sealed {}
+}
+
+/// Trait for valid bitmap type states [Clean], [Dirty].
+pub trait State: private::Sealed + Sized + Send + Sync {}
+
+/// Clean bitmap type state - bitmap has no pending mutations.
+#[derive(Clone, Debug)]
+pub struct Clean;
+
+impl private::Sealed for Clean {}
+impl State for Clean {}
+
+/// Dirty bitmap type state - bitmap has pending mutations not yet committed.
+///
+/// # De-duplication and Cancellation
+///
+/// **The dirty state de-duplicates during operations, not at commit time.**
+///
+/// Operations that cancel out are handled automatically:
+///
+/// ```text
+/// Example 1: push + pop = no-op
+///   push(true)  → appended_bits=[true], projected_len=11
+///   pop()       → appended_bits=[], projected_len=10
+///   Result: dirty state unchanged from base!
+///
+/// Example 2: set_bit + set_bit = last write wins
+///   set_bit(5, true)   → modified_bits={5: true}
+///   set_bit(5, false)  → modified_bits={5: false}
+///   Result: only final value recorded
+///
+/// Example 3: set_bit + pop = cancels modification
+///   set_bit(9, true)  → modified_bits={9: true}
+///   pop()             → modified_bits={} (removed), projected_len=9
+///   Result: bit 9 no longer exists, modification discarded
+/// ```
+///
+/// # Key Invariants
+///
+/// 1. **Base immutability**: `base_len` and `base_pruned_chunks` never change
+/// 2. **Appended region**: Always occupies `[projected_len - appended_bits.len(), projected_len)`
+/// 3. **Modified region**: `modified_bits` only contains offsets in `[0, projected_len - appended_bits.len())`
+///    - These are modifications to the base bitmap, never to appended bits
+///    - Appended bits are modified by directly updating the `appended_bits` vector
+/// 4. **No overlap**: A bit is either in `modified_bits` OR `appended_bits`, never both
+#[derive(Clone, Debug)]
+pub struct Dirty<const N: usize> {
+    /// Bitmap state when dirty started (immutable).
+    base_len: u64,
+    base_pruned_chunks: usize,
+
+    /// What the bitmap will look like after commit (mutable).
+    projected_len: u64,
+    projected_pruned_chunks: usize,
+
+    /// Modifications to bits that existed in the bitmap (not appended bits).
+    /// Contains offsets in [0, projected_len - appended_bits.len()).
+    /// Maps: bit -> new_value
+    modified_bits: BTreeMap<u64, bool>,
+
+    /// New bits pushed in this dirty state (in order).
+    /// Logical position: [projected_len - appended_bits.len(), projected_len)
+    appended_bits: Vec<bool>,
+
+    /// Old chunk data for chunks being pruned.
+    /// Captured eagerly during `prune_to_bit()` for historical reconstruction.
+    chunks_to_prune: BTreeMap<usize, [u8; N]>,
+}
+
+impl<const N: usize> private::Sealed for Dirty<N> {}
+impl<const N: usize> State for Dirty<N> {}
+
+/// A change to a chunk.
 #[derive(Clone, Debug)]
 pub(super) enum ChunkDiff<const N: usize> {
     /// Chunk was modified (contains old value before the change).
@@ -29,27 +104,37 @@ pub(super) struct CommitDiff<const N: usize> {
     pub(super) chunk_diffs: BTreeMap<usize, ChunkDiff<N>>,
 }
 
-/// A historical bitmap that maintains one actual bitmap plus diffs for history and batching.
+/// A historical bitmap that maintains one actual bitmap plus diffs for history.
+///
+/// Uses a type-state pattern to track whether the bitmap is clean (no pending
+/// mutations) or dirty (has pending mutations).
 ///
 /// Commit numbers must be strictly monotonically increasing and < u64::MAX.
-pub struct BitMap<const N: usize> {
+#[derive(Clone, Debug)]
+pub struct BitMap<const N: usize, S: State = Clean> {
     /// The current/HEAD state - the one and only full bitmap.
-    pub(super) current: Prunable<N>,
+    current: Prunable<N>,
 
     /// Historical commits: commit_number -> reverse diff from that commit.
-    pub(super) commits: BTreeMap<u64, CommitDiff<N>>,
+    commits: BTreeMap<u64, CommitDiff<N>>,
 
-    /// Active batch (if any).
-    pub(super) active_batch: Option<Batch<N>>,
+    /// State marker (Clean or Dirty).
+    state: S,
 }
 
-impl<const N: usize> BitMap<N> {
+/// Type alias for a clean bitmap with no pending mutations.
+pub type CleanBitMap<const N: usize> = BitMap<N, Clean>;
+
+/// Type alias for a dirty bitmap with pending mutations.
+pub type DirtyBitMap<const N: usize> = BitMap<N, Dirty<N>>;
+
+impl<const N: usize> CleanBitMap<N> {
     /// Create a new empty historical bitmap.
     pub const fn new() -> Self {
         Self {
             current: Prunable::new(),
             commits: BTreeMap::new(),
-            active_batch: None,
+            state: Clean,
         }
     }
 
@@ -58,58 +143,45 @@ impl<const N: usize> BitMap<N> {
         Ok(Self {
             current: Prunable::new_with_pruned_chunks(pruned_chunks)?,
             commits: BTreeMap::new(),
-            active_batch: None,
+            state: Clean,
         })
     }
 
-    /// Start a new batch for making mutations.
+    /// Transition to dirty state to begin making mutations.
     ///
-    /// The returned [BatchGuard] must be either committed or dropped. All mutations
-    /// are applied to the guard's diff layer and do not affect the current bitmap
-    /// until commit.
+    /// All mutations are applied to a diff layer and do not affect the current
+    /// bitmap until commit.
     ///
     /// # Examples
     ///
     /// ```
     /// # use commonware_utils::bitmap::historical::BitMap;
-    /// let mut bitmap: BitMap<4> = BitMap::new();
+    /// let bitmap: BitMap<4> = BitMap::new();
     ///
-    /// let mut batch = bitmap.start_batch();
-    /// batch.push(true);
-    /// batch.push(false);
-    /// batch.commit(1).unwrap();
+    /// let mut dirty = bitmap.into_dirty();
+    /// dirty.push(true);
+    /// dirty.push(false);
+    /// let bitmap = dirty.commit(1).unwrap();
     ///
     /// assert_eq!(bitmap.len(), 2);
     /// ```
-    ///
-    /// # Panics
-    ///
-    /// Panics if a batch is already active.
-    pub fn start_batch(&mut self) -> BatchGuard<'_, N> {
-        assert!(
-            self.active_batch.is_none(),
-            "cannot start batch: batch already active"
-        );
-
-        let batch = Batch {
-            base_len: self.current.len(),
-            base_pruned_chunks: self.current.pruned_chunks(),
-            projected_len: self.current.len(),
-            projected_pruned_chunks: self.current.pruned_chunks(),
-            modified_bits: BTreeMap::new(),
-            appended_bits: Vec::new(),
-            chunks_to_prune: BTreeMap::new(),
-        };
-
-        self.active_batch = Some(batch);
-
-        BatchGuard {
-            bitmap: self,
-            committed: false,
+    pub fn into_dirty(self) -> DirtyBitMap<N> {
+        DirtyBitMap {
+            state: Dirty {
+                base_len: self.current.len(),
+                base_pruned_chunks: self.current.pruned_chunks(),
+                projected_len: self.current.len(),
+                projected_pruned_chunks: self.current.pruned_chunks(),
+                modified_bits: BTreeMap::new(),
+                appended_bits: Vec::new(),
+                chunks_to_prune: BTreeMap::new(),
+            },
+            current: self.current,
+            commits: self.commits,
         }
     }
 
-    /// Execute a closure with a batch and commit it at the given commit number.
+    /// Execute a closure with a dirty bitmap and commit it at the given commit number.
     ///
     /// # Errors
     ///
@@ -118,16 +190,25 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Returns [Error::ReservedCommitNumber] if the commit number is `u64::MAX`.
     ///
-    /// # Panics
+    /// # Examples
     ///
-    /// Panics if a batch is already active.
-    pub fn with_batch<F>(&mut self, commit_number: u64, f: F) -> Result<(), Error>
+    /// ```
+    /// # use commonware_utils::bitmap::historical::BitMap;
+    /// let mut bitmap: BitMap<4> = BitMap::new();
+    ///
+    /// bitmap = bitmap.apply(1, |dirty| {
+    ///     dirty.push(true).push(false);
+    /// }).unwrap();
+    ///
+    /// assert_eq!(bitmap.len(), 2);
+    /// ```
+    pub fn apply<F>(self, commit_number: u64, f: F) -> Result<Self, Error>
     where
-        F: FnOnce(&mut BatchGuard<'_, N>),
+        F: FnOnce(&mut DirtyBitMap<N>),
     {
-        let mut guard = self.start_batch();
-        f(&mut guard);
-        guard.commit(commit_number)
+        let mut dirty = self.into_dirty();
+        f(&mut dirty);
+        dirty.commit(commit_number)
     }
 
     /// Get the bitmap state as it existed at a specific commit.
@@ -145,14 +226,14 @@ impl<const N: usize> BitMap<N> {
     /// # use commonware_utils::bitmap::historical::BitMap;
     /// let mut bitmap: BitMap<4> = BitMap::new();
     ///
-    /// bitmap.with_batch(1, |batch| {
-    ///     batch.push(true);
-    ///     batch.push(false);
+    /// bitmap = bitmap.apply(1, |dirty| {
+    ///     dirty.push(true);
+    ///     dirty.push(false);
     /// }).unwrap();
     ///
-    /// bitmap.with_batch(2, |batch| {
-    ///     batch.set_bit(0, false);
-    ///     batch.push(true);
+    /// bitmap = bitmap.apply(2, |dirty| {
+    ///     dirty.set_bit(0, false);
+    ///     dirty.push(true);
     /// }).unwrap();
     ///
     /// // Get state as it was at commit 1
@@ -182,6 +263,75 @@ impl<const N: usize> BitMap<N> {
         }
 
         Some(state)
+    }
+
+    /// Check if a commit exists.
+    pub fn commit_exists(&self, commit_number: u64) -> bool {
+        self.commits.contains_key(&commit_number)
+    }
+
+    /// Get an iterator over all commit numbers in ascending order.
+    pub fn commits(&self) -> impl Iterator<Item = u64> + '_ {
+        self.commits.keys().copied()
+    }
+
+    /// Get the latest commit number, if any commits exist.
+    pub fn latest_commit(&self) -> Option<u64> {
+        self.commits.keys().next_back().copied()
+    }
+
+    /// Get the earliest commit number, if any commits exist.
+    pub fn earliest_commit(&self) -> Option<u64> {
+        self.commits.keys().next().copied()
+    }
+
+    /// Get a reference to the current bitmap state.
+    pub const fn current(&self) -> &Prunable<N> {
+        &self.current
+    }
+
+    /// Number of bits in the current bitmap.
+    #[inline]
+    pub const fn len(&self) -> u64 {
+        self.current.len()
+    }
+
+    /// Returns true if the current bitmap is empty.
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.current.is_empty()
+    }
+
+    /// Get the value of a bit in the current bitmap.
+    #[inline]
+    pub fn get_bit(&self, bit: u64) -> bool {
+        self.current.get_bit(bit)
+    }
+
+    /// Get the chunk containing a bit in the current bitmap.
+    #[inline]
+    pub fn get_chunk_containing(&self, bit: u64) -> &[u8; N] {
+        self.current.get_chunk_containing(bit)
+    }
+
+    /// Number of pruned chunks in the current bitmap.
+    #[inline]
+    pub const fn pruned_chunks(&self) -> usize {
+        self.current.pruned_chunks()
+    }
+
+    /// Remove all commits with numbers below the commit number.
+    ///
+    /// Returns the number of commits removed.
+    pub fn prune_commits_before(&mut self, commit_number: u64) -> usize {
+        let count = self.commits.len();
+        self.commits = self.commits.split_off(&commit_number);
+        count - self.commits.len()
+    }
+
+    /// Clear all historical commits.
+    pub fn clear_history(&mut self) {
+        self.commits.clear();
     }
 
     /// Push bits to extend the bitmap to target length.
@@ -277,114 +427,417 @@ impl<const N: usize> BitMap<N> {
         assert_eq!(newer_state.pruned_chunks(), target_pruned);
         assert_eq!(newer_state.len(), target_len);
     }
+}
 
-    /// Check if a commit exists.
-    pub fn commit_exists(&self, commit_number: u64) -> bool {
-        self.commits.contains_key(&commit_number)
+impl<const N: usize> Default for CleanBitMap<N> {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    /// Get an iterator over all commit numbers in ascending order.
-    pub fn commits(&self) -> impl Iterator<Item = u64> + '_ {
-        self.commits.keys().copied()
-    }
-
-    /// Get the latest commit number, if any commits exist.
-    pub fn latest_commit(&self) -> Option<u64> {
-        self.commits.keys().next_back().copied()
-    }
-
-    /// Get the earliest commit number, if any commits exist.
-    pub fn earliest_commit(&self) -> Option<u64> {
-        self.commits.keys().next().copied()
-    }
-
-    /// Get a reference to the current bitmap state.
-    pub const fn current(&self) -> &Prunable<N> {
-        &self.current
-    }
-
-    /// Number of bits in the current bitmap.
+impl<const N: usize> DirtyBitMap<N> {
+    /// Get the length of the bitmap as it would be after committing.
     #[inline]
     pub const fn len(&self) -> u64 {
-        self.current.len()
+        self.state.projected_len
     }
 
-    /// Returns true if the current bitmap is empty.
+    /// Returns true if the bitmap would be empty after committing.
     #[inline]
     pub const fn is_empty(&self) -> bool {
-        self.current.is_empty()
+        self.len() == 0
     }
 
-    /// Get the value of a bit in the current bitmap.
+    /// Get the number of pruned chunks after committing.
     #[inline]
+    pub const fn pruned_chunks(&self) -> usize {
+        self.state.projected_pruned_chunks
+    }
+
+    /// Get a bit value with read-through semantics.
+    ///
+    /// Returns the bit's value as it would be after committing.
+    /// Priority: appended bits > modified bits > original bitmap.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bit offset is out of bounds or if the bit has been pruned.
     pub fn get_bit(&self, bit: u64) -> bool {
+        assert!(
+            bit < self.state.projected_len,
+            "bit offset {bit} out of bounds (len: {})",
+            self.state.projected_len
+        );
+
+        let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+        assert!(
+            chunk_idx >= self.state.projected_pruned_chunks,
+            "cannot get bit {bit}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
+            self.state.projected_pruned_chunks
+        );
+
+        // Priority 1: Check if bit is in appended region.
+        // Must use appended_start, not base_len, to handle net pops + appends.
+        let appended_start = self.state.projected_len - self.state.appended_bits.len() as u64;
+        if bit >= appended_start {
+            let append_offset = (bit - appended_start) as usize;
+            return self.state.appended_bits[append_offset];
+        }
+
+        // Priority 2: Check if bit was modified.
+        if let Some(&value) = self.state.modified_bits.get(&bit) {
+            return value;
+        }
+
+        // Priority 3: Fall through to original bitmap.
         self.current.get_bit(bit)
     }
 
-    /// Get the chunk containing a bit in the current bitmap.
-    #[inline]
-    pub fn get_chunk_containing(&self, bit: u64) -> &[u8; N] {
-        self.current.get_chunk_containing(bit)
-    }
-
-    /// Number of pruned chunks in the current bitmap.
-    #[inline]
-    pub const fn pruned_chunks(&self) -> usize {
-        self.current.pruned_chunks()
-    }
-
-    /// Remove all commits with numbers below the commit number.
+    /// Get a chunk value with read-through semantics.
     ///
-    /// Returns the number of commits removed.
-    pub fn prune_commits_before(&mut self, commit_number: u64) -> usize {
-        let count = self.commits.len();
-        self.commits = self.commits.split_off(&commit_number);
-        count - self.commits.len()
+    /// Reconstructs the chunk if it has modifications, otherwise returns from current.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bit offset is out of bounds or if the chunk has been pruned.
+    pub fn get_chunk(&self, bit: u64) -> [u8; N] {
+        // Check bounds
+        assert!(
+            bit < self.state.projected_len,
+            "bit offset {bit} out of bounds (len: {})",
+            self.state.projected_len
+        );
+
+        let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+
+        // Check if chunk is in pruned range
+        assert!(
+            chunk_idx >= self.state.projected_pruned_chunks,
+            "cannot get chunk at bit offset {bit}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
+            self.state.projected_pruned_chunks
+        );
+
+        let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+        let chunk_end_bit = chunk_start_bit + Prunable::<N>::CHUNK_SIZE_BITS;
+
+        // Determine if this chunk needs reconstruction.
+        let appended_start = self.state.projected_len - self.state.appended_bits.len() as u64;
+
+        // Skip reconstruction only if chunk is entirely outside modified regions
+        let chunk_entirely_past_end = chunk_start_bit >= self.state.projected_len;
+        let chunk_entirely_before_changes =
+            chunk_end_bit <= appended_start && chunk_end_bit <= self.state.projected_len;
+
+        let chunk_needs_reconstruction =
+            // Chunk overlaps with pops or appends
+            !(chunk_entirely_past_end || chunk_entirely_before_changes)
+            // OR chunk has explicit bit modifications
+            || (chunk_start_bit..chunk_end_bit.min(self.state.base_len))
+                .any(|bit| self.state.modified_bits.contains_key(&bit));
+
+        if chunk_needs_reconstruction {
+            // Reconstruct chunk from current + modifications
+            self.reconstruct_modified_chunk(chunk_start_bit)
+        } else {
+            // Fall through to current bitmap
+            *self.current.get_chunk_containing(bit)
+        }
     }
 
-    /// Clear all historical commits.
-    pub fn clear_history(&mut self) {
-        self.commits.clear();
+    /// Reconstruct a chunk that has modifications, appends, or pops.
+    fn reconstruct_modified_chunk(&self, chunk_start: u64) -> [u8; N] {
+        // Start with current chunk if it exists
+        let mut chunk = if chunk_start < self.current.len() {
+            *self.current.get_chunk_containing(chunk_start)
+        } else {
+            [0u8; N]
+        };
+
+        // Calculate appended region boundary
+        let appended_start = self.state.projected_len - self.state.appended_bits.len() as u64;
+
+        // Apply modifications and zero out popped bits
+        for bit_in_chunk in 0..Prunable::<N>::CHUNK_SIZE_BITS {
+            let bit = chunk_start + bit_in_chunk;
+
+            let byte_idx = (bit_in_chunk / 8) as usize;
+            let bit_idx = bit_in_chunk % 8;
+            let mask = 1u8 << bit_idx;
+
+            if bit >= self.state.projected_len {
+                // Bit is beyond projected length (popped), zero it out
+                chunk[byte_idx] &= !mask;
+            } else if let Some(&value) = self.state.modified_bits.get(&bit) {
+                // Bit was explicitly modified
+                if value {
+                    chunk[byte_idx] |= mask;
+                } else {
+                    chunk[byte_idx] &= !mask;
+                }
+            } else if bit >= appended_start {
+                // This is an appended bit
+                let append_offset = (bit - appended_start) as usize;
+                if append_offset < self.state.appended_bits.len() {
+                    let value = self.state.appended_bits[append_offset];
+                    if value {
+                        chunk[byte_idx] |= mask;
+                    } else {
+                        chunk[byte_idx] &= !mask;
+                    }
+                }
+            }
+        }
+
+        chunk
     }
 
-    /// Apply a batch's changes to the current bitmap.
-    pub(super) fn apply_batch_to_current(&mut self, batch: &Batch<N>) {
-        // Step 1: Shrink to length before appends (handles net pops)
-        let target_len_before_appends = batch.projected_len - batch.appended_bits.len() as u64;
+    /// Set a bit value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bit offset is out of bounds or if the bit has been pruned.
+    pub fn set_bit(&mut self, bit: u64, value: bool) -> &mut Self {
+        assert!(
+            bit < self.state.projected_len,
+            "cannot set bit {bit}: out of bounds (len: {})",
+            self.state.projected_len
+        );
 
+        let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+        assert!(
+            chunk_idx >= self.state.projected_pruned_chunks,
+            "cannot set bit {bit}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
+            self.state.projected_pruned_chunks
+        );
+
+        // Determine which region this bit belongs to.
+        // Appended region: bits pushed, starting at projected_len - appended_bits.len()
+        let appended_start = self.state.projected_len - self.state.appended_bits.len() as u64;
+
+        if bit >= appended_start {
+            // Bit is in the appended region: update the appended_bits vector directly.
+            let append_offset = (bit - appended_start) as usize;
+            self.state.appended_bits[append_offset] = value;
+        } else {
+            // Bit is in the base region: record as a modification.
+            self.state.modified_bits.insert(bit, value);
+        }
+
+        self
+    }
+
+    /// Push a bit to the end of the bitmap.
+    pub fn push(&mut self, bit: bool) -> &mut Self {
+        self.state.appended_bits.push(bit);
+        self.state.projected_len += 1;
+        self
+    }
+
+    /// Push a byte to the end of the bitmap.
+    pub fn push_byte(&mut self, byte: u8) -> &mut Self {
+        for i in 0..8 {
+            let bit = (byte >> i) & 1 == 1;
+            self.push(bit);
+        }
+        self
+    }
+
+    /// Push a full chunk to the end of the bitmap.
+    pub fn push_chunk(&mut self, chunk: &[u8; N]) -> &mut Self {
+        for byte in chunk {
+            self.push_byte(*byte);
+        }
+        self
+    }
+
+    /// Pop the last bit from the bitmap.
+    ///
+    /// Returns the value of the popped bit, accounting for any modifications.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bitmap is empty.
+    pub fn pop(&mut self) -> bool {
+        assert!(self.state.projected_len > 0, "cannot pop from empty bitmap");
+
+        let old_projected_len = self.state.projected_len;
+        self.state.projected_len -= 1;
+        let bit = self.state.projected_len;
+
+        // Determine which region the popped bit came from.
+        // The appended region contains bits pushed: [appended_start, old_projected_len)
+        let appended_start = old_projected_len - self.state.appended_bits.len() as u64;
+
+        if bit >= appended_start {
+            // Popping from appended region: remove from appended_bits vector.
+            self.state.appended_bits.pop().unwrap()
+        } else {
+            // Popping from base region: check if it was modified.
+            if let Some(&modified_value) = self.state.modified_bits.get(&bit) {
+                self.state.modified_bits.remove(&bit);
+                modified_value
+            } else {
+                // Not modified, return original value.
+                self.current.get_bit(bit)
+            }
+        }
+    }
+
+    /// Prune chunks up to the chunk containing the given bit offset.
+    ///
+    /// Note: `bit` can equal `projected_len` when pruning at a chunk boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bit` is > the projected length.
+    pub fn prune_to_bit(&mut self, bit: u64) -> &mut Self {
+        assert!(
+            bit <= self.state.projected_len,
+            "cannot prune to bit {bit}: beyond projected length ({})",
+            self.state.projected_len
+        );
+
+        let chunk_num = Prunable::<N>::unpruned_chunk(bit);
+
+        if chunk_num <= self.state.projected_pruned_chunks {
+            return self; // Already pruned
+        }
+
+        // Capture preimages of chunks being pruned
+        let current_pruned = self.current.pruned_chunks();
+        for chunk_idx in self.state.projected_pruned_chunks..chunk_num {
+            if self.state.chunks_to_prune.contains_key(&chunk_idx) {
+                continue; // Already captured
+            }
+
+            // Invariant: chunk_idx should always be >= current_pruned because
+            // projected_pruned_chunks starts at base_pruned_chunks (= current_pruned)
+            assert!(
+                chunk_idx >= current_pruned,
+                "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={current_pruned})",
+            );
+
+            let bitmap_idx = chunk_idx - current_pruned;
+
+            // Get chunk data, which may come from dirty state if it's appended
+            let chunk_data = if bitmap_idx < self.current.chunks_len() {
+                // Chunk exists in current bitmap
+                *self.current.get_chunk(bitmap_idx)
+            } else {
+                // Chunk only exists in appended bits
+                // Manually reconstruct it from appended_bits
+                let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+                let appended_start =
+                    self.state.projected_len - self.state.appended_bits.len() as u64;
+
+                let mut chunk = [0u8; N];
+                for bit_in_chunk in 0..Prunable::<N>::CHUNK_SIZE_BITS {
+                    let bit = chunk_start_bit + bit_in_chunk;
+                    if bit >= self.state.projected_len {
+                        break;
+                    }
+                    if bit >= appended_start {
+                        let append_idx = (bit - appended_start) as usize;
+                        if append_idx < self.state.appended_bits.len()
+                            && self.state.appended_bits[append_idx]
+                        {
+                            let byte_idx = (bit_in_chunk / 8) as usize;
+                            let bit_idx = bit_in_chunk % 8;
+                            chunk[byte_idx] |= 1u8 << bit_idx;
+                        }
+                    }
+                }
+                chunk
+            };
+
+            self.state.chunks_to_prune.insert(chunk_idx, chunk_data);
+        }
+
+        self.state.projected_pruned_chunks = chunk_num;
+
+        self
+    }
+
+    /// Commit the changes and return a clean bitmap with a historical snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::NonMonotonicCommit] if the commit number is not
+    /// greater than the previous commit.
+    ///
+    /// Returns [Error::ReservedCommitNumber] if the commit number is `u64::MAX`.
+    pub fn commit(mut self, commit_number: u64) -> Result<CleanBitMap<N>, Error> {
+        // Validate commit number is not reserved
+        if commit_number == u64::MAX {
+            return Err(Error::ReservedCommitNumber);
+        }
+
+        // Validate commit number is monotonically increasing
+        if let Some(&max_commit) = self.commits.keys().next_back() {
+            if commit_number <= max_commit {
+                return Err(Error::NonMonotonicCommit {
+                    previous: max_commit,
+                    attempted: commit_number,
+                });
+            }
+        }
+
+        // Build reverse diff (captures OLD state before applying changes)
+        let reverse_diff = self.build_reverse_diff();
+
+        // Shrink to length before appends (handles net pops)
+        let target_len_before_appends =
+            self.state.projected_len - self.state.appended_bits.len() as u64;
         while self.current.len() > target_len_before_appends {
             self.current.pop();
         }
-
-        // Step 2: Grow by appending new bits
-        for &bit in &batch.appended_bits {
+        // Grow by appending new bits
+        for &bit in &self.state.appended_bits {
             self.current.push(bit);
         }
-        assert_eq!(self.current.len(), batch.projected_len);
-
-        // Step 3: Modify existing base bits (not appended bits)
-        for (&bit, &value) in &batch.modified_bits {
+        assert_eq!(self.current.len(), self.state.projected_len);
+        // Modify existing base bits (not appended bits)
+        for (&bit, &value) in &self.state.modified_bits {
             self.current.set_bit(bit, value);
         }
-
-        // Step 4: Prune chunks from the beginning
-        if batch.projected_pruned_chunks > batch.base_pruned_chunks {
+        // Prune chunks from the beginning
+        if self.state.projected_pruned_chunks > self.state.base_pruned_chunks {
             let prune_to_bit =
-                batch.projected_pruned_chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
+                self.state.projected_pruned_chunks as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
             self.current.prune_to_bit(prune_to_bit);
+        }
+
+        // Store the reverse diff
+        self.commits.insert(commit_number, reverse_diff);
+
+        Ok(CleanBitMap {
+            current: self.current,
+            commits: self.commits,
+            state: Clean,
+        })
+    }
+
+    /// Abort the changes and return to clean state.
+    ///
+    /// All pending mutations are discarded.
+    pub fn abort(self) -> CleanBitMap<N> {
+        CleanBitMap {
+            current: self.current,
+            commits: self.commits,
+            state: Clean,
         }
     }
 
-    /// Build a reverse diff from a batch.
-    pub(super) fn build_reverse_diff(&self, batch: &Batch<N>) -> CommitDiff<N> {
+    /// Build a reverse diff from current dirty state.
+    fn build_reverse_diff(&self) -> CommitDiff<N> {
         let mut changes = BTreeMap::new();
-        self.capture_modified_chunks(batch, &mut changes);
-        self.capture_appended_chunks(batch, &mut changes);
-        self.capture_popped_chunks(batch, &mut changes);
-        self.capture_pruned_chunks(batch, &mut changes);
+        self.capture_modified_chunks(&mut changes);
+        self.capture_appended_chunks(&mut changes);
+        self.capture_popped_chunks(&mut changes);
+        self.capture_pruned_chunks(&mut changes);
         CommitDiff {
-            len: batch.base_len,
-            pruned_chunks: batch.base_pruned_chunks,
+            len: self.state.base_len,
+            pruned_chunks: self.state.base_pruned_chunks,
             chunk_diffs: changes,
         }
     }
@@ -393,19 +846,15 @@ impl<const N: usize> BitMap<N> {
     ///
     /// For each chunk containing modified bits, we store its original value so we can
     /// restore it when reconstructing historical states.
-    fn capture_modified_chunks(
-        &self,
-        batch: &Batch<N>,
-        changes: &mut BTreeMap<usize, ChunkDiff<N>>,
-    ) {
-        for &bit in batch.modified_bits.keys() {
+    fn capture_modified_chunks(&self, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
+        for &bit in self.state.modified_bits.keys() {
             let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
             changes.entry(chunk_idx).or_insert_with(|| {
                 // `modified_bits` only contains bits from the base region that existed
-                // at batch creation. Since current hasn't changed yet (we're still
+                // at dirty creation. Since current hasn't changed yet (we're still
                 // building the diff), the chunk MUST exist.
                 let old_chunk = self
-                    .get_chunk(chunk_idx)
+                    .get_chunk_from_current(chunk_idx)
                     .expect("chunk must exist for modified bit");
                 ChunkDiff::Modified(old_chunk)
             });
@@ -417,26 +866,22 @@ impl<const N: usize> BitMap<N> {
     /// When bits are appended, they may:
     /// - Extend an existing partial chunk (mark as Modified with old data)
     /// - Create entirely new chunks (mark as Added)
-    fn capture_appended_chunks(
-        &self,
-        batch: &Batch<N>,
-        changes: &mut BTreeMap<usize, ChunkDiff<N>>,
-    ) {
-        if batch.appended_bits.is_empty() {
+    fn capture_appended_chunks(&self, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
+        if self.state.appended_bits.is_empty() {
             return;
         }
 
         // Calculate which chunks will be affected by appends.
         // Note: append_start_bit accounts for any net pops before the pushes.
-        let append_start_bit = batch.projected_len - batch.appended_bits.len() as u64;
+        let append_start_bit = self.state.projected_len - self.state.appended_bits.len() as u64;
         let start_chunk = Prunable::<N>::unpruned_chunk(append_start_bit);
-        let end_chunk = Prunable::<N>::unpruned_chunk(batch.projected_len.saturating_sub(1));
+        let end_chunk = Prunable::<N>::unpruned_chunk(self.state.projected_len.saturating_sub(1));
 
         for chunk_idx in start_chunk..=end_chunk {
             // Use or_insert_with so we don't overwrite chunks already captured
             // by capture_modified_chunks (which runs first and takes precedence).
             changes.entry(chunk_idx).or_insert_with(|| {
-                self.get_chunk(chunk_idx).map_or(
+                self.get_chunk_from_current(chunk_idx).map_or(
                     // Chunk is brand new: mark as Added
                     ChunkDiff::Added,
                     // Chunk existed before: store its old data
@@ -451,36 +896,36 @@ impl<const N: usize> BitMap<N> {
     /// When bits are popped (projected_len < base_len), we need to capture the original
     /// data of chunks that will be truncated or fully removed. This allows reconstruction
     /// to restore the bits that were popped.
-    fn capture_popped_chunks(&self, batch: &Batch<N>, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
-        if batch.projected_len >= batch.base_len || batch.base_len == 0 {
+    fn capture_popped_chunks(&self, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
+        if self.state.projected_len >= self.state.base_len || self.state.base_len == 0 {
             return; // No net pops
         }
 
         // Identify the range of chunks affected by length reduction.
-        let old_last_chunk = Prunable::<N>::unpruned_chunk(batch.base_len - 1);
-        let new_last_chunk = if batch.projected_len > 0 {
-            Prunable::<N>::unpruned_chunk(batch.projected_len - 1)
+        let old_last_chunk = Prunable::<N>::unpruned_chunk(self.state.base_len - 1);
+        let new_last_chunk = if self.state.projected_len > 0 {
+            Prunable::<N>::unpruned_chunk(self.state.projected_len - 1)
         } else {
             0
         };
 
         // Capture all chunks between the new and old endpoints.
-        // Skip chunks that were already pruned before this batch started.
+        // Skip chunks that were already pruned before this started.
         for chunk_idx in new_last_chunk..=old_last_chunk {
-            if chunk_idx < batch.base_pruned_chunks {
-                // This chunk was already pruned before the batch, skip it
+            if chunk_idx < self.state.base_pruned_chunks {
+                // This chunk was already pruned before, skip it
                 continue;
             }
 
             changes.entry(chunk_idx).or_insert_with(|| {
                 let old_chunk = self
-                    .get_chunk(chunk_idx)
+                    .get_chunk_from_current(chunk_idx)
                     .expect("chunk must exist in base bitmap for popped bits");
 
                 // Determine if this chunk is partially kept or completely removed
                 let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
 
-                if batch.projected_len > chunk_start_bit {
+                if self.state.projected_len > chunk_start_bit {
                     // Chunk spans the new length boundary → partially kept (Modified)
                     ChunkDiff::Modified(old_chunk)
                 } else {
@@ -493,10 +938,10 @@ impl<const N: usize> BitMap<N> {
 
     /// Capture chunks that will be pruned.
     ///
-    /// The batch's `prune_to_bit` method already captured the old chunk data,
+    /// The `prune_to_bit` method already captured the old chunk data,
     /// so we simply copy it into the reverse diff.
-    fn capture_pruned_chunks(&self, batch: &Batch<N>, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
-        for (&chunk_idx, &chunk_data) in &batch.chunks_to_prune {
+    fn capture_pruned_chunks(&self, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
+        for (&chunk_idx, &chunk_data) in &self.state.chunks_to_prune {
             changes.insert(chunk_idx, ChunkDiff::Pruned(chunk_data));
         }
     }
@@ -505,7 +950,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Returns `Some(chunk_data)` if the chunk exists in the current bitmap,
     /// or `None` if it's out of bounds or pruned.
-    fn get_chunk(&self, chunk_idx: usize) -> Option<[u8; N]> {
+    fn get_chunk_from_current(&self, chunk_idx: usize) -> Option<[u8; N]> {
         let current_pruned = self.current.pruned_chunks();
         if chunk_idx >= current_pruned {
             let bitmap_idx = chunk_idx - current_pruned;
@@ -514,11 +959,5 @@ impl<const N: usize> BitMap<N> {
             }
         }
         None
-    }
-}
-
-impl<const N: usize> Default for BitMap<N> {
-    fn default() -> Self {
-        Self::new()
     }
 }
