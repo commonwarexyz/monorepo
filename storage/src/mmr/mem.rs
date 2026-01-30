@@ -18,7 +18,9 @@ cfg_if::cfg_if! {
         use commonware_parallel::ThreadPool;
         use rayon::prelude::*;
     } else {
-        struct ThreadPool;
+        /// Placeholder for no_std builds where parallelism is unavailable.
+        // TODO(#3001): Migrate to commonware-parallel
+        pub struct ThreadPool;
     }
 }
 
@@ -548,7 +550,7 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: Option<ThreadPool>,
+        #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
     ) -> CleanMmr<D> {
         #[cfg(feature = "std")]
         match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
@@ -723,7 +725,7 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: Option<ThreadPool>,
+        #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
         updates: &[(Location, T)],
     ) -> Result<(), Error> {
         if updates.is_empty() {

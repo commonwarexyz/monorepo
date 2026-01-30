@@ -73,11 +73,12 @@ use crate::{
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-};
-use tracing::{debug, warn};
+use std::num::{NonZeroU64, NonZeroUsize};
+#[commonware_macros::stability(ALPHA)]
+use std::ops::Range;
+#[commonware_macros::stability(ALPHA)]
+use tracing::debug;
+use tracing::warn;
 
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;

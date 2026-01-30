@@ -21,19 +21,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_macros::{select, stability_scope};
-use prometheus_client::registry::Metric;
-use std::{
-    future::Future,
-    io::Error as IoError,
-    net::SocketAddr,
-    num::NonZeroUsize,
-    time::{Duration, SystemTime},
-};
-use thiserror::Error;
-
-/// Prefix for runtime metrics.
-const METRICS_PREFIX: &str = "runtime";
+use commonware_macros::stability_scope;
 
 #[macro_use]
 mod macros;
@@ -56,8 +44,21 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
 stability_scope!(BETA {
+    use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
+    use std::{
+        future::Future,
+        io::Error as IoError,
+        net::SocketAddr,
+        num::NonZeroUsize,
+        time::{Duration, SystemTime},
+    };
+    use thiserror::Error;
+
+    /// Prefix for runtime metrics.
+    pub(crate) const METRICS_PREFIX: &str = "runtime";
 
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;

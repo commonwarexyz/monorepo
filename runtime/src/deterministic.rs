@@ -63,9 +63,9 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
-use commonware_macros::{stability, select};
 #[stability(BETA)]
 use commonware_codec::Encode;
+use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -1506,10 +1506,9 @@ mod tests {
         deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
     };
     use commonware_utils::channel::oneshot;
-    use futures::{
-        stream::{FuturesUnordered, StreamExt as _},
-        task::noop_waker,
-    };
+    #[cfg(not(feature = "external"))]
+    use futures::stream::StreamExt as _;
+    use futures::{stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {

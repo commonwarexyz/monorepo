@@ -20,7 +20,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View, Round};
+    use types::{Epoch, Height, View};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -65,15 +65,12 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::types::Round;
     use commonware_cryptography::Digest;
-    use commonware_cryptography::certificate::Scheme;
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
-    use commonware_runtime::{Spawner, Metrics, Clock};
-    use rand::Rng;
 
     pub mod marshal;
-    use crate::marshal::ingress::mailbox::AncestorStream;
 
     mod reporter;
     pub use reporter::*;
@@ -198,6 +195,10 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 });
 commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    use commonware_cryptography::certificate::Scheme;
+    use commonware_runtime::{Spawner, Metrics, Clock};
+    use rand::Rng;
+    use crate::marshal::ingress::mailbox::AncestorStream;
     pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream

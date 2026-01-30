@@ -6,7 +6,9 @@ use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
-use core::{iter, num::NonZeroU32};
+#[cfg(feature = "std")]
+use core::iter;
+use core::num::NonZeroU32;
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
 
@@ -39,6 +41,7 @@ impl Mode {
     }
 
     /// Compute the scalars for all participants.
+    #[cfg(feature = "std")]
     pub(crate) fn all_scalars(self, total: NonZeroU32) -> impl Iterator<Item = Scalar> {
         (0..total.get()).map(move |i| self.scalar(total, Participant::new(i)).expect("i < total"))
     }
@@ -84,6 +87,7 @@ impl Mode {
     ///
     /// This function will return `None` only if `subset` contains elements
     /// not in `set`.
+    #[cfg(feature = "std")]
     pub(crate) fn subset_interpolator<I: Clone + Ord>(
         self,
         set: &Set<I>,
@@ -155,6 +159,7 @@ impl<V: Variant> Sharing<V> {
     }
 
     /// Get the mode used for this sharing.
+    #[cfg(feature = "std")]
     pub(crate) const fn mode(&self) -> Mode {
         self.mode
     }
@@ -163,6 +168,7 @@ impl<V: Variant> Sharing<V> {
         self.mode.scalar(self.total, i)
     }
 
+    #[cfg(feature = "std")]
     fn all_scalars(&self) -> impl Iterator<Item = Scalar> {
         self.mode.all_scalars(self.total)
     }
