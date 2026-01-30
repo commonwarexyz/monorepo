@@ -52,6 +52,7 @@ pub async fn parse<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<SocketA
 
 /// Parse PROXY header from raw bytes, returning the real client address and bytes consumed.
 /// Used by io_uring implementation which doesn't use tokio's BufReader.
+#[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
 pub fn parse_from_bytes(data: &[u8]) -> Result<(SocketAddr, usize), Error> {
     let (header, consumed) =
         ProxyHeader::parse(data, ParseConfig::default()).map_err(|_| Error::ReadFailed)?;

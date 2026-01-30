@@ -194,7 +194,7 @@ impl Config {
         self.read_buffer_size
     }
     /// See [Config]
-    pub fn proxy(&self) -> Option<&ProxyConfig> {
+    pub const fn proxy(&self) -> Option<&ProxyConfig> {
         self.proxy.as_ref()
     }
 }
