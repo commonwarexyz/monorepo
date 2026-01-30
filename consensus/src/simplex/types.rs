@@ -2224,9 +2224,18 @@ impl<S: Scheme, D: Digest> Hash for ConflictingNotarize<S, D> {
 
 impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two notarizes do not have the same round and signer, or if they
+    /// have identical proposals (which would not constitute conflicting evidence).
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
         assert_eq!(notarize_1.round(), notarize_2.round());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
+        assert_ne!(
+            notarize_1.proposal, notarize_2.proposal,
+            "proposals must differ to constitute conflicting evidence"
+        );
 
         Self {
             notarize_1,
@@ -2240,7 +2249,8 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.verify(rng, scheme, strategy)
+        self.notarize_1.proposal != self.notarize_2.proposal
+            && self.notarize_1.verify(rng, scheme, strategy)
             && self.notarize_2.verify(rng, scheme, strategy)
     }
 }
@@ -2277,7 +2287,10 @@ impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
         let notarize_1 = Notarize::read(reader)?;
         let notarize_2 = Notarize::read(reader)?;
 
-        if notarize_1.signer() != notarize_2.signer() || notarize_1.round() != notarize_2.round() {
+        if notarize_1.signer() != notarize_2.signer()
+            || notarize_1.round() != notarize_2.round()
+            || notarize_1.proposal == notarize_2.proposal
+        {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingNotarize",
                 "invalid conflicting notarize",
@@ -2340,9 +2353,18 @@ impl<S: Scheme, D: Digest> Hash for ConflictingFinalize<S, D> {
 
 impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two finalizes do not have the same round and signer, or if they
+    /// have identical proposals (which would not constitute conflicting evidence).
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
         assert_eq!(finalize_1.round(), finalize_2.round());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
+        assert_ne!(
+            finalize_1.proposal, finalize_2.proposal,
+            "proposals must differ to constitute conflicting evidence"
+        );
 
         Self {
             finalize_1,
@@ -2356,7 +2378,8 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.finalize_1.verify(rng, scheme, strategy)
+        self.finalize_1.proposal != self.finalize_2.proposal
+            && self.finalize_1.verify(rng, scheme, strategy)
             && self.finalize_2.verify(rng, scheme, strategy)
     }
 }
@@ -2393,7 +2416,10 @@ impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
         let finalize_1 = Finalize::read(reader)?;
         let finalize_2 = Finalize::read(reader)?;
 
-        if finalize_1.signer() != finalize_2.signer() || finalize_1.round() != finalize_2.round() {
+        if finalize_1.signer() != finalize_2.signer()
+            || finalize_1.round() != finalize_2.round()
+            || finalize_1.proposal == finalize_2.proposal
+        {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingFinalize",
                 "invalid conflicting finalize",
@@ -2549,6 +2575,7 @@ mod tests {
             ed25519, secp256r1, Scheme,
         },
     };
+    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -3377,6 +3404,118 @@ mod tests {
         let mut iter = map.iter();
         assert!(matches!(iter.next(), Some(a) if a.signer() == Participant::new(2)));
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "proposals must differ")]
+    fn issue_2944_regression_conflicting_notarize_new_identical() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
+        let _ = ConflictingNotarize::new(notarize.clone(), notarize);
+    }
+
+    #[test]
+    fn issue_2944_regression_conflicting_notarize_decode_identical() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
+
+        // Manually encode two identical notarizes
+        let mut buf = Vec::new();
+        notarize.write(&mut buf);
+        notarize.write(&mut buf);
+
+        // Decoding should fail
+        let result = ConflictingNotarize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn issue_2944_regression_conflicting_notarize_verify_identical() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
+
+        // Construct invalid ConflictingNotarize by bypassing the constructor
+        let invalid = ConflictingNotarize {
+            notarize_1: notarize.clone(),
+            notarize_2: notarize,
+        };
+
+        // verify should return false even though both signatures are valid
+        assert!(!invalid.verify(&mut rng, &fixture.schemes[0], &Sequential));
+    }
+
+    #[test]
+    #[should_panic(expected = "proposals must differ")]
+    fn issue_2944_regression_conflicting_finalize_new_identical() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
+        let _ = ConflictingFinalize::new(finalize.clone(), finalize);
+    }
+
+    #[test]
+    fn issue_2944_regression_conflicting_finalize_decode_identical() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
+
+        // Manually encode two identical finalizes
+        let mut buf = Vec::new();
+        finalize.write(&mut buf);
+        finalize.write(&mut buf);
+
+        // Decoding should fail
+        let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn issue_2944_regression_conflicting_finalize_verify_identical() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
+
+        // Construct invalid ConflictingFinalize by bypassing the constructor
+        let invalid = ConflictingFinalize {
+            finalize_1: finalize.clone(),
+            finalize_2: finalize,
+        };
+
+        // verify should return false even though both signatures are valid
+        assert!(!invalid.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]
