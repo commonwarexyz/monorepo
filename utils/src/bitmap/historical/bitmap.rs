@@ -32,7 +32,7 @@ impl State for Clean {}
 /// Example 1: push + pop = no-op
 ///   push(true)  → appended_bits=[true], projected_len=11
 ///   pop()       → appended_bits=[], projected_len=10
-///   Result: dirty state unchanged from base!
+///   Result: dirty state unchanged from base
 ///
 /// Example 2: set_bit + set_bit = last write wins
 ///   set_bit(5, true)   → modified_bits={5: true}
