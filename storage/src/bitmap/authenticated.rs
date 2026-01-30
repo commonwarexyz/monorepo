@@ -15,7 +15,7 @@ use crate::{
     mmr::{
         hasher::Hasher as MmrHasher,
         iterator::nodes_to_pin,
-        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State},
+        mem::{Clean, CleanMmr, Config, Dirty, Mmr, State as MmrState},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -53,37 +53,37 @@ mod private {
     pub trait Sealed {}
 }
 
-pub trait BitMapState<D: Digest>: private::Sealed + Sized + Send + Sync {
-    type MmrState: State<D>;
+pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
+    type MmrState: MmrState<D>;
 }
 
-pub struct BitMapClean<D: Digest> {
+pub struct Merkleized<D: Digest> {
     pub root: D,
 }
 
-impl<D: Digest> private::Sealed for BitMapClean<D> {}
-impl<D: Digest> BitMapState<D> for BitMapClean<D> {
+impl<D: Digest> private::Sealed for Merkleized<D> {}
+impl<D: Digest> State<D> for Merkleized<D> {
     type MmrState = Clean<D>;
 }
 
-pub struct BitMapDirty {
+pub struct Unmerkleized {
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
-    /// "chunk index" (the index of the chunk in `self.bitmap`).
+    /// "chunk index" (the index of the chunk in the status bitmap).
     ///
     /// Invariant: Indices are always in the range [0,`authenticated_len`).
     dirty_chunks: HashSet<usize>,
 }
 
-impl private::Sealed for BitMapDirty {}
-impl<D: Digest> BitMapState<D> for BitMapDirty {
+impl private::Sealed for Unmerkleized {}
+impl<D: Digest> State<D> for Unmerkleized {
     type MmrState = Dirty;
 }
 
 /// A bitmap in the clean state (root has been computed).
-pub type CleanBitMap<E, D, const N: usize> = BitMap<E, D, N, BitMapClean<D>>;
+pub type CleanBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
 
 /// A bitmap in the dirty state (has pending updates not yet reflected in the root).
-pub type DirtyBitMap<E, D, const N: usize> = BitMap<E, D, N, BitMapDirty>;
+pub type DirtyBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized>;
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -105,7 +105,7 @@ pub struct BitMap<
     E: Clock + RStorage + Metrics,
     D: Digest,
     const N: usize,
-    S: BitMapState<D> = BitMapClean<D>,
+    S: State<D> = Merkleized<D>,
 > {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
@@ -139,9 +139,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key identifying the pruned_chunks value.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: BitMapState<D>>
-    BitMap<E, D, N, S>
-{
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
     /// The size of a chunk in bits.
     pub const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -329,7 +327,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
                 mmr,
                 pool,
                 metadata,
-                state: BitMapClean { root: cached_root },
+                state: Merkleized { root: cached_root },
             });
         }
         let mmr_size = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
@@ -366,7 +364,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
             mmr,
             pool,
             metadata,
-            state: BitMapClean { root: cached_root },
+            state: Merkleized { root: cached_root },
         })
     }
 
@@ -503,7 +501,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
             authenticated_len: self.authenticated_len,
             mmr: self.mmr.into_dirty(),
             pool: self.pool,
-            state: BitMapDirty {
+            state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
             },
             metadata: self.metadata,
@@ -574,14 +572,13 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
             .state
             .dirty_chunks
             .iter()
-            .map(|chunk| {
-                let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
-                (loc, self.bitmap.get_chunk(*chunk))
+            .map(|&chunk| {
+                let loc = Location::new_unchecked((chunk + pruned_chunks) as u64);
+                (loc, self.bitmap.get_chunk(chunk))
             })
             .collect::<Vec<_>>();
         self.mmr
             .update_leaf_batched(hasher, self.pool.clone(), &updates)?;
-        self.state.dirty_chunks.clear();
         let mmr = self.mmr.merkleize(hasher, self.pool.clone());
 
         // Compute the bitmap root
@@ -600,7 +597,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
             mmr,
             pool: self.pool,
             metadata: self.metadata,
-            state: BitMapClean { root: cached_root },
+            state: Merkleized { root: cached_root },
         })
     }
 }
@@ -629,9 +626,7 @@ mod tests {
     type TestContext = deterministic::Context;
     type TestCleanBitMap<const N: usize> = CleanBitMap<TestContext, sha256::Digest, N>;
 
-    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: BitMapState<D>>
-        BitMap<E, D, N, S>
-    {
+    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
         /// Convert a bit into the position of the Merkle tree leaf it belongs to.
         pub(crate) fn leaf_pos(bit: u64) -> Position {
             let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);

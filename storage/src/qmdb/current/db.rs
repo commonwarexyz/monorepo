@@ -3,7 +3,7 @@
 //! The impl blocks in this file defines shared functionality across all Current QMDB variants.
 
 use crate::{
-    bitmap::{BitMapClean, BitMapDirty, BitMapState, CleanBitMap, DirtyBitMap},
+    bitmap::{Merkleized, Unmerkleized, CleanBitMap, DirtyBitMap, State as BitMapState},
     index::Unordered as UnorderedIndex,
     journal::{
         contiguous::{Contiguous, MutableContiguous},
@@ -61,7 +61,7 @@ pub struct Clean<D: Digest> {
 impl<D: Digest> private::Sealed for Clean<D> {}
 impl<D: Digest> State<D> for Clean<D> {
     type AnyState = crate::mmr::mem::Clean<D>;
-    type BitMapState = BitMapClean<D>;
+    type BitMapState = Merkleized<D>;
 }
 
 /// Dirty state: the database has pending changes not yet merkleized.
@@ -70,7 +70,7 @@ pub struct Dirty;
 impl private::Sealed for Dirty {}
 impl<D: Digest> State<D> for Dirty {
     type AnyState = crate::mmr::mem::Dirty;
-    type BitMapState = BitMapDirty;
+    type BitMapState = Unmerkleized;
 }
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
