@@ -59,11 +59,11 @@ All public primitives (and primitive dialects) in the Commonware Library are ann
 
 | Level        | Index | Description                                                                              |
 |--------------|-------|------------------------------------------------------------------------------------------|
-| **ALPHA**    | 0     | Significant breaking changes expected with no migration path. |
-| **BETA**     | 1     | Disk and/or wire-format stable. All breaking format changes include a migration path.           |
-| **GAMMA**    | 2     | API stable. Fuzzed and tested extensively.                               |
-| **DELTA**    | 3     | Battle-tested and bug bounty eligible.                     |
-| **EPSILON**  | 4     | Feature-frozen. Changes only introduced for bugs and significant performance improvement.                                              |
+| **ALPHA**    | 0     | Breaking changes expected. No migration path provided.                                   |
+| **BETA**     | 1     | Wire and storage formats stable. Breaking changes include a migration path.              |
+| **GAMMA**    | 2     | API stable. Extensively tested and fuzzed.                                               |
+| **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
+| **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
 Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
 
