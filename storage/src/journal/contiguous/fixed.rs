@@ -74,21 +74,9 @@ use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
+#[commonware_macros::stability(ALPHA)]
 use std::ops::Range;
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
+#[commonware_macros::stability(ALPHA)]
 use tracing::debug;
 use tracing::warn;
 

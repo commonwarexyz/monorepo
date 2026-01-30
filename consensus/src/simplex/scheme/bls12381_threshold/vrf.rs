@@ -38,13 +38,7 @@ use crate::{
     types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
+#[commonware_macros::stability(ALPHA)]
 use crate::simplex::scheme::seed_namespace;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -60,13 +54,7 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
+#[commonware_macros::stability(ALPHA)]
 use commonware_cryptography::bls12381::tle;
 use commonware_macros::stability;
 use commonware_parallel::Strategy;

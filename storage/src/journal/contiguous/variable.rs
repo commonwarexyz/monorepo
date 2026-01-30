@@ -14,23 +14,11 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
+#[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
 use futures::{future::Either, stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[cfg(not(any(
-    commonware_stability_BETA,
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // ALPHA
+#[commonware_macros::stability(ALPHA)]
 use tracing::debug;
 use tracing::warn;
 

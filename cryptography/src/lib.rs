@@ -13,7 +13,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-// Modules containing #[macro_export] macros must remain outside stability_scope!.
+// Modules containing #[macro_export] macros must use verbose cfg.
 // See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
 #[cfg(not(any(
     commonware_stability_GAMMA,

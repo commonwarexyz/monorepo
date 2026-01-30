@@ -275,12 +275,7 @@ pub mod hex_literal;
 )))] // BETA
 pub mod vec;
 
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // BETA
+#[commonware_macros::stability(BETA)]
 #[inline]
 const fn decode_hex_digit(byte: u8) -> Option<u8> {
     match byte {
