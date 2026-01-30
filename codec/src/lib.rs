@@ -196,10 +196,10 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
-
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    extern crate alloc;
+
     pub mod codec;
     pub mod config;
     pub mod error;

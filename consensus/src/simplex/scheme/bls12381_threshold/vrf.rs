@@ -32,29 +32,30 @@
 
 use crate::{
     simplex::{
-        scheme::{seed_namespace, Namespace},
+        scheme::Namespace,
         types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
+#[commonware_macros::stability(ALPHA)]
+use crate::simplex::scheme::seed_namespace;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     types::lazy::Lazy, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
 };
 use commonware_cryptography::{
-    bls12381::{
-        primitives::{
-            group::Share,
-            ops::{self, batch, threshold},
-            sharing::Sharing,
-            variant::{PartialSignature, Variant},
-        },
-        tle,
+    bls12381::primitives::{
+        group::Share,
+        ops::{self, batch, threshold},
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
     },
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
+#[commonware_macros::stability(ALPHA)]
+use commonware_cryptography::bls12381::tle;
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
