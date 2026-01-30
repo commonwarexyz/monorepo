@@ -94,7 +94,7 @@ fn bench_variable_init(c: &mut Criterion) {
                             let any_cfg = any_cfg(pool.clone());
                             let current_cfg = current_cfg(pool);
 
-                            // Start the timer here to avoid including time to allocate buffer pool,
+                            // Start the timer here to avoid including time to allocate page cache,
                             // thread pool, and other shared structures.
                             let start = Instant::now();
                             for _ in 0..iters {

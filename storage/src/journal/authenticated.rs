@@ -616,7 +616,7 @@ mod tests {
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::PoolRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Metrics, Runner as _,
     };
@@ -635,7 +635,7 @@ mod tests {
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -645,7 +645,7 @@ mod tests {
             partition: format!("journal_{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

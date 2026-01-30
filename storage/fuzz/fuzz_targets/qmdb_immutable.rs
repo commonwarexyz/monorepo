@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
     qmdb::{
@@ -103,7 +103,7 @@ fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

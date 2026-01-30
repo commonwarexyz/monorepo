@@ -25,7 +25,9 @@ use commonware_cryptography::{
     PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{buffer::PoolRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage};
+use commonware_runtime::{
+    buffer::paged::CacheRef, Buf, BufMut, Clock, Metrics, Storage as RuntimeStorage,
+};
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
@@ -38,9 +40,9 @@ use std::{
 };
 use tracing::{debug, warn};
 
-// Configure 32MB buffer pool
+// Configure 32MB page cache
 const PAGE_SIZE: NonZeroU16 = NZU16!(1 << 12);
-const POOL_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
+const PAGE_CACHE_CAPACITY: NonZeroUsize = NZUsize!(1 << 13);
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 const READ_BUFFER: NonZeroUsize = NZUsize!(1 << 20);
@@ -182,7 +184,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
-        let buffer_pool = PoolRef::new(PAGE_SIZE, POOL_CAPACITY);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
@@ -200,7 +202,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
                 partition: format!("{partition_prefix}_msgs"),
                 compression: None,
                 codec_config: max_read_size,
-                buffer_pool,
+                page_cache,
                 write_buffer: WRITE_BUFFER,
             },
         )

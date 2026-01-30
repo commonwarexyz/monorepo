@@ -40,7 +40,7 @@ pub fn create_config() -> Config<Translator> {
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
-        buffer_pool: buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
+        page_cache: buffer::paged::CacheRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
 

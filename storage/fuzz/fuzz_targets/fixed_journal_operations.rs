@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
@@ -63,7 +63,7 @@ fn fuzz(input: FuzzInput) {
             partition: "fixed_journal_operations_fuzz_test".to_string(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
