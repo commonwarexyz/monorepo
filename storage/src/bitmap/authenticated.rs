@@ -53,11 +53,13 @@ mod private {
     pub trait Sealed {}
 }
 
+/// Trait for valid [BitMap] type states.
 pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
+    /// The merkleization type state for the inner [Mmr].
     type MmrState: MmrState<D>;
 }
 
-/// Type state for a merkleized bitmap.
+/// Merkleized state: the bitmap has been merkleized and the root is cached.
 pub struct Merkleized<D: Digest> {
     /// The cached root of the bitmap.
     root: D,
@@ -68,7 +70,7 @@ impl<D: Digest> State<D> for Merkleized<D> {
     type MmrState = Clean<D>;
 }
 
-/// Type state for an unmerkleized bitmap.
+/// Unmerkleized state: the bitmap has pending changes not yet merkleized.
 pub struct Unmerkleized {
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in the status bitmap).

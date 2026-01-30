@@ -43,11 +43,11 @@ mod private {
     pub trait Sealed {}
 }
 
-/// Type state for [Db] based on whether it is [Merkleized] or [Unmerkleized].
+/// Trait for valid [Db] type states.
 pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
     /// The merkleization type state for the inner [any::db::Db].
     type AnyState: mmr::mem::State<D>;
-    /// The merkleization type state for the status bitmap.
+    /// The merkleization type state for the inner [bitmap::BitMap].
     type BitMapState: bitmap::State<D>;
 }
 
