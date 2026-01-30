@@ -7,12 +7,12 @@ n_cases = 65536
 hash = "6e3772525660cd57a4223330b548ab47656d68ab0bfb8014d4efbeb9c1646508"
 
 ["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Info<PublicKey>>"]
-n_cases = 65536
-hash = "37457ac4dfe77e8021f89721d9ec60ebcf8334faa9e591116a3ce52b63ea0799"
+n_cases = 1024
+hash = "c02489700ac3be0bf70550795468d0dbcb0a2fc91e521d2a70a49bacd910c725"
 
 ["commonware_p2p::authenticated::discovery::types::tests::conformance::CodecConformance<Payload<PublicKey>>"]
-n_cases = 65536
-hash = "aa1467f4e8b515bff31d84d478c9fc5a7c5335d5252dfa50c1e0b684eb168040"
+n_cases = 1024
+hash = "1a846e6d35253cadd8a737824b6435059d521b91b42faca84fac3f436231c4c0"
 
 ["commonware_p2p::authenticated::lookup::types::tests::conformance::CodecConformance<Message>"]
 n_cases = 65536

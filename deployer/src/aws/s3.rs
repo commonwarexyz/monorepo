@@ -1,6 +1,6 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::aws::Error;
+use crate::aws::{deployer_directory, Error};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
@@ -16,8 +16,40 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{collections::HashMap, io::Read, path::Path, time::Duration};
 use tracing::{debug, info};
 
-/// Bucket name for caching deployer artifacts
-pub const BUCKET_NAME: &str = "commonware-deployer-cache";
+/// File name for the bucket config (stores the S3 bucket name).
+const BUCKET_CONFIG_FILE: &str = "bucket";
+
+/// Gets the bucket name, generating one if it doesn't exist.
+/// The bucket name is stored in ~/.commonware_deployer/bucket.
+pub fn get_bucket_name() -> String {
+    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
+
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        let name = contents.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+
+    let suffix = &uuid::Uuid::new_v4().simple().to_string()[..16];
+    let bucket_name = format!("commonware-deployer-{suffix}");
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("failed to create deployer directory");
+    }
+    std::fs::write(&path, &bucket_name).expect("failed to write bucket config");
+
+    bucket_name
+}
+
+/// Deletes the bucket config file so a new bucket name is generated on next use.
+pub fn delete_bucket_config() {
+    let path = deployer_directory(None).join(BUCKET_CONFIG_FILE);
+
+    // If the bucket config file doesn't exist yet, do nothing (clean may have been run
+    // out-of-order)
+    let _ = std::fs::remove_file(path);
+}
 
 /// Prefix for tool binaries: tools/binaries/{tool}/{version}/{platform}/{filename}
 pub const TOOLS_BINARIES_PREFIX: &str = "tools/binaries";

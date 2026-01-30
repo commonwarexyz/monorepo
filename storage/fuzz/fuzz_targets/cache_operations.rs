@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_runtime::{buffer::PoolRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::cache::{Cache, Config};
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::{
@@ -21,10 +21,10 @@ const MIN_REPLAY_BUFFER: usize = 256;
 const MAX_REPLAY_BUFFER: usize = 2 * 8192;
 const MIN_COMPRESSION_LEVEL: u8 = 1;
 const MAX_COMPRESSION_LEVEL: u8 = 21;
-const MIN_BUFFER_POOL_PAGE_SIZE: u16 = 511;
-const MAX_BUFFER_POOL_PAGE_SIZE: u16 = 4097;
-const MIN_BUFFER_POOL_CAPACITY: usize = 10;
-const MAX_BUFFER_POOL_CAPACITY: usize = 64;
+const MIN_PAGE_CACHE_PAGE_SIZE: u16 = 511;
+const MAX_PAGE_CACHE_PAGE_SIZE: u16 = 4097;
+const MIN_PAGE_CACHE_CAPACITY: usize = 10;
+const MAX_PAGE_CACHE_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug)]
 enum Operation {
@@ -45,8 +45,8 @@ struct CacheConfig {
     write_buffer: usize,
     replay_buffer: usize,
     compression: Option<u8>,
-    buffer_pool_pages_size: NonZeroU16,
-    buffer_pool_capacity: usize,
+    page_cache_page_size: NonZeroU16,
+    page_cache_capacity: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -70,19 +70,19 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         } else {
             None
         };
-        let buffer_pool_pages_size =
-            NonZeroU16::new(u.int_in_range(MIN_BUFFER_POOL_PAGE_SIZE..=MAX_BUFFER_POOL_PAGE_SIZE)?)
+        let page_cache_page_size =
+            NonZeroU16::new(u.int_in_range(MIN_PAGE_CACHE_PAGE_SIZE..=MAX_PAGE_CACHE_PAGE_SIZE)?)
                 .unwrap();
-        let buffer_pool_capacity =
-            u.int_in_range(MIN_BUFFER_POOL_CAPACITY..=MAX_BUFFER_POOL_CAPACITY)?;
+        let page_cache_capacity =
+            u.int_in_range(MIN_PAGE_CACHE_CAPACITY..=MAX_PAGE_CACHE_CAPACITY)?;
 
         let config = CacheConfig {
             items_per_blob,
             write_buffer,
             replay_buffer,
             compression,
-            buffer_pool_capacity,
-            buffer_pool_pages_size,
+            page_cache_capacity,
+            page_cache_page_size,
         };
 
         let num_operations = u.int_in_range(1..=MAX_OPERATIONS)?;
@@ -137,9 +137,9 @@ fn fuzz(input: FuzzInput) {
             write_buffer: NZUsize!(input.config.write_buffer),
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
-            buffer_pool: PoolRef::new(
-                input.config.buffer_pool_pages_size,
-                NZUsize!(input.config.buffer_pool_capacity),
+            page_cache: CacheRef::new(
+                input.config.page_cache_page_size,
+                NZUsize!(input.config.page_cache_capacity),
             ),
         };
 

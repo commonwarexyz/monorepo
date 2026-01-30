@@ -27,8 +27,6 @@ use super::{
     variant::Variant,
     Error,
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
 use commonware_utils::union_unique;

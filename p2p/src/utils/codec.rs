@@ -62,6 +62,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
     }
 }
 
+/// Checked sender that wraps a [`crate::LimitedSender::Checked`] and encodes messages using a [Codec].
 #[derive(Debug)]
 pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
     sender: S::Checked<'a>,

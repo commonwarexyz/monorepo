@@ -17,7 +17,7 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::{Receiver, Sender};
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -395,7 +395,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-    use commonware_stream::{self, Config as StreamConfig};
+    use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
@@ -463,7 +463,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -478,7 +478,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -562,7 +562,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -577,7 +577,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -667,7 +667,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -682,7 +682,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -770,7 +770,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -785,7 +785,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),

@@ -196,22 +196,24 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
-extern crate alloc;
+commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    extern crate alloc;
 
-pub mod codec;
-pub mod config;
-pub mod error;
-pub mod extensions;
-pub mod types;
-pub mod util;
-pub mod varint;
+    pub mod codec;
+    pub mod config;
+    pub mod error;
+    pub mod extensions;
+    pub mod types;
+    pub mod util;
+    pub mod varint;
 
-// Re-export main types and traits
-pub use codec::*;
-pub use config::RangeCfg;
-pub use error::Error;
-pub use extensions::*;
+    // Re-export main types and traits
+    pub use codec::*;
+    pub use config::RangeCfg;
+    pub use error::Error;
+    pub use extensions::*;
+});
 
 #[cfg(feature = "arbitrary")]
 pub mod conformance;

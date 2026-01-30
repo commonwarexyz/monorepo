@@ -5,6 +5,6 @@
 
 Augment the development of primitives with procedural macros.
 
-## Status 
+## Status
 
-`commonware-macros` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
