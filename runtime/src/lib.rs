@@ -55,6 +55,9 @@ stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
 });
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    pub use network::proxy::ProxyConfig;
+});
 stability_scope!(BETA {
     use commonware_parallel::{Rayon, ThreadPool};
     use rayon::ThreadPoolBuildError;

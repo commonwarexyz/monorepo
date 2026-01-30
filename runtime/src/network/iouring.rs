@@ -24,6 +24,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer},
+    network::proxy::ProxyConfig,
     IoBufMut, IoBufs,
 };
 use futures::{
@@ -56,6 +57,11 @@ pub struct Config {
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     pub read_buffer_size: usize,
+    /// Optional PROXY protocol configuration.
+    ///
+    /// When set, connections from trusted proxy IPs will have PROXY headers
+    /// parsed to obtain the real client address.
+    pub proxy: Option<ProxyConfig>,
 }
 
 impl Default for Config {
@@ -64,6 +70,7 @@ impl Default for Config {
             tcp_nodelay: None,
             iouring_config: iouring::Config::default(),
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            proxy: None,
         }
     }
 }
@@ -80,6 +87,8 @@ pub struct Network {
     recv_submitter: mpsc::Sender<iouring::Op>,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
+    /// Optional PROXY protocol configuration.
+    proxy: Option<ProxyConfig>,
 }
 
 impl Network {
@@ -119,6 +128,7 @@ impl Network {
             send_submitter,
             recv_submitter,
             read_buffer_size: cfg.read_buffer_size,
+            proxy: cfg.proxy,
         })
     }
 }
@@ -136,6 +146,7 @@ impl crate::Network for Network {
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
             read_buffer_size: self.read_buffer_size,
+            proxy: self.proxy.clone(),
         })
     }
 
@@ -181,6 +192,8 @@ pub struct Listener {
     recv_submitter: mpsc::Sender<iouring::Op>,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
+    /// Optional PROXY protocol configuration.
+    proxy: Option<ProxyConfig>,
 }
 
 impl crate::Listener for Listener {
@@ -188,7 +201,7 @@ impl crate::Listener for Listener {
     type Sink = Sink;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
-        let (stream, remote_addr) = self
+        let (stream, tcp_addr) = self
             .inner
             .accept()
             .await
@@ -211,11 +224,28 @@ impl crate::Listener for Listener {
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
+        let mut io_stream = Stream::new(fd.clone(), self.recv_submitter.clone(), self.read_buffer_size);
+
+        // Parse PROXY header if configured and connection is from trusted proxy
+        let client_addr = if let Some(ref proxy_cfg) = self.proxy {
+            if proxy_cfg.is_trusted(tcp_addr.ip()) {
+                // Fill buffer to get PROXY header data
+                io_stream.fill_buffer().await?;
+                let buf = &io_stream.buffer.as_ref()[..io_stream.buffer_len];
+                let (addr, consumed) = crate::network::proxy::parse_from_bytes(buf)?;
+                io_stream.buffer_pos = consumed;
+                addr
+            } else {
+                tcp_addr
+            }
+        } else {
+            tcp_addr
+        };
 
         Ok((
-            remote_addr,
-            Sink::new(fd.clone(), self.send_submitter.clone()),
-            Stream::new(fd, self.recv_submitter.clone(), self.read_buffer_size),
+            client_addr,
+            Sink::new(fd, self.send_submitter.clone()),
+            io_stream,
         ))
     }
 

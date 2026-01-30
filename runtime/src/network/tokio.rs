@@ -1,4 +1,4 @@
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{network::proxy::ProxyConfig, Error, IoBufMut, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -74,7 +74,7 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         // Accept a new TCP stream
-        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
+        let (stream, tcp_addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
@@ -83,17 +83,30 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Return the sink and stream
-        let (stream, sink) = stream.into_split();
+        // Split the stream
+        let (read_half, write_half) = stream.into_split();
+        let mut buf_reader = BufReader::with_capacity(self.cfg.read_buffer_size, read_half);
+
+        // Parse PROXY header if configured and connection is from trusted proxy
+        let client_addr = if let Some(ref proxy_cfg) = self.cfg.proxy {
+            if proxy_cfg.is_trusted(tcp_addr.ip()) {
+                crate::network::proxy::parse(&mut buf_reader).await?
+            } else {
+                tcp_addr
+            }
+        } else {
+            tcp_addr
+        };
+
         Ok((
-            addr,
+            client_addr,
             Sink {
                 write_timeout: self.cfg.write_timeout,
-                sink,
+                sink: write_half,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                stream: buf_reader,
             },
         ))
     }
@@ -126,6 +139,11 @@ pub struct Config {
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     read_buffer_size: usize,
+    /// Optional PROXY protocol configuration.
+    ///
+    /// When set, connections from trusted proxy IPs will have PROXY headers
+    /// parsed to obtain the real client address.
+    proxy: Option<ProxyConfig>,
 }
 
 #[cfg_attr(feature = "iouring-network", allow(dead_code))]
@@ -151,6 +169,12 @@ impl Config {
         self.read_buffer_size = read_buffer_size;
         self
     }
+    /// Enable PROXY protocol support.
+    /// Only connections from trusted proxies will have headers parsed.
+    pub fn with_proxy(mut self, config: ProxyConfig) -> Self {
+        self.proxy = Some(config);
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -169,6 +193,10 @@ impl Config {
     pub const fn read_buffer_size(&self) -> usize {
         self.read_buffer_size
     }
+    /// See [Config]
+    pub fn proxy(&self) -> Option<&ProxyConfig> {
+        self.proxy.as_ref()
+    }
 }
 
 impl Default for Config {
@@ -178,6 +206,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             read_buffer_size: 64 * 1024, // 64 KB
+            proxy: None,
         }
     }
 }

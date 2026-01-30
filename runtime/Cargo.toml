@@ -27,10 +27,12 @@ commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
 governor.workspace = true
 io-uring = { workspace = true, optional = true }
+ipnet.workspace = true
 libc.workspace = true
 opentelemetry.workspace = true
 pin-project = { workspace = true, optional = true }
 prometheus-client.workspace = true
+proxy-header.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 rayon.workspace = true
