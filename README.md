@@ -69,7 +69,7 @@ Users employing the Commonware Library can compile with the `commonware_stabilit
 
 ```bash
 # Generate docs for only code with stability >= BETA (level 1)
-RUSTFLAGS="--cfg commonware_stability_BETA" cargo doc
+RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stability_BETA -A rustdoc::broken_intra_doc_links" cargo doc --open
 
 # Check if your application only uses commonware APIs with stability >= BETA
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
