@@ -19,7 +19,7 @@ use crate::{
             FixedValue,
         },
         current::{
-            db::{merkleize_grafted_bitmap, root, Clean},
+            db::{merkleize_grafted_bitmap, root, Merkleized},
             FixedConfig as Config,
         },
         Durable, Error,
@@ -31,10 +31,10 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Clean<DigestOf<H>>, D = Durable> =
+pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, H, T, N, S, D>;
 
-// Functionality for the Clean state - init only.
+// Functionality for the Merkleized state - init only.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -42,7 +42,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>
+    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
@@ -97,7 +97,7 @@ impl<
         Ok(Self {
             any,
             status,
-            state: Clean { cached_root },
+            state: Merkleized { root: cached_root },
         })
     }
 }
@@ -111,7 +111,7 @@ pub mod test {
         qmdb::{
             any::ordered::Update,
             current::{
-                db::Dirty,
+                db::Unmerkleized,
                 proof::{OperationProof, RangeProof},
                 tests::{self, apply_random_ops},
             },
@@ -149,11 +149,11 @@ pub mod test {
         }
     }
 
-    /// A type alias for the concrete [Db] type used in these unit tests (Clean, Durable state).
+    /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable state).
     type CleanCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Clean<Digest>, Durable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Digest>, Durable>;
     type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Dirty, NonDurable>;
+        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Unmerkleized, NonDurable>;
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(

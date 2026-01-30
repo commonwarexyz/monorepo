@@ -12,7 +12,7 @@ use crate::{
             FixedValue, VariableValue,
         },
         current::{
-            db::{Clean, Dirty},
+            db::{Merkleized, Unmerkleized},
             BitmapPrunedBits,
         },
         Durable, Error, NonDurable,
@@ -36,9 +36,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > CleanAny for fixed::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>
+    > CleanAny for fixed::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 {
-    type Mutable = fixed::Db<E, K, V, H, T, N, Dirty, NonDurable>;
+    type Mutable = fixed::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -52,12 +52,12 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > UnmerkleizedDurableAny for fixed::Db<E, K, V, H, T, N, Dirty, Durable>
+    > UnmerkleizedDurableAny for fixed::Db<E, K, V, H, T, N, Unmerkleized, Durable>
 {
     type Digest = H::Digest;
     type Operation = FixedOperation<K, V>;
-    type Mutable = fixed::Db<E, K, V, H, T, N, Dirty, NonDurable>;
-    type Merkleized = fixed::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>;
+    type Mutable = fixed::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
+    type Merkleized = fixed::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -75,9 +75,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MerkleizedNonDurableAny for fixed::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, NonDurable>
+    > MerkleizedNonDurableAny for fixed::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>
 {
-    type Mutable = fixed::Db<E, K, V, H, T, N, Dirty, NonDurable>;
+    type Mutable = fixed::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -91,12 +91,12 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MutableAny for fixed::Db<E, K, V, H, T, N, Dirty, NonDurable>
+    > MutableAny for fixed::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 {
     type Digest = H::Digest;
     type Operation = FixedOperation<K, V>;
-    type Durable = fixed::Db<E, K, V, H, T, N, Dirty, Durable>;
-    type Merkleized = fixed::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, NonDurable>;
+    type Durable = fixed::Db<E, K, V, H, T, N, Unmerkleized, Durable>;
+    type Merkleized = fixed::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>;
 
     async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
         self.commit(metadata).await
@@ -122,11 +122,11 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > CleanAny for variable::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>
+    > CleanAny for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
     VariableOperation<K, V>: Read,
 {
-    type Mutable = variable::Db<E, K, V, H, T, N, Dirty, NonDurable>;
+    type Mutable = variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -140,14 +140,14 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > UnmerkleizedDurableAny for variable::Db<E, K, V, H, T, N, Dirty, Durable>
+    > UnmerkleizedDurableAny for variable::Db<E, K, V, H, T, N, Unmerkleized, Durable>
 where
     VariableOperation<K, V>: Read,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
-    type Mutable = variable::Db<E, K, V, H, T, N, Dirty, NonDurable>;
-    type Merkleized = variable::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>;
+    type Mutable = variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
+    type Merkleized = variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -165,11 +165,11 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MerkleizedNonDurableAny for variable::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, NonDurable>
+    > MerkleizedNonDurableAny for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>
 where
     VariableOperation<K, V>: Read,
 {
-    type Mutable = variable::Db<E, K, V, H, T, N, Dirty, NonDurable>;
+    type Mutable = variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -183,14 +183,14 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MutableAny for variable::Db<E, K, V, H, T, N, Dirty, NonDurable>
+    > MutableAny for variable::Db<E, K, V, H, T, N, Unmerkleized, NonDurable>
 where
     VariableOperation<K, V>: Read,
 {
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
-    type Durable = variable::Db<E, K, V, H, T, N, Dirty, Durable>;
-    type Merkleized = variable::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, NonDurable>;
+    type Durable = variable::Db<E, K, V, H, T, N, Unmerkleized, Durable>;
+    type Merkleized = variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>;
 
     async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
         self.commit(metadata).await
@@ -216,7 +216,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>
+    > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -238,7 +238,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > BitmapPrunedBits for variable::Db<E, K, V, H, T, N, Clean<DigestOf<H>>, Durable>
+    > BitmapPrunedBits for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
     VariableOperation<K, V>: Read,
 {
