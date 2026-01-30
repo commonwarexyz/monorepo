@@ -1,9 +1,7 @@
-//! Augment the development of primitives with procedural macros.
-
-#![doc(
-    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
-    html_favicon_url = "https://commonware.xyz/favicon.ico"
-)]
+//! Proc-macro implementation for `commonware-macros`.
+//!
+//! This is an internal crate. Use [`commonware-macros`](https://docs.rs/commonware-macros)
+//! instead.
 
 use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
@@ -462,7 +460,7 @@ pub fn test_group(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Capture logs from a test run into an in-memory store.
 ///
-/// This macro defaults to a log level of `DEBUG` on the [mod@tracing_subscriber::fmt] layer if no level is provided.
+/// This macro defaults to a log level of `DEBUG` on the `tracing_subscriber::fmt` layer if no level is provided.
 ///
 /// This macro is powered by the [tracing](https://docs.rs/tracing),
 /// [tracing-subscriber](https://docs.rs/tracing-subscriber), and
@@ -668,9 +666,9 @@ pub fn select(input: TokenStream) -> TokenStream {
     // Generate the final output code
     quote! {
         {
-            use futures::FutureExt as _;
+            use ::commonware_macros::__reexport::futures::FutureExt as _;
 
-            futures::select_biased! {
+            ::commonware_macros::__reexport::futures::select_biased! {
                 #(#select_branches)*
             }
         }

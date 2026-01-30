@@ -1,0 +1,24 @@
+[package]
+name = "commonware-macros"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Augment the development of primitives with procedural macros."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
+documentation = "https://docs.rs/commonware-macros"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-macros-impl = { path = "impl" }
+futures.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+futures-timer.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
