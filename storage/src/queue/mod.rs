@@ -5,6 +5,32 @@
 //! explicitly acknowledge each item after processing. If a crash occurs before
 //! acknowledgment, items will be re-delivered on restart.
 //!
+//! # Concurrent Access
+//!
+//! For concurrent access from separate writer and reader tasks, use the [shared] module:
+//!
+//! ```rust,ignore
+//! use commonware_storage::queue::shared;
+//! use commonware_macros::select;
+//!
+//! let (writer, mut reader) = shared::init(context, config).await?;
+//!
+//! // Writer task
+//! writer.enqueue(item).await?;
+//!
+//! // Reader task with select
+//! loop {
+//!     select! {
+//!         result = reader.recv() => {
+//!             let Some((pos, item)) = result? else { break };
+//!             // Process item...
+//!             reader.ack(pos).await?;
+//!         }
+//!         _ = shutdown => break,
+//!     }
+//! }
+//! ```
+//!
 //! # At-Least-Once Delivery
 //!
 //! The queue guarantees that every enqueued item will be delivered at least once.
@@ -64,8 +90,10 @@
 //! ```
 
 mod metrics;
+pub mod shared;
 mod storage;
 
+pub use shared::{QueueReader, QueueWriter};
 pub use storage::{Config, Queue};
 use thiserror::Error;
 
