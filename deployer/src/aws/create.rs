@@ -39,7 +39,6 @@ struct ToolUrls {
     promtail: String,
     libjemalloc: String,
     logrotate: String,
-    jq: String,
     fonts_dejavu_mono: String,
     fonts_dejavu_core: String,
     fontconfig_config: String,
@@ -250,7 +249,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, jq_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 14] =
+             libjemalloc_url, logrotate_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -261,7 +260,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
                 cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
                 cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
-                cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
                 cache_tool(fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION, *arch), fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
                 cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
@@ -282,7 +280,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 promtail: promtail_url,
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
-                jq: jq_url,
                 fonts_dejavu_mono: fonts_dejavu_mono_url.clone(),
                 fonts_dejavu_core: fonts_dejavu_core_url.clone(),
                 fontconfig_config: fontconfig_config_url,
@@ -1084,11 +1081,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         let promtail_digest = &instance_promtail_digest[name];
         let pyroscope_digest = &instance_pyroscope_digest[name];
         let tool_urls = &tool_urls_by_arch[&arch];
-        let jq_deb = if deployment.instance.profiling {
-            Some(tool_urls.jq.clone())
-        } else {
-            None
-        };
 
         instance_urls_map.insert(
             name.clone(),
@@ -1110,7 +1102,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
                     logrotate_deb: tool_urls.logrotate.clone(),
                     unzip_deb: tool_urls.unzip.clone(),
-                    jq_deb,
                 },
                 arch,
             ),
