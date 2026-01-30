@@ -57,8 +57,10 @@ pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
     type MmrState: MmrState<D>;
 }
 
+/// Type state for a merkleized bitmap.
 pub struct Merkleized<D: Digest> {
-    pub root: D,
+    /// The cached root of the bitmap.
+    root: D,
 }
 
 impl<D: Digest> private::Sealed for Merkleized<D> {}
@@ -66,6 +68,7 @@ impl<D: Digest> State<D> for Merkleized<D> {
     type MmrState = Clean<D>;
 }
 
+/// Type state for an unmerkleized bitmap.
 pub struct Unmerkleized {
     /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
     /// "chunk index" (the index of the chunk in the status bitmap).
@@ -79,11 +82,11 @@ impl<D: Digest> State<D> for Unmerkleized {
     type MmrState = Dirty;
 }
 
-/// A bitmap in the clean state (root has been computed).
-pub type CleanBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
+/// A merkleized bitmap whose root digest has been computed and cached.
+pub type MerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
 
-/// A bitmap in the dirty state (has pending updates not yet reflected in the root).
-pub type DirtyBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized>;
+/// An unmerkleized bitmap whose root digest has not been computed.
+pub type UnmerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized>;
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -93,9 +96,10 @@ pub type DirtyBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized>;
 /// # Type States
 ///
 /// The bitmap uses the type-state pattern to enforce at compile-time whether the bitmap has pending
-/// updates that must be merkleized before computing proofs. CleanBitMap represents a bitmap
-/// whose root digest has been computed and cached. DirtyBitMap represents a bitmap with pending
-/// updates. A dirty bitmap can be converted into a clean bitmap by calling [DirtyBitMap::merkleize].
+/// updates that must be merkleized before computing proofs. [MerkleizedBitMap] represents a bitmap
+/// whose root digest has been computed and cached. [UnmerkleizedBitMap] represents a bitmap with
+/// pending updates. An unmerkleized bitmap can be converted into a merkleized bitmap by calling
+/// [UnmerkleizedBitMap::merkleize].
 ///
 /// # Warning
 ///
@@ -287,7 +291,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D, N> {
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
     /// Initialize a bitmap from the metadata in the given partition. If the partition is empty,
     /// returns an empty bitmap. Otherwise restores the pruned state (the caller must replay
     /// retained elements to restore its full state).
@@ -494,9 +498,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
         Ok((proof, chunk))
     }
 
-    /// Convert this clean bitmap into a dirty bitmap without making any changes to it.
-    pub fn into_dirty(self) -> DirtyBitMap<E, D, N> {
-        DirtyBitMap {
+    /// Convert this merkleized bitmap into an unmerkleized bitmap without making any changes to it.
+    pub fn into_dirty(self) -> UnmerkleizedBitMap<E, D, N> {
+        UnmerkleizedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
             mmr: self.mmr.into_dirty(),
@@ -509,7 +513,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> CleanBitMap<E, D,
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D, N> {
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
     /// Add a single bit to the end of the bitmap.
     ///
     /// # Warning
@@ -557,7 +561,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
     pub async fn merkleize(
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
-    ) -> Result<CleanBitMap<E, D, N>, Error> {
+    ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
@@ -591,7 +595,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
             partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
         };
 
-        Ok(CleanBitMap {
+        Ok(MerkleizedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
             mmr,
@@ -602,7 +606,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D,
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D> for CleanBitMap<E, D, N> {
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D>
+    for MerkleizedBitMap<E, D, N>
+{
     fn size(&self) -> Position {
         self.size()
     }
@@ -624,7 +630,7 @@ mod tests {
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 
     type TestContext = deterministic::Context;
-    type TestCleanBitMap<const N: usize> = CleanBitMap<TestContext, sha256::Digest, N>;
+    type TestMerkleizedBitMap<const N: usize> = MerkleizedBitMap<TestContext, sha256::Digest, N>;
 
     impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
         /// Convert a bit into the position of the Merkle tree leaf it belongs to.
@@ -635,7 +641,7 @@ mod tests {
         }
     }
 
-    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> DirtyBitMap<E, D, N> {
+    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
         // Add a byte's worth of bits to the bitmap.
         //
         // # Warning
@@ -679,7 +685,7 @@ mod tests {
                 digests: Vec::new(),
             };
             assert!(
-                !TestCleanBitMap::<SHA256_SIZE>::verify_bit_inclusion(
+                !TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
                     &mut hasher,
                     &proof,
                     &[0u8; SHA256_SIZE],
@@ -696,8 +702,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let mut bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let mut bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             assert_eq!(bitmap.len(), 0);
@@ -724,7 +730,7 @@ mod tests {
 
             // Fill up a full chunk
             let mut dirty = bitmap.into_dirty();
-            for i in 0..(TestCleanBitMap::<SHA256_SIZE>::CHUNK_SIZE_BITS - 1) {
+            for i in 0..(TestMerkleizedBitMap::<SHA256_SIZE>::CHUNK_SIZE_BITS - 1) {
                 dirty.push(i % 2 != 0);
             }
             bitmap = dirty.merkleize(&mut hasher).await.unwrap();
@@ -735,7 +741,7 @@ mod tests {
             // Chunk should be provable.
             let (proof, chunk) = bitmap.proof(&mut hasher, 0).await.unwrap();
             assert!(
-                TestCleanBitMap::<SHA256_SIZE>::verify_bit_inclusion(
+                TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
                     &mut hasher,
                     &proof,
                     &chunk,
@@ -746,7 +752,7 @@ mod tests {
             );
             // bit outside range should not verify
             assert!(
-                !TestCleanBitMap::<SHA256_SIZE>::verify_bit_inclusion(
+                !TestMerkleizedBitMap::<SHA256_SIZE>::verify_bit_inclusion(
                     &mut hasher,
                     &proof,
                     &chunk,
@@ -779,10 +785,14 @@ mod tests {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Add each bit one at a time after the first chunk.
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap1"), "test1", None, &mut hasher)
-                    .await
-                    .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
+                context.with_label("bitmap1"),
+                "test1",
+                None,
+                &mut hasher,
+            )
+            .await
+            .unwrap();
             let mut dirty = bitmap.into_dirty();
             dirty.push_chunk(&test_chunk);
             for b in test_chunk {
@@ -802,7 +812,7 @@ mod tests {
             {
                 // Repeat the above MMR build only using push_chunk instead, and make
                 // sure root digests match.
-                let bitmap: TestCleanBitMap<SHA256_SIZE> = TestCleanBitMap::init(
+                let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                     context.with_label("bitmap2"),
                     "test2",
                     None,
@@ -819,7 +829,7 @@ mod tests {
             }
             {
                 // Repeat build again using push_byte this time.
-                let bitmap: TestCleanBitMap<SHA256_SIZE> = TestCleanBitMap::init(
+                let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
                     context.with_label("bitmap3"),
                     "test3",
                     None,
@@ -845,8 +855,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -862,8 +872,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -879,8 +889,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -895,8 +905,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: StandardHasher<Sha256> = StandardHasher::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -915,8 +925,8 @@ mod tests {
         executor.start(|context| async move {
             // Build a starting test MMR with two chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -967,8 +977,8 @@ mod tests {
         executor.start(|context| async move {
             // Build a test MMR with a few chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -1041,8 +1051,8 @@ mod tests {
         executor.start(|context| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let bitmap: CleanBitMap<TestContext, sha256::Digest, N> =
-                CleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: MerkleizedBitMap<TestContext, sha256::Digest, N> =
+                MerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();
@@ -1070,7 +1080,7 @@ mod tests {
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
-                        CleanBitMap::<TestContext, _, N>::verify_bit_inclusion(
+                        MerkleizedBitMap::<TestContext, _, N>::verify_bit_inclusion(
                             &mut hasher,
                             &proof,
                             &chunk,
@@ -1083,7 +1093,7 @@ mod tests {
                     // Flip the bit in the chunk and make sure the proof fails.
                     let corrupted = flip_bit(i, &chunk);
                     assert!(
-                        !CleanBitMap::<TestContext, _, N>::verify_bit_inclusion(
+                        !MerkleizedBitMap::<TestContext, _, N>::verify_bit_inclusion(
                             &mut hasher,
                             &proof,
                             &corrupted,
@@ -1106,10 +1116,14 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
             // Initializing from an empty partition should result in an empty bitmap.
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("initial"), PARTITION, None, &mut hasher)
-                    .await
-                    .unwrap();
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> = TestMerkleizedBitMap::init(
+                context.with_label("initial"),
+                PARTITION,
+                None,
+                &mut hasher,
+            )
+            .await
+            .unwrap();
             assert_eq!(bitmap.len(), 0);
 
             // Add a non-trivial amount of data.
@@ -1133,11 +1147,11 @@ mod tests {
             for i in (10..=FULL_CHUNK_COUNT).step_by(10) {
                 bitmap
                     .prune_to_bit(
-                        (i * TestCleanBitMap::<SHA256_SIZE>::CHUNK_SIZE_BITS as usize) as u64,
+                        (i * TestMerkleizedBitMap::<SHA256_SIZE>::CHUNK_SIZE_BITS as usize) as u64,
                     )
                     .unwrap();
                 bitmap.write_pruned().await.unwrap();
-                bitmap = TestCleanBitMap::init(
+                bitmap = TestMerkleizedBitMap::init(
                     context.with_label(&format!("restore_{i}")),
                     PARTITION,
                     None,
@@ -1174,8 +1188,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let bitmap: TestCleanBitMap<SHA256_SIZE> =
-                TestCleanBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
+            let bitmap: TestMerkleizedBitMap<SHA256_SIZE> =
+                TestMerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
                     .await
                     .unwrap();
             let mut dirty = bitmap.into_dirty();

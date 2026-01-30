@@ -3,7 +3,9 @@
 //! The impl blocks in this file defines shared functionality across all Current QMDB variants.
 
 use crate::{
-    bitmap::{Merkleized, Unmerkleized, CleanBitMap, DirtyBitMap, State as BitMapState},
+    bitmap::{
+        Merkleized, MerkleizedBitMap, State as BitMapState, Unmerkleized, UnmerkleizedBitMap,
+    },
     index::Unordered as UnorderedIndex,
     journal::{
         contiguous::{Contiguous, MutableContiguous},
@@ -566,7 +568,7 @@ where
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
 pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &CleanBitMap<E, H::Digest, N>,
+    status: &MerkleizedBitMap<E, H::Digest, N>,
     mmr: &Mmr<E, H::Digest, MmrClean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
@@ -593,18 +595,18 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
     ))
 }
 
-/// Consumes a `DirtyBitMap`, performs merkleization using the provided hasher and MMR storage,
-/// and returns a `CleanBitMap` containing the merkleized result.
+/// Consumes an `UnmerkleizedBitMap`, performs merkleization using the provided hasher and MMR storage,
+/// and returns a `MerkleizedBitMap` containing the merkleized result.
 ///
 /// # Arguments
 /// * `hasher` - The hasher used for merkleization.
-/// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
+/// * `status` - The `UnmerkleizedBitMap` to be merkleized. Ownership is taken.
 /// * `mmr` - The MMR storage used for grafting.
 pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: DirtyBitMap<E, H::Digest, N>,
+    status: UnmerkleizedBitMap<E, H::Digest, N>,
     mmr: &impl crate::mmr::storage::Storage<H::Digest>,
-) -> Result<CleanBitMap<E, H::Digest, N>, Error>
+) -> Result<MerkleizedBitMap<E, H::Digest, N>, Error>
 where
     E: Storage + Clock + Metrics,
     H: Hasher,

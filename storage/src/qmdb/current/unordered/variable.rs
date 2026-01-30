@@ -8,7 +8,7 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
-    bitmap::CleanBitMap,
+    bitmap::MerkleizedBitMap,
     journal::contiguous::variable::Journal,
     mmr::{Location, StandardHasher},
     qmdb::{
@@ -69,7 +69,7 @@ where
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::init(
+        let mut status = MerkleizedBitMap::init(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
@@ -109,7 +109,7 @@ where
 #[cfg(test)]
 mod test {
     use crate::{
-        bitmap::CleanBitMap,
+        bitmap::MerkleizedBitMap,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, Proof, StandardHasher},
         qmdb::{
@@ -314,8 +314,10 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.loc);
             assert_eq!(
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*proof_inactive.loc)
+                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
+                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
+                    *proof_inactive.loc
+                )
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.loc = active_loc;
