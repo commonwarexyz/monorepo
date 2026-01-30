@@ -18,8 +18,8 @@ commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::{Committable, Digestible};
 
     pub mod simplex;
-    pub mod types;
 
+    pub mod types;
     use types::{Epoch, Height, View, Round};
 
     /// Epochable is a trait that provides access to the epoch number.

@@ -18,5 +18,6 @@ commonware_macros::stability_scope!(BETA {
     pub mod algebra;
     pub mod poly;
 });
+
 #[cfg(test)]
 pub(crate) mod test;

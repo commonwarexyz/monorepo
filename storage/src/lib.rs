@@ -10,10 +10,9 @@
 )]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[commonware_macros::stability(ALPHA)]
-extern crate alloc;
-
 commonware_macros::stability_scope!(ALPHA {
+    extern crate alloc;
+
     pub mod mmr;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
