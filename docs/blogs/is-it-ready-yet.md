@@ -10,6 +10,10 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
+Large parts of the Commonware Library are now considered BETA.
+
+While I enjoy rabbit holing on random side quests as much as the next person, ....
+
 ```bash
 # Ensure stability is internally consistent
 just check-stability
