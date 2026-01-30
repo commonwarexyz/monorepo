@@ -1,7 +1,4 @@
-use crate::{
-    algebra::{Additive as _, FieldNTT as _, Ring},
-    fields::goldilocks::F,
-};
+use crate::algebra::{Additive, FieldNTT, Ring};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
@@ -21,7 +18,7 @@ fn reverse_bits(bit_width: u32, i: u64) -> u64 {
 ///
 /// We implement this generically over anything we can index into, which allows
 /// performing NTTs in place
-fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
+fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>>(
     rows: usize,
     cols: usize,
     matrix: &mut M,
@@ -85,8 +82,8 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
         let mut out = vec![(0usize, F::zero()); lg_rows];
         let mut w_i = w;
         for i in (0..lg_rows).rev() {
-            out[i] = (i, w_i);
-            w_i = w_i * w_i;
+            out[i] = (i, w_i.clone());
+            w_i = w_i.clone() * &w_i;
         }
         // In the case of the reverse algorithm, we undo each stage of the
         // forward algorithm, starting with the last stage.
@@ -117,22 +114,23 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
                 let index_a = i + j;
                 let index_b = index_a + skip;
                 for k in 0..cols {
-                    let (a, b) = (matrix[(index_a, k)], matrix[(index_b, k)]);
+                    let (a, b) = (matrix[(index_a, k)].clone(), matrix[(index_b, k)].clone());
                     if FORWARD {
-                        matrix[(index_a, k)] = a + w_j * b;
-                        matrix[(index_b, k)] = a - w_j * b;
+                        let w_j_b = w_j.clone() * &b;
+                        matrix[(index_a, k)] = a.clone() + &w_j_b;
+                        matrix[(index_b, k)] = a - &w_j_b;
                     } else {
                         // To check the math, convince yourself that applying the forward
                         // transformation, and then this transformation, with w_j being the
                         // inverse of the value above, that you get (a, b).
                         // (a + w_j * b) + (a - w_j * b) = 2 * a
-                        matrix[(index_a, k)] = (a + b).div_2();
+                        matrix[(index_a, k)] = (a.clone() + &b).div_2();
                         // (a + w_j * b) - (a - w_j * b) = 2 * w_j * b.
                         // w_j in this branch is the inverse of w_j in the other branch.
-                        matrix[(index_b, k)] = ((a - b) * w_j).div_2();
+                        matrix[(index_b, k)] = ((a - &b) * &w_j).div_2();
                     }
                 }
-                w_j = w_j * w;
+                w_j *= &w;
             }
             i += 2 * skip;
         }
@@ -142,18 +140,18 @@ fn ntt<const FORWARD: bool, M: IndexMut<(usize, usize), Output = F>>(
 /// A single column of some larger data.
 ///
 /// This allows us to easily do NTTs over partial segments of some bigger matrix.
-struct Column<'a> {
+struct Column<'a, F> {
     data: &'a mut [F],
 }
 
-impl<'a> Index<(usize, usize)> for Column<'a> {
+impl<'a, F> Index<(usize, usize)> for Column<'a, F> {
     type Output = F;
 
     fn index(&self, (i, _): (usize, usize)) -> &Self::Output {
         &self.data[i]
     }
 }
-impl<'a> IndexMut<(usize, usize)> for Column<'a> {
+impl<'a, F> IndexMut<(usize, usize)> for Column<'a, F> {
     fn index_mut(&mut self, (i, _): (usize, usize)) -> &mut Self::Output {
         &mut self.data[i]
     }
@@ -164,19 +162,19 @@ impl<'a> IndexMut<(usize, usize)> for Column<'a> {
 /// This is in row major order, so consider processing elements in the same
 /// row first, for locality.
 #[derive(Clone, PartialEq)]
-pub struct Matrix {
+pub struct Matrix<F> {
     rows: usize,
     cols: usize,
     data: Vec<F>,
 }
 
-impl EncodeSize for Matrix {
+impl<F: EncodeSize> EncodeSize for Matrix<F> {
     fn encode_size(&self) -> usize {
         self.rows.encode_size() + self.cols.encode_size() + self.data.encode_size()
     }
 }
 
-impl Write for Matrix {
+impl<F: Write> Write for Matrix<F> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.rows.write(buf);
         self.cols.write(buf);
@@ -184,17 +182,17 @@ impl Write for Matrix {
     }
 }
 
-impl Read for Matrix {
-    type Cfg = usize;
+impl<F: Read> Read for Matrix<F> {
+    type Cfg = (usize, <F as Read>::Cfg);
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
-        &max_els: &Self::Cfg,
+        (max_els, f_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let cfg = RangeCfg::from(..=max_els);
+        let cfg = RangeCfg::from(..=*max_els);
         let rows = usize::read_cfg(buf, &cfg)?;
         let cols = usize::read_cfg(buf, &cfg)?;
-        let data = Vec::<F>::read_cfg(buf, &(cfg, ()))?;
+        let data = Vec::<F>::read_cfg(buf, &(cfg, f_cfg.clone()))?;
         let expected_len = rows
             .checked_mul(cols)
             .ok_or(commonware_codec::Error::Invalid(
@@ -211,11 +209,11 @@ impl Read for Matrix {
     }
 }
 
-impl core::fmt::Debug for Matrix {
+impl<F: core::fmt::Debug> core::fmt::Debug for Matrix<F> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         for i in 0..self.rows {
             let row_i = &self[i];
-            for &row_i_j in row_i {
+            for row_i_j in row_i {
                 write!(f, "{row_i_j:?} ")?;
             }
             writeln!(f)?;
@@ -224,7 +222,7 @@ impl core::fmt::Debug for Matrix {
     }
 }
 
-impl Matrix {
+impl<F: Additive> Matrix<F> {
     /// Create a zero matrix, with a certain number of rows and columns
     fn zero(rows: usize, cols: usize) -> Self {
         Self {
@@ -256,14 +254,17 @@ impl Matrix {
     ///
     /// This will return `None` if `min_coefficients < self.rows`, which would mean
     /// discarding data, instead of padding it.
-    pub fn as_polynomials(&self, min_coefficients: usize) -> Option<PolynomialVector> {
+    pub fn as_polynomials(&self, min_coefficients: usize) -> Option<PolynomialVector<F>>
+    where
+        F: Clone,
+    {
         if min_coefficients < self.rows {
             return None;
         }
         Some(PolynomialVector::new(
             min_coefficients,
             self.cols,
-            (0..self.rows).flat_map(|i| self[i].iter().copied()),
+            (0..self.rows).flat_map(|i| self[i].iter().cloned()),
         ))
     }
 
@@ -271,25 +272,32 @@ impl Matrix {
     ///
     /// This assumes that the number of columns in this matrix match the number
     /// of rows in the other matrix.
-    pub fn mul(&self, other: &Self) -> Self {
+    pub fn mul(&self, other: &Self) -> Self
+    where
+        F: Clone + Ring,
+    {
         assert_eq!(self.cols, other.rows);
         let mut out = Self::zero(self.rows, other.cols);
         for i in 0..self.rows {
             for j in 0..self.cols {
-                let c = self[(i, j)];
+                let c = self[(i, j)].clone();
                 let other_j = &other[j];
                 for k in 0..other.cols {
-                    out[(i, k)] = out[(i, k)] + c * other_j[k]
+                    out[(i, k)] += &(c.clone() * &other_j[k])
                 }
             }
         }
         out
     }
+}
 
+impl<F: FieldNTT> Matrix<F> {
     fn ntt<const FORWARD: bool>(&mut self) {
-        ntt::<FORWARD, Self>(self.rows, self.cols, self)
+        ntt::<FORWARD, F, Self>(self.rows, self.cols, self)
     }
+}
 
+impl<F> Matrix<F> {
     pub const fn rows(&self) -> usize {
         self.rows
     }
@@ -298,18 +306,23 @@ impl Matrix {
         self.cols
     }
 
-    // Iterate over the rows of this matrix.
+    /// Iterate over the rows of this matrix.
     pub fn iter(&self) -> impl Iterator<Item = &[F]> {
         (0..self.rows).map(|i| &self[i])
     }
+}
 
+impl<F: crate::algebra::Random> Matrix<F> {
     /// Create a random matrix with certain dimensions.
-    pub fn rand(mut rng: impl CryptoRngCore, rows: usize, cols: usize) -> Self {
-        Self::init(rows, cols, (0..rows * cols).map(|_| F::rand(&mut rng)))
+    pub fn rand(mut rng: impl CryptoRngCore, rows: usize, cols: usize) -> Self
+    where
+        F: Additive,
+    {
+        Self::init(rows, cols, (0..rows * cols).map(|_| F::random(&mut rng)))
     }
 }
 
-impl Index<usize> for Matrix {
+impl<F> Index<usize> for Matrix<F> {
     type Output = [F];
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -317,13 +330,13 @@ impl Index<usize> for Matrix {
     }
 }
 
-impl IndexMut<usize> for Matrix {
+impl<F> IndexMut<usize> for Matrix<F> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.data[self.cols * index..self.cols * (index + 1)]
     }
 }
 
-impl Index<(usize, usize)> for Matrix {
+impl<F> Index<(usize, usize)> for Matrix<F> {
     type Output = F;
 
     fn index(&self, (i, j): (usize, usize)) -> &Self::Output {
@@ -331,15 +344,15 @@ impl Index<(usize, usize)> for Matrix {
     }
 }
 
-impl IndexMut<(usize, usize)> for Matrix {
+impl<F> IndexMut<(usize, usize)> for Matrix<F> {
     fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut Self::Output {
         &mut self.data[self.cols * i + j]
     }
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
-impl arbitrary::Arbitrary<'_> for Matrix {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+impl<'a, F: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Matrix<F> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let rows = u.int_in_range(1..=16)?;
         let cols = u.int_in_range(1..=16)?;
         let data = (0..rows * cols)
@@ -350,11 +363,11 @@ impl arbitrary::Arbitrary<'_> for Matrix {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct NTTPolynomial {
+struct NTTPolynomial<F> {
     coefficients: Vec<F>,
 }
 
-impl NTTPolynomial {
+impl<F: FieldNTT> NTTPolynomial<F> {
     /// Create a polynomial which vanishes (evaluates to 0) except at a few points.
     ///
     /// It's assumed that `except` is a bit vector with length a power of 2.
@@ -457,8 +470,8 @@ impl NTTPolynomial {
             let lg_rows = lg_rows as usize;
             let mut out = Vec::with_capacity(lg_rows);
             for _ in 0..lg_rows {
-                out.push(w_inv);
-                w_inv = w_inv * w_inv;
+                out.push(w_inv.clone());
+                w_inv = w_inv.clone() * &w_inv;
             }
             out.reverse();
             out
@@ -496,8 +509,8 @@ impl NTTPolynomial {
                         for j in 0..polynomial_size {
                             let index =
                                 polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
-                            slice[index] = slice[index] * w_j;
-                            w_j = w_j * w_inv;
+                            slice[index] *= &w_j;
+                            w_j *= &w_inv;
                         }
                         // Expand the right side to occupy the entire space.
                         // The left side must be 0s.
@@ -525,14 +538,14 @@ impl NTTPolynomial {
                         for j in 0..polynomial_size {
                             let index =
                                 polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
-                            slice[index] = slice[index] * w_j;
-                            w_j = w_j * w_inv;
+                            slice[index] *= &w_j;
+                            w_j *= &w_inv;
                         }
 
                         // Expand the right side to occupy all of scratch.
                         // Clear the right side.
                         for j in 0..polynomial_size {
-                            scratch[2 * j] = slice[polynomial_size + j];
+                            scratch[2 * j] = slice[polynomial_size + j].clone();
                             slice[polynomial_size + j] = F::zero();
                         }
 
@@ -545,12 +558,16 @@ impl NTTPolynomial {
                         // Multiply the polynomials together, by first evaluating each of them,
                         // then multiplying their evaluations, producing (f * g) evaluated over
                         // the domain, which we can then interpolate back.
-                        ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: &mut scratch });
-                        ntt::<true, _>(new_polynomial_size, 1, &mut Column { data: slice });
+                        ntt::<true, F, _>(
+                            new_polynomial_size,
+                            1,
+                            &mut Column { data: &mut scratch },
+                        );
+                        ntt::<true, F, _>(new_polynomial_size, 1, &mut Column { data: slice });
                         for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
-                            *p_i = *p_i * s_i
+                            *p_i *= &s_i;
                         }
-                        ntt::<false, _>(new_polynomial_size, 1, &mut Column { data: slice })
+                        ntt::<false, F, _>(new_polynomial_size, 1, &mut Column { data: slice })
                     }
                 }
                 // If there was a polynomial on the left or the right, then on the next iteration
@@ -585,7 +602,7 @@ impl NTTPolynomial {
         let rows = self.coefficients.len();
         let lg_rows = rows.ilog2();
         for i in (0..rows).rev() {
-            out = out * point + self.coefficients[reverse_bits(lg_rows, i as u64) as usize];
+            out = out * &point + &self.coefficients[reverse_bits(lg_rows, i as u64) as usize];
         }
         out
     }
@@ -614,14 +631,14 @@ impl NTTPolynomial {
         let lg_rows = self.coefficients.len().ilog2();
         for i in 0..self.coefficients.len() {
             let index = reverse_bits(lg_rows, i as u64) as usize;
-            self.coefficients[index] = self.coefficients[index] * factor_i;
-            factor_i = factor_i * factor;
+            self.coefficients[index] *= &factor_i;
+            factor_i *= &factor;
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PolynomialVector {
+pub struct PolynomialVector<F> {
     // Each column of this matrix contains the coefficients of a polynomial,
     // in reverse bit order. So, the ith coefficient appears at index i.reverse_bits().
     //
@@ -634,10 +651,10 @@ pub struct PolynomialVector {
     // that the first bit of their coefficient index is 0, then in that subset
     // the first half has the second bit set to 0, and the second half set to 1,
     // and so on, recursively.
-    data: Matrix,
+    data: Matrix<F>,
 }
 
-impl PolynomialVector {
+impl<F: Additive> PolynomialVector<F> {
     /// Construct a new vector of polynomials, from dimensions, and coefficients.
     ///
     /// The coefficients should be supplied in order of increasing index,
@@ -672,9 +689,11 @@ impl PolynomialVector {
         }
         Self { data }
     }
+}
 
+impl<F: FieldNTT> PolynomialVector<F> {
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
-    pub fn evaluate(mut self) -> EvaluationVector {
+    pub fn evaluate(mut self) -> EvaluationVector<F> {
         self.data.ntt::<true>();
         let active_rows = BitMap::ones(self.data.rows as u64);
         EvaluationVector {
@@ -687,7 +706,7 @@ impl PolynomialVector {
     ///
     /// Exists as a useful tool for testing
     #[cfg(any(test, feature = "fuzz"))]
-    fn evaluate_naive(self) -> EvaluationVector {
+    fn evaluate_naive(self) -> EvaluationVector<F> {
         let rows = self.data.rows;
         let lg_rows = rows.ilog2();
         let w = F::root_of_unity(lg_rows as u8).expect("too much data to calculate NTT");
@@ -702,10 +721,10 @@ impl PolynomialVector {
             let mut w_ij = F::one();
             for j in 0..rows {
                 // Remember, the coeffients of the polynomial are in reverse bit order!
-                row_i[reverse_bits(lg_rows, j as u64) as usize] = w_ij;
-                w_ij = w_ij * w_i;
+                row_i[reverse_bits(lg_rows, j as u64) as usize] = w_ij.clone();
+                w_ij *= &w_i;
             }
-            w_i = w_i * w;
+            w_i *= &w;
         }
 
         EvaluationVector {
@@ -723,9 +742,9 @@ impl PolynomialVector {
         let lg_rows = self.data.rows.ilog2();
         for i in 0..self.data.rows {
             for p_i in &mut self.data[reverse_bits(lg_rows, i as u64) as usize] {
-                *p_i = *p_i * factor_i;
+                *p_i *= &factor_i;
             }
-            factor_i = factor_i * factor;
+            factor_i *= &factor;
         }
     }
 
@@ -738,13 +757,13 @@ impl PolynomialVector {
     /// This assumes that the number of coefficients in the polynomials of this vector
     /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
     ///
-    /// This assumes that `q` has no zeroes over [F::NOT_ROOT_OF_UNITY] * [F::ROOT_OF_UNITY]^i,
+    /// This assumes that `q` has no zeroes over `coset_shift() * root_of_unity()^i`,
     /// for any i. This will be the case for [NTTPolynomial::vanishing].
     /// If this isn't the case, the result may be junk.
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
     /// for that polynomial is not guaranteed to be anything meaningful.
-    fn divide(&mut self, mut q: NTTPolynomial) {
+    fn divide(&mut self, mut q: NTTPolynomial<F>) {
         // The algorithm operates column wise.
         //
         // You can compute P(X) / Q(X) by evaluating each polynomial, then computing
@@ -769,12 +788,12 @@ impl PolynomialVector {
             q.coefficients.len(),
             "cannot divide by polynomial of the wrong size"
         );
-        let skew = F::NOT_ROOT_OF_UNITY;
-        let skew_inv = F::NOT_ROOT_OF_UNITY_INV;
-        self.divide_roots(skew);
+        let skew = F::coset_shift();
+        let skew_inv = F::coset_shift_inv();
+        self.divide_roots(skew.clone());
         q.divide_roots(skew);
-        ntt::<true, _>(self.data.rows, self.data.cols, &mut self.data);
-        ntt::<true, _>(
+        ntt::<true, F, _>(self.data.rows, self.data.cols, &mut self.data);
+        ntt::<true, F, _>(
             q.coefficients.len(),
             1,
             &mut Column {
@@ -783,21 +802,23 @@ impl PolynomialVector {
         );
         // Do a point wise division.
         for i in 0..self.data.rows {
-            let q_i = q.coefficients[i];
+            let q_i = q.coefficients[i].clone();
             // If `q_i = 0`, then we will get 0 in the output.
             // We don't expect any of the q_i to be 0, but being 0 is only one
             // of the many possibilities for the coefficient to be incorrect,
             // so doing a runtime assertion here doesn't make sense.
             let q_i_inv = q_i.inv();
             for d_i_j in &mut self.data[i] {
-                *d_i_j = *d_i_j * q_i_inv;
+                *d_i_j *= &q_i_inv;
             }
         }
         // Interpolate back, using the inverse skew
-        ntt::<false, _>(self.data.rows, self.data.cols, &mut self.data);
+        ntt::<false, F, _>(self.data.rows, self.data.cols, &mut self.data);
         self.divide_roots(skew_inv);
     }
+}
 
+impl<F> PolynomialVector<F> {
     /// Iterate over up to n rows of this vector.
     ///
     /// For example, given polynomials:
@@ -825,43 +846,20 @@ impl PolynomialVector {
 /// This is used in [Self::recover], which can use the rows that are present to fill in the missing
 /// rows.
 #[derive(Debug, PartialEq)]
-pub struct EvaluationVector {
-    data: Matrix,
+pub struct EvaluationVector<F> {
+    data: Matrix<F>,
     active_rows: BitMap,
 }
 
-impl EvaluationVector {
+impl<F: FieldNTT> EvaluationVector<F> {
     /// Figure out the polynomial which evaluates to this vector.
     ///
     /// i.e. the inverse of [PolynomialVector::evaluate].
     ///
     /// (This makes all the rows count as filled).
-    fn interpolate(mut self) -> PolynomialVector {
+    fn interpolate(mut self) -> PolynomialVector<F> {
         self.data.ntt::<false>();
         PolynomialVector { data: self.data }
-    }
-
-    /// Create an empty element of this struct, with no filled rows.
-    ///
-    /// `2^lg_rows` must be a valid `usize`.
-    pub fn empty(lg_rows: usize, cols: usize) -> Self {
-        assert!(
-            lg_rows < usize::BITS as usize,
-            "2^lg_rows must be a valid usize"
-        );
-        let data = Matrix::zero(1 << lg_rows, cols);
-        let active = BitMap::zeroes(data.rows as u64);
-        Self {
-            data,
-            active_rows: active,
-        }
-    }
-
-    /// Fill a specific row.
-    pub fn fill_row(&mut self, row: usize, data: &[F]) {
-        assert!(data.len() <= self.data.cols);
-        self.data[row][..data.len()].copy_from_slice(data);
-        self.active_rows.set(row as u64, true);
     }
 
     /// Erase a particular row.
@@ -873,24 +871,24 @@ impl EvaluationVector {
         self.active_rows.set(row as u64, false);
     }
 
-    fn multiply(&mut self, polynomial: NTTPolynomial) {
+    fn multiply(&mut self, polynomial: NTTPolynomial<F>) {
         let NTTPolynomial { mut coefficients } = polynomial;
-        ntt::<true, _>(
+        ntt::<true, F, _>(
             coefficients.len(),
             1,
             &mut Column {
                 data: &mut coefficients,
             },
         );
-        for (i, &c_i) in coefficients.iter().enumerate() {
+        for (i, c_i) in coefficients.iter().enumerate() {
             for self_j in &mut self.data[i] {
-                *self_j = *self_j * c_i;
+                *self_j = self_j.clone() * c_i;
             }
         }
     }
 
     /// Attempt to recover the missing rows in this data.
-    pub fn recover(mut self) -> PolynomialVector {
+    pub fn recover(mut self) -> PolynomialVector<F> {
         // If we had all of the rows, we could simply call [Self::interpolate],
         // in order to recover the original polynomial. If we do this while missing some
         // rows, what we get is D(X) * V(X) where D is the original polynomial,
@@ -909,9 +907,39 @@ impl EvaluationVector {
         out.divide(vanishing);
         out
     }
+}
 
+impl<F: Additive> EvaluationVector<F> {
+    /// Create an empty element of this struct, with no filled rows.
+    ///
+    /// `2^lg_rows` must be a valid `usize`.
+    pub fn empty(lg_rows: usize, cols: usize) -> Self {
+        assert!(
+            lg_rows < usize::BITS as usize,
+            "2^lg_rows must be a valid usize"
+        );
+        let data = Matrix::zero(1 << lg_rows, cols);
+        let active = BitMap::zeroes(data.rows as u64);
+        Self {
+            data,
+            active_rows: active,
+        }
+    }
+
+    /// Fill a specific row.
+    pub fn fill_row(&mut self, row: usize, data: &[F])
+    where
+        F: Clone,
+    {
+        assert!(data.len() <= self.data.cols);
+        self.data[row][..data.len()].clone_from_slice(data);
+        self.active_rows.set(row as u64, true);
+    }
+}
+
+impl<F> EvaluationVector<F> {
     /// Get the underlying data, as a Matrix.
-    pub fn data(self) -> Matrix {
+    pub fn data(self) -> Matrix<F> {
         self.data
     }
 
@@ -924,14 +952,14 @@ impl EvaluationVector {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::algebra::Ring;
+    use crate::{algebra::Ring, fields::goldilocks::F};
     use arbitrary::{Arbitrary, Unstructured};
 
     fn arb_polynomial_vector(
         u: &mut Unstructured<'_>,
         max_log_rows: u32,
         max_cols: usize,
-    ) -> arbitrary::Result<PolynomialVector> {
+    ) -> arbitrary::Result<PolynomialVector<F>> {
         let lg_rows = u.int_in_range(0..=max_log_rows)?;
         let cols = u.int_in_range(1..=max_cols)?;
         let rows = 1usize << lg_rows;
@@ -1012,8 +1040,8 @@ pub mod fuzz {
 
     #[derive(Debug)]
     pub enum Plan {
-        NttEqNaive(PolynomialVector),
-        EvaluationThenInverse(PolynomialVector),
+        NttEqNaive(PolynomialVector<F>),
+        EvaluationThenInverse(PolynomialVector<F>),
         VanishingPolynomial(BitMap),
         Recovery(RecoverySetup),
     }
@@ -1079,7 +1107,7 @@ pub mod fuzz {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::algebra::Ring;
+    use crate::{algebra::Ring, fields::goldilocks::F};
 
     #[test]
     fn test_reverse_bits() {
@@ -1100,7 +1128,7 @@ mod test {
         vec![F::one(); 3].write(&mut buf);
 
         let mut bytes = buf.freeze();
-        let result = Matrix::read_cfg(&mut bytes, &8);
+        let result = Matrix::<F>::read_cfg(&mut bytes, &(8, ()));
         assert!(matches!(
             result,
             Err(commonware_codec::Error::Invalid(
@@ -1128,7 +1156,7 @@ mod test {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Matrix>,
+            CodecConformance<Matrix<F>>,
         }
     }
 }
