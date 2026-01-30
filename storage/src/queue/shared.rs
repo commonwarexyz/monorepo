@@ -193,19 +193,18 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
 ///
 /// let (writer, mut reader) = shared::init(context, config).await?;
 ///
-/// // Writer task
+/// // Writer task (clone for multiple producers)
 /// writer.enqueue(item).await?;
 ///
-/// // Reader task with select
-/// select! {
-///     result = reader.recv() => {
-///         if let Ok(Some((pos, item))) = result {
-///             // Process item
+/// // Reader task
+/// loop {
+///     select! {
+///         result = reader.recv() => {
+///             let Some((pos, item)) = result? else { break };
+///             // Process item...
 ///             reader.ack(pos).await?;
 ///         }
-///     }
-///     _ = shutdown_signal => {
-///         // Handle shutdown
+///         _ = shutdown => break,
 ///     }
 /// }
 /// ```

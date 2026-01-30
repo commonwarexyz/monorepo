@@ -450,17 +450,19 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.journal.size()
     }
 
-    /// Returns the number of items available to be dequeued.
+    /// Returns the number of items not yet read.
     ///
-    /// This is an upper bound - it counts items from read_pos to size, but some
-    /// may already be acknowledged.
+    /// This is an upper bound on items available to dequeue - it counts items from
+    /// `read_pos` to `size`, but some may have been acknowledged out of order and
+    /// will be skipped during dequeue.
     pub const fn pending(&self) -> u64 {
         self.journal.size().saturating_sub(self.read_pos)
     }
 
-    /// Returns the number of unacked items above the ack floor that are tracked.
+    /// Returns the count of acknowledged items above the ack floor.
     ///
-    /// This represents the memory overhead of out-of-order acking.
+    /// This represents the memory overhead of out-of-order acknowledgments.
+    /// These items are tracked until the floor advances past them.
     pub fn acked_above_count(&self) -> usize {
         self.acked_above
             .iter()
@@ -477,12 +479,11 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             .saturating_sub(self.journal.pruning_boundary())
     }
 
-    /// Returns whether the queue has any pending unacked items.
-    pub fn is_empty(&self) -> bool {
-        // Total acked = items below floor + items tracked in acked_above
-        // Empty when all items in queue are acked
-        let total_acked = self.ack_floor + self.acked_above_count() as u64;
-        total_acked >= self.journal.size()
+    /// Returns whether all enqueued items have been acknowledged.
+    pub const fn is_empty(&self) -> bool {
+        // If acked_above is non-empty, there's a gap at ack_floor (otherwise floor
+        // would have advanced). So all items acked implies ack_floor == size.
+        self.ack_floor >= self.journal.size()
     }
 
     /// Returns whether a specific position has been acknowledged.

@@ -7,7 +7,8 @@
 //!
 //! # Concurrent Access
 //!
-//! For concurrent access from separate writer and reader tasks, use the [shared] module:
+//! For concurrent access from separate writer and reader tasks, use the [shared] module.
+//! Writers can be cloned for multiple producer tasks.
 //!
 //! ```rust,ignore
 //! use commonware_storage::queue::shared;
@@ -15,10 +16,10 @@
 //!
 //! let (writer, mut reader) = shared::init(context, config).await?;
 //!
-//! // Writer task
+//! // Writer task (can clone for multiple producers)
 //! writer.enqueue(item).await?;
 //!
-//! // Reader task with select
+//! // Reader task
 //! loop {
 //!     select! {
 //!         result = reader.recv() => {
