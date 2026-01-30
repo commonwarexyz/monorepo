@@ -1176,7 +1176,7 @@ PERF_FREQ=100 # Hz
 
 # Construct the Pyroscope application name with tags (URL-encoded)
 RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region},deployer_arch={arch}}}"
-APP_NAME=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$RAW_APP_NAME'))")
+APP_NAME=$(printf '%s' "$RAW_APP_NAME" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))")
 
 # Get the PID of the binary service
 PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
