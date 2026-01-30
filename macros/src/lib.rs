@@ -9,7 +9,7 @@ use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
-use quote::{format_ident, quote, ToTokens};
+use quote::{format_ident, quote};
 use syn::{
     braced,
     parse::{Parse, ParseStream, Result},
@@ -20,10 +20,8 @@ mod nextest;
 
 /// Stability level input that accepts either a literal integer (0-4) or a named constant
 /// (ALPHA, BETA, GAMMA, DELTA, EPSILON).
-#[allow(dead_code)]
 struct StabilityLevel {
     value: u8,
-    span: Span,
 }
 
 impl Parse for StabilityLevel {
@@ -40,10 +38,7 @@ impl Parse for StabilityLevel {
                     "stability level must be 0, 1, 2, 3, or 4",
                 ));
             }
-            Ok(Self {
-                value,
-                span: lit.span(),
-            })
+            Ok(Self { value })
         } else if lookahead.peek(Ident) {
             let ident: Ident = input.parse()?;
             let value = match ident.to_string().as_str() {
@@ -59,30 +54,13 @@ impl Parse for StabilityLevel {
                     ));
                 }
             };
-            Ok(Self {
-                value,
-                span: ident.span(),
-            })
+            Ok(Self { value })
         } else {
             Err(lookahead.error())
         }
     }
 }
 
-/// Marks an item with a stability level.
-///
-/// When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability
-/// less than X are excluded. Unmarked items are always included.
-///
-/// See [commonware README](https://github.com/commonwarexyz/monorepo#stability) for stability level definitions.
-///
-/// # Example
-/// ```rust,ignore
-/// use commonware_macros::stability;
-///
-/// #[stability(BETA)]  // excluded at GAMMA, DELTA, EPSILON
-/// pub struct StableApi { }
-/// ```
 fn level_name(level: u8) -> &'static str {
     match level {
         0 => "ALPHA",
@@ -105,6 +83,20 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
     names
 }
 
+/// Marks an item with a stability level.
+///
+/// When building with `RUSTFLAGS="--cfg commonware_stability_X"`, items with stability
+/// less than X are excluded. Unmarked items are always included.
+///
+/// See [commonware README](https://github.com/commonwarexyz/monorepo#stability) for stability level definitions.
+///
+/// # Example
+/// ```rust,ignore
+/// use commonware_macros::stability;
+///
+/// #[stability(BETA)]  // excluded at GAMMA, DELTA, EPSILON
+/// pub struct StableApi { }
+/// ```
 #[proc_macro_attribute]
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
@@ -177,7 +169,7 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
 /// Input for the `stability_scope!` macro: `level [, cfg(predicate)] { items... }`
 struct StabilityScopeInput {
     level: StabilityLevel,
-    cfg_predicate: Option<syn::Meta>,
+    predicate: Option<syn::Meta>,
     items: Vec<syn::Item>,
 }
 
@@ -186,7 +178,7 @@ impl Parse for StabilityScopeInput {
         let level: StabilityLevel = input.parse()?;
 
         // Check for optional cfg predicate
-        let cfg_predicate = if input.peek(Token![,]) {
+        let predicate = if input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
 
             // Parse `cfg(...)` - expect the literal identifier "cfg" followed by parenthesized content
@@ -211,7 +203,7 @@ impl Parse for StabilityScopeInput {
 
         Ok(Self {
             level,
-            cfg_predicate,
+            predicate,
             items,
         })
     }
@@ -241,13 +233,13 @@ impl Parse for StabilityScopeInput {
 pub fn stability_scope(input: TokenStream) -> TokenStream {
     let StabilityScopeInput {
         level,
-        cfg_predicate,
+        predicate,
         items,
     } = parse_macro_input!(input as StabilityScopeInput);
 
     let exclude_names = exclusion_cfg_names(level.value);
 
-    let cfg_attr = cfg_predicate.map_or_else(
+    let cfg_attr = predicate.map_or_else(
         || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
         |pred| quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
     );
@@ -580,20 +572,6 @@ impl Parse for SelectInput {
         }
 
         Ok(Self { branches })
-    }
-}
-
-impl ToTokens for SelectInput {
-    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        for branch in &self.branches {
-            let pattern = &branch.pattern;
-            let future = &branch.future;
-            let body = &branch.body;
-
-            tokens.extend(quote! {
-                #pattern = #future => #body,
-            });
-        }
     }
 }
 
