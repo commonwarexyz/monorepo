@@ -1,4 +1,4 @@
-//! Procedural macros for async select, stability annotations, and test utilities.
+//! Augment the development of primitives with procedural macros.
 //!
 //! This crate provides:
 //! - [`select!`] - Biased async select over multiple futures (requires `std` feature)
