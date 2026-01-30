@@ -1,5 +1,5 @@
 [package]
-name = "commonware-macros"
+name = "commonware-macros-impl"
 edition.workspace = true
 publish = true
 version.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "Augment the development of primitives with procedural macros."
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros-impl"
 documentation = "https://docs.rs/commonware-macros"
 
 [lints]
