@@ -19,7 +19,7 @@ use crate::{
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    DirtyAuthenticatedBitMap, Persistable,
+    Persistable, UnmerkleizedAuthenticatedBitMap,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -436,7 +436,7 @@ where
         const N: usize,
     >(
         &mut self,
-        status: &mut DirtyAuthenticatedBitMap<F, D, N>,
+        status: &mut UnmerkleizedAuthenticatedBitMap<F, D, N>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.op_count();

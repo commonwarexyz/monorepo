@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
-use commonware_storage::{CleanAuthenticatedBitMap, DirtyAuthenticatedBitMap};
+use commonware_storage::{MerkleizedAuthenticatedBitMap, UnmerkleizedAuthenticatedBitMap};
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
@@ -11,8 +11,8 @@ const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
 enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
-    Clean(CleanAuthenticatedBitMap<E, D, N>),
-    Dirty(DirtyAuthenticatedBitMap<E, D, N>),
+    Clean(MerkleizedAuthenticatedBitMap<E, D, N>),
+    Dirty(UnmerkleizedAuthenticatedBitMap<E, D, N>),
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -59,7 +59,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let init_bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+        let init_bitmap = MerkleizedAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
             context.with_label("bitmap"),
             PARTITION,
             None,
@@ -213,7 +213,7 @@ fn fuzz(input: FuzzInput) {
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
                             let root = bitmap.root();
                             assert!(
-                                CleanAuthenticatedBitMap::<
+                                MerkleizedAuthenticatedBitMap::<
                                     deterministic::Context,
                                     sha256::Digest,
                                     CHUNK_SIZE,
@@ -232,7 +232,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    let bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+                    let bitmap = MerkleizedAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
                         context
                             .with_label("bitmap")
                             .with_attribute("instance", restarts),
