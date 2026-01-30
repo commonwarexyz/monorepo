@@ -85,10 +85,10 @@ impl<D: Digest> State<D> for Unmerkleized {
 }
 
 /// A merkleized bitmap whose root digest has been computed and cached.
-pub type MerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
+pub type MerkleizedAuthenticatedBitMap<E, D, const N: usize> = BitMap<E, D, N, Merkleized<D>>;
 
 /// An unmerkleized bitmap whose root digest has not been computed.
-pub type UnmerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized>;
+pub type UnmerkleizedAuthenticatedBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized>;
 
 /// A bitmap supporting inclusion proofs through Merkelization.
 ///
@@ -98,10 +98,10 @@ pub type UnmerkleizedBitMap<E, D, const N: usize> = BitMap<E, D, N, Unmerkleized
 /// # Type States
 ///
 /// The bitmap uses the type-state pattern to enforce at compile-time whether the bitmap has pending
-/// updates that must be merkleized before computing proofs. [MerkleizedBitMap] represents a bitmap
-/// whose root digest has been computed and cached. [UnmerkleizedBitMap] represents a bitmap with
+/// updates that must be merkleized before computing proofs. [MerkleizedAuthenticatedBitMap] represents a bitmap
+/// whose root digest has been computed and cached. [UnmerkleizedAuthenticatedBitMap] represents a bitmap with
 /// pending updates. An unmerkleized bitmap can be converted into a merkleized bitmap by calling
-/// [UnmerkleizedBitMap::merkleize].
+/// [UnmerkleizedAuthenticatedBitMap::merkleize].
 ///
 /// # Warning
 ///
@@ -133,6 +133,7 @@ pub struct BitMap<
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
 
+    /// Merkleization-dependent state.
     state: S,
 
     /// Metadata for persisting pruned state.
@@ -293,7 +294,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize>
+    MerkleizedAuthenticatedBitMap<E, D, N>
+{
     /// Initialize a bitmap from the metadata in the given partition. If the partition is empty,
     /// returns an empty bitmap. Otherwise restores the pruned state (the caller must replay
     /// retained elements to restore its full state).
@@ -501,8 +504,8 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     }
 
     /// Convert this merkleized bitmap into an unmerkleized bitmap without making any changes to it.
-    pub fn into_dirty(self) -> UnmerkleizedBitMap<E, D, N> {
-        UnmerkleizedBitMap {
+    pub fn into_dirty(self) -> UnmerkleizedAuthenticatedBitMap<E, D, N> {
+        UnmerkleizedAuthenticatedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
             mmr: self.mmr.into_dirty(),
@@ -515,7 +518,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize>
+    UnmerkleizedAuthenticatedBitMap<E, D, N>
+{
     /// Add a single bit to the end of the bitmap.
     ///
     /// # Warning
@@ -563,7 +568,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     pub async fn merkleize(
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
-    ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
+    ) -> Result<MerkleizedAuthenticatedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
@@ -578,9 +583,9 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
             .state
             .dirty_chunks
             .iter()
-            .map(|&chunk| {
-                let loc = Location::new_unchecked((chunk + pruned_chunks) as u64);
-                (loc, self.bitmap.get_chunk(chunk))
+            .map(|chunk| {
+                let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
+                (loc, self.bitmap.get_chunk(*chunk))
             })
             .collect::<Vec<_>>();
         self.mmr
@@ -597,7 +602,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
             partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
         };
 
-        Ok(MerkleizedBitMap {
+        Ok(MerkleizedAuthenticatedBitMap {
             bitmap: self.bitmap,
             authenticated_len: self.authenticated_len,
             mmr,
@@ -609,7 +614,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
 }
 
 impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D>
-    for MerkleizedBitMap<E, D, N>
+    for MerkleizedAuthenticatedBitMap<E, D, N>
 {
     fn size(&self) -> Position {
         self.size()
@@ -632,7 +637,8 @@ mod tests {
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 
     type TestContext = deterministic::Context;
-    type TestMerkleizedBitMap<const N: usize> = MerkleizedBitMap<TestContext, sha256::Digest, N>;
+    type TestMerkleizedBitMap<const N: usize> =
+        MerkleizedAuthenticatedBitMap<TestContext, sha256::Digest, N>;
 
     impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
         /// Convert a bit into the position of the Merkle tree leaf it belongs to.
@@ -643,7 +649,9 @@ mod tests {
         }
     }
 
-    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
+    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize>
+        UnmerkleizedAuthenticatedBitMap<E, D, N>
+    {
         // Add a byte's worth of bits to the bitmap.
         //
         // # Warning
@@ -1053,10 +1061,15 @@ mod tests {
         executor.start(|context| async move {
             // Build a bitmap with 10 chunks worth of bits.
             let mut hasher = StandardHasher::<Sha256>::new();
-            let bitmap: MerkleizedBitMap<TestContext, sha256::Digest, N> =
-                MerkleizedBitMap::init(context.with_label("bitmap"), "test", None, &mut hasher)
-                    .await
-                    .unwrap();
+            let bitmap: MerkleizedAuthenticatedBitMap<TestContext, sha256::Digest, N> =
+                MerkleizedAuthenticatedBitMap::init(
+                    context.with_label("bitmap"),
+                    "test",
+                    None,
+                    &mut hasher,
+                )
+                .await
+                .unwrap();
             let mut dirty = bitmap.into_dirty();
             for i in 0u32..10 {
                 dirty.push_chunk(&test_chunk(format!("test{i}").as_bytes()));
@@ -1082,7 +1095,7 @@ mod tests {
 
                     // Proof should verify for the original chunk containing the bit.
                     assert!(
-                        MerkleizedBitMap::<TestContext, _, N>::verify_bit_inclusion(
+                        MerkleizedAuthenticatedBitMap::<TestContext, _, N>::verify_bit_inclusion(
                             &mut hasher,
                             &proof,
                             &chunk,
@@ -1095,7 +1108,7 @@ mod tests {
                     // Flip the bit in the chunk and make sure the proof fails.
                     let corrupted = flip_bit(i, &chunk);
                     assert!(
-                        !MerkleizedBitMap::<TestContext, _, N>::verify_bit_inclusion(
+                        !MerkleizedAuthenticatedBitMap::<TestContext, _, N>::verify_bit_inclusion(
                             &mut hasher,
                             &proof,
                             &corrupted,

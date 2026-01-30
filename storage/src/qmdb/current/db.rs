@@ -45,7 +45,7 @@ mod private {
 
 /// Trait for valid [Db] type states.
 pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
-    /// The merkleization type state for the inner [any::db::Db].
+    /// The merkleization type state for the inner `any::db::Db`.
     type AnyState: mmr::mem::State<D>;
     /// The merkleization type state for the inner [bitmap::BitMap].
     type BitMapState: bitmap::State<D>;
@@ -565,7 +565,7 @@ where
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
 pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &bitmap::MerkleizedBitMap<E, H::Digest, N>,
+    status: &bitmap::MerkleizedAuthenticatedBitMap<E, H::Digest, N>,
     mmr: &Mmr<E, H::Digest, mmr::mem::Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
@@ -601,9 +601,9 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
 /// * `mmr` - The MMR storage used for grafting.
 pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: bitmap::UnmerkleizedBitMap<E, H::Digest, N>,
+    status: bitmap::UnmerkleizedAuthenticatedBitMap<E, H::Digest, N>,
     mmr: &impl mmr::storage::Storage<H::Digest>,
-) -> Result<bitmap::MerkleizedBitMap<E, H::Digest, N>, Error>
+) -> Result<bitmap::MerkleizedAuthenticatedBitMap<E, H::Digest, N>, Error>
 where
     E: Storage + Clock + Metrics,
     H: Hasher,
