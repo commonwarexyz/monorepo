@@ -74,6 +74,7 @@ impl ProxyConfig {
 
 /// Parse PROXY header from a buffered reader, returning the real client address.
 /// Consumes the header bytes from the reader.
+#[cfg_attr(feature = "iouring-network", allow(dead_code))]
 pub async fn parse<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<SocketAddr, Error> {
     let buf = reader.fill_buf().await.map_err(|_| Error::ReadFailed)?;
 
