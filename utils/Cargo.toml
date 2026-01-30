@@ -20,7 +20,6 @@ cfg-if.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-macros.workspace = true
 futures = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync"], optional = true }
 hashbrown.workspace = true
 num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
@@ -29,6 +28,7 @@ num-traits.workspace = true
 pin-project.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"], optional = true }
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
