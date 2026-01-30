@@ -448,15 +448,10 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
     /// Returns whether the queue has any pending unacked items.
     pub fn is_empty(&self) -> bool {
-        // Check if there are any unacked items from ack_floor to size
-        let mut pos = self.ack_floor;
-        while pos < self.journal.size() {
-            if !self.is_acked(pos) {
-                return false;
-            }
-            pos += 1;
-        }
-        true
+        // Total acked = items below floor + items tracked in acked_above
+        // Empty when all items in queue are acked
+        let total_acked = self.ack_floor + self.acked_above_count() as u64;
+        total_acked >= self.journal.size()
     }
 
     /// Returns whether a specific position has been acknowledged.
@@ -501,21 +496,51 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Queue<E, V> {
     type Error = Error;
 
+    /// Commit enqueued items and ack state to storage.
+    ///
+    /// # Sync Ordering
+    ///
+    /// The journal is synced before the ack metadata. This ordering ensures
+    /// at-least-once delivery semantics:
+    ///
+    /// - If a crash occurs after journal sync but before ack metadata sync,
+    ///   items are persisted but ack state may be stale. On recovery, some
+    ///   items may be re-delivered (at-least-once).
+    ///
+    /// - If ack metadata were synced first, a crash could leave acks persisted
+    ///   for items that were never durably written, causing item loss.
+    ///
+    /// This ordering prioritizes data safety over exactly-once delivery.
     async fn commit(&mut self) -> Result<(), Self::Error> {
-        // Save ack state if dirty
         if self.ack_dirty {
             self.save_ack_state();
         }
+        // Sync journal first to ensure items are durable before acks
         self.journal.commit().await?;
         self.ack_metadata.sync().await?;
         Ok(())
     }
 
+    /// Sync enqueued items and ack state to storage.
+    ///
+    /// # Sync Ordering
+    ///
+    /// The journal is synced before the ack metadata. This ordering ensures
+    /// at-least-once delivery semantics:
+    ///
+    /// - If a crash occurs after journal sync but before ack metadata sync,
+    ///   items are persisted but ack state may be stale. On recovery, some
+    ///   items may be re-delivered (at-least-once).
+    ///
+    /// - If ack metadata were synced first, a crash could leave acks persisted
+    ///   for items that were never durably written, causing item loss.
+    ///
+    /// This ordering prioritizes data safety over exactly-once delivery.
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        // Save ack state if dirty
         if self.ack_dirty {
             self.save_ack_state();
         }
+        // Sync journal first to ensure items are durable before acks
         self.journal.sync().await?;
         self.ack_metadata.sync().await?;
         Ok(())
@@ -925,6 +950,71 @@ mod tests {
             let (p, item) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(p, 15);
             assert_eq!(item, vec![15]);
+
+            queue.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_multiple_sequential_prunes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_multi_prune");
+            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Enqueue many items across multiple sections (items_per_section = 10)
+            for i in 0..50u8 {
+                queue.enqueue(vec![i]).await.unwrap();
+            }
+            queue.sync().await.unwrap();
+
+            // First batch: ack and prune items 0-14
+            for i in 0..15 {
+                queue.dequeue().await.unwrap();
+                queue.ack(i).unwrap();
+            }
+            assert_eq!(queue.ack_floor(), 15);
+            queue.sync().await.unwrap();
+            let pruned1 = queue.prune().await.unwrap();
+            assert!(pruned1);
+
+            // Verify items 15+ still readable
+            let (p, item) = queue.dequeue().await.unwrap().unwrap();
+            assert_eq!(p, 15);
+            assert_eq!(item, vec![15]);
+
+            // Second batch: ack and prune items 15-29
+            queue.ack(15).unwrap();
+            for i in 16..30 {
+                queue.dequeue().await.unwrap();
+                queue.ack(i).unwrap();
+            }
+            assert_eq!(queue.ack_floor(), 30);
+            queue.sync().await.unwrap();
+            let pruned2 = queue.prune().await.unwrap();
+            assert!(pruned2);
+
+            // Verify items 30+ still readable
+            let (p, item) = queue.dequeue().await.unwrap().unwrap();
+            assert_eq!(p, 30);
+            assert_eq!(item, vec![30]);
+
+            // Third batch: ack remaining items
+            queue.ack(30).unwrap();
+            for i in 31..50 {
+                queue.dequeue().await.unwrap();
+                queue.ack(i).unwrap();
+            }
+            assert_eq!(queue.ack_floor(), 50);
+            queue.sync().await.unwrap();
+            let pruned3 = queue.prune().await.unwrap();
+            assert!(pruned3);
+
+            // Queue should be empty now
+            assert!(queue.is_empty());
+            assert!(queue.dequeue().await.unwrap().is_none());
 
             queue.destroy().await.unwrap();
         });
