@@ -20,6 +20,7 @@ use commonware_runtime::Metrics as _;
 use commonware_utils::NZU64;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
+use tracing::debug;
 
 /// Type alias for sync engine errors
 type Error<DB, R> = qmdb::sync::Error<<R as Resolver>::Error, <DB as Database>::Digest>;
@@ -173,13 +174,56 @@ where
             }));
         }
 
-        // Create journal and verifier using the database's factory methods
-        let journal = <DB::Journal as Journal>::new(
-            config.context.with_label("journal"),
-            config.db_config.journal_config(),
-            config.target.range.clone(),
-        )
-        .await?;
+        // Open or create a journal within the sync target range.
+        //
+        // Handles scenarios based on existing journal data vs. the given range:
+        // 1. No existing data: Creates journal at range.start (or empty if range.start == 0)
+        // 2. Data within range: Returns the journal as-is
+        // 3. Data exceeds range: Returns error
+        // 4. Stale data: Destroys and recreates at range.start
+        let range_start = *config.target.range.start;
+        let range_end = *config.target.range.end;
+        let journal_context = config.context.with_label("journal");
+        let journal_config = config.db_config.journal_config();
+
+        debug!(range_start, range_end, "opening journal for sync");
+
+        // Use a labeled context for the probe init. If we need to recreate, we'll use the original
+        // context (different metric prefix) to avoid duplicate metric registration since destroy
+        // doesn't unregister metrics.
+        let journal =
+            DB::Journal::init(journal_context.with_label("journal"), journal_config.clone())
+                .await?;
+        let size = journal.size();
+
+        let journal = if size == 0 {
+            // No existing data - initialize at the start of the sync range.
+            if range_start == 0 {
+                debug!("no existing journal data, returning empty journal");
+                journal
+            } else {
+                debug!(
+                    range_start,
+                    "no existing journal data, initializing at sync range start"
+                );
+                journal.destroy().await?;
+                DB::Journal::init_at_size(journal_context, journal_config, range_start).await?
+            }
+        } else if size > range_end {
+            // Data exceeds the sync range.
+            return Err(crate::journal::Error::ItemOutOfRange(size).into());
+        } else if size <= range_start {
+            // All existing data is before our sync range - destroy and recreate fresh.
+            debug!(
+                size,
+                range_start, "existing journal data is stale, re-initializing at start position"
+            );
+            journal.destroy().await?;
+            DB::Journal::init_at_size(journal_context, journal_config, range_start).await?
+        } else {
+            // Data is within range - reuse.
+            journal
+        };
 
         let mut engine = Self {
             outstanding_requests: Requests::new(),
@@ -225,7 +269,7 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
-        let log_size = self.journal.size().await;
+        let log_size = self.journal.size();
 
         for _ in 0..num_requests {
             // Convert fetched operations to operation counts for shared gap detection
@@ -304,7 +348,7 @@ where
     /// and applies them in order. It removes stale batches and handles partial
     /// application of batches when needed.
     pub async fn apply_operations(&mut self) -> Result<(), Error<DB, R>> {
-        let mut next_loc = self.journal.size().await;
+        let mut next_loc = self.journal.size();
 
         // Remove any batches of operations with stale data.
         // That is, those whose last operation is before `next_loc`.
@@ -362,7 +406,7 @@ where
 
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
-        let journal_size = self.journal.size().await;
+        let journal_size = self.journal.size();
         let target_journal_size = self.target.range.end;
 
         // Check if we've completed sync

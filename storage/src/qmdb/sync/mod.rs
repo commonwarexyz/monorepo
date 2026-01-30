@@ -10,7 +10,7 @@ mod error;
 pub use error::{EngineError, Error};
 
 mod gaps;
-mod journal;
+pub(crate) mod journal;
 
 pub(crate) use journal::Journal;
 

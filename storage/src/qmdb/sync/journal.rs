@@ -1,32 +1,42 @@
 use crate::mmr::Location;
-use std::{future::Future, ops::Range};
-use tracing::debug;
+use std::future::Future;
 
 /// Journal of operations used by a [super::Database]
 pub trait Journal: Sized + Send {
-    /// The context of the journal
-    type Context;
+    /// The context of the journal.
+    type Context: Clone;
 
-    /// The configuration of the journal
-    type Config;
+    /// The configuration of the journal.
+    type Config: Clone;
 
-    /// The type of operations in the journal
+    /// The type of operations in the journal.
     type Op: Send;
 
-    /// The error type returned by the journal
-    type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error>;
+    /// The error type returned by the journal.
+    type Error: std::error::Error
+        + Send
+        + 'static
+        + Into<crate::qmdb::Error>
+        + From<crate::journal::Error>;
 
-    /// Create/open a journal for syncing the given range.
-    ///
-    /// The implementation must:
-    /// - Reuse any on-disk data whose logical locations lie within the range.
-    /// - Discard/ignore any data outside the range.
-    /// - Report `size()` equal to the next location to be filled.
-    fn new(
+    /// Open or create a journal.
+    fn init(
         context: Self::Context,
         config: Self::Config,
-        range: Range<Location>,
     ) -> impl Future<Output = Result<Self, Self::Error>>;
+
+    /// Initialize at a specific size (empty journal with pruning boundary set).
+    fn init_at_size(
+        context: Self::Context,
+        config: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self, Self::Error>>;
+
+    /// Destroy the journal and all its data.
+    fn destroy(self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Current size (next location to fill).
+    fn size(&self) -> u64;
 
     /// Discard all operations before the given location.
     ///
@@ -37,29 +47,42 @@ pub trait Journal: Sized + Send {
     /// Persist the journal.
     fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Get the number of operations in the journal
-    fn size(&self) -> impl Future<Output = u64> + Send;
-
-    /// Append an operation to the journal
+    /// Append an operation to the journal.
     fn append(&mut self, op: Self::Op) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
 where
-    E: commonware_runtime::Clock + commonware_runtime::Storage + commonware_runtime::Metrics,
+    E: commonware_runtime::Clock
+        + commonware_runtime::Storage
+        + commonware_runtime::Metrics
+        + Clone,
     V: commonware_codec::CodecShared,
+    V::Cfg: Clone,
 {
     type Context = E;
     type Config = crate::journal::contiguous::variable::Config<V::Cfg>;
     type Op = V;
     type Error = crate::journal::Error;
 
-    async fn new(
+    async fn init(context: Self::Context, config: Self::Config) -> Result<Self, Self::Error> {
+        Self::init(context, config).await
+    }
+
+    async fn init_at_size(
         context: Self::Context,
         config: Self::Config,
-        range: Range<Location>,
+        size: u64,
     ) -> Result<Self, Self::Error> {
-        Self::init_sync(context, config.clone(), *range.start..*range.end).await
+        Self::init_at_size(context, config, size).await
+    }
+
+    async fn destroy(self) -> Result<(), Self::Error> {
+        Self::destroy(self).await
+    }
+
+    fn size(&self) -> u64 {
+        Self::size(self)
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
@@ -72,10 +95,6 @@ where
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Self::sync(self).await
-    }
-
-    async fn size(&self) -> u64 {
-        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -85,7 +104,10 @@ where
 
 impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
 where
-    E: commonware_runtime::Clock + commonware_runtime::Storage + commonware_runtime::Metrics,
+    E: commonware_runtime::Clock
+        + commonware_runtime::Storage
+        + commonware_runtime::Metrics
+        + Clone,
     A: commonware_codec::CodecFixedShared,
 {
     type Context = E;
@@ -93,56 +115,24 @@ where
     type Op = A;
     type Error = crate::journal::Error;
 
-    async fn new(
+    async fn init(context: Self::Context, config: Self::Config) -> Result<Self, Self::Error> {
+        Self::init(context, config).await
+    }
+
+    async fn init_at_size(
         context: Self::Context,
         config: Self::Config,
-        range: Range<Location>,
+        size: u64,
     ) -> Result<Self, Self::Error> {
-        assert!(!range.is_empty(), "range must not be empty");
-        let range_start = *range.start;
-        let range_end = *range.end;
+        Self::init_at_size(context, config, size).await
+    }
 
-        debug!(
-            range_start,
-            range_end,
-            items_per_blob = config.items_per_blob.get(),
-            "initializing contiguous fixed journal for sync"
-        );
+    async fn destroy(self) -> Result<(), Self::Error> {
+        Self::destroy(self).await
+    }
 
-        let journal = Self::init(context.clone(), config.clone()).await?;
-        let size = journal.size();
-
-        // No existing data - initialize at the start of the sync range.
-        if size == 0 {
-            if range_start == 0 {
-                debug!("no existing journal data, returning empty journal");
-                return Ok(journal);
-            }
-            debug!(
-                range_start,
-                "no existing journal data, initializing at sync range start"
-            );
-            journal.destroy().await?;
-            return Self::init_at_size(context, config, range_start).await;
-        }
-
-        // Data exceeds the sync range.
-        if size > range_end {
-            return Err(crate::journal::Error::ItemOutOfRange(size));
-        }
-
-        // All existing data is before our sync range - destroy and recreate fresh.
-        if size <= range_start {
-            debug!(
-                size,
-                range_start, "existing journal data is stale, re-initializing at start position"
-            );
-            journal.destroy().await?;
-            return Self::init_at_size(context, config, range_start).await;
-        }
-
-        // Data is within range - reuse.
-        Ok(journal)
+    fn size(&self) -> u64 {
+        Self::size(self)
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
@@ -155,10 +145,6 @@ where
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
         Self::sync(self).await
-    }
-
-    async fn size(&self) -> u64 {
-        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
