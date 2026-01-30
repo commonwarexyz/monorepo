@@ -65,6 +65,8 @@ All public primitives (and primitive dialects) in the Commonware Library are ann
 | **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
+_Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future)._
+
 Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
 
 ```bash
@@ -74,8 +76,6 @@ RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stabi
 # Check if your application only uses commonware APIs with stability >= BETA
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
-
-_All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future)._
 
 ## Licensing
 
