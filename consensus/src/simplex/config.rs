@@ -9,7 +9,7 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the consensus engine.
@@ -79,8 +79,8 @@ pub struct Config<
     /// The size of the write buffer to use for each blob in the journal.
     pub write_buffer: NonZeroUsize,
 
-    /// Buffer pool for the journal.
-    pub buffer_pool: PoolRef,
+    /// Page cache for the journal.
+    pub page_cache: CacheRef,
 
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.

@@ -38,9 +38,6 @@ pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
 /// Version of logrotate package for Ubuntu 24.04
 pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
 
-/// Version of jq package for Ubuntu 24.04
-pub const JQ_VERSION: &str = "1.7.1-3build1";
-
 /// Version of libfontconfig1 package for Ubuntu 24.04
 pub const LIBFONTCONFIG1_VERSION: &str = "2.15.0-1.1ubuntu2";
 
@@ -145,13 +142,6 @@ pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) 
 pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/logrotate/{version}/linux-{arch}/logrotate_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-pub(crate) fn jq_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/jq/{version}/linux-{arch}/jq_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -395,18 +385,6 @@ pub(crate) fn logrotate_download_url(version: &str, architecture: Architecture) 
     };
     format!(
         "{base}/main/l/logrotate/logrotate_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
-}
-
-/// Returns the download URL for jq from Ubuntu archive
-pub(crate) fn jq_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/main/j/jq/jq_{version}_{arch}.deb",
         arch = architecture.as_str()
     )
 }
@@ -912,7 +890,6 @@ pub struct InstanceUrls {
     pub libjemalloc_deb: String,
     pub logrotate_deb: String,
     pub unzip_deb: String,
-    pub jq_deb: Option<String>,
 }
 
 /// Phase 1 (optional): Install apt packages on binary instances
@@ -932,17 +909,11 @@ sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(una
 
 /// Phase 2: Download files from S3 on binary instances
 pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
-    let jq_download = urls
-        .jq_deb
-        .as_ref()
-        .map(|url| format!("{WGET} -O /home/ubuntu/jq.deb '{url}' &\n"))
-        .unwrap_or_default();
-    let jq_verify = if urls.jq_deb.is_some() { " jq.deb" } else { "" };
     format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz \
-      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/unzip.deb /home/ubuntu/jq.deb
+      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/unzip.deb
 rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
 
 # Unmask services in case previous attempt left them masked
@@ -965,13 +936,13 @@ sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
 {WGET} -O /home/ubuntu/logrotate.deb '{}' &
 {WGET} -O /home/ubuntu/unzip.deb '{}' &
-{jq_download}wait
+wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
          node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         libjemalloc2.deb logrotate.deb unzip.deb{jq_verify}; do
+         libjemalloc2.deb logrotate.deb unzip.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -1000,11 +971,6 @@ done
 /// Phase 3: Setup and start services on binary instances
 pub(crate) fn install_binary_setup_cmd(profiling: bool, architecture: Architecture) -> String {
     let arch = architecture.as_str();
-    let jq_install = if profiling {
-        "sudo dpkg -i /home/ubuntu/jq.deb\n"
-    } else {
-        ""
-    };
     let perf_setup = if profiling {
         r#"
 # Setup pyroscope agent (perf symlink must be created after linux-tools installed via apt)
@@ -1031,7 +997,7 @@ echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo 
 sudo dpkg -i /home/ubuntu/unzip.deb
 sudo dpkg -i /home/ubuntu/libjemalloc2.deb
 sudo dpkg -i /home/ubuntu/logrotate.deb
-{jq_install}
+
 # Install Promtail
 sudo mkdir -p /opt/promtail /etc/promtail
 sudo chown -R ubuntu:ubuntu /opt/promtail
@@ -1208,9 +1174,9 @@ PERF_STACK_FILE="/tmp/perf.stack"
 PROFILE_DURATION=60 # seconds
 PERF_FREQ=100 # Hz
 
-# Construct the Pyroscope application name with tags
+# Construct the Pyroscope application name with tags (URL-encoded)
 RAW_APP_NAME="binary{{deployer_name={name},deployer_ip={ip},deployer_region={region},deployer_arch={arch}}}"
-APP_NAME=$(jq -nr --arg str "$RAW_APP_NAME" '$str | @uri')
+APP_NAME=$(printf '%s' "$RAW_APP_NAME" | python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))")
 
 # Get the PID of the binary service
 PID=$(systemctl show --property MainPID ${{SERVICE_NAME}} | cut -d= -f2)
@@ -1330,10 +1296,6 @@ mod tests {
             "tools/binaries/logrotate/3.21.0-2build1/linux-arm64/logrotate_3.21.0-2build1_arm64.deb"
         );
         assert_eq!(
-            jq_bin_s3_key("1.7.1-3build1", arch),
-            "tools/binaries/jq/1.7.1-3build1/linux-arm64/jq_1.7.1-3build1_arm64.deb"
-        );
-        assert_eq!(
             libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),
             "tools/binaries/libfontconfig1/2.15.0-1.1ubuntu2/linux-arm64/libfontconfig1_2.15.0-1.1ubuntu2_arm64.deb"
         );
@@ -1381,10 +1343,6 @@ mod tests {
         assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
             "tools/binaries/logrotate/3.21.0-2build1/linux-amd64/logrotate_3.21.0-2build1_amd64.deb"
-        );
-        assert_eq!(
-            jq_bin_s3_key("1.7.1-3build1", arch),
-            "tools/binaries/jq/1.7.1-3build1/linux-amd64/jq_1.7.1-3build1_amd64.deb"
         );
         assert_eq!(
             libfontconfig_bin_s3_key("2.15.0-1.1ubuntu2", arch),

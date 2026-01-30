@@ -4,7 +4,7 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    buffer::PoolRef,
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
     RayonPoolSpawner,
 };
@@ -28,7 +28,7 @@ const PARTITION_SUFFIX: &str = "keyless_bench_partition";
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
-/// The number of pages to cache in the buffer pool.
+/// The number of pages to cache in the page cache.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
@@ -47,7 +47,7 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
