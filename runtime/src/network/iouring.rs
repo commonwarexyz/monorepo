@@ -229,12 +229,21 @@ impl crate::Listener for Listener {
         // Parse PROXY header if configured and connection is from trusted proxy
         let client_addr = if let Some(ref proxy_cfg) = self.proxy {
             if proxy_cfg.is_trusted(tcp_addr.ip()) {
-                // Fill buffer to get PROXY header data
-                io_stream.fill_buffer().await?;
-                let buf = &io_stream.buffer.as_ref()[..io_stream.buffer_len];
-                let (addr, consumed) = crate::network::proxy::parse_from_bytes(buf)?;
-                io_stream.buffer_pos = consumed;
-                addr
+                // Keep reading until we have enough data to parse the PROXY header
+                loop {
+                    io_stream.fill_buffer().await?;
+                    let buf = &io_stream.buffer.as_ref()[..io_stream.buffer_len];
+                    match crate::network::proxy::parse_from_bytes(buf)? {
+                        crate::network::proxy::ParseResult::Complete(addr, consumed) => {
+                            io_stream.buffer_pos = consumed;
+                            break addr;
+                        }
+                        crate::network::proxy::ParseResult::Incomplete => {
+                            // Need more data, continue reading
+                            continue;
+                        }
+                    }
+                }
             } else {
                 tcp_addr
             }

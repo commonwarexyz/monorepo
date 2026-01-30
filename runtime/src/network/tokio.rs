@@ -276,7 +276,7 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
-        network::{tests, tokio as TokioNetwork},
+        network::{proxy::ProxyConfig, tests, tokio as TokioNetwork},
         Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
@@ -480,5 +480,185 @@ mod tests {
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
+    }
+
+    // PROXY protocol integration tests
+
+    #[tokio::test]
+    async fn test_proxy_v1_trusted_source() {
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("127.0.0.0/8")
+            .unwrap();
+
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5))
+                .with_proxy(proxy_config),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the proxied address, not 127.0.0.1
+            assert_eq!(client_addr.ip().to_string(), "192.168.1.100");
+            assert_eq!(client_addr.port(), 56789);
+
+            // Data after PROXY header should be readable
+            let data = stream.recv(5).await.unwrap();
+            assert_eq!(data.coalesce(), b"hello");
+        });
+
+        // Connect and send PROXY header followed by data
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"PROXY TCP4 192.168.1.100 10.0.0.1 56789 443\r\nhello")
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_untrusted_source_no_parsing() {
+        // Only trust 10.0.0.0/8, not 127.0.0.0/8
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("10.0.0.0/8")
+            .unwrap();
+
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5))
+                .with_proxy(proxy_config),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the TCP address (127.0.0.1) since source is not trusted
+            assert!(client_addr.ip().is_loopback());
+
+            // PROXY header is NOT parsed, so it appears as data
+            let data = stream.recv(6).await.unwrap();
+            assert_eq!(data.coalesce(), b"PROXY ");
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"PROXY TCP4 192.168.1.100 10.0.0.1 56789 443\r\nhello")
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_no_config_no_parsing() {
+        // No proxy config at all
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5)),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the TCP address
+            assert!(client_addr.ip().is_loopback());
+
+            // PROXY header appears as data
+            let data = stream.recv(6).await.unwrap();
+            assert_eq!(data.coalesce(), b"PROXY ");
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"PROXY TCP4 192.168.1.100 10.0.0.1 56789 443\r\nhello")
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_v2_trusted_source() {
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("127.0.0.0/8")
+            .unwrap();
+
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5))
+                .with_proxy(proxy_config),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the proxied address from v2 header
+            assert_eq!(client_addr.ip().to_string(), "192.168.1.100");
+            assert_eq!(client_addr.port(), 56789);
+
+            // Data after PROXY header should be readable
+            let data = stream.recv(5).await.unwrap();
+            assert_eq!(data.coalesce(), b"hello");
+        });
+
+        // Build v2 binary header
+        const V2_SIG: [u8; 12] = [
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+        ];
+        let mut header = Vec::new();
+        header.extend_from_slice(&V2_SIG);
+        header.push(0x21); // version 2, PROXY command
+        header.push(0x11); // AF_INET, TCP
+        header.extend_from_slice(&12u16.to_be_bytes()); // address length
+        header.extend_from_slice(&[192, 168, 1, 100]); // src ip
+        header.extend_from_slice(&[10, 0, 0, 1]); // dst ip
+        header.extend_from_slice(&56789u16.to_be_bytes()); // src port
+        header.extend_from_slice(&443u16.to_be_bytes()); // dst port
+        header.extend_from_slice(b"hello");
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(header).await.unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_invalid_header_from_trusted_rejected() {
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("127.0.0.0/8")
+            .unwrap();
+
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5))
+                .with_proxy(proxy_config),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            // Accept should fail because PROXY header is invalid
+            let result = listener.accept().await;
+            assert!(result.is_err());
+        });
+
+        // Connect and send invalid data (not a PROXY header)
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"GET / HTTP/1.1\r\n").await.unwrap();
+
+        server.await.unwrap();
     }
 }
