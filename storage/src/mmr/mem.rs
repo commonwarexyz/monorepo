@@ -19,6 +19,7 @@ cfg_if::cfg_if! {
         use rayon::prelude::*;
     } else {
         /// Placeholder for no_std builds where parallelism is unavailable.
+        // TODO(#3001): Migrate to commonware-parallel
         pub struct ThreadPool;
     }
 }
