@@ -39,7 +39,6 @@ struct ToolUrls {
     promtail: String,
     libjemalloc: String,
     logrotate: String,
-    jq: String,
     fonts_dejavu_mono: String,
     fonts_dejavu_core: String,
     fontconfig_config: String,
@@ -195,19 +194,21 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
 
     // Setup S3 bucket and cache observability tools
-    info!(bucket = BUCKET_NAME, "setting up S3 bucket");
+    let bucket_name = get_bucket_name();
+    info!(bucket = bucket_name.as_str(), "setting up S3 bucket");
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
-    ensure_bucket_exists(&s3_client, BUCKET_NAME, MONITORING_REGION).await?;
+    ensure_bucket_exists(&s3_client, &bucket_name, MONITORING_REGION).await?;
 
     // Cache observability tools for each architecture needed
     info!("uploading observability tools to S3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
+        let bucket_name = bucket_name.clone();
         async move {
-            if object_exists(&s3_client, BUCKET_NAME, &s3_key).await? {
+            if object_exists(&s3_client, &bucket_name, &s3_key).await? {
                 info!(key = s3_key.as_str(), "tool already in S3");
-                return presign_url(&s3_client, BUCKET_NAME, &s3_key, PRESIGN_DURATION).await;
+                return presign_url(&s3_client, &bucket_name, &s3_key, PRESIGN_DURATION).await;
             }
             info!(
                 key = s3_key.as_str(),
@@ -217,7 +218,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             download_file(&download_url, &temp_path).await?;
             let url = cache_and_presign(
                 &s3_client,
-                BUCKET_NAME,
+                &bucket_name,
                 &s3_key,
                 UploadSource::File(&temp_path),
                 PRESIGN_DURATION,
@@ -248,7 +249,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, jq_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 14] =
+             libjemalloc_url, logrotate_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -259,7 +260,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
                 cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
                 cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
-                cache_tool(jq_bin_s3_key(JQ_VERSION, *arch), jq_download_url(JQ_VERSION, *arch)),
                 cache_tool(fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION, *arch), fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
                 cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
@@ -280,7 +280,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 promtail: promtail_url,
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
-                jq: jq_url,
                 fonts_dejavu_mono: fonts_dejavu_mono_url.clone(),
                 fonts_dejavu_core: fonts_dejavu_core_url.clone(),
                 fontconfig_config: fontconfig_config_url,
@@ -333,13 +332,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             Ok::<_, Error>(
                 try_join_all(binary_digests.iter().map(|(digest, path)| {
                     let s3_client = s3_client.clone();
+                    let bucket_name = bucket_name.clone();
                     let digest = digest.clone();
                     let key = binary_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            BUCKET_NAME,
+                            &bucket_name,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -357,13 +357,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             Ok::<_, Error>(
                 try_join_all(config_digests.iter().map(|(digest, path)| {
                     let s3_client = s3_client.clone();
+                    let bucket_name = bucket_name.clone();
                     let digest = digest.clone();
                     let key = config_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            BUCKET_NAME,
+                            &bucket_name,
                             &key,
                             UploadSource::File(path.as_ref()),
                             PRESIGN_DURATION,
@@ -872,20 +873,20 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 14] = try_join_all([
-        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, BUCKET_NAME, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
     ])
     .await?
     .try_into()
@@ -899,7 +900,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         std::fs::write(&temp_path, &binary_service_content)?;
         let binary_service_url = cache_and_presign(
             &s3_client,
-            BUCKET_NAME,
+            &bucket_name,
             &binary_service_s3_key_for_arch(*arch),
             UploadSource::File(&temp_path),
             PRESIGN_DURATION,
@@ -931,14 +932,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let [prometheus_config_url, dashboard_url]: [String; 2] = try_join_all([
         cache_and_presign(
             &s3_client,
-            BUCKET_NAME,
+            &bucket_name,
             &monitoring_s3_key(tag, &prom_digest),
             UploadSource::File(&prom_path),
             PRESIGN_DURATION,
         ),
         cache_and_presign(
             &s3_client,
-            BUCKET_NAME,
+            &bucket_name,
             &monitoring_s3_key(tag, &dashboard_digest),
             UploadSource::File(&dashboard_path),
             PRESIGN_DURATION,
@@ -966,7 +967,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     std::fs::write(&hosts_path, &hosts_yaml)?;
     let hosts_url = cache_and_presign(
         &s3_client,
-        BUCKET_NAME,
+        &bucket_name,
         &hosts_s3_key(tag, &hosts_digest),
         UploadSource::File(&hosts_path),
         PRESIGN_DURATION,
@@ -1024,13 +1025,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             Ok::<_, Error>(
                 try_join_all(promtail_digests.iter().map(|(digest, path)| {
                     let s3_client = s3_client.clone();
+                    let bucket_name = bucket_name.clone();
                     let digest = digest.clone();
                     let key = promtail_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            BUCKET_NAME,
+                            &bucket_name,
                             &key,
                             UploadSource::File(&path),
                             PRESIGN_DURATION,
@@ -1048,13 +1050,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             Ok::<_, Error>(
                 try_join_all(pyroscope_digests.iter().map(|(digest, path)| {
                     let s3_client = s3_client.clone();
+                    let bucket_name = bucket_name.clone();
                     let digest = digest.clone();
                     let key = pyroscope_s3_key(tag, &digest);
                     let path = path.clone();
                     async move {
                         let url = cache_and_presign(
                             &s3_client,
-                            BUCKET_NAME,
+                            &bucket_name,
                             &key,
                             UploadSource::File(&path),
                             PRESIGN_DURATION,
@@ -1078,11 +1081,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         let promtail_digest = &instance_promtail_digest[name];
         let pyroscope_digest = &instance_pyroscope_digest[name];
         let tool_urls = &tool_urls_by_arch[&arch];
-        let jq_deb = if deployment.instance.profiling {
-            Some(tool_urls.jq.clone())
-        } else {
-            None
-        };
 
         instance_urls_map.insert(
             name.clone(),
@@ -1104,7 +1102,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
                     logrotate_deb: tool_urls.logrotate.clone(),
                     unzip_deb: tool_urls.unzip.clone(),
-                    jq_deb,
                 },
                 arch,
             ),

@@ -100,14 +100,15 @@ pub async fn profile(
     info!(architecture = %arch, "detected architecture");
 
     // Cache samply binary in S3 if needed and get presigned URL
+    let bucket_name = get_bucket_name();
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
-    ensure_bucket_exists(&s3_client, BUCKET_NAME, MONITORING_REGION).await?;
+    ensure_bucket_exists(&s3_client, &bucket_name, MONITORING_REGION).await?;
 
     // Cache samply archive in S3 (like other tools, we cache the archive and extract on the instance)
     let samply_s3_key = samply_bin_s3_key(SAMPLY_VERSION, arch);
-    let samply_url = if object_exists(&s3_client, BUCKET_NAME, &samply_s3_key).await? {
+    let samply_url = if object_exists(&s3_client, &bucket_name, &samply_s3_key).await? {
         info!(key = samply_s3_key.as_str(), "samply already in S3");
-        presign_url(&s3_client, BUCKET_NAME, &samply_s3_key, PRESIGN_DURATION).await?
+        presign_url(&s3_client, &bucket_name, &samply_s3_key, PRESIGN_DURATION).await?
     } else {
         info!(
             key = samply_s3_key.as_str(),
@@ -122,7 +123,7 @@ pub async fn profile(
         // Upload archive to S3
         let url = cache_and_presign(
             &s3_client,
-            BUCKET_NAME,
+            &bucket_name,
             &samply_s3_key,
             UploadSource::File(&temp_archive),
             PRESIGN_DURATION,

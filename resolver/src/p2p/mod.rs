@@ -562,7 +562,9 @@ mod tests {
             // Cancel before sending the fetch request, expecting no effect
             mailbox1.cancel(key.clone()).await;
             select! {
-                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = cons_out1.next() => {
+                    panic!("unexpected event");
+                },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
@@ -580,7 +582,9 @@ mod tests {
             // Attempt to cancel after data has been delivered, expecting no effect
             mailbox1.cancel(key.clone()).await;
             select! {
-                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = cons_out1.next() => {
+                    panic!("unexpected event");
+                },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
@@ -1385,7 +1389,9 @@ mod tests {
             // Retain before fetching should have no effect
             mailbox1.retain(|_| true).await;
             select! {
-                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = cons_out1.next() => {
+                    panic!("unexpected event");
+                },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
@@ -1466,7 +1472,9 @@ mod tests {
             // Clear before fetching should have no effect
             mailbox1.clear().await;
             select! {
-                _ = cons_out1.next() => { panic!("unexpected event"); },
+                _ = cons_out1.next() => {
+                    panic!("unexpected event");
+                },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 

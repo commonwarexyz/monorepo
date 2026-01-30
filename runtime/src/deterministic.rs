@@ -63,8 +63,10 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
+use commonware_macros::{stability, select};
+#[stability(BETA)]
 use commonware_codec::Encode;
-use commonware_macros::select;
+#[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -84,6 +86,7 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
+#[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -1085,9 +1088,7 @@ impl crate::Spawner for Context {
                 result.map_err(|_| Error::Closed)?;
                 Ok(())
             },
-            _ = timeout_future => {
-                Err(Error::Timeout)
-            }
+            _ = timeout_future => Err(Error::Timeout),
         }
     }
 
@@ -1099,6 +1100,7 @@ impl crate::Spawner for Context {
     }
 }
 
+#[stability(BETA)]
 impl crate::RayonPoolSpawner for Context {
     fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
         let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
@@ -1520,7 +1522,9 @@ mod tests {
     use crate::{
         deterministic, reschedule, Blob, IoBufMut, Metrics, Pooling, Resolver, Runner as _, Storage,
     };
-    use futures::stream::{FuturesUnordered, StreamExt as _};
+    #[cfg(not(feature = "external"))]
+    use futures::stream::StreamExt as _;
+    use futures::stream::FuturesUnordered;
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {

@@ -11,7 +11,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf,
 };
-use commonware_stream::{listen, Config as StreamConfig};
+use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
@@ -246,7 +246,7 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
                         drop(reservation);
                     }
                 });
-            }
+            },
         }
     }
 }

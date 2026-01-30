@@ -16,7 +16,7 @@ use crate::{
 };
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use core::{marker::PhantomData, ops::Range};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
@@ -57,8 +57,8 @@ pub struct Config<C> {
     /// An optional thread pool to use for parallelizing batch MMR operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// A keyless QMDB for variable length data.
@@ -153,7 +153,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
             thread_pool: cfg.thread_pool,
-            buffer_pool: cfg.buffer_pool.clone(),
+            page_cache: cfg.page_cache.clone(),
         };
 
         let journal_cfg = JournalConfig {
@@ -161,7 +161,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             items_per_section: cfg.log_items_per_section,
             compression: cfg.log_compression,
             codec_config: cfg.log_codec_config,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
             write_buffer: cfg.log_write_buffer,
         };
 
@@ -425,7 +425,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

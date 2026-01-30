@@ -2,8 +2,7 @@
 //!
 //! # Status
 //!
-//! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
@@ -14,227 +13,257 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-use commonware_codec::{Encode, ReadExt};
-use commonware_math::algebra::Random;
-use commonware_utils::Array;
-use rand::SeedableRng as _;
-use rand_chacha::ChaCha20Rng;
-
+// Modules containing #[macro_export] macros must use verbose cfg.
+// See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
 pub mod bls12381;
-pub mod certificate;
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
 pub mod ed25519;
-pub mod sha256;
-use rand_core::CryptoRngCore;
-pub use sha256::{CoreSha256, Sha256};
-pub mod blake3;
-pub use blake3::{Blake3, CoreBlake3};
-pub mod crc32;
-pub use crc32::Crc32;
-pub mod bloomfilter;
-pub use bloomfilter::BloomFilter;
-#[cfg(feature = "std")]
-pub mod handshake;
-pub mod lthash;
-pub use lthash::LtHash;
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // ALPHA
 pub mod secp256r1;
-pub mod secret;
-pub use secret::Secret;
-pub mod transcript;
 
-/// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
-pub trait Signer: Random + Send + Sync + Clone + 'static {
-    /// The type of [Signature] produced by this [Signer].
-    type Signature: Signature;
+commonware_macros::stability_scope!(ALPHA {
+    pub mod bloomfilter;
+    pub mod lthash;
 
-    /// The corresponding [PublicKey] type.
-    type PublicKey: PublicKey<Signature = Self::Signature>;
+    pub use crate::bloomfilter::BloomFilter;
+    pub use crate::lthash::LtHash;
+});
+commonware_macros::stability_scope!(BETA {
+    use commonware_codec::{Encode, ReadExt};
+    use commonware_math::algebra::Random;
+    use commonware_utils::Array;
+    use rand::SeedableRng as _;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::CryptoRngCore;
 
-    /// Returns the [PublicKey] corresponding to this [Signer].
-    fn public_key(&self) -> Self::PublicKey;
+    pub mod secret;
+    pub use crate::secret::Secret;
 
-    /// Sign a message with the given namespace.
-    ///
-    /// The message should not be hashed prior to calling this function. If a particular scheme
-    /// requires a payload to be hashed before it is signed, it will be done internally.
-    ///
-    /// A namespace must be used to prevent cross-domain attacks (where a signature can be reused
-    /// in a different context). It must be prepended to the message so that a signature meant for
-    /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
-    /// layer can't accidentally spend funds on the execution layer). See
-    /// [commonware_utils::union_unique] for details.
-    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature;
+    pub mod certificate;
+    pub mod transcript;
 
-    /// Create a [Signer] from a seed.
+    pub mod sha256;
+    pub use crate::sha256::{CoreSha256, Sha256};
+    pub mod blake3;
+    pub use crate::blake3::{Blake3, CoreBlake3};
+    pub mod crc32;
+    pub use crate::crc32::Crc32;
+
+    #[cfg(feature = "std")]
+    pub mod handshake;
+
+    /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
+    pub trait Signer: Random + Send + Sync + Clone + 'static {
+        /// The type of [Signature] produced by this [Signer].
+        type Signature: Signature;
+
+        /// The corresponding [PublicKey] type.
+        type PublicKey: PublicKey<Signature = Self::Signature>;
+
+        /// Returns the [PublicKey] corresponding to this [Signer].
+        fn public_key(&self) -> Self::PublicKey;
+
+        /// Sign a message with the given namespace.
+        ///
+        /// The message should not be hashed prior to calling this function. If a particular scheme
+        /// requires a payload to be hashed before it is signed, it will be done internally.
+        ///
+        /// A namespace must be used to prevent cross-domain attacks (where a signature can be reused
+        /// in a different context). It must be prepended to the message so that a signature meant for
+        /// one context cannot be used unexpectedly in another (i.e. signing a message on the network
+        /// layer can't accidentally spend funds on the execution layer). See
+        /// [commonware_utils::union_unique] for details.
+        fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature;
+
+        /// Create a [Signer] from a seed.
+        ///
+        /// # Warning
+        ///
+        /// This function is insecure and should only be used for examples
+        /// and testing.
+        fn from_seed(seed: u64) -> Self {
+            Self::random(&mut ChaCha20Rng::seed_from_u64(seed))
+        }
+    }
+
+    /// A [Signer] that can be serialized/deserialized.
+    pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
+
+    /// Verifies [Signature]s over messages.
+    pub trait Verifier {
+        /// The type of [Signature] that this verifier can verify.
+        type Signature: Signature;
+
+        /// Verify that a [Signature] is a valid over a given message.
+        ///
+        /// The message should not be hashed prior to calling this function. If a particular
+        /// scheme requires a payload to be hashed before it is signed, it will be done internally.
+        ///
+        /// Because namespace is prepended to message before signing, the namespace provided here must
+        /// match the namespace provided during signing.
+        fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool;
+    }
+
+    /// A [PublicKey], able to verify [Signature]s.
+    pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
+
+    /// A [Signature] over a message.
+    pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
+
+    /// An extension of [Signature] that supports public key recovery.
+    pub trait Recoverable: Signature {
+        /// The type of [PublicKey] that can be recovered from this [Signature].
+        type PublicKey: PublicKey<Signature = Self>;
+
+        /// Recover the [PublicKey] of the signer that created this [Signature] over the given message.
+        ///
+        /// The message should not be hashed prior to calling this function. If a particular
+        /// scheme requires a payload to be hashed before it is signed, it will be done internally.
+        ///
+        /// Like when verifying a signature, the namespace must match what was used during signing exactly.
+        fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
+    }
+
+    /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
+    pub trait BatchVerifier<K: PublicKey> {
+        /// Create a new batch verifier.
+        fn new() -> Self;
+
+        /// Append item to the batch.
+        ///
+        /// The message should not be hashed prior to calling this function. If a particular scheme
+        /// requires a payload to be hashed before it is signed, it will be done internally.
+        ///
+        /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
+        /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
+        /// a message on the network layer can't accidentally spend funds on the execution layer). See
+        /// [commonware_utils::union_unique] for details.
+        fn add(
+            &mut self,
+            namespace: &[u8],
+            message: &[u8],
+            public_key: &K,
+            signature: &K::Signature,
+        ) -> bool;
+
+        /// Verify all items added to the batch.
+        ///
+        /// Returns `true` if all items are valid, `false` otherwise.
+        ///
+        /// # Why Randomness?
+        ///
+        /// When performing batch verification, it is often important to add some randomness
+        /// to prevent an attacker from constructing a malicious batch of signatures that pass
+        /// batch verification but are invalid individually. Abstractly, think of this as
+        /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
+        /// (`c_1 + d` and `c_2 - d`).
+        ///
+        /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
+        fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool;
+    }
+
+    /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
+    /// (which should be cheap to clone).
     ///
     /// # Warning
     ///
-    /// This function is insecure and should only be used for examples
-    /// and testing.
-    fn from_seed(seed: u64) -> Self {
-        Self::random(&mut ChaCha20Rng::seed_from_u64(seed))
-    }
-}
-
-/// A [Signer] that can be serialized/deserialized.
-pub trait PrivateKey: Signer + Sized + ReadExt + Encode {}
-
-/// Verifies [Signature]s over messages.
-pub trait Verifier {
-    /// The type of [Signature] that this verifier can verify.
-    type Signature: Signature;
-
-    /// Verify that a [Signature] is a valid over a given message.
-    ///
-    /// The message should not be hashed prior to calling this function. If a particular
-    /// scheme requires a payload to be hashed before it is signed, it will be done internally.
-    ///
-    /// Because namespace is prepended to message before signing, the namespace provided here must
-    /// match the namespace provided during signing.
-    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool;
-}
-
-/// A [PublicKey], able to verify [Signature]s.
-pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
-
-/// A [Signature] over a message.
-pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
-
-/// An extension of [Signature] that supports public key recovery.
-pub trait Recoverable: Signature {
-    /// The type of [PublicKey] that can be recovered from this [Signature].
-    type PublicKey: PublicKey<Signature = Self>;
-
-    /// Recover the [PublicKey] of the signer that created this [Signature] over the given message.
-    ///
-    /// The message should not be hashed prior to calling this function. If a particular
-    /// scheme requires a payload to be hashed before it is signed, it will be done internally.
-    ///
-    /// Like when verifying a signature, the namespace must match what was used during signing exactly.
-    fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
-}
-
-/// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
-pub trait BatchVerifier<K: PublicKey> {
-    /// Create a new batch verifier.
-    fn new() -> Self;
-
-    /// Append item to the batch.
-    ///
-    /// The message should not be hashed prior to calling this function. If a particular scheme
-    /// requires a payload to be hashed before it is signed, it will be done internally.
-    ///
-    /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
-    /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-    /// a message on the network layer can't accidentally spend funds on the execution layer). See
-    /// [commonware_utils::union_unique] for details.
-    fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &K,
-        signature: &K::Signature,
-    ) -> bool;
-
-    /// Verify all items added to the batch.
-    ///
-    /// Returns `true` if all items are valid, `false` otherwise.
-    ///
-    /// # Why Randomness?
-    ///
-    /// When performing batch verification, it is often important to add some randomness
-    /// to prevent an attacker from constructing a malicious batch of signatures that pass
-    /// batch verification but are invalid individually. Abstractly, think of this as
-    /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
-    /// (`c_1 + d` and `c_2 - d`).
-    ///
-    /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-    fn verify<R: CryptoRngCore>(self, rng: &mut R) -> bool;
-}
-
-/// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
-/// (which should be cheap to clone).
-///
-/// # Warning
-///
-/// This trait requires [`Random::random`], but generating a digest at random is
-/// typically reserved for testing, and not production use.
-pub trait Digest: Array + Copy + Random {
-    /// An empty (all-zero) digest.
-    const EMPTY: Self;
-}
-
-/// An object that can be uniquely represented as a [Digest].
-pub trait Digestible: Clone + Sized + Send + Sync + 'static {
-    /// The type of digest produced by this object.
-    type Digest: Digest;
-
-    /// Returns a unique representation of the object as a [Digest].
-    ///
-    /// If many objects with [Digest]s are related (map to some higher-level
-    /// group [Digest]), you should also implement [Committable].
-    fn digest(&self) -> Self::Digest;
-}
-
-/// An object that can produce a commitment of itself.
-pub trait Committable: Clone + Sized + Send + Sync + 'static {
-    /// The type of commitment produced by this object.
-    type Commitment: Digest;
-
-    /// Returns the unique commitment of the object as a [Digest].
-    ///
-    /// For simple objects (like a block), this is often just the digest of the object
-    /// itself. For more complex objects, however, this may represent some root or base
-    /// of a proof structure (where many unique objects map to the same commitment).
-    ///
-    /// # Warning
-    ///
-    /// It must not be possible for two objects with the same [Digest] to map
-    /// to different commitments. Primitives assume there is a one-to-one
-    /// relation between digest and commitment and a one-to-many relation
-    /// between commitment and digest.
-    fn commitment(&self) -> Self::Commitment;
-}
-
-pub type DigestOf<H> = <H as Hasher>::Digest;
-
-/// Interface that commonware crates rely on for hashing.
-///
-/// Hash functions in commonware primitives are not typically hardcoded
-/// to a specific algorithm (e.g. SHA-256) because different hash functions
-/// may work better with different cryptographic schemes, may be more efficient
-/// to use in STARK/SNARK proofs, or provide different levels of security (with some
-/// performance/size penalty).
-///
-/// This trait is required to implement the `Clone` trait because it is often
-/// part of a struct that is cloned. In practice, implementations do not actually
-/// clone the hasher state but users should not rely on this behavior and call `reset`
-/// after cloning.
-pub trait Hasher: Default + Clone + Send + Sync + 'static {
-    /// Digest generated by the hasher.
-    type Digest: Digest;
-
-    /// Create a new, empty hasher.
-    fn new() -> Self {
-        Self::default()
+    /// This trait requires [`Random::random`], but generating a digest at random is
+    /// typically reserved for testing, and not production use.
+    pub trait Digest: Array + Copy + Random {
+        /// An empty (all-zero) digest.
+        const EMPTY: Self;
     }
 
-    /// Append message to previously recorded data.
-    fn update(&mut self, message: &[u8]) -> &mut Self;
+    /// An object that can be uniquely represented as a [Digest].
+    pub trait Digestible: Clone + Sized + Send + Sync + 'static {
+        /// The type of digest produced by this object.
+        type Digest: Digest;
 
-    /// Hash all recorded data and reset the hasher
-    /// to the initial state.
-    fn finalize(&mut self) -> Self::Digest;
-
-    /// Reset the hasher without generating a hash.
-    ///
-    /// This function does not need to be called after `finalize`.
-    fn reset(&mut self) -> &mut Self;
-
-    /// Hash a single message with a one-time-use hasher.
-    fn hash(message: &[u8]) -> Self::Digest {
-        Self::new().update(message).finalize()
+        /// Returns a unique representation of the object as a [Digest].
+        ///
+        /// If many objects with [Digest]s are related (map to some higher-level
+        /// group [Digest]), you should also implement [Committable].
+        fn digest(&self) -> Self::Digest;
     }
-}
+
+    /// An object that can produce a commitment of itself.
+    pub trait Committable: Clone + Sized + Send + Sync + 'static {
+        /// The type of commitment produced by this object.
+        type Commitment: Digest;
+
+        /// Returns the unique commitment of the object as a [Digest].
+        ///
+        /// For simple objects (like a block), this is often just the digest of the object
+        /// itself. For more complex objects, however, this may represent some root or base
+        /// of a proof structure (where many unique objects map to the same commitment).
+        ///
+        /// # Warning
+        ///
+        /// It must not be possible for two objects with the same [Digest] to map
+        /// to different commitments. Primitives assume there is a one-to-one
+        /// relation between digest and commitment and a one-to-many relation
+        /// between commitment and digest.
+        fn commitment(&self) -> Self::Commitment;
+    }
+
+    pub type DigestOf<H> = <H as Hasher>::Digest;
+
+    /// Interface that commonware crates rely on for hashing.
+    ///
+    /// Hash functions in commonware primitives are not typically hardcoded
+    /// to a specific algorithm (e.g. SHA-256) because different hash functions
+    /// may work better with different cryptographic schemes, may be more efficient
+    /// to use in STARK/SNARK proofs, or provide different levels of security (with some
+    /// performance/size penalty).
+    ///
+    /// This trait is required to implement the `Clone` trait because it is often
+    /// part of a struct that is cloned. In practice, implementations do not actually
+    /// clone the hasher state but users should not rely on this behavior and call `reset`
+    /// after cloning.
+    pub trait Hasher: Default + Clone + Send + Sync + 'static {
+        /// Digest generated by the hasher.
+        type Digest: Digest;
+
+        /// Create a new, empty hasher.
+        fn new() -> Self {
+            Self::default()
+        }
+
+        /// Append message to previously recorded data.
+        fn update(&mut self, message: &[u8]) -> &mut Self;
+
+        /// Hash all recorded data and reset the hasher
+        /// to the initial state.
+        fn finalize(&mut self) -> Self::Digest;
+
+        /// Reset the hasher without generating a hash.
+        ///
+        /// This function does not need to be called after `finalize`.
+        fn reset(&mut self) -> &mut Self;
+
+        /// Hash a single message with a one-time-use hasher.
+        fn hash(message: &[u8]) -> Self::Digest {
+            Self::new().update(message).finalize()
+        }
+    }
+});
 
 #[cfg(test)]
 mod tests {
@@ -495,6 +524,7 @@ mod tests {
         assert_eq!(secp256r1::recoverable::PublicKey::SIZE, 33);
         assert_eq!(secp256r1::recoverable::Signature::SIZE, 65);
     }
+
     fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();

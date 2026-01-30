@@ -184,6 +184,7 @@ impl Panicker {
     }
 
     /// Returns whether the [Panicker] is configured to catch panics.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) const fn catch(&self) -> bool {
         self.catch
     }

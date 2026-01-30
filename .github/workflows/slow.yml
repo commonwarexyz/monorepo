@@ -187,17 +187,44 @@ jobs:
           echo "All tests passed successfully!"
 
   conformance:
-    name: Breaking Changes
-    runs-on: ubuntu-latest
+    # Run conformance tests on multiple architectures to catch platform-specific
+    # encoding differences.
+    name: "Breaking Changes (${{ matrix.name }}) (partition: ${{ matrix.partition }}/8)"
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    strategy:
+      matrix:
+        name: [x86_64, arm64]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        include:
+          - name: x86_64
+            os: ubuntu-latest
+          - name: arm64
+            os: macos-latest
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        additional-cache-key: ${{ matrix.name }}-part-${{ matrix.partition }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0,cargo-nextest@0.9.104
     - name: Run conformance tests
-      run: just test-conformance && git diff --exit-code
+      run: just test-conformance --partition hash:${{ matrix.partition }}/8 && git diff --exit-code
+
+  Conformance-Gate:
+    name: "Breaking Changes"
+    runs-on: ubuntu-latest
+    needs: conformance
+    if: always()
+    steps:
+      - name: Check conformance results
+        run: |
+          if [ "${{ needs.conformance.result }}" != "success" ]; then
+            echo "Conformance tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All conformance tests passed successfully!"

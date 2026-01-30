@@ -852,7 +852,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
                             Some(task) => task,
                             None => break,
                         };
-                    }
+                    },
                 }
 
                 // Send task
@@ -1114,14 +1114,20 @@ impl<P: PublicKey> Peer<P> {
                 // Listen for control messages, which are used to register channels
                 control = control_receiver.next() => {
                     // If control is closed, exit
-                    let (channel, sender, result_tx): (Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>) = match control {
+                    let (channel, sender, result_tx): (
+                        Channel,
+                        Handle<()>,
+                        oneshot::Sender<MessageReceiver<P>>,
+                    ) = match control {
                         Some(control) => control,
                         None => break,
                     };
 
                     // Register channel
                     let (receiver_tx, receiver_rx) = mpsc::unbounded();
-                    if let Some((_, existing_sender)) = mailboxes.insert(channel, (receiver_tx, sender)) {
+                    if let Some((_, existing_sender)) =
+                        mailboxes.insert(channel, (receiver_tx, sender))
+                    {
                         warn!(?public_key, ?channel, "overwriting existing channel");
                         existing_sender.abort();
                     }

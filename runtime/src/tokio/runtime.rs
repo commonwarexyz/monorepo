@@ -21,7 +21,8 @@ use crate::{
     BufferPools, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
     METRICS_PREFIX,
 };
-use commonware_macros::select;
+use commonware_macros::{stability, select};
+#[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -31,6 +32,7 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
+#[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
@@ -525,9 +527,7 @@ impl crate::Spawner for Context {
                 result.map_err(|_| Error::Closed)?;
                 Ok(())
             },
-            _ = timeout_future => {
-                Err(Error::Timeout)
-            }
+            _ = timeout_future => Err(Error::Timeout),
         }
     }
 
@@ -536,6 +536,7 @@ impl crate::Spawner for Context {
     }
 }
 
+#[stability(BETA)]
 impl crate::RayonPoolSpawner for Context {
     fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
         ThreadPoolBuilder::new()

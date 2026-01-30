@@ -71,13 +71,14 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::PoolRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-};
-use tracing::{debug, warn};
+use std::num::{NonZeroU64, NonZeroUsize};
+#[commonware_macros::stability(ALPHA)]
+use std::ops::Range;
+#[commonware_macros::stability(ALPHA)]
+use tracing::debug;
+use tracing::warn;
 
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
@@ -97,8 +98,8 @@ pub struct Config {
     /// Only the newest blob may contain fewer items.
     pub items_per_blob: NonZeroU64,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -192,7 +193,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
 
@@ -406,6 +407,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// # Crash Safety
     /// If a crash occurs during this operation, `init()` will recover to a consistent state
     /// (though possibly different from the intended `size`).
+    #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         let items_per_blob = cfg.items_per_blob.get();
         let tail_section = size / items_per_blob;
@@ -413,7 +415,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
         let segmented_cfg = SegmentedConfig {
             partition: blob_partition,
-            buffer_pool: cfg.buffer_pool,
+            page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
 
@@ -462,6 +464,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///    may be retained (from the section boundary to `range.start - 1`).
     /// 3. **Data exceeds range**: Returns error
     /// 4. **Stale data**: Destroys and recreates at `range.start`
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config,
@@ -903,7 +906,7 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1156,7 +1159,7 @@ mod tests {
         });
     }
 
-    /// Append a lot of data to make sure we exercise buffer pool paging boundaries.
+    /// Append a lot of data to make sure we exercise page cache paging boundaries.
     #[test_traced]
     fn test_fixed_journal_append_a_lot_of_data() {
         // Initialize the deterministic context
@@ -1902,7 +1905,7 @@ mod tests {
             let cfg = Config {
                 partition: "single_item_per_blob".into(),
                 items_per_blob: NZU64!(1),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),
             };
 

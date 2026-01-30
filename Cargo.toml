@@ -49,9 +49,10 @@ homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
+warnings = "deny"
 
 [workspace.lints.clippy]
 missing-const-for-fn = "warn"

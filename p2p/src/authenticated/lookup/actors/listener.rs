@@ -11,7 +11,7 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf,
 };
-use commonware_stream::{listen, Config as StreamConfig};
+use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::counter::Counter;
@@ -262,8 +262,13 @@ impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E,
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context.into_present(), address, stream_cfg, sink, stream,
-                            tracker, supervisor,
+                            context.into_present(),
+                            address,
+                            stream_cfg,
+                            sink,
+                            stream,
+                            tracker,
+                            supervisor,
                         )
                         .await;
 

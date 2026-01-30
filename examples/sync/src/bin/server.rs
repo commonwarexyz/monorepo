@@ -356,7 +356,7 @@ where
                 // Channel closed
                 return Ok(());
             }
-        }
+        },
     }
 
     Ok(())
@@ -455,7 +455,7 @@ where
                     error!(?err, "❌ failed to accept client");
                 }
             }
-        }
+        },
     }
 
     Ok(())

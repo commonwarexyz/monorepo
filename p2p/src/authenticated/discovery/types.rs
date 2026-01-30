@@ -831,9 +831,9 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Payload<PublicKey>>,
+            CodecConformance<Payload<PublicKey>> => 1024,
             CodecConformance<BitVec>,
-            CodecConformance<Info<PublicKey>>,
+            CodecConformance<Info<PublicKey>> => 1024,
         }
     }
 }

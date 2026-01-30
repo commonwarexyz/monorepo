@@ -74,8 +74,8 @@ pub struct Config<C> {
     /// Partition for the glob value storage.
     pub value_partition: String,
 
-    /// Buffer pool for index journal caching.
-    pub index_buffer_pool: commonware_runtime::buffer::PoolRef,
+    /// Page cache for index journal caching.
+    pub index_page_cache: commonware_runtime::buffer::paged::CacheRef,
 
     /// Write buffer size for the index journal.
     pub index_write_buffer: NonZeroUsize,
@@ -109,7 +109,7 @@ impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E,
         // Initialize both journals
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
-            buffer_pool: cfg.index_buffer_pool,
+            page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
         let index = FixedJournal::init(context.with_label("index"), index_cfg).await?;
@@ -447,7 +447,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::PoolRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner,
     };
     use commonware_utils::{NZUsize, NZU16};
 
@@ -517,7 +517,7 @@ mod tests {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
-            index_buffer_pool: PoolRef::new(NZU16!(64), NZUsize!(8)),
+            index_page_cache: CacheRef::new(NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -911,7 +911,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1447,7 +1447,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1728,7 +1728,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -2453,7 +2453,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,

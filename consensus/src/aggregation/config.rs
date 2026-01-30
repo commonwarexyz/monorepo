@@ -9,7 +9,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::PoolRef;
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -77,8 +77,8 @@ pub struct Config<
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
 
-    /// Buffer pool for the journal.
-    pub journal_buffer_pool: PoolRef,
+    /// Page cache for the journal.
+    pub journal_page_cache: CacheRef,
 
     /// Strategy for parallel operations.
     pub strategy: T,

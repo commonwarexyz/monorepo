@@ -11,7 +11,7 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::{Receiver, Sender};
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -121,57 +121,67 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         let ping_rate_limiter = RateLimiter::direct_with_clock(ping_rate, self.context.clone());
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.with_label("sender").spawn( {
-            let peer = peer.clone();
-            let rate_limits = rate_limits.clone();
-            move |context| async move {
-                // Set the initial deadline (no need to send right away)
-                let mut deadline = context.current() + self.ping_frequency;
+        let mut send_handler: Handle<Result<(), Error>> =
+            self.context.with_label("sender").spawn({
+                let peer = peer.clone();
+                let rate_limits = rate_limits.clone();
+                move |context| async move {
+                    // Set the initial deadline (no need to send right away)
+                    let mut deadline = context.current() + self.ping_frequency;
 
-                // Enter into the main loop
-                select_loop! {
-                    context,
-                    on_stopped => {},
-                    _ = context.sleep_until(deadline) => {
-                        // Periodically send a ping to the peer
-                        Self::send_payload(
-                            &mut conn_sender,
-                            &self.sent_messages,
-                            metrics::Message::new_ping(&peer),
-                            types::Message::Ping,
-                        ).await?;
+                    // Enter into the main loop
+                    select_loop! {
+                        context,
+                        on_stopped => {},
+                        _ = context.sleep_until(deadline) => {
+                            // Periodically send a ping to the peer
+                            Self::send_payload(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metrics::Message::new_ping(&peer),
+                                types::Message::Ping,
+                            )
+                            .await?;
 
-                        // Reset ticker
-                        deadline = context.current() + self.ping_frequency;
-                    },
-                    msg_control = self.control.next() => {
-                        let msg = match msg_control {
-                            Some(msg_control) => msg_control,
-                            None => return Err(Error::PeerDisconnected),
-                        };
-                        match msg {
-                            Message::Kill => {
-                                return Err(Error::PeerKilled(peer.to_string()))
+                            // Reset ticker
+                            deadline = context.current() + self.ping_frequency;
+                        },
+                        msg_control = self.control.next() => {
+                            let msg = match msg_control {
+                                Some(msg_control) => msg_control,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            match msg {
+                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             }
-                        }
-                    },
-                    msg_high = self.high.next() => {
-                        // Data is already pre-encoded, just forward to stream
-                        let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
+                        },
+                        msg_high = self.high.next() => {
+                            // Data is already pre-encoded, just forward to stream
+                            let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                            Self::send_encoded(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metrics::Message::new_data(&peer, encoded.channel),
+                                encoded.payload,
+                            )
                             .await?;
-                    },
-                    msg_low = self.low.next() => {
-                        // Data is already pre-encoded, just forward to stream
-                        let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                        Self::send_encoded(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, encoded.channel), encoded.payload)
+                        },
+                        msg_low = self.low.next() => {
+                            // Data is already pre-encoded, just forward to stream
+                            let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
+                            Self::send_encoded(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                metrics::Message::new_data(&peer, encoded.channel),
+                                encoded.payload,
+                            )
                             .await?;
+                        },
                     }
-                }
 
-                Ok(())
-            }
-        });
+                    Ok(())
+                }
+            });
         let mut receive_handler: Handle<Result<(), Error>> = self
             .context
             .with_label("receiver")
@@ -257,12 +267,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                 debug!("context shutdown, stopping peer");
                 Ok(Ok(()))
             },
-            send_result = &mut send_handler => {
-                send_result
-            },
-            receive_result = &mut receive_handler => {
-                receive_result
-            }
+            send_result = &mut send_handler => send_result,
+            receive_result = &mut receive_handler => receive_result,
         };
 
         // Parse result

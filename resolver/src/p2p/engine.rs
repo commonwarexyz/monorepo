@@ -245,7 +245,8 @@ impl<
 
                             // Only start new fetch if not already in progress
                             if is_new {
-                                self.fetch_timers.insert(key.clone(), self.metrics.fetch_duration.timer());
+                                self.fetch_timers
+                                    .insert(key.clone(), self.metrics.fetch_duration.timer());
                                 self.fetcher.add_ready(key);
                             } else {
                                 trace!(?key, "updated targets for existing fetch");
@@ -269,7 +270,10 @@ impl<
 
                         // Clean up timers and notify consumer
                         let before = self.fetch_timers.len();
-                        let removed = self.fetch_timers.extract_if(|k, _| !predicate(k)).collect::<Vec<_>>();
+                        let removed = self
+                            .fetch_timers
+                            .extract_if(|k, _| !predicate(k))
+                            .collect::<Vec<_>>();
                         for (key, timer) in removed {
                             timer.cancel();
                             self.consumer.failed(key, ()).await;
@@ -308,7 +312,12 @@ impl<
             },
             // Handle completed server requests
             serve = self.serves.next_completed() => {
-                let Serve { timer, peer, id, result } = serve;
+                let Serve {
+                    timer,
+                    peer,
+                    id,
+                    result,
+                } = serve;
 
                 // Metrics and logs
                 match result {
@@ -323,7 +332,8 @@ impl<
                 }
 
                 // Send response to peer
-                self.handle_serve(&mut sender, peer, id, result, self.priority_responses).await;
+                self.handle_serve(&mut sender, peer, id, result, self.priority_responses)
+                    .await;
             },
             // Handle network messages
             msg = receiver.recv() => {
@@ -345,8 +355,12 @@ impl<
                     }
                 };
                 match msg.payload {
-                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key).await,
-                    wire::Payload::Response(response) => self.handle_network_response(peer, msg.id, response).await,
+                    wire::Payload::Request(key) => {
+                        self.handle_network_request(peer, msg.id, key).await
+                    }
+                    wire::Payload::Response(response) => {
+                        self.handle_network_response(peer, msg.id, response).await
+                    }
                     wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
                 };
             },
