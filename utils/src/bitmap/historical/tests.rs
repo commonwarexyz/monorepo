@@ -12,7 +12,7 @@ fn test_dirty_lifecycle_and_operations() {
 
     // Basic push and commit
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push(true).push(false).push(true);
         })
         .unwrap();
@@ -43,13 +43,13 @@ fn test_dirty_lifecycle_and_operations() {
     assert!(!bitmap.get_bit(3));
 
     // Empty dirty commit
-    let bitmap = bitmap.apply(3, |_dirty| {}).unwrap();
+    let bitmap = bitmap.apply_batch(3, |_dirty| {}).unwrap();
     assert_eq!(bitmap.len(), 4);
     assert!(bitmap.commit_exists(3));
 
     // Method chaining with dirty.set_bit()
     let bitmap = bitmap
-        .apply(4, |dirty| {
+        .apply_batch(4, |dirty| {
             dirty.set_bit(0, false).push_byte(0xAA);
         })
         .unwrap();
@@ -64,13 +64,13 @@ fn test_dirty_operations_push_pop_prune() {
 
     // Push, modify, and append operations
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push(false).push(false).push(false);
         })
         .unwrap();
 
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.set_bit(0, true); // Modify
             dirty.set_bit(1, true); // Modify
             dirty.push(true); // Append
@@ -85,7 +85,7 @@ fn test_dirty_operations_push_pop_prune() {
 
     // Pop operations
     let _bitmap = bitmap
-        .apply(3, |dirty| {
+        .apply_batch(3, |dirty| {
             dirty.push(false); // Add bit 5
             let popped = dirty.pop(); // Remove it
             assert!(!popped);
@@ -97,13 +97,13 @@ fn test_dirty_operations_push_pop_prune() {
     // Start fresh with 32 bits so chunks align cleanly
     let bitmap: BitMap<4> = BitMap::new();
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push_chunk(&hex!("0x00000000"));
         })
         .unwrap();
 
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.push_chunk(&hex!("0xAABBCCDD")); // 32 bits at offset 32
             dirty.push_byte(0xFF); // 8 bits at offset 64
         })
@@ -127,7 +127,7 @@ fn test_dirty_operations_push_pop_prune() {
 
     // Prune operations
     let bitmap = bitmap
-        .apply(4, |dirty| {
+        .apply_batch(4, |dirty| {
             dirty.prune_to_bit(32);
         })
         .unwrap();
@@ -143,14 +143,14 @@ fn test_commit_history_management() {
 
     // Validate monotonic commit numbers
     let bitmap = bitmap
-        .apply(5, |dirty| {
+        .apply_batch(5, |dirty| {
             dirty.push(true);
         })
         .unwrap();
 
     let err = bitmap
         .clone()
-        .apply(5, |dirty| {
+        .apply_batch(5, |dirty| {
             dirty.push(false);
         })
         .unwrap_err();
@@ -167,7 +167,7 @@ fn test_commit_history_management() {
 
     let err = bitmap
         .clone()
-        .apply(3, |dirty| {
+        .apply_batch(3, |dirty| {
             dirty.push(false);
         })
         .unwrap_err();
@@ -183,7 +183,7 @@ fn test_commit_history_management() {
     }
 
     let _bitmap = bitmap
-        .apply(10, |dirty| {
+        .apply_batch(10, |dirty| {
             dirty.push(false);
         })
         .unwrap(); // Should succeed
@@ -195,7 +195,7 @@ fn test_commit_history_management() {
     let mut bitmap = bitmap;
     for i in 1..=5 {
         bitmap = bitmap
-            .apply(i * 10, |dirty| {
+            .apply_batch(i * 10, |dirty| {
                 dirty.push(true);
             })
             .unwrap();
@@ -229,12 +229,12 @@ fn test_historical_reconstruction_with_modifications() {
 
     // Simple modification scenario
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push(true).push(false).push(true);
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.set_bit(0, false);
             dirty.push(false);
         })
@@ -253,18 +253,18 @@ fn test_historical_reconstruction_with_modifications() {
     // Multiple successive modifications
     let bitmap: BitMap<4> = BitMap::new();
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push_chunk(&hex!("0xFF00FF00"));
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.set_bit(0, false);
             dirty.set_bit(8, true);
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(3, |dirty| {
+        .apply_batch(3, |dirty| {
             dirty.set_bit(16, false);
             dirty.set_bit(24, true);
         })
@@ -286,20 +286,20 @@ fn test_historical_reconstruction_with_modifications() {
     // Modifications combined with appends
     let bitmap: BitMap<4> = BitMap::new();
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..4 {
                 dirty.push(true);
             }
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.set_bit(0, false).set_bit(2, false);
             dirty.push(false).push(false);
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(3, |dirty| {
+        .apply_batch(3, |dirty| {
             dirty.set_bit(1, false).set_bit(3, false);
             dirty.push(true).push(true);
         })
@@ -330,17 +330,17 @@ fn test_historical_reconstruction_with_length_changes() {
 
     // Pure append operations
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push(true).push(false);
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.push(true).push(true);
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(3, |dirty| {
+        .apply_batch(3, |dirty| {
             dirty.push(false).push(false);
         })
         .unwrap();
@@ -352,20 +352,20 @@ fn test_historical_reconstruction_with_length_changes() {
     // Pops followed by appends
     let bitmap: BitMap<4> = BitMap::new();
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for i in 0..5 {
                 dirty.push(i % 2 == 0);
             }
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.pop();
             dirty.pop();
         })
         .unwrap();
     let bitmap = bitmap
-        .apply(3, |dirty| {
+        .apply_batch(3, |dirty| {
             dirty.push(true).push(true).push(true);
         })
         .unwrap();
@@ -392,7 +392,7 @@ fn test_historical_reconstruction_with_pruning() {
 
     // Commit 1: Create 64 bits (2 chunks), no pruning
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push_chunk(&hex!("0xAABBCCDD"));
             dirty.push_chunk(&hex!("0x11223344"));
         })
@@ -400,7 +400,7 @@ fn test_historical_reconstruction_with_pruning() {
 
     // Commit 2: Prune first chunk
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.prune_to_bit(32);
         })
         .unwrap();
@@ -426,7 +426,7 @@ fn test_historical_reconstruction_edge_cases() {
     let bitmap: BitMap<4> = BitMap::new();
 
     let bitmap = bitmap
-        .apply(10, |dirty| {
+        .apply_batch(10, |dirty| {
             dirty.push(true);
         })
         .unwrap();
@@ -441,7 +441,7 @@ fn test_historical_reconstruction_edge_cases() {
     let mut bitmap = bitmap;
     for i in 1..=5 {
         bitmap = bitmap
-            .apply(i, |dirty| {
+            .apply_batch(i, |dirty| {
                 for _ in 0..i {
                     dirty.push(true);
                 }
@@ -468,7 +468,7 @@ fn test_dirty_modifications_on_appended_bits() {
 
     // Modify appended bit in same dirty state
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push(true); // Append bit 0
             dirty.set_bit(0, false); // Modify that appended bit
         })
@@ -478,7 +478,7 @@ fn test_dirty_modifications_on_appended_bits() {
 
     // Push, modify, then pop (should cancel out cleanly)
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.push(true); // Append bit 1
             dirty.set_bit(1, false); // Modify that appended bit
             dirty.pop(); // Remove bit 1
@@ -494,7 +494,7 @@ fn test_pop_behavior_with_modifications() {
 
     // Create initial bits
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..10 {
                 dirty.push(true);
             }
@@ -504,7 +504,7 @@ fn test_pop_behavior_with_modifications() {
     // pop() should return modified value
     let mut popped_value = true;
     let _bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.set_bit(9, false); // Modify bit 9 in dirty
             popped_value = dirty.pop(); // Should return false (modified)
         })
@@ -521,7 +521,7 @@ fn test_pop_behavior_with_modifications() {
 fn test_read_popped_bit_panics() {
     let bitmap: BitMap<4> = BitMap::new();
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..10 {
                 dirty.push(true);
             }
@@ -540,7 +540,7 @@ fn test_read_popped_bit_panics() {
 fn test_prune_beyond_length_panics() {
     let bitmap: BitMap<4> = BitMap::new();
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..10 {
                 dirty.push(true);
             }
@@ -604,7 +604,7 @@ fn test_pop_zeros_chunk_tail() {
 
     // Setup: Create 33 bits (chunk 0 has bits 0-31 all true, chunk 1 has bit 32 true)
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..33 {
                 dirty.push(true);
             }
@@ -643,7 +643,7 @@ fn test_prune_freshly_appended_chunk() {
 
     // Start with 10 bits (chunk 0 is partial, no chunk 1)
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..10 {
                 dirty.push(true);
             }
@@ -691,7 +691,7 @@ fn test_read_appended_bits_after_pops() {
 
     // Setup: Create bitmap with 10 bits, all set to true
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for _ in 0..10 {
                 dirty.push(true);
             }
@@ -742,7 +742,7 @@ fn test_reconstruct_less_pruned_from_more_pruned() {
 
     // Commit 1: Create 64 bits (2 chunks) with pattern
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for i in 0..64 {
                 dirty.push(i < 32); // First chunk all true, second chunk all false
             }
@@ -753,7 +753,7 @@ fn test_reconstruct_less_pruned_from_more_pruned() {
 
     // Commit 2: Prune first chunk
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.prune_to_bit(32); // Prune chunk 0
         })
         .unwrap();
@@ -798,7 +798,7 @@ fn test_reconstruct_fully_pruned_commit() {
 
     // Commit 1: Create 32 bits (1 complete chunk)
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             for i in 0..32 {
                 dirty.push(i % 2 == 0); // Alternating pattern
             }
@@ -809,7 +809,7 @@ fn test_reconstruct_fully_pruned_commit() {
 
     // Commit 2: Prune the entire chunk
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.prune_to_bit(32); // Prune chunk 0 (bits 0..32)
         })
         .unwrap();
@@ -987,14 +987,14 @@ fn test_pop_into_pruned_region_panics() {
 
     // Create a bitmap with 64 bits (2 chunks), then prune first chunk
     let bitmap = bitmap
-        .apply(1, |dirty| {
+        .apply_batch(1, |dirty| {
             dirty.push_chunk(&[0xFF; 4]);
             dirty.push_chunk(&[0xFF; 4]);
         })
         .unwrap();
 
     let bitmap = bitmap
-        .apply(2, |dirty| {
+        .apply_batch(2, |dirty| {
             dirty.prune_to_bit(32);
         })
         .unwrap();
@@ -1017,7 +1017,7 @@ fn test_commit_u64_max_is_reserved() {
     let bitmap: BitMap<4> = BitMap::new();
 
     // Verify that u64::MAX cannot be used as a commit number
-    let result = bitmap.apply(u64::MAX, |dirty| {
+    let result = bitmap.apply_batch(u64::MAX, |dirty| {
         dirty.push(true);
     });
 
@@ -1025,7 +1025,7 @@ fn test_commit_u64_max_is_reserved() {
 
     // Verify that u64::MAX - 1 can be used
     let bitmap: BitMap<4> = BitMap::new();
-    let result = bitmap.apply(u64::MAX - 1, |dirty| {
+    let result = bitmap.apply_batch(u64::MAX - 1, |dirty| {
         dirty.push(true);
     });
 

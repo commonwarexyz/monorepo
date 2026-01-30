@@ -1,4 +1,4 @@
-//! A historical wrapper around [crate::bitmap::Prunable] that maintains snapshots via diff-based batching.
+//! A historical wrapper around [crate::bitmap::Prunable] that maintains snapshots via diffs.
 //!
 //! The Historical bitmap maintains one full [crate::bitmap::Prunable] bitmap (the current/head state).
 //! All historical states are represented as diffs, not full bitmap clones.
@@ -34,7 +34,7 @@
 //! # use commonware_utils::bitmap::historical::BitMap;
 //! let mut bitmap: BitMap<4> = BitMap::new();
 //!
-//! bitmap = bitmap.apply(1, |dirty| {
+//! bitmap = bitmap.apply_batch(1, |dirty| {
 //!     dirty.push(true);
 //!     dirty.push(false);
 //! }).unwrap();
@@ -49,7 +49,7 @@
 //! ```
 //! # use commonware_utils::bitmap::historical::BitMap;
 //! let mut bitmap: BitMap<4> = BitMap::new();
-//! bitmap = bitmap.apply(1, |dirty| { dirty.push(false); }).unwrap();
+//! bitmap = bitmap.apply_batch(1, |dirty| { dirty.push(false); }).unwrap();
 //!
 //! // Before modification
 //! assert!(!bitmap.get_bit(0));
@@ -71,7 +71,7 @@
 //! ```
 //! # use commonware_utils::bitmap::historical::BitMap;
 //! let mut bitmap: BitMap<4> = BitMap::new();
-//! bitmap = bitmap.apply(1, |dirty| { dirty.push(true); }).unwrap();
+//! bitmap = bitmap.apply_batch(1, |dirty| { dirty.push(true); }).unwrap();
 //! let len_before = bitmap.len();
 //!
 //! // Make changes in dirty state
@@ -91,7 +91,7 @@
 //! # use commonware_utils::bitmap::historical::BitMap;
 //! let mut bitmap: BitMap<4> = BitMap::new();
 //! for i in 1..=5 {
-//!     bitmap = bitmap.apply(i, |dirty| {
+//!     bitmap = bitmap.apply_batch(i, |dirty| {
 //!         dirty.push(true);
 //!     }).unwrap();
 //! }

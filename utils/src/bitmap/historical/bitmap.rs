@@ -196,13 +196,13 @@ impl<const N: usize> CleanBitMap<N> {
     /// # use commonware_utils::bitmap::historical::BitMap;
     /// let mut bitmap: BitMap<4> = BitMap::new();
     ///
-    /// bitmap = bitmap.apply(1, |dirty| {
+    /// bitmap = bitmap.apply_batch(1, |dirty| {
     ///     dirty.push(true).push(false);
     /// }).unwrap();
     ///
     /// assert_eq!(bitmap.len(), 2);
     /// ```
-    pub fn apply<F>(self, commit_number: u64, f: F) -> Result<Self, Error>
+    pub fn apply_batch<F>(self, commit_number: u64, f: F) -> Result<Self, Error>
     where
         F: FnOnce(&mut DirtyBitMap<N>),
     {
@@ -226,12 +226,12 @@ impl<const N: usize> CleanBitMap<N> {
     /// # use commonware_utils::bitmap::historical::BitMap;
     /// let mut bitmap: BitMap<4> = BitMap::new();
     ///
-    /// bitmap = bitmap.apply(1, |dirty| {
+    /// bitmap = bitmap.apply_batch(1, |dirty| {
     ///     dirty.push(true);
     ///     dirty.push(false);
     /// }).unwrap();
     ///
-    /// bitmap = bitmap.apply(2, |dirty| {
+    /// bitmap = bitmap.apply_batch(2, |dirty| {
     ///     dirty.set_bit(0, false);
     ///     dirty.push(true);
     /// }).unwrap();
