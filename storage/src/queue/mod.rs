@@ -2,15 +2,15 @@
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! Items are durably stored in a journal and will survive crashes. The reader must
-//! explicitly acknowledge each item after processing to allow pruning. If a crash occurs
-//! before acknowledgment, items will be re-delivered on restart.
+//! explicitly acknowledge each item after processing. If a crash occurs before
+//! acknowledgment, items will be re-delivered on restart.
 //!
 //! # At-Least-Once Delivery
 //!
 //! The queue guarantees that every enqueued item will be delivered at least once.
 //! Duplicate delivery may occur if:
 //! - The reader processes an item but crashes before acknowledging it
-//! - The reader acknowledges items but the process crashes before sync completes
+//! - The reader acknowledges items but the process crashes before the journal syncs
 //!
 //! Applications must be prepared to handle duplicate messages (idempotent processing).
 //!
@@ -23,7 +23,8 @@
 //! - More efficient crash recovery (only truly unprocessed items are re-delivered)
 //!
 //! Acknowledged items are tracked using an "ack floor" plus ranges of acked items above
-//! the floor. When items are acked contiguously from the floor, the floor advances.
+//! the floor. When items are acked contiguously from the floor, the floor advances and
+//! acknowledged items are automatically pruned from storage.
 //!
 //! # Example
 //!
@@ -46,29 +47,23 @@
 //!     }).await.unwrap();
 //!
 //!     // Enqueue items
-//!     let pos1 = queue.enqueue(b"task1".to_vec()).await.unwrap();
-//!     let pos2 = queue.enqueue(b"task2".to_vec()).await.unwrap();
-//!
-//!     // Sync to ensure durability
-//!     queue.sync().await.unwrap();
+//!     queue.enqueue(b"task1".to_vec()).await.unwrap();
+//!     queue.enqueue(b"task2".to_vec()).await.unwrap();
 //!
 //!     // Dequeue and process items (can be done out of order)
 //!     while let Some((position, item)) = queue.dequeue().await.unwrap() {
 //!         // Process the item...
 //!         println!("Processing item at position {}", position);
 //!
-//!         // Acknowledge after successful processing (per-item)
-//!         queue.ack(position).unwrap();
+//!         // Acknowledge after successful processing (auto-prunes)
+//!         queue.ack(position).await.unwrap();
 //!     }
-//!
-//!     // Sync to persist ack state, then prune acknowledged items
-//!     queue.sync().await.unwrap();
-//!     queue.prune().await.unwrap();
 //!
 //!     queue.destroy().await.unwrap();
 //! });
 //! ```
 
+mod metrics;
 mod storage;
 
 pub use storage::{Config, Queue};
