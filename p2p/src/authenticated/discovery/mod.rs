@@ -207,7 +207,7 @@
 //! ```
 
 mod actors;
-mod channels;
+mod channel;
 mod config;
 mod metrics;
 mod network;
@@ -225,7 +225,7 @@ pub enum Error {
 }
 
 pub use actors::tracker::Oracle;
-pub use channels::{Receiver, Sender};
+pub use channel::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
@@ -1647,8 +1647,8 @@ mod tests {
             let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
 
             // Track senders/receivers/handles across restarts
-            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
-            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut senders: Vec<Option<channel::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channel::Receiver<_>>> = (0..n).map(|_| None).collect();
             let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
 
             // Track port allocations (updated on restart)
@@ -1840,8 +1840,8 @@ mod tests {
             let mut ports: Vec<u16> = (0..n).map(|i| base_port + i as u16).collect();
 
             // Track senders/receivers/handles across restarts
-            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
-            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut senders: Vec<Option<channel::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channel::Receiver<_>>> = (0..n).map(|_| None).collect();
             let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
 
             // Create networks for all peers (peer 0 is bootstrapper)
@@ -2005,8 +2005,8 @@ mod tests {
             let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
 
             // Track all senders/receivers/handles across restarts
-            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
-            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut senders: Vec<Option<channel::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channel::Receiver<_>>> = (0..n).map(|_| None).collect();
             let mut handles: Vec<Option<Handle<()>>> = (0..n).map(|_| None).collect();
 
             // Track port allocations for each peer (updated on restart)
@@ -2306,7 +2306,7 @@ mod tests {
                 RouterActor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
 
             // Create channels for the router
-            let channels = channels::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
+            let channels = channel::Channels::new(messenger.clone(), MAX_MESSAGE_SIZE);
             let _handle = router.start(channels);
 
             // Register peer 1 with small buffer (will fill up after 10 messages)

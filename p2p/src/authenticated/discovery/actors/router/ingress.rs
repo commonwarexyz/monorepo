@@ -1,7 +1,7 @@
 use crate::{
     authenticated::{
         data::{Data, EncodedData},
-        discovery::{channels::Channels, types},
+        discovery::{channel::Channels, types},
         relay::Relay,
         Mailbox,
     },
