@@ -24,7 +24,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::PoolRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner,
+    Storage,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
@@ -49,8 +50,8 @@ const FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
 const FREEZER_VALUE_COMPRESSION: Option<u8> = Some(3);
 const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
-const BUFFER_POOL_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
-const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
+const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
+const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 
 pub struct Config<C, P, B, V, T>
@@ -131,7 +132,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
-        let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
+        let page_cache = CacheRef::new(PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
@@ -178,7 +179,7 @@ where
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_buffer_pool: buffer_pool.clone(),
+                freezer_key_page_cache: page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
@@ -221,7 +222,7 @@ where
                     "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_buffer_pool: buffer_pool.clone(),
+                freezer_key_page_cache: page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
@@ -267,7 +268,7 @@ where
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
-                buffer_pool: buffer_pool.clone(),
+                page_cache: page_cache.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
