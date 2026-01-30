@@ -21,12 +21,12 @@ use std::{
 };
 use tracing::{debug, info};
 
+/// File name for the bucket config (stores the S3 bucket name).
+const BUCKET_CONFIG_FILE: &str = "bucket";
+
 /// Path to the bucket config file that stores the bucket name.
 fn bucket_config_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("$HOME is not configured");
-    PathBuf::from(home)
-        .join(".commonware_deployer")
-        .join("bucket")
+    super::deployer_directory(None).join(BUCKET_CONFIG_FILE)
 }
 
 /// Gets the bucket name, generating one if it doesn't exist.
@@ -55,6 +55,9 @@ pub fn get_bucket_name() -> String {
 /// Deletes the bucket config file so a new bucket name is generated on next use.
 pub fn delete_bucket_config() {
     let path = bucket_config_path();
+
+    // If the bucket config file doesn't exist yet, do nothing (clean may have been run
+    // out-of-order)
     let _ = std::fs::remove_file(path);
 }
 
