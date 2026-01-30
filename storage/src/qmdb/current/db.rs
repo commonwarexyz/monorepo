@@ -263,16 +263,8 @@ where
     pub async fn into_merkleized(
         self,
     ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, Durable>, Error> {
-        // Merkleize the any db's log
-        let mut any = any::db::Db {
-            log: self.any.log.merkleize(),
-            inactivity_floor_loc: self.any.inactivity_floor_loc,
-            last_commit_loc: self.any.last_commit_loc,
-            snapshot: self.any.snapshot,
-            durable_state: self.any.durable_state,
-            active_keys: self.any.active_keys,
-            _update: core::marker::PhantomData,
-        };
+        // Merkleize the any db
+        let mut any = self.any.into_merkleized();
 
         // Merkleize the bitmap using the clean MMR
         let hasher = &mut any.log.hasher;
@@ -309,16 +301,8 @@ where
     pub async fn into_merkleized(
         self,
     ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, NonDurable>, Error> {
-        // Merkleize the any db's log
-        let mut any = any::db::Db {
-            log: self.any.log.merkleize(),
-            inactivity_floor_loc: self.any.inactivity_floor_loc,
-            last_commit_loc: self.any.last_commit_loc,
-            snapshot: self.any.snapshot,
-            durable_state: self.any.durable_state,
-            active_keys: self.any.active_keys,
-            _update: core::marker::PhantomData,
-        };
+        // Merkleize the any db
+        let mut any = self.any.into_merkleized();
 
         // Merkleize the bitmap using the clean MMR
         let hasher = &mut any.log.hasher;
