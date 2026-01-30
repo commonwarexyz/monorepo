@@ -850,9 +850,7 @@ impl<const N: usize> DirtyBitMap<N> {
         for &bit in self.state.modified_bits.keys() {
             let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
             changes.entry(chunk_idx).or_insert_with(|| {
-                // `modified_bits` only contains bits from the base region that existed
-                // at dirty creation. Since current hasn't changed yet (we're still
-                // building the diff), the chunk MUST exist.
+                // `modified_bits` only contains bits from the base region, so the chunk must exist.
                 let old_chunk = self
                     .get_chunk_from_current(chunk_idx)
                     .expect("chunk must exist for modified bit");
