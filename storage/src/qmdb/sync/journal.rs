@@ -1,5 +1,6 @@
 use crate::mmr::Location;
 use std::{future::Future, ops::Range};
+use tracing::debug;
 
 /// Journal of operations used by a [super::Database]
 pub trait Journal: Sized + Send {
@@ -97,7 +98,51 @@ where
         config: Self::Config,
         range: Range<Location>,
     ) -> Result<Self, Self::Error> {
-        Self::init_sync(context, config, *range.start..*range.end).await
+        assert!(!range.is_empty(), "range must not be empty");
+        let range_start = *range.start;
+        let range_end = *range.end;
+
+        debug!(
+            range_start,
+            range_end,
+            items_per_blob = config.items_per_blob.get(),
+            "initializing contiguous fixed journal for sync"
+        );
+
+        let journal = Self::init(context.clone(), config.clone()).await?;
+        let size = journal.size();
+
+        // No existing data - initialize at the start of the sync range.
+        if size == 0 {
+            if range_start == 0 {
+                debug!("no existing journal data, returning empty journal");
+                return Ok(journal);
+            }
+            debug!(
+                range_start,
+                "no existing journal data, initializing at sync range start"
+            );
+            journal.destroy().await?;
+            return Self::init_at_size(context, config, range_start).await;
+        }
+
+        // Data exceeds the sync range.
+        if size > range_end {
+            return Err(crate::journal::Error::ItemOutOfRange(size));
+        }
+
+        // All existing data is before our sync range - destroy and recreate fresh.
+        if size <= range_start {
+            debug!(
+                size,
+                range_start, "existing journal data is stale, re-initializing at start position"
+            );
+            journal.destroy().await?;
+            return Self::init_at_size(context, config, range_start).await;
+        }
+
+        // Data is within range - reuse.
+        Ok(journal)
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {

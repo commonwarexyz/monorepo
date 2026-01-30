@@ -376,23 +376,23 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///
     /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
     ///
-    /// 1. **Fresh Start**: existing_size < range.start
+    /// 1. **Fresh Start**: existing_size <= range.start
     ///    - Deletes existing data (if any)
     ///    - Creates new [Journal] with pruning boundary and size `range.start`
     ///
-    /// 2. **Prune and Reuse**: range.start ≤ existing_size ≤ range.end
+    /// 2. **Prune and Reuse**: range.start < existing_size <= range.end
     ///    - Sets in-memory MMR size to `existing_size`
     ///    - Prunes the journal toward `range.start` (section-aligned)
     ///
-    /// 3. **Prune and Rewind**: existing_size > range.end
-    ///    - Rewinds the journal to size `range.end`
-    ///    - Sets in-memory MMR size to `range.end`
-    ///    - Prunes the journal toward `range.start` (section-aligned)
+    /// 3. **Data Exceeds Range**: existing_size > range.end
+    ///    - Returns an error
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
+        assert!(!cfg.range.is_empty(), "range must not be empty");
+
         let journal_cfg = JConfig {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
@@ -400,13 +400,56 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             buffer_pool: cfg.config.buffer_pool.clone(),
         };
 
-        // Open the journal.
-        let mut journal: Journal<E, D> = Journal::init_sync(
-            context.with_label("mmr_journal"),
-            journal_cfg,
-            *cfg.range.start..*cfg.range.end,
-        )
-        .await?;
+        debug!(
+            range.start = *cfg.range.start,
+            range.end = *cfg.range.end,
+            items_per_blob = cfg.config.items_per_blob.get(),
+            "initializing mmr for sync"
+        );
+
+        // Open the journal and handle sync scenarios.
+        let journal = Journal::init(context.with_label("mmr_journal"), journal_cfg.clone()).await?;
+        let size = journal.size();
+
+        let mut journal: Journal<E, D> = if size == 0 {
+            // No existing data - initialize at the start of the sync range.
+            if *cfg.range.start == 0 {
+                debug!("no existing journal data, returning empty journal");
+                journal
+            } else {
+                debug!(
+                    range_start = *cfg.range.start,
+                    "no existing journal data, initializing at sync range start"
+                );
+                journal.destroy().await?;
+                Journal::init_at_size(
+                    context.with_label("mmr_journal"),
+                    journal_cfg,
+                    *cfg.range.start,
+                )
+                .await?
+            }
+        } else if size > *cfg.range.end {
+            // Data exceeds the sync range.
+            return Err(JError::ItemOutOfRange(size).into());
+        } else if size <= *cfg.range.start {
+            // All existing data is before our sync range - destroy and recreate fresh.
+            debug!(
+                size,
+                range_start = *cfg.range.start,
+                "existing journal data is stale, re-initializing at start position"
+            );
+            journal.destroy().await?;
+            Journal::init_at_size(
+                context.with_label("mmr_journal"),
+                journal_cfg,
+                *cfg.range.start,
+            )
+            .await?
+        } else {
+            // Data is within range - reuse (caller prunes later).
+            journal
+        };
         let journal_size = Position::new(journal.size());
         assert!(journal_size <= *cfg.range.end);
 
