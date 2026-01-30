@@ -1513,9 +1513,9 @@ mod tests {
     use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    use futures::{stream::FuturesUnordered, task::noop_waker};
     #[cfg(feature = "external")]
-    use futures::{SinkExt, StreamExt};
+    use futures::StreamExt;
+    use futures::{stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
