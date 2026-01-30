@@ -19,7 +19,7 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
 };
-use commonware_stream::{dial, Config as StreamConfig};
+use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
@@ -209,7 +209,7 @@ mod tests {
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_stream::Config as StreamConfig;
+    use commonware_stream::encrypted::Config as StreamConfig;
     use futures::StreamExt;
     use std::{
         net::{Ipv4Addr, SocketAddr},

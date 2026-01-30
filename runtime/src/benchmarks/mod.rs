@@ -1,4 +1,4 @@
 //! Utilities for running benchmarks.
 
 pub mod context;
-pub mod tokio;
+commonware_macros::stability_mod!(BETA, pub mod tokio);

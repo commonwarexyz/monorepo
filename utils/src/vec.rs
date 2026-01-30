@@ -443,7 +443,7 @@ macro_rules! non_empty_vec {
 mod tests {
     use super::*;
     use crate::{NZUsize, TryCollect};
-    use commonware_codec::Error as CodecError;
+    use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
     use std::num::NonZeroUsize;
 
     #[test]
