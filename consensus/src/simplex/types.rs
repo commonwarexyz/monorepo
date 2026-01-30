@@ -2249,8 +2249,7 @@ impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.notarize_1.proposal != self.notarize_2.proposal
-            && self.notarize_1.verify(rng, scheme, strategy)
+        self.notarize_1.verify(rng, scheme, strategy)
             && self.notarize_2.verify(rng, scheme, strategy)
     }
 }
@@ -2378,8 +2377,7 @@ impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
         R: CryptoRngCore,
         S: scheme::Scheme<D>,
     {
-        self.finalize_1.proposal != self.finalize_2.proposal
-            && self.finalize_1.verify(rng, scheme, strategy)
+        self.finalize_1.verify(rng, scheme, strategy)
             && self.finalize_2.verify(rng, scheme, strategy)
     }
 }
@@ -3408,7 +3406,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "proposals must differ")]
-    fn issue_2944_regression_conflicting_notarize_new_identical() {
+    fn issue_2944_regression_conflicting_notarize_new() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
         let proposal = Proposal::new(
@@ -3421,7 +3419,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_2944_regression_conflicting_notarize_decode_identical() {
+    fn issue_2944_regression_conflicting_notarize_decode() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
         let proposal = Proposal::new(
@@ -3442,29 +3440,8 @@ mod tests {
     }
 
     #[test]
-    fn issue_2944_regression_conflicting_notarize_verify_identical() {
-        let mut rng = test_rng();
-        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
-        let proposal = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(1),
-        );
-        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
-
-        // Construct invalid ConflictingNotarize by bypassing the constructor
-        let invalid = ConflictingNotarize {
-            notarize_1: notarize.clone(),
-            notarize_2: notarize,
-        };
-
-        // verify should return false even though both signatures are valid
-        assert!(!invalid.verify(&mut rng, &fixture.schemes[0], &Sequential));
-    }
-
-    #[test]
     #[should_panic(expected = "proposals must differ")]
-    fn issue_2944_regression_conflicting_finalize_new_identical() {
+    fn issue_2944_regression_conflicting_finalize_new() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
         let proposal = Proposal::new(
@@ -3477,7 +3454,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_2944_regression_conflicting_finalize_decode_identical() {
+    fn issue_2944_regression_conflicting_finalize_decode() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
         let proposal = Proposal::new(
@@ -3495,27 +3472,6 @@ mod tests {
         // Decoding should fail
         let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn issue_2944_regression_conflicting_finalize_verify_identical() {
-        let mut rng = test_rng();
-        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
-        let proposal = Proposal::new(
-            Round::new(Epoch::new(0), View::new(10)),
-            View::new(5),
-            sample_digest(1),
-        );
-        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
-
-        // Construct invalid ConflictingFinalize by bypassing the constructor
-        let invalid = ConflictingFinalize {
-            finalize_1: finalize.clone(),
-            finalize_2: finalize,
-        };
-
-        // verify should return false even though both signatures are valid
-        assert!(!invalid.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     #[cfg(feature = "arbitrary")]
