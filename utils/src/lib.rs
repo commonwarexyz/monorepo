@@ -10,14 +10,16 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
 use alloc::{boxed::Box, string::String, vec::Vec};
-use bytes::{BufMut, BytesMut};
-use core::{
-    fmt::{Debug, Write as FmtWrite},
-    time::Duration,
-};
 
 commonware_macros::stability_scope!(BETA {
+
+    use bytes::{BufMut, BytesMut};
+    use core::{
+        fmt::Write as FmtWrite,
+        time::Duration,
+    };
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
 
@@ -275,6 +277,12 @@ pub mod hex_literal;
 )))] // BETA
 pub mod vec;
 
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
 #[inline]
 const fn decode_hex_digit(byte: u8) -> Option<u8> {
     match byte {

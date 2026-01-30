@@ -68,15 +68,11 @@ commonware_macros::stability_scope!(BETA {
 });
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_cryptography::Digest;
-    use commonware_cryptography::certificate::Scheme;
     use commonware_utils::channels::fallible::OneshotExt;
     use futures::channel::{oneshot, mpsc};
     use std::future::Future;
-    use commonware_runtime::{Spawner, Metrics, Clock};
-    use rand::Rng;
 
     pub mod marshal;
-    use crate::marshal::ingress::mailbox::AncestorStream;
 
     mod reporter;
     pub use reporter::*;
@@ -202,6 +198,10 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 });
 commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    use commonware_cryptography::certificate::Scheme;
+    use commonware_runtime::{Spawner, Metrics, Clock};
+    use rand::Rng;
+    use crate::marshal::ingress::mailbox::AncestorStream;
     pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream

@@ -197,6 +197,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(not(feature = "std"))]
+#[allow(unused_extern_crates)]
 extern crate alloc;
 
 commonware_macros::stability_scope!(BETA {

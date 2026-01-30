@@ -191,6 +191,13 @@ impl<'a, S: UnlimitedSender> CheckedSender<'a, S> {
     ///
     /// Rate limiting has already been applied to the original recipients. Any
     /// messages sent via the extracted sender will bypass the rate limiter.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))] // ALPHA
     pub(crate) fn into_inner(self) -> &'a mut S {
         self.sender
     }

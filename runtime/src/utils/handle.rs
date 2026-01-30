@@ -184,6 +184,13 @@ impl Panicker {
     }
 
     /// Returns whether the [Panicker] is configured to catch panics.
+    #[cfg(not(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    )))] // ALPHA
     pub(crate) const fn catch(&self) -> bool {
         self.catch
     }

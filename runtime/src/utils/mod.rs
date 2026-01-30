@@ -15,7 +15,15 @@ pub mod signal;
 
 mod handle;
 pub use handle::Handle;
-pub(crate) use handle::{Aborter, MetricHandle, Panicked, Panicker};
+pub(crate) use handle::{Aborter, MetricHandle, Panicker};
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // ALPHA
+pub(crate) use handle::Panicked;
 
 mod cell;
 pub use cell::Cell as ContextCell;
