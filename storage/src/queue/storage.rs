@@ -154,7 +154,24 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         .await?;
 
         // Load persisted ack state
-        let (ack_floor, acked_above) = Self::load_ack_state(&ack_metadata);
+        let (mut ack_floor, mut acked_above) = Self::load_ack_state(&ack_metadata);
+
+        // Ensure consistency after crash recovery: if the journal was pruned but
+        // ack metadata wasn't synced, ack_floor might be stale (less than pruning_boundary).
+        // Adjust to prevent reading pruned positions.
+        let pruning_boundary = journal.pruning_boundary();
+        if ack_floor < pruning_boundary {
+            debug!(
+                old_ack_floor = ack_floor,
+                pruning_boundary,
+                "adjusting ack_floor to pruning_boundary after crash"
+            );
+            // Remove any acked_above entries below new floor
+            if pruning_boundary > 0 {
+                acked_above.remove(0, pruning_boundary - 1);
+            }
+            ack_floor = pruning_boundary;
+        }
 
         // On restart, begin reading from the ack floor
         let start_pos = ack_floor;
@@ -163,7 +180,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             start_pos,
             ack_floor,
             size = journal.size(),
-            pruning_boundary = journal.pruning_boundary(),
+            pruning_boundary,
             "queue initialized"
         );
 
@@ -1126,6 +1143,106 @@ mod tests {
                 for i in 0..5 {
                     let (p, _) = queue.dequeue().await.unwrap().unwrap();
                     assert_eq!(p, i);
+                }
+
+                queue.destroy().await.unwrap();
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_crash_recovery_pruned_journal_stale_metadata() {
+        // Tests the scenario where:
+        // 1. Items are acked and journal is pruned
+        // 2. Journal sync completes but ack metadata sync doesn't (crash)
+        // 3. On recovery, ack_floor should be adjusted to pruning_boundary
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_recovery_pruned");
+
+            // First session: enqueue many items, ack enough to trigger pruning
+            {
+                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+                // Enqueue items across multiple sections (items_per_section = 10)
+                for i in 0..25u8 {
+                    queue.enqueue(vec![i]).await.unwrap();
+                }
+
+                // Ack items 0-14 to advance floor and trigger pruning of section 0
+                for i in 0..15 {
+                    queue.ack(i).await.unwrap();
+                }
+                assert_eq!(queue.ack_floor(), 15);
+
+                // Sync everything (both journal prune state and ack metadata)
+                queue.sync().await.unwrap();
+
+                // Verify pruning occurred
+                let pruning_boundary = queue.journal.pruning_boundary();
+                assert!(pruning_boundary > 0, "expected some pruning to occur");
+
+                drop(queue);
+            }
+
+            // Simulate crash: manually reset ack metadata to stale state
+            // This simulates a crash after journal sync but before metadata sync
+            {
+                let ack_partition = format!("{}_ack", cfg.partition);
+                let mut ack_metadata: Metadata<_, U64, Vec<u8>> = Metadata::init(
+                    context.with_label("corrupt"),
+                    metadata::Config {
+                        partition: ack_partition,
+                        codec_config: ((0..).into(), ()),
+                    },
+                )
+                .await
+                .unwrap();
+
+                // Write stale ack_floor = 0 (simulating unsynced metadata)
+                ack_metadata.put(ACK_FLOOR_KEY, 0u64.to_le_bytes().to_vec());
+                ack_metadata.put(ACK_RANGES_KEY, 0u64.to_le_bytes().to_vec()); // No ranges
+                ack_metadata.sync().await.unwrap();
+            }
+
+            // Third session: verify recovery handles stale metadata correctly
+            {
+                let mut queue =
+                    Queue::<_, Vec<u8>>::init(context.with_label("third"), cfg.clone())
+                        .await
+                        .unwrap();
+
+                // ack_floor should have been adjusted to pruning_boundary
+                let pruning_boundary = queue.journal.pruning_boundary();
+                assert!(
+                    queue.ack_floor() >= pruning_boundary,
+                    "ack_floor ({}) should be >= pruning_boundary ({})",
+                    queue.ack_floor(),
+                    pruning_boundary
+                );
+
+                // read_pos should also be at or above pruning_boundary
+                assert!(
+                    queue.read_position() >= pruning_boundary,
+                    "read_position ({}) should be >= pruning_boundary ({})",
+                    queue.read_position(),
+                    pruning_boundary
+                );
+
+                // Dequeue should work without panicking (no reading pruned data)
+                let result = queue.dequeue().await;
+                assert!(result.is_ok(), "dequeue should not fail after recovery");
+
+                // If there are items, they should be at valid positions
+                if let Ok(Some((pos, _))) = result {
+                    assert!(
+                        pos >= pruning_boundary,
+                        "dequeued position ({}) should be >= pruning_boundary ({})",
+                        pos,
+                        pruning_boundary
+                    );
                 }
 
                 queue.destroy().await.unwrap();
