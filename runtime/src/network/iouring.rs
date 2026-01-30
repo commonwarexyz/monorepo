@@ -57,7 +57,7 @@ pub struct Config {
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     pub read_buffer_size: usize,
-    /// Optional PROXY protocol configuration.
+    /// Optional [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) configuration.
     ///
     /// When set, connections from trusted proxy IPs will have PROXY headers
     /// parsed to obtain the real client address.
