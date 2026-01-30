@@ -1,5 +1,5 @@
 use crate::{
-    algebra::{Additive as _, Ring},
+    algebra::{Additive as _, FieldNTT as _, Ring},
     fields::goldilocks::F,
 };
 #[cfg(not(feature = "std"))]
