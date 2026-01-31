@@ -30,6 +30,8 @@
 //! authenticated, evidence can be used locally (as it must be sent by said participant)
 //! but can't be used by an external observer.
 
+#[commonware_macros::stability(ALPHA)]
+use crate::simplex::scheme::seed_namespace;
 use crate::{
     simplex::{
         scheme::Namespace,
@@ -38,12 +40,12 @@ use crate::{
     types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
-#[commonware_macros::stability(ALPHA)]
-use crate::simplex::scheme::seed_namespace;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     types::lazy::Lazy, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
 };
+#[commonware_macros::stability(ALPHA)]
+use commonware_cryptography::bls12381::tle;
 use commonware_cryptography::{
     bls12381::primitives::{
         group::Share,
@@ -54,8 +56,6 @@ use commonware_cryptography::{
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
-#[commonware_macros::stability(ALPHA)]
-use commonware_cryptography::bls12381::tle;
 use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};

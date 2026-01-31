@@ -428,8 +428,6 @@ impl Field for F {
 #[cfg(test)]
 mod test {
     use super::*;
-    #[cfg(not(feature = "std"))]
-    use alloc::vec::Vec;
     use crate::algebra;
     use proptest::prelude::*;
 
