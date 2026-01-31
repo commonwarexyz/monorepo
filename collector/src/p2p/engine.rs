@@ -223,7 +223,7 @@ where
                         break;
                     }
                 };
-                let msg: Rs = match msg {
+                let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
                         warn!(?err, ?peer, "blocking peer");
