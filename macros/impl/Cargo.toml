@@ -1,0 +1,24 @@
+[package]
+name = "commonware-macros-impl"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Proc-macro implementation for commonware-macros (internal crate)."
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros/impl"
+documentation = "https://docs.rs/commonware-macros"
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+proc-macro = true
+
+[dependencies]
+proc-macro-crate.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full"] }
+toml.workspace = true

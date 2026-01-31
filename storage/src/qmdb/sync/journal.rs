@@ -97,7 +97,23 @@ where
         config: Self::Config,
         range: Range<Location>,
     ) -> Result<Self, Self::Error> {
-        Self::init_sync(context, config, *range.start..*range.end).await
+        assert!(!range.is_empty(), "range must not be empty");
+
+        let mut journal = Self::init(context, config).await?;
+        let size = journal.size();
+
+        if size > *range.end {
+            return Err(crate::journal::Error::ItemOutOfRange(size));
+        }
+        if size <= *range.start {
+            if *range.start != 0 {
+                journal.clear_to_size(*range.start).await?;
+            }
+        } else {
+            journal.prune(*range.start).await?;
+        }
+
+        Ok(journal)
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
