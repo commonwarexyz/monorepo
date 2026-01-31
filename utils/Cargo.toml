@@ -48,6 +48,7 @@ default = [ "std" ]
 std = [
 	"bytes/std",
 	"commonware-codec/std",
+	"commonware-macros/std",
 	"futures",
 	"getrandom/std",
 	"num-bigint",

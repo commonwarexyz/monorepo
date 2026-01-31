@@ -1,0 +1,7 @@
+# Disallow direct use of futures select macros - use commonware_macros::select! instead.
+# tokio::select is not listed here because our select! macro expands to it, and clippy
+# checks after macro expansion.
+disallowed-macros = [
+    { path = "futures::select", reason = "use commonware_macros::select! instead" },
+    { path = "futures::select_biased", reason = "use commonware_macros::select! instead" },
+]

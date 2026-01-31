@@ -48,6 +48,7 @@ std = [
 	"bytes/std",
 	"commonware-codec/std",
 	"commonware-cryptography/std",
+	"commonware-macros/std",
 	"commonware-parallel",
 	"commonware-parallel?/std",
 	"commonware-runtime",

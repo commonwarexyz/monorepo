@@ -318,10 +318,10 @@ impl<
                 self.pending
                     .iter_mut()
                     .for_each(|(_, pending)| match pending {
-                        Pending::Unverified(acks) => {
+                        self::Pending::Unverified(acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
-                        Pending::Verified(_, acks) => {
+                        self::Pending::Verified(_, acks) => {
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
                     });
