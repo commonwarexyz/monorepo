@@ -392,7 +392,6 @@ pub struct Checkpoint {
     rng: Mutex<BoxDynRng>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
-    buffer_pools: Arc<BufferPools>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
 }
@@ -470,7 +469,6 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let buffer_pools = context.buffer_pools.clone();
         let mut root = Box::pin(panicked.interrupt(f(context)));
 
         // Register the root task
@@ -631,7 +629,6 @@ impl Runner {
             rng: executor.rng,
             time: executor.time,
             storage,
-            buffer_pools,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
         };
@@ -921,6 +918,10 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize buffer pools
+        let buffer_pools =
+            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
+
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
 
@@ -949,7 +950,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                buffer_pools: checkpoint.buffer_pools,
+                buffer_pools: Arc::new(buffer_pools),
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
