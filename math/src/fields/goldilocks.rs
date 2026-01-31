@@ -429,8 +429,6 @@ impl Field for F {
 mod test {
     use super::*;
     use crate::algebra;
-    #[cfg(not(feature = "std"))]
-    use alloc::vec::Vec;
     use proptest::prelude::*;
 
     impl Arbitrary for F {
