@@ -588,7 +588,6 @@ impl BufferPool {
             }
         };
 
-        // Note: exhausted_total metric is incremented inside try_alloc
         let buffer = self
             .inner
             .try_alloc(class_index)
@@ -644,9 +643,7 @@ impl BufferPools {
 
 /// A mutable buffer from the pool.
 ///
-/// When dropped, the underlying buffer is returned to the pool (if it came from one).
-/// Buffers that were allocated as fallback (when the pool was exhausted) are simply
-/// deallocated on drop.
+/// When dropped, the underlying buffer is returned to the pool.
 ///
 /// # Buffer Layout
 ///
@@ -690,7 +687,7 @@ pub struct PooledBufMut {
     cursor: usize,
     /// Number of bytes written (initialized).
     len: usize,
-    /// Reference to the pool. `Weak::new()` for fallback allocations.
+    /// Reference to the pool.
     pool: Weak<BufferPoolInner>,
 }
 
