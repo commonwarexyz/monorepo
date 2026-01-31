@@ -72,6 +72,7 @@ arbitrary = [
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name = "utils"

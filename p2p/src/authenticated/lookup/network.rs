@@ -2,7 +2,7 @@
 
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
-    channel::{self, Channels},
+    channels::{self, Channels},
     config::Config,
     types,
 };
@@ -107,8 +107,8 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
         rate: Quota,
         backlog: usize,
     ) -> (
-        channel::Sender<C::PublicKey, E>,
-        channel::Receiver<C::PublicKey>,
+        channels::Sender<C::PublicKey, E>,
+        channels::Receiver<C::PublicKey>,
     ) {
         let clock = self
             .context
