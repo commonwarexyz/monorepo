@@ -20,7 +20,6 @@ commonware-macros = { workspace = true, features = ["std"] }
 commonware-p2p.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-utils.workspace = true
-futures.workspace = true
 prometheus-client.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
