@@ -3,7 +3,7 @@ use crate::authenticated::{
     data::EncodedData,
     discovery::{
         actors::tracker,
-        channel::Channels,
+        channels::Channels,
         metrics,
         types::{self, InfoVerifier},
     },
@@ -388,7 +388,7 @@ mod tests {
     use crate::authenticated::{
         discovery::{
             actors::{router, tracker},
-            channel::Channels,
+            channels::Channels,
         },
         mailbox::UnboundedMailbox,
         Mailbox,

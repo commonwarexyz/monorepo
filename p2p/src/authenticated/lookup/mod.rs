@@ -151,7 +151,7 @@
 //! ```
 
 mod actors;
-mod channel;
+mod channels;
 mod config;
 mod metrics;
 mod network;
@@ -169,7 +169,7 @@ pub enum Error {
 }
 
 pub use actors::tracker::Oracle;
-pub use channel::{Receiver, Sender};
+pub use channels::{Receiver, Sender};
 pub use config::Config;
 pub use network::Network;
 
@@ -1464,8 +1464,8 @@ mod tests {
             let addresses: Vec<_> = peers.iter().map(|p| p.public_key()).collect();
 
             // Track senders/receivers/oracles/handles across restarts
-            let mut senders: Vec<Option<channel::Sender<_, _>>> = (0..n).map(|_| None).collect();
-            let mut receivers: Vec<Option<channel::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
             let mut oracles: Vec<Option<Oracle<_>>> = (0..n).map(|_| None).collect();
             let mut handles: Vec<Option<commonware_runtime::Handle<()>>> =
                 (0..n).map(|_| None).collect();
@@ -1702,8 +1702,8 @@ mod tests {
                 .collect();
 
             // Track senders/receivers/oracles/handles across restarts
-            let mut senders: Vec<Option<channel::Sender<_, _>>> = (0..n).map(|_| None).collect();
-            let mut receivers: Vec<Option<channel::Receiver<_>>> = (0..n).map(|_| None).collect();
+            let mut senders: Vec<Option<channels::Sender<_, _>>> = (0..n).map(|_| None).collect();
+            let mut receivers: Vec<Option<channels::Receiver<_>>> = (0..n).map(|_| None).collect();
             let mut oracles: Vec<Option<Oracle<_>>> = (0..n).map(|_| None).collect();
             let mut handles: Vec<Option<commonware_runtime::Handle<()>>> =
                 (0..n).map(|_| None).collect();

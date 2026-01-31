@@ -1,7 +1,7 @@
 use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
     data::EncodedData,
-    lookup::{channel::Channels, metrics, types},
+    lookup::{channels::Channels, metrics, types},
     relay::Relay,
     Mailbox,
 };

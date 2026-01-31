@@ -5,7 +5,7 @@ use super::{
 use crate::{
     authenticated::{
         data::EncodedData,
-        discovery::{channel::Channels, metrics},
+        discovery::{channels::Channels, metrics},
         relay::Relay,
         Mailbox,
     },
