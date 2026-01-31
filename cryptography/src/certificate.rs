@@ -57,13 +57,12 @@
 //! (like [bls12381_threshold]). Refer to [ed25519] for an example of a scheme that uses the
 //! same key for both purposes.
 
+#[commonware_macros::stability(ALPHA)]
+pub use crate::secp256r1::certificate as secp256r1;
 pub use crate::{
     bls12381::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold},
     ed25519::certificate as ed25519,
 };
-
-#[commonware_macros::stability(ALPHA)]
-pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};

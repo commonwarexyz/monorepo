@@ -20,7 +20,7 @@ use crate::{
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
-use commonware_macros::{stability, select};
+use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
