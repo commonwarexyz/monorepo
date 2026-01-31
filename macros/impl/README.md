@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-macros-impl.svg)](https://crates.io/crates/commonware-macros-impl)
 [![Docs.rs](https://docs.rs/commonware-macros-impl/badge.svg)](https://docs.rs/commonware-macros-impl)
 
-Augments the development of [`commonware-macros`](https://crates.io/crates/commonware-macros) with procedural macros.
+Augment the development of [`commonware-macros`](https://crates.io/crates/commonware-macros) with procedural macros.
 
 ## Status
 
