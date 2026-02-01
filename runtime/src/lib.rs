@@ -31,8 +31,8 @@ mod process;
 mod storage;
 
 stability_scope!(ALPHA {
-    pub mod mocks;
     pub mod deterministic;
+    pub mod mocks;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
@@ -60,11 +60,10 @@ stability_scope!(BETA {
     /// Prefix for runtime metrics.
     pub(crate) const METRICS_PREFIX: &str = "runtime";
 
-    /// Re-export of [governor::Quota] for rate limiting configuration.
-    pub use governor::Quota;
-
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
+    /// Re-export of [governor::Quota] for rate limiting configuration.
+    pub use governor::Quota;
 
     pub mod iobuf;
     pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
@@ -263,7 +262,10 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
         /// be built.
-        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+        fn create_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError>;
 
         /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
         ///
@@ -273,7 +275,10 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
         /// built.
-        fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
+        fn create_strategy(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<Rayon, ThreadPoolBuildError> {
             self.create_pool(concurrency).map(Rayon::with_pool)
         }
     }
@@ -489,12 +494,8 @@ stability_scope!(BETA {
         {
             async move {
                 select! {
-                    result = future => {
-                        Ok(result)
-                    },
-                    _ = self.sleep(duration) => {
-                        Err(Error::Timeout)
-                    },
+                    result = future => Ok(result),
+                    _ = self.sleep(duration) => Err(Error::Timeout),
                 }
             }
         }
@@ -662,7 +663,8 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Return all blobs in a given partition.
-        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+        fn scan(&self, partition: &str)
+            -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
     /// Interface to read and write to a blob.

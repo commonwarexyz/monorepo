@@ -206,7 +206,10 @@ commonware_macros::stability_scope!(BETA {
     where
         C: crate::RayonPoolSpawner,
     {
-        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        fn create_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError> {
             self.as_present().create_pool(concurrency)
         }
     }
@@ -255,7 +258,10 @@ commonware_macros::stability_scope!(BETA {
             self.as_present().remove(partition, name)
         }
 
-        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
+        fn scan(
+            &self,
+            partition: &str,
+        ) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
             self.as_present().scan(partition)
         }
     }

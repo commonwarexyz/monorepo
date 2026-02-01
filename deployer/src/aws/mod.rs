@@ -279,9 +279,9 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 cfg_if::cfg_if! {
-    if #[cfg(feature="aws")] {
-        use thiserror::Error;
+    if #[cfg(feature = "aws")] {
         use std::path::PathBuf;
+        use thiserror::Error;
 
         /// CPU architecture for EC2 instances
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -323,8 +323,8 @@ cfg_if::cfg_if! {
             pub instance_count: usize,
         }
 
-        pub mod ec2;
         mod create;
+        pub mod ec2;
         pub mod services;
         pub use create::create;
         mod update;
@@ -339,8 +339,8 @@ cfg_if::cfg_if! {
         pub use profile::profile;
         mod list;
         pub use list::list;
-        pub mod utils;
         pub mod s3;
+        pub mod utils;
 
         /// Name of the monitoring instance
         const MONITORING_NAME: &str = "monitoring";
@@ -426,7 +426,10 @@ cfg_if::cfg_if! {
         impl std::fmt::Display for BucketForbiddenReason {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
-                    Self::AccessDenied => write!(f, "access denied (check IAM permissions or bucket ownership)"),
+                    Self::AccessDenied => write!(
+                        f,
+                        "access denied (check IAM permissions or bucket ownership)"
+                    ),
                 }
             }
         }
@@ -451,7 +454,9 @@ cfg_if::cfg_if! {
             #[error("AWS security group ingress error: {0}")]
             AwsSecurityGroupIngress(#[from] aws_sdk_ec2::operation::authorize_security_group_ingress::AuthorizeSecurityGroupIngressError),
             #[error("AWS describe instances error: {0}")]
-            AwsDescribeInstances(#[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError),
+            AwsDescribeInstances(
+                #[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError,
+            ),
             #[error("S3 operation failed: {operation} on bucket '{bucket}'")]
             AwsS3 {
                 bucket: String,
@@ -497,7 +502,9 @@ cfg_if::cfg_if! {
             #[error("S3 presigning config error: {0}")]
             S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
             #[error("S3 presigning failed: {0}")]
-            S3PresigningFailed(Box<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>),
+            S3PresigningFailed(
+                Box<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>,
+            ),
             #[error("S3 builder error: {0}")]
             S3Builder(#[from] aws_sdk_s3::error::BuildError),
             #[error("duplicate instance name: {0}")]
@@ -518,8 +525,12 @@ cfg_if::cfg_if! {
             RegionsNotEnabled(Vec<String>),
         }
 
-        impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>> for Error {
-            fn from(err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> Self {
+        impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>
+            for Error
+        {
+            fn from(
+                err: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>,
+            ) -> Self {
                 Self::S3PresigningFailed(Box::new(err))
             }
         }

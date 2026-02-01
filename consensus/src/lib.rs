@@ -77,8 +77,9 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Histogram buckets for measuring consensus latency.
     const LATENCY: [f64; 36] = [
-        0.05, 0.1, 0.125, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29, 0.3, 0.31, 0.32, 0.33, 0.34, 0.35,
-        0.36, 0.37, 0.38, 0.39, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+        0.05, 0.1, 0.125, 0.15, 0.16, 0.17, 0.18, 0.19, 0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26,
+        0.27, 0.28, 0.29, 0.3, 0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38, 0.39, 0.4, 0.45,
+        0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
     ];
 
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
@@ -191,21 +192,23 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         type Index;
 
         /// Create a channel that will receive updates when the latest index (also provided) changes.
-        fn subscribe(&mut self) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
+        fn subscribe(
+            &mut self,
+        ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
 });
 commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Spawner, Metrics, Clock};
-    use rand::Rng;
     use crate::marshal::ingress::mailbox::AncestorStream;
+    use commonware_cryptography::certificate::Scheme;
+    use commonware_runtime::{Clock, Metrics, Spawner};
+    use rand::Rng;
     pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
     pub trait Application<E>: Clone + Send + 'static
     where
-        E: Rng + Spawner + Metrics + Clock
+        E: Rng + Spawner + Metrics + Clock,
     {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;
@@ -238,7 +241,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     /// hidden from the application.
     pub trait VerifyingApplication<E>: Application<E>
     where
-        E: Rng + Spawner + Metrics + Clock
+        E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         fn verify(

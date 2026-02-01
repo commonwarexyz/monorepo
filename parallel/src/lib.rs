@@ -68,8 +68,7 @@ commonware_macros::stability_scope!(BETA {
         if #[cfg(feature = "std")] {
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
-                ThreadPool as RThreadPool, ThreadPoolBuilder,
-                ThreadPoolBuildError
+                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
             use std::{num::NonZeroUsize, sync::Arc};
         } else {

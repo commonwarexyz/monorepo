@@ -229,7 +229,10 @@ stability_scope!(BETA {
         fn update(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
 
         /// Fetch the ordered set of peers for a given ID.
-        fn peer_set(&mut self, id: u64) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;
+        fn peer_set(
+            &mut self,
+            id: u64,
+        ) -> impl Future<Output = Option<Set<Self::PublicKey>>> + Send;
 
         /// Subscribe to notifications when new peer sets are added.
         ///
