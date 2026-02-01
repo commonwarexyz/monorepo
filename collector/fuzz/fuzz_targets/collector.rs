@@ -26,6 +26,7 @@ use std::{
 
 const MAX_LEN: usize = 1_000_000;
 const MAX_OPERATIONS: usize = 256;
+const MIN_BUFFER_SIZE: u16 = 1;
 
 #[derive(Debug, Arbitrary)]
 enum RecipientsType {
@@ -411,6 +412,7 @@ fn fuzz(input: FuzzInput) {
                     priority_response,
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
+                    let mailbox_size = mailbox_size.max(MIN_BUFFER_SIZE);
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
                     });
