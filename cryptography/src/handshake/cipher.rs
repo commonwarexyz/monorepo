@@ -55,7 +55,11 @@ cfg_if::cfg_if! {
                 Self(LessSafeKey::new(unbound_key))
             }
 
-            fn encrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn encrypt(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+            ) -> Result<Vec<u8>, Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
                 let mut scratch = Vec::with_capacity(data.len() + CIPHERTEXT_OVERHEAD);
                 scratch.extend_from_slice(data);
@@ -65,7 +69,11 @@ cfg_if::cfg_if! {
                 Ok(scratch)
             }
 
-            fn decrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn decrypt(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+            ) -> Result<Vec<u8>, Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
                 let mut scratch = data.to_vec();
                 self.0
@@ -85,13 +93,21 @@ cfg_if::cfg_if! {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
 
-            fn encrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn encrypt(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+            ) -> Result<Vec<u8>, Error> {
                 self.0
                     .encrypt(nonce.into(), data)
                     .map_err(|_| Error::EncryptionFailed)
             }
 
-            fn decrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn decrypt(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+            ) -> Result<Vec<u8>, Error> {
                 self.0
                     .decrypt(nonce.into(), data)
                     .map_err(|_| Error::DecryptionFailed)

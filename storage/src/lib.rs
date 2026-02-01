@@ -16,9 +16,12 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod mmr;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub mod qmdb;
     mod bitmap;
-    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap, DirtyBitMap as DirtyAuthenticatedBitMap};
+    pub mod qmdb;
+    pub use crate::bitmap::{
+        BitMap as AuthenticatedBitMap, CleanBitMap as CleanAuthenticatedBitMap,
+        DirtyBitMap as DirtyAuthenticatedBitMap,
+    };
     pub mod bmt;
     pub mod cache;
 });
