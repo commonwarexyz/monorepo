@@ -17,7 +17,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{authenticated, Manager};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, RayonPoolSpawner, Runner,
+    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, TaskPools,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -219,7 +219,7 @@ fn main() {
         );
 
         // Initialize application
-        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
+        let strategy = context.create_strategy("bridge", NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network =
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)

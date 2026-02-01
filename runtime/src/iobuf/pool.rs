@@ -74,7 +74,7 @@ impl std::error::Error for PoolError {}
 ///
 /// On Unix systems, queries the actual page size via `sysconf`.
 /// On other systems (Windows), defaults to 4KB.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn page_size() -> usize {
     // SAFETY: sysconf is safe to call.
     let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -85,7 +85,7 @@ fn page_size() -> usize {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 #[allow(clippy::missing_const_for_fn)]
 fn page_size() -> usize {
     4096
@@ -97,7 +97,7 @@ fn page_size() -> usize {
 /// accounts for spatial prefetching. Uses 64 bytes for other architectures.
 ///
 /// See: <https://github.com/crossbeam-rs/crossbeam/blob/983d56b6007ca4c22b56a665a7785f40f55c2a53/crossbeam-utils/src/cache_padded.rs>
-const fn cache_line_size() -> usize {
+pub(crate) const fn cache_line_size() -> usize {
     cfg_if::cfg_if! {
         if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
             128
@@ -119,25 +119,12 @@ pub struct BufferPoolConfig {
     /// Whether to pre-allocate all buffers on pool creation.
     pub prefill: bool,
     /// Buffer alignment. Must be a power of two.
-    /// Use `page_size()` for storage I/O, `cache_line_size()` for network I/O.
+    /// Use page alignment for storage I/O, cache-line alignment for network I/O.
     pub alignment: usize,
 }
 
 impl Default for BufferPoolConfig {
     fn default() -> Self {
-        Self::for_network()
-    }
-}
-
-impl BufferPoolConfig {
-    /// Network I/O preset: cache-line aligned, cache_line_size to 64KB buffers,
-    /// 4096 per class, not prefilled.
-    ///
-    /// Network operations typically need multiple concurrent buffers per connection
-    /// (message, encoding, encryption) so we allow 4096 buffers per size class.
-    /// Cache-line alignment is used because network buffers don't require page
-    /// alignment for DMA, and smaller alignment reduces internal fragmentation.
-    pub const fn for_network() -> Self {
         let cache_line = cache_line_size();
         Self {
             min_size: cache_line,
@@ -147,22 +134,9 @@ impl BufferPoolConfig {
             alignment: cache_line,
         }
     }
+}
 
-    /// Storage I/O preset: page-aligned, page_size to 64KB buffers, 32 per class,
-    /// not prefilled.
-    ///
-    /// Page alignment is required for direct I/O and efficient DMA transfers.
-    pub fn for_storage() -> Self {
-        let page = page_size();
-        Self {
-            min_size: page,
-            max_size: 64 * 1024,
-            max_per_class: 32,
-            prefill: false,
-            alignment: page,
-        }
-    }
-
+impl BufferPoolConfig {
     /// Validates the configuration, panicking on invalid values.
     ///
     /// # Panics
@@ -602,44 +576,6 @@ impl BufferPool {
     }
 }
 
-/// Composite type holding buffer pools for different I/O domains.
-#[derive(Clone)]
-pub struct BufferPools {
-    network: BufferPool,
-    storage: BufferPool,
-}
-
-impl BufferPools {
-    /// Creates buffer pools with the given configurations.
-    pub fn new(
-        network_config: BufferPoolConfig,
-        storage_config: BufferPoolConfig,
-        registry: &mut Registry,
-    ) -> Self {
-        let network = BufferPool::new(network_config, registry.sub_registry_with_prefix("network"));
-        let storage = BufferPool::new(storage_config, registry.sub_registry_with_prefix("storage"));
-        Self { network, storage }
-    }
-
-    /// Creates buffer pools with default configurations.
-    pub fn with_defaults(registry: &mut Registry) -> Self {
-        Self::new(
-            BufferPoolConfig::for_network(),
-            BufferPoolConfig::for_storage(),
-            registry,
-        )
-    }
-
-    /// Returns the network buffer pool.
-    pub const fn network(&self) -> &BufferPool {
-        &self.network
-    }
-
-    /// Returns the storage buffer pool.
-    pub const fn storage(&self) -> &BufferPool {
-        &self.storage
-    }
-}
 
 /// A mutable buffer from the pool.
 ///
@@ -1127,39 +1063,14 @@ mod tests {
     }
 
     #[test]
-    fn test_config_for_network() {
-        let config = BufferPoolConfig::for_network();
+    fn test_config_default() {
+        let config = BufferPoolConfig::default();
         config.validate();
         assert_eq!(config.min_size, cache_line_size());
         assert_eq!(config.max_size, 64 * 1024);
         assert_eq!(config.max_per_class, 4096);
         assert!(!config.prefill);
         assert_eq!(config.alignment, cache_line_size());
-    }
-
-    #[test]
-    fn test_config_for_storage() {
-        let config = BufferPoolConfig::for_storage();
-        config.validate();
-        assert_eq!(config.min_size, page_size());
-        assert_eq!(config.max_size, 64 * 1024);
-        assert_eq!(config.max_per_class, 32);
-        assert!(!config.prefill);
-        assert_eq!(config.alignment, page_size());
-    }
-
-    #[test]
-    fn test_buffer_pools_with_defaults() {
-        let mut registry = test_registry();
-        let pools = BufferPools::with_defaults(&mut registry);
-
-        // Verify network pool works (cache-line aligned)
-        let net_buf = pools.network().alloc(1024).expect("network alloc failed");
-        assert!(net_buf.capacity() >= cache_line_size());
-
-        // Verify storage pool works (page-aligned)
-        let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
-        assert!(storage_buf.capacity() >= page_size());
     }
 
     /// Helper to get the number of allocated buffers for a size class.
@@ -1784,8 +1695,15 @@ mod tests {
         let cache_line = cache_line_size();
         let mut registry = test_registry();
 
-        // Storage preset - page aligned
-        let storage_pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        // Page-aligned config
+        let storage_config = BufferPoolConfig {
+            min_size: page,
+            max_size: 64 * 1024,
+            max_per_class: 32,
+            prefill: false,
+            alignment: page,
+        };
+        let storage_pool = BufferPool::new(storage_config, &mut registry);
         let mut buf = storage_pool.alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % page,
@@ -1793,8 +1711,8 @@ mod tests {
             "storage buffer not page-aligned"
         );
 
-        // Network preset - cache-line aligned
-        let network_pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        // Cache-line aligned config (default)
+        let network_pool = BufferPool::new(BufferPoolConfig::default(), &mut registry);
         let mut buf = network_pool.alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % cache_line,
@@ -1936,7 +1854,14 @@ mod tests {
     fn test_alignment_after_advance() {
         let page = page_size();
         let mut registry = test_registry();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let config = BufferPoolConfig {
+            min_size: page,
+            max_size: 64 * 1024,
+            max_per_class: 32,
+            prefill: false,
+            alignment: page,
+        };
+        let pool = BufferPool::new(config, &mut registry);
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0; 100]);

@@ -255,15 +255,15 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
-        network::{tests, tokio as TokioNetwork},
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        network::{tests, tokio as TokioNetwork, BUFFER_POOL_CONFIG},
+        BufferPool, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
     use std::time::{Duration, Instant};
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+        BufferPool::new(BUFFER_POOL_CONFIG, &mut Registry::default())
     }
 
     #[tokio::test]

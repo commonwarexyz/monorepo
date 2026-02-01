@@ -12,15 +12,17 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
+    iobuf::{BufferPool, BufferPoolConfig},
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    BufferPools, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
-    METRICS_PREFIX,
+    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
+use std::collections::HashMap;
+use std::sync::RwLock;
 use commonware_macros::{stability, select};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
@@ -302,9 +304,10 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Initialize buffer pools (before network, as network uses the pool)
-        let buffer_pools = crate::BufferPools::with_defaults(
-            runtime_registry.sub_registry_with_prefix("buffer_pool"),
+        // Initialize internal network buffer pool (not exposed via trait)
+        let network_pool = BufferPool::new(
+            crate::network::BUFFER_POOL_CONFIG,
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
 
         // Initialize network
@@ -324,7 +327,7 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry, buffer_pools.network().clone()).unwrap(),
+                    IoUringNetwork::start(config, iouring_registry, network_pool).unwrap(),
                 runtime_registry,
             );
         } else {
@@ -333,11 +336,15 @@ impl crate::Runner for Runner {
                 .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::new(config, buffer_pools.network().clone()),
+                    TokioNetwork::new(config, network_pool),
                     runtime_registry,
                 );
             }
         }
+
+        // Initialize buffer and task pool storage
+        let buffer_pools = Arc::new(RwLock::new(HashMap::new()));
+        let task_pools = Arc::new(RwLock::new(HashMap::new()));
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -360,7 +367,8 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            buffer_pools: Arc::new(buffer_pools),
+            buffer_pools,
+            task_pools,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -397,7 +405,8 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    buffer_pools: Arc<BufferPools>,
+    buffer_pools: Arc<RwLock<HashMap<String, BufferPool>>>,
+    task_pools: Arc<RwLock<HashMap<String, ThreadPool>>>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -413,6 +422,7 @@ impl Clone for Context {
             storage: self.storage.clone(),
             network: self.network.clone(),
             buffer_pools: self.buffer_pools.clone(),
+            task_pools: self.task_pools.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -537,20 +547,35 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-        ThreadPoolBuilder::new()
+impl crate::TaskPools for Context {
+    fn task_pool(
+        &self,
+        name: &str,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
+        // Check if pool already exists
+        {
+            let pools = self.task_pools.read().unwrap();
+            if let Some(pool) = pools.get(name) {
+                return Ok(pool.clone());
+            }
+        }
+
+        // Create new pool
+        let pool = ThreadPoolBuilder::new()
             .num_threads(concurrency.get())
             .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
                 self.with_label("rayon_thread")
                     .dedicated()
                     .spawn(move |_| async move { thread.run() });
                 Ok(())
             })
             .build()
-            .map(Arc::new)
+            .map(Arc::new)?;
+
+        // Insert pool (may race with another thread, but that's ok - we just return what's there)
+        let mut pools = self.task_pools.write().unwrap();
+        Ok(pools.entry(name.to_string()).or_insert(pool).clone())
     }
 }
 
@@ -724,8 +749,25 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::Pooling for Context {
-    fn buffer_pools(&self) -> &BufferPools {
-        &self.buffer_pools
+impl crate::BufferPools for Context {
+    fn buffer_pool(&self, name: &str) -> BufferPool {
+        // Check if pool already exists
+        {
+            let pools = self.buffer_pools.read().unwrap();
+            if let Some(pool) = pools.get(name) {
+                return pool.clone();
+            }
+        }
+
+        // Create new pool with default config
+        let mut registry = self.executor.registry.lock().unwrap();
+        let pool = BufferPool::new(
+            BufferPoolConfig::default(),
+            registry.sub_registry_with_prefix(format!("buffer_pool_{name}")),
+        );
+
+        // Insert pool (may race with another thread, but that's ok - we just return what's there)
+        let mut pools = self.buffer_pools.write().unwrap();
+        pools.entry(name.to_string()).or_insert(pool).clone()
     }
 }

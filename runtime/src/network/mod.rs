@@ -1,4 +1,21 @@
+use crate::iobuf::{cache_line_size, BufferPoolConfig};
 use commonware_macros::stability_scope;
+
+/// Default buffer pool configuration for network I/O.
+///
+/// Uses cache-line alignment (no page alignment needed for network),
+/// buffers from cache_line_size to 64KB, and 4096 buffers per size class
+/// to support many concurrent connections.
+pub(crate) const BUFFER_POOL_CONFIG: BufferPoolConfig = {
+    let cache_line = cache_line_size();
+    BufferPoolConfig {
+        min_size: cache_line,
+        max_size: 64 * 1024,
+        max_per_class: 4096,
+        prefill: false,
+        alignment: cache_line,
+    }
+};
 
 stability_scope!(ALPHA {
     pub(crate) mod audited;

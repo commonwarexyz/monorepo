@@ -68,7 +68,7 @@ stability_scope!(BETA {
     pub use bytes::{Buf, BufMut};
 
     pub mod iobuf;
-    pub use iobuf::{BufferPool, BufferPoolConfig, BufferPools, IoBuf, IoBufMut, IoBufs, IoBufsMut};
+    pub use iobuf::{BufferPool, BufferPoolConfig, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
     pub mod utils;
     pub use utils::*;
@@ -257,27 +257,44 @@ stability_scope!(BETA {
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
     /// placed on dedicated threads via [Spawner].
-    pub trait RayonPoolSpawner: Spawner + Metrics {
-        /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
+    ///
+    /// Task pools are created lazily on first access and cached by name.
+    /// The same name always returns the same pool (cheap Arc clone).
+    pub trait TaskPools: Spawner + Metrics {
+        /// Returns a [rayon]-compatible thread pool with the given name.
+        ///
+        /// If a pool with this name already exists, returns the existing pool
+        /// (ignoring the `concurrency` parameter).
+        /// Otherwise, creates a new pool with the specified concurrency.
         ///
         /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+        /// - `name`: The name of the pool. Same name returns same pool.
+        /// - `concurrency`: The number of threads in the pool (only used on first call for this name).
         ///
         /// # Returns
         /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
         /// be built.
-        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+        fn task_pool(
+            &self,
+            name: &str,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError>;
 
         /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
         ///
         /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+        /// - `name`: The name of the pool. Same name returns same pool.
+        /// - `concurrency`: The number of threads in the pool (only used on first call for this name).
         ///
         /// # Returns
         /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
         /// built.
-        fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
-            self.create_pool(concurrency).map(Rayon::with_pool)
+        fn create_strategy(
+            &self,
+            name: &str,
+            concurrency: NonZeroUsize,
+        ) -> Result<Rayon, ThreadPoolBuildError> {
+            self.task_pool(name, concurrency).map(Rayon::with_pool)
         }
     }
 
@@ -718,9 +735,16 @@ stability_scope!(BETA {
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
-    pub trait Pooling: Clone + Send + Sync + 'static {
-        /// Returns the buffer pools for this runtime.
-        fn buffer_pools(&self) -> &BufferPools;
+    ///
+    /// Buffer pools are created lazily on first access and cached by name.
+    /// The same name always returns the same pool (cheap Arc clone).
+    pub trait BufferPools: Clone + Send + Sync + 'static {
+        /// Returns a buffer pool with the given name.
+        ///
+        /// If a pool with this name already exists, returns the existing pool.
+        /// Otherwise, creates a new pool with the default configuration
+        /// (cache-line aligned, up to 64KB buffers, 4096 buffers per size class).
+        fn buffer_pool(&self, name: &str) -> BufferPool;
     }
 });
 stability_scope!(ALPHA, cfg(feature = "external") {
@@ -3436,11 +3460,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_tokio() {
+    fn test_task_pool_tokio() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .task_pool("test", NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3453,11 +3480,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_deterministic() {
+    fn test_task_pool_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .task_pool("test", NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();

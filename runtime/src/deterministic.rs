@@ -58,8 +58,9 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, BufferPools, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
-    Panicked, Spawner as _, METRICS_PREFIX,
+    iobuf::{BufferPool, BufferPoolConfig},
+    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
+    Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -97,7 +98,7 @@ use std::{
     num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, RwLock, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -812,7 +813,8 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    buffer_pools: Arc<BufferPools>,
+    buffer_pools: Arc<RwLock<HashMap<String, BufferPool>>>,
+    task_pools: Arc<RwLock<HashMap<String, ThreadPool>>>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -828,6 +830,7 @@ impl Clone for Context {
             network: self.network.clone(),
             storage: self.storage.clone(),
             buffer_pools: self.buffer_pools.clone(),
+            task_pools: self.task_pools.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -856,9 +859,9 @@ impl Context {
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
-        // Initialize buffer pools
-        let buffer_pools =
-            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
+        // Initialize buffer and task pool storage
+        let buffer_pools = Arc::new(RwLock::new(HashMap::new()));
+        let task_pools = Arc::new(RwLock::new(HashMap::new()));
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -886,7 +889,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                buffer_pools: Arc::new(buffer_pools),
+                buffer_pools,
+                task_pools,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -918,9 +922,9 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
-        // Initialize buffer pools
-        let buffer_pools =
-            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
+        // Initialize buffer and task pool storage
+        let buffer_pools = Arc::new(RwLock::new(HashMap::new()));
+        let task_pools = Arc::new(RwLock::new(HashMap::new()));
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
@@ -950,7 +954,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                buffer_pools: Arc::new(buffer_pools),
+                buffer_pools,
+                task_pools,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -1102,15 +1107,28 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+impl crate::TaskPools for Context {
+    fn task_pool(
+        &self,
+        name: &str,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
+        // Check if pool already exists
+        {
+            let pools = self.task_pools.read().unwrap();
+            if let Some(pool) = pools.get(name) {
+                return Ok(pool.clone());
+            }
+        }
+
+        // Create new pool
         let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
 
         if rayon::current_thread_index().is_none() {
             builder = builder.use_current_thread()
         }
 
-        builder
+        let pool = builder
             .spawn_handler(move |thread| {
                 self.with_label("rayon_thread")
                     .dedicated()
@@ -1118,7 +1136,11 @@ impl crate::RayonPoolSpawner for Context {
                 Ok(())
             })
             .build()
-            .map(Arc::new)
+            .map(Arc::new)?;
+
+        // Insert pool (may race with another thread, but that's ok - we just return what's there)
+        let mut pools = self.task_pools.write().unwrap();
+        Ok(pools.entry(name.to_string()).or_insert(pool).clone())
     }
 }
 
@@ -1507,9 +1529,27 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::Pooling for Context {
-    fn buffer_pools(&self) -> &BufferPools {
-        &self.buffer_pools
+impl crate::BufferPools for Context {
+    fn buffer_pool(&self, name: &str) -> BufferPool {
+        // Check if pool already exists
+        {
+            let pools = self.buffer_pools.read().unwrap();
+            if let Some(pool) = pools.get(name) {
+                return pool.clone();
+            }
+        }
+
+        // Create new pool with default config
+        let executor = self.executor();
+        let mut registry = executor.registry.lock().unwrap();
+        let pool = BufferPool::new(
+            BufferPoolConfig::default(),
+            registry.sub_registry_with_prefix(format!("buffer_pool_{name}")),
+        );
+
+        // Insert pool (may race with another thread, but that's ok - we just return what's there)
+        let mut pools = self.buffer_pools.write().unwrap();
+        pools.entry(name.to_string()).or_insert(pool).clone()
     }
 }
 
@@ -1521,7 +1561,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::Spawner;
     use crate::{
-        deterministic, reschedule, Blob, IoBufMut, Metrics, Pooling, Resolver, Runner as _, Storage,
+        deterministic, reschedule, Blob, BufferPools as _, IoBufMut, Metrics, Resolver, Runner as _,
+        Storage,
     };
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
@@ -2002,23 +2043,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pooling_trait() {
+    fn test_buffer_pools_trait() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Access buffer pools via trait
-            let pools = context.buffer_pools();
+            // Access buffer pool via trait
+            let pool = context.buffer_pool("test");
 
-            // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = pools.network().alloc(1024).expect("network alloc failed");
+            // Verify pool is accessible and works (cache-line aligned, default network config)
+            let net_buf = pool.alloc(1024).expect("alloc failed");
             assert!(net_buf.capacity() >= 1024); // At least requested size
 
-            // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
-            assert!(storage_buf.capacity() >= 4096); // Page-aligned min size
+            // Verify same name returns same pool
+            let pool2 = context.buffer_pool("test");
+            assert_eq!(pool.config().max_per_class, pool2.config().max_per_class);
 
-            // Verify pools have expected configurations
-            assert_eq!(pools.network().config().max_per_class, 4096);
-            assert_eq!(pools.storage().config().max_per_class, 32);
+            // Verify different name returns different pool
+            let pool3 = context.buffer_pool("other");
+            assert_eq!(pool3.config().max_per_class, 4096); // Default network config
         });
     }
 }

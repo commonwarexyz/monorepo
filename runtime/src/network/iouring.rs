@@ -496,16 +496,16 @@ mod tests {
         iouring,
         network::{
             iouring::{Config, Network},
-            tests,
+            tests, BUFFER_POOL_CONFIG,
         },
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
     use std::time::{Duration, Instant};
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+        BufferPool::new(BUFFER_POOL_CONFIG, &mut Registry::default())
     }
 
     #[tokio::test]
