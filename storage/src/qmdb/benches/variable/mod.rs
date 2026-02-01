@@ -104,13 +104,13 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let pool = ctx.task_pool("qmdb", THREADS).unwrap();
+    let pool = ctx.create_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let pool = ctx.task_pool("qmdb", THREADS).unwrap();
+    let pool = ctx.create_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
@@ -134,7 +134,7 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCf
 }
 
 async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
-    let pool = ctx.task_pool("qmdb", THREADS).unwrap();
+    let pool = ctx.create_pool(THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
@@ -142,7 +142,7 @@ async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
 }
 
 async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
-    let pool = ctx.task_pool("qmdb", THREADS).unwrap();
+    let pool = ctx.create_pool(THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await

@@ -35,10 +35,10 @@
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_queue::ArrayQueue;
+use crate::Metrics;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::Registry,
 };
 use std::{
     alloc::{alloc, dealloc, Layout},
@@ -228,8 +228,46 @@ struct PoolMetrics {
 }
 
 impl PoolMetrics {
-    fn new(registry: &mut Registry) -> Self {
-        let metrics = Self {
+    fn new(metrics: impl Metrics) -> Self {
+        let pool_metrics = Self {
+            allocated: Family::default(),
+            available: Family::default(),
+            allocations_total: Family::default(),
+            exhausted_total: Family::default(),
+            oversized_total: Counter::default(),
+        };
+
+        metrics.register(
+            "allocated",
+            "Number of buffers currently allocated from the pool",
+            pool_metrics.allocated.clone(),
+        );
+        metrics.register(
+            "available",
+            "Number of buffers available in the pool",
+            pool_metrics.available.clone(),
+        );
+        metrics.register(
+            "allocations_total",
+            "Total number of successful buffer allocations",
+            pool_metrics.allocations_total.clone(),
+        );
+        metrics.register(
+            "exhausted_total",
+            "Total number of failed allocations due to pool exhaustion",
+            pool_metrics.exhausted_total.clone(),
+        );
+        metrics.register(
+            "oversized_total",
+            "Total number of allocation requests exceeding max buffer size",
+            pool_metrics.oversized_total.clone(),
+        );
+
+        pool_metrics
+    }
+
+    fn new_with_registry(registry: &mut prometheus_client::registry::Registry) -> Self {
+        let pool_metrics = Self {
             allocated: Family::default(),
             available: Family::default(),
             allocations_total: Family::default(),
@@ -238,32 +276,32 @@ impl PoolMetrics {
         };
 
         registry.register(
-            "buffer_pool_allocated",
+            "allocated",
             "Number of buffers currently allocated from the pool",
-            metrics.allocated.clone(),
+            pool_metrics.allocated.clone(),
         );
         registry.register(
-            "buffer_pool_available",
+            "available",
             "Number of buffers available in the pool",
-            metrics.available.clone(),
+            pool_metrics.available.clone(),
         );
         registry.register(
-            "buffer_pool_allocations_total",
+            "allocations_total",
             "Total number of successful buffer allocations",
-            metrics.allocations_total.clone(),
+            pool_metrics.allocations_total.clone(),
         );
         registry.register(
-            "buffer_pool_exhausted_total",
+            "exhausted_total",
             "Total number of failed allocations due to pool exhaustion",
-            metrics.exhausted_total.clone(),
+            pool_metrics.exhausted_total.clone(),
         );
         registry.register(
-            "buffer_pool_oversized_total",
+            "oversized_total",
             "Total number of allocation requests exceeding max buffer size",
-            metrics.oversized_total.clone(),
+            pool_metrics.oversized_total.clone(),
         );
 
-        metrics
+        pool_metrics
     }
 }
 
@@ -485,10 +523,20 @@ impl BufferPool {
     /// # Panics
     ///
     /// Panics if the configuration is invalid.
-    pub fn new(config: BufferPoolConfig, registry: &mut Registry) -> Self {
-        config.validate();
+    pub fn new(metrics: impl Metrics, config: BufferPoolConfig) -> Self {
+        Self::new_internal(PoolMetrics::new(metrics), config)
+    }
 
-        let metrics = PoolMetrics::new(registry);
+    /// Internal constructor used by runtime initialization.
+    pub(crate) fn new_with_registry(
+        registry: &mut prometheus_client::registry::Registry,
+        config: BufferPoolConfig,
+    ) -> Self {
+        Self::new_internal(PoolMetrics::new_with_registry(registry), config)
+    }
+
+    fn new_internal(metrics: PoolMetrics, config: BufferPoolConfig) -> Self {
+        config.validate();
 
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
@@ -877,10 +925,12 @@ mod tests {
     use super::*;
     use crate::IoBufs;
     use bytes::BytesMut;
+    use prometheus_client::registry::Registry;
     use std::{sync::mpsc, thread};
 
-    fn test_registry() -> Registry {
-        Registry::default()
+    /// Creates a test pool with the given config.
+    fn test_pool(config: BufferPoolConfig) -> BufferPool {
+        BufferPool::new_with_registry(&mut Registry::default(), config)
     }
 
     /// Creates a test config with page alignment.
@@ -954,8 +1004,7 @@ mod tests {
     #[test]
     fn test_pool_alloc_and_return() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 2));
 
         // Allocate a buffer - returns buffer with len=0, capacity >= requested
         let buf = pool.alloc(100).expect("alloc should succeed");
@@ -974,8 +1023,7 @@ mod tests {
     #[test]
     fn test_pool_exhaustion() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Allocate max buffers
         let _buf1 = pool.alloc(100).expect("first alloc should succeed");
@@ -988,8 +1036,7 @@ mod tests {
     #[test]
     fn test_pool_oversized() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 2, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 2, 10));
 
         // Request larger than max_size
         assert!(pool.alloc(page * 4).is_none());
@@ -998,8 +1045,7 @@ mod tests {
     #[test]
     fn test_pool_size_classes() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         // Small request gets smallest class
         let buf1 = pool.alloc(100).unwrap();
@@ -1016,8 +1062,7 @@ mod tests {
     #[test]
     fn test_pooled_buf_mut_freeze() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Allocate and initialize a buffer
         let mut buf = pool.alloc(11).unwrap();
@@ -1040,17 +1085,13 @@ mod tests {
     #[test]
     fn test_prefill() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(
-            BufferPoolConfig {
-                min_size: page,
-                max_size: page,
-                max_per_class: 5,
-                prefill: true,
-                alignment: page,
-            },
-            &mut registry,
-        );
+        let pool = test_pool(BufferPoolConfig {
+            min_size: page,
+            max_size: page,
+            max_per_class: 5,
+            prefill: true,
+            alignment: page,
+        });
 
         // Should be able to allocate max_per_class buffers immediately
         let mut bufs = Vec::new();
@@ -1090,8 +1131,7 @@ mod tests {
     #[test]
     fn test_freeze_returns_buffer_to_pool() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Initially: 0 allocated, 0 available
         assert_eq!(get_allocated(&pool, page), 0);
@@ -1115,8 +1155,7 @@ mod tests {
     #[test]
     fn test_cloned_iobuf_returns_buffer_when_all_dropped() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let buf = pool.alloc(100).unwrap();
         let iobuf = buf.freeze();
@@ -1146,8 +1185,7 @@ mod tests {
     #[test]
     fn test_slice_holds_buffer_reference() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0u8; 100]);
@@ -1170,8 +1208,7 @@ mod tests {
     #[test]
     fn test_copy_to_bytes_on_pooled_buffer() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0x42u8; 100]);
@@ -1198,8 +1235,7 @@ mod tests {
     #[test]
     fn test_concurrent_clones_and_drops() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 4), &mut registry);
+        let pool = test_pool(test_config(page, page, 4));
 
         // Simulate the pattern in Messenger::content where we clone for multiple recipients
         for _ in 0..100 {
@@ -1225,8 +1261,7 @@ mod tests {
         // This tests the IoBuf -> IoBufMut conversion that happens
         // when send() takes impl Into<IoBufMut>
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let buf = pool.alloc(100).unwrap();
         assert_eq!(get_allocated(&pool, page), 1);
@@ -1263,8 +1298,7 @@ mod tests {
         // 4. Encrypts in place
         // 5. Freezes and sends
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 4), &mut registry);
+        let pool = test_pool(test_config(page, page, 4));
 
         for _ in 0..100 {
             // Incoming data (could be IoBuf or IoBufMut)
@@ -1314,8 +1348,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_multithreaded_alloc_freeze_return() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = Arc::new(BufferPool::new(test_config(page, page, 100), &mut registry));
+        let pool = Arc::new(test_pool(test_config(page, page, 100)));
 
         let mut handles = vec![];
 
@@ -1361,8 +1394,7 @@ mod tests {
     fn test_cross_thread_buffer_return() {
         // Allocate on one thread, freeze, send to another thread, drop there
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 100), &mut registry);
+        let pool = test_pool(test_config(page, page, 100));
 
         let (tx, rx) = mpsc::channel();
 
@@ -1393,8 +1425,7 @@ mod tests {
         // The Weak reference should fail to upgrade, and the buffer should just be deallocated.
 
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0u8; 100]);
@@ -1415,8 +1446,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_buf_trait() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         bytes.put_slice(&[0xAAu8; 50]);
@@ -1450,8 +1480,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_bufmut_trait() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         let mut pooled = pool.alloc(100).unwrap();
@@ -1481,8 +1510,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_truncate_after_advance() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         bytes.put_slice(&[0xAAu8; 50]);
@@ -1508,8 +1536,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_clear_after_advance() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         bytes.put_slice(&[0xAAu8; 50]);
@@ -1532,8 +1559,7 @@ mod tests {
     #[test]
     fn test_pool_exhaustion_and_recovery() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 3), &mut registry);
+        let pool = test_pool(test_config(page, page, 3));
 
         // Exhaust the pool
         let buf1 = pool.alloc(100).expect("first alloc");
@@ -1565,8 +1591,7 @@ mod tests {
     #[test]
     fn test_try_alloc_errors() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let pool = test_pool(test_config(page, page, 2));
 
         // Oversized request
         let result = pool.try_alloc(page * 10);
@@ -1583,8 +1608,7 @@ mod tests {
     #[test]
     fn test_is_pooled() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let pooled = pool.alloc(100).unwrap();
         assert!(pooled.is_pooled());
@@ -1596,8 +1620,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_capacity_after_advance() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         let mut bytes = BytesMut::with_capacity(page);
         bytes.put_slice(&[0xAAu8; 50]);
@@ -1623,8 +1646,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_set_len_after_advance() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         let mut bytes = BytesMut::with_capacity(page);
         bytes.resize(50, 0xBB);
@@ -1649,8 +1671,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_clear_preserves_view() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         let mut bytes = BytesMut::with_capacity(page);
         bytes.resize(50, 0xCC);
@@ -1673,8 +1694,7 @@ mod tests {
     #[test]
     fn test_bytesmut_parity_put_after_advance() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
+        let pool = test_pool(test_config(page, page * 4, 10));
 
         let mut bytes = BytesMut::with_capacity(100);
         bytes.resize(30, 0xAA);
@@ -1693,7 +1713,6 @@ mod tests {
     fn test_buffer_alignment() {
         let page = page_size();
         let cache_line = cache_line_size();
-        let mut registry = test_registry();
 
         // Page-aligned config
         let storage_config = BufferPoolConfig {
@@ -1703,7 +1722,7 @@ mod tests {
             prefill: false,
             alignment: page,
         };
-        let storage_pool = BufferPool::new(storage_config, &mut registry);
+        let storage_pool = test_pool(storage_config);
         let mut buf = storage_pool.alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % page,
@@ -1712,7 +1731,7 @@ mod tests {
         );
 
         // Cache-line aligned config (default)
-        let network_pool = BufferPool::new(BufferPoolConfig::default(), &mut registry);
+        let network_pool = test_pool(BufferPoolConfig::default());
         let mut buf = network_pool.alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % cache_line,
@@ -1724,8 +1743,7 @@ mod tests {
     #[test]
     fn test_freeze_after_advance_to_end() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0x42; 100]);
@@ -1738,8 +1756,7 @@ mod tests {
     #[test]
     fn test_zero_capacity_allocation() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let buf = pool.alloc(0);
         assert!(buf.is_some());
@@ -1751,8 +1768,7 @@ mod tests {
     #[test]
     fn test_exact_max_size_allocation() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let buf = pool.alloc(page);
         assert!(buf.is_some());
@@ -1762,8 +1778,7 @@ mod tests {
     #[test]
     fn test_freeze_after_partial_advance_mut() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut buf = pool.alloc(100).unwrap();
         // SAFETY: We claim 50 bytes as written (uninitialized, but we don't read them)
@@ -1778,8 +1793,7 @@ mod tests {
     #[test]
     fn test_interleaved_advance_and_write() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(b"hello");
@@ -1791,8 +1805,7 @@ mod tests {
     #[test]
     fn test_freeze_slice_clone_refcount() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0x42; 100]);
@@ -1815,8 +1828,7 @@ mod tests {
     #[test]
     fn test_truncate_beyond_len_is_noop() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         // BytesMut behavior
         let mut bytes = BytesMut::with_capacity(100);
@@ -1834,8 +1846,7 @@ mod tests {
     #[test]
     fn test_freeze_empty_after_clear() {
         let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = test_pool(test_config(page, page, 10));
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0xAA; 50]);
@@ -1853,7 +1864,6 @@ mod tests {
     #[test]
     fn test_alignment_after_advance() {
         let page = page_size();
-        let mut registry = test_registry();
         let config = BufferPoolConfig {
             min_size: page,
             max_size: 64 * 1024,
@@ -1861,7 +1871,7 @@ mod tests {
             prefill: false,
             alignment: page,
         };
-        let pool = BufferPool::new(config, &mut registry);
+        let pool = test_pool(config);
 
         let mut buf = pool.alloc(100).unwrap();
         buf.put_slice(&[0; 100]);

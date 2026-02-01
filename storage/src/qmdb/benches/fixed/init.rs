@@ -108,7 +108,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.task_pool("qmdb", THREADS).unwrap();
+                            let pool = ctx.create_pool(THREADS).unwrap();
                             let any_cfg = any_cfg(pool.clone());
                             let current_cfg = current_cfg(pool.clone());
                             let variable_any_cfg = variable_any_cfg(pool.clone());

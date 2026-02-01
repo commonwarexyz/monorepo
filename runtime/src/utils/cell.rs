@@ -206,12 +206,8 @@ commonware_macros::stability_scope!(BETA {
     where
         C: crate::TaskPools,
     {
-        fn task_pool(
-            &self,
-            name: &str,
-            concurrency: NonZeroUsize,
-        ) -> Result<ThreadPool, ThreadPoolBuildError> {
-            self.as_present().task_pool(name, concurrency)
+        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+            self.as_present().create_pool(concurrency)
         }
     }
 
@@ -312,12 +308,3 @@ where
 }
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
-
-impl<C> crate::BufferPools for Cell<C>
-where
-    C: crate::BufferPools,
-{
-    fn buffer_pool(&self, name: &str) -> crate::BufferPool {
-        self.as_present().buffer_pool(name)
-    }
-}

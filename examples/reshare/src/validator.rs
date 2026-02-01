@@ -116,7 +116,7 @@ pub async fn run<S, L>(
     };
     let marshal = marshal_resolver::init(&context, resolver_cfg, marshal);
 
-    let strategy = context.create_strategy("reshare", NZUsize!(2)).unwrap();
+    let strategy = context.create_strategy(NZUsize!(2)).unwrap();
     let engine = engine::Engine::<_, _, _, _, Sha256, MinSig, S, L, _>::new(
         context.with_label("engine"),
         engine::Config {

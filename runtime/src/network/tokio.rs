@@ -263,7 +263,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn test_pool() -> BufferPool {
-        BufferPool::new(BUFFER_POOL_CONFIG, &mut Registry::default())
+        BufferPool::new_with_registry(&mut Registry::default(), BUFFER_POOL_CONFIG)
     }
 
     #[tokio::test]

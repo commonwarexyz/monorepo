@@ -219,7 +219,7 @@ fn main() {
         );
 
         // Initialize application
-        let strategy = context.create_strategy("bridge", NZUsize!(2)).unwrap();
+        let strategy = context.create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network =
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)

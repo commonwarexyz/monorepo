@@ -12,7 +12,7 @@ use crate::{
     network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
 };
 use crate::{
-    iobuf::{BufferPool, BufferPoolConfig},
+    iobuf::BufferPool,
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
@@ -21,8 +21,6 @@ use crate::{
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
     Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
-use std::collections::HashMap;
-use std::sync::RwLock;
 use commonware_macros::{stability, select};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
@@ -305,9 +303,9 @@ impl crate::Runner for Runner {
         }
 
         // Initialize internal network buffer pool (not exposed via trait)
-        let network_pool = BufferPool::new(
-            crate::network::BUFFER_POOL_CONFIG,
+        let network_pool = BufferPool::new_with_registry(
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+            crate::network::BUFFER_POOL_CONFIG,
         );
 
         // Initialize network
@@ -342,10 +340,6 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Initialize buffer and task pool storage
-        let buffer_pools = Arc::new(RwLock::new(HashMap::new()));
-        let task_pools = Arc::new(RwLock::new(HashMap::new()));
-
         // Initialize executor
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
@@ -367,8 +361,6 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            buffer_pools,
-            task_pools,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -405,8 +397,6 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    buffer_pools: Arc<RwLock<HashMap<String, BufferPool>>>,
-    task_pools: Arc<RwLock<HashMap<String, ThreadPool>>>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -421,8 +411,6 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            buffer_pools: self.buffer_pools.clone(),
-            task_pools: self.task_pools.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -548,21 +536,8 @@ impl crate::Spawner for Context {
 
 #[stability(BETA)]
 impl crate::TaskPools for Context {
-    fn task_pool(
-        &self,
-        name: &str,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        // Check if pool already exists
-        {
-            let pools = self.task_pools.read().unwrap();
-            if let Some(pool) = pools.get(name) {
-                return Ok(pool.clone());
-            }
-        }
-
-        // Create new pool
-        let pool = ThreadPoolBuilder::new()
+    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        ThreadPoolBuilder::new()
             .num_threads(concurrency.get())
             .spawn_handler(move |thread| {
                 self.with_label("rayon_thread")
@@ -571,11 +546,7 @@ impl crate::TaskPools for Context {
                 Ok(())
             })
             .build()
-            .map(Arc::new)?;
-
-        // Insert pool (may race with another thread, but that's ok - we just return what's there)
-        let mut pools = self.task_pools.write().unwrap();
-        Ok(pools.entry(name.to_string()).or_insert(pool).clone())
+            .map(Arc::new)
     }
 }
 
@@ -749,25 +720,3 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::BufferPools for Context {
-    fn buffer_pool(&self, name: &str) -> BufferPool {
-        // Check if pool already exists
-        {
-            let pools = self.buffer_pools.read().unwrap();
-            if let Some(pool) = pools.get(name) {
-                return pool.clone();
-            }
-        }
-
-        // Create new pool with default config
-        let mut registry = self.executor.registry.lock().unwrap();
-        let pool = BufferPool::new(
-            BufferPoolConfig::default(),
-            registry.sub_registry_with_prefix(format!("buffer_pool_{name}")),
-        );
-
-        // Insert pool (may race with another thread, but that's ok - we just return what's there)
-        let mut pools = self.buffer_pools.write().unwrap();
-        pools.entry(name.to_string()).or_insert(pool).clone()
-    }
-}
