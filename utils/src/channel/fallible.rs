@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use commonware_utils::channels::fallible::FallibleExt;
+//! use commonware_utils::channel::fallible::FallibleExt;
 //!
 //! // Fire-and-forget: silently ignore disconnection
 //! sender.send_lossy(Message::Shutdown);
@@ -16,7 +16,7 @@
 //! let result = sender.request(|tx| Message::Query { responder: tx }).await;
 //! ```
 
-use futures::channel::{mpsc, oneshot};
+use super::{mpsc, oneshot};
 
 /// Extension trait for channel operations that may fail due to disconnection.
 ///
@@ -74,7 +74,7 @@ pub trait FallibleExt<T> {
 
 impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
     fn send_lossy(&self, msg: T) -> bool {
-        self.unbounded_send(msg).is_ok()
+        self.send(msg).is_ok()
     }
 
     async fn request<R, F>(&self, make_msg: F) -> Option<R>
@@ -83,7 +83,7 @@ impl<T: Send> FallibleExt<T> for mpsc::UnboundedSender<T> {
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
         let (tx, rx) = oneshot::channel();
-        if self.unbounded_send(make_msg(tx)).is_err() {
+        if self.send(make_msg(tx)).is_err() {
             return None;
         }
         rx.await.ok()
@@ -157,7 +157,7 @@ pub trait AsyncFallibleExt<T> {
 
 impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
     async fn send_lossy(&mut self, msg: T) -> bool {
-        futures::SinkExt::send(self, msg).await.is_ok()
+        self.send(msg).await.is_ok()
     }
 
     fn try_send_lossy(&mut self, msg: T) -> bool {
@@ -170,7 +170,7 @@ impl<T: Send> AsyncFallibleExt<T> for mpsc::Sender<T> {
         F: FnOnce(oneshot::Sender<R>) -> T + Send,
     {
         let (tx, rx) = oneshot::channel();
-        if futures::SinkExt::send(self, make_msg(tx)).await.is_err() {
+        if self.send(make_msg(tx)).await.is_err() {
             return None;
         }
         rx.await.ok()
@@ -237,19 +237,16 @@ mod tests {
 
     #[test]
     fn test_send_lossy_success() {
-        let (tx, mut rx) = mpsc::unbounded();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         assert!(tx.send_lossy(TestMessage::FireAndForget(42)));
 
         // Message should be received
-        assert!(matches!(
-            rx.try_next(),
-            Ok(Some(TestMessage::FireAndForget(42)))
-        ));
+        assert!(matches!(rx.try_recv(), Ok(TestMessage::FireAndForget(42))));
     }
 
     #[test]
     fn test_send_lossy_disconnected() {
-        let (tx, rx) = mpsc::unbounded::<TestMessage>();
+        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         drop(rx);
 
         // Should not panic, returns false
@@ -258,7 +255,7 @@ mod tests {
 
     #[test_async]
     async fn test_request_send_disconnected() {
-        let (tx, rx) = mpsc::unbounded::<TestMessage>();
+        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         drop(rx);
 
         let result: Option<String> = tx
@@ -270,7 +267,7 @@ mod tests {
 
     #[test_async]
     async fn test_request_or_disconnected() {
-        let (tx, rx) = mpsc::unbounded::<TestMessage>();
+        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         drop(rx);
 
         let result = tx
@@ -282,7 +279,7 @@ mod tests {
 
     #[test_async]
     async fn test_request_or_default_disconnected() {
-        let (tx, rx) = mpsc::unbounded::<TestMessage>();
+        let (tx, rx) = mpsc::unbounded_channel::<TestMessage>();
         drop(rx);
 
         let result: Vec<u32> = tx
@@ -300,10 +297,7 @@ mod tests {
         assert!(tx.send_lossy(TestMessage::FireAndForget(42)).await);
 
         // Message should be received
-        assert!(matches!(
-            rx.try_next(),
-            Ok(Some(TestMessage::FireAndForget(42)))
-        ));
+        assert!(matches!(rx.try_recv(), Ok(TestMessage::FireAndForget(42))));
     }
 
     #[test_async]
@@ -363,10 +357,7 @@ mod tests {
         assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)));
 
         // Message should be received
-        assert!(matches!(
-            rx.try_next(),
-            Ok(Some(TestMessage::FireAndForget(42)))
-        ));
+        assert!(matches!(rx.try_recv(), Ok(TestMessage::FireAndForget(42))));
     }
 
     #[test]
@@ -382,10 +373,9 @@ mod tests {
 
     #[test]
     fn test_oneshot_send_lossy_success() {
-        use futures::FutureExt;
-        let (tx, rx) = oneshot::channel::<u32>();
+        let (tx, mut rx) = oneshot::channel::<u32>();
         assert!(tx.send_lossy(42));
-        assert_eq!(rx.now_or_never(), Some(Ok(42)));
+        assert_eq!(rx.try_recv(), Ok(42));
     }
 
     #[test]

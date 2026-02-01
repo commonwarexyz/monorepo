@@ -13,10 +13,9 @@ use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{channels::fallible::OneshotExt, futures::Pool};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc, oneshot},
+    futures::Pool,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
@@ -126,14 +125,14 @@ where
         let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
 
         // Create futures pool
-        let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
+        let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            command = self.mailbox.next() => {
+            command = self.mailbox.recv() => {
                 if let Some(command) = command {
                     match command {
                         Message::Send {

@@ -23,10 +23,9 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channels::fallible::OneshotExt,
+    channel::{fallible::OneshotExt, mpsc},
     ordered::{Quorum, Set},
 };
-use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
@@ -196,7 +195,7 @@ impl<
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
-            message = self.mailbox_receiver.next() => {
+            message = self.mailbox_receiver.recv() => {
                 match message {
                     Some(Message::Update {
                         current: new_current,

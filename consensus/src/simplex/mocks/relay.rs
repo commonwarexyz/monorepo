@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
-use futures::{channel::mpsc, SinkExt};
+use commonware_utils::channel::mpsc;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     sync::Mutex,
@@ -32,7 +32,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
 
     /// Registers a new recipient that receives all broadcasts.
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         {
             let mut recipients = self.recipients.lock().unwrap();
             match recipients.entry(public_key.clone()) {
@@ -63,8 +63,8 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
             channels
         };
         for (recipient, listeners) in channels {
-            for mut listener in listeners {
-                if let Err(e) = listener.send((payload, data.clone())).await {
+            for listener in listeners {
+                if let Err(e) = listener.send((payload, data.clone())) {
                     error!(?e, ?recipient, "failed to send message to recipient");
                 }
             }

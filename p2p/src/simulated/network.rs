@@ -20,15 +20,12 @@ use commonware_runtime::{
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
-    channels::{fallible::FallibleExt, ring},
+    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
     NZUsize, TryCollect,
 };
 use either::Either;
-use futures::{
-    channel::{mpsc, oneshot},
-    future, SinkExt, StreamExt,
-};
+use futures::{future, SinkExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
@@ -172,7 +169,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
     pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -699,7 +696,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     let completions = self.transmitter.advance(now);
                     self.process_completions(completions);
                 },
-                message = self.ingress.next() => {
+                message = self.ingress.recv() => {
                     // If ingress is closed, exit
                     let message = match message {
                         Some(message) => message,
@@ -707,7 +704,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     };
                     self.handle_ingress(message).await;
                 },
-                task = self.receiver.next() => {
+                task = self.receiver.recv() => {
                     // If receiver is closed, exit
                     let task = match task {
                         Some(task) => task,
@@ -790,7 +787,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         if channel
-            .unbounded_send((self.channel, self.me.clone(), recipients, message, sender))
+            .send((self.channel, self.me.clone(), recipients, message, sender))
             .is_err()
         {
             return Ok(Vec::new());
@@ -828,26 +825,26 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
         me: P,
         channel: Channel,
         max_size: u32,
-        mut sender: mpsc::UnboundedSender<Task<P>>,
+        sender: mpsc::UnboundedSender<Task<P>>,
         oracle_mailbox: UnboundedMailbox<ingress::Message<P, E>>,
         clock: E,
         quota: Quota,
     ) -> (Self, Handle<()>) {
         // Listen for messages
-        let (high, mut high_receiver) = mpsc::unbounded();
-        let (low, mut low_receiver) = mpsc::unbounded();
+        let (high, mut high_receiver) = mpsc::unbounded_channel();
+        let (low, mut low_receiver) = mpsc::unbounded_channel();
         let processor = context.with_label("processor").spawn(move |_| async move {
             loop {
                 // Wait for task
                 let task;
                 select! {
-                    high_task = high_receiver.next() => {
+                    high_task = high_receiver.recv() => {
                         task = match high_task {
                             Some(task) => task,
                             None => break,
                         };
                     },
-                    low_task = low_receiver.next() => {
+                    low_task = low_receiver.recv() => {
                         task = match low_task {
                             Some(task) => task,
                             None => break,
@@ -856,7 +853,7 @@ impl<P: PublicKey, E: Clock> Sender<P, E> {
                 }
 
                 // Send task
-                if let Err(err) = sender.send(task).await {
+                if let Err(err) = sender.send(task) {
                     error!(?err, channel, "failed to send task");
                 }
             }
@@ -1015,7 +1012,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type PublicKey = P;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        self.receiver.next().await.ok_or(Error::NetworkClosed)
+        self.receiver.recv().await.ok_or(Error::NetworkClosed)
     }
 }
 
@@ -1026,29 +1023,29 @@ impl<P: PublicKey> Receiver<P> {
         context: E,
         router: R,
     ) -> (Self, Self) {
-        let (mut primary_tx, primary_rx) = mpsc::unbounded();
-        let (mut secondary_tx, secondary_rx) = mpsc::unbounded();
+        let (primary_tx, primary_rx) = mpsc::unbounded_channel();
+        let (secondary_tx, secondary_rx) = mpsc::unbounded_channel();
         context.spawn(move |_| async move {
-            while let Some(message) = self.receiver.next().await {
+            while let Some(message) = self.receiver.recv().await {
                 // Route message to the appropriate target
                 let direction = router(&message);
                 match direction {
                     SplitTarget::None => {}
                     SplitTarget::Primary => {
-                        if let Err(err) = primary_tx.send(message).await {
+                        if let Err(err) = primary_tx.send(message) {
                             error!(?err, "failed to send message to primary");
                         }
                     }
                     SplitTarget::Secondary => {
-                        if let Err(err) = secondary_tx.send(message).await {
+                        if let Err(err) = secondary_tx.send(message) {
                             error!(?err, "failed to send message to secondary");
                         }
                     }
                     SplitTarget::Both => {
-                        if let Err(err) = primary_tx.send(message.clone()).await {
+                        if let Err(err) = primary_tx.send(message.clone()) {
                             error!(?err, "failed to send message to primary");
                         }
-                        if let Err(err) = secondary_tx.send(message).await {
+                        if let Err(err) = secondary_tx.send(message) {
                             error!(?err, "failed to send message to secondary");
                         }
                     }
@@ -1096,11 +1093,11 @@ impl<P: PublicKey> Peer<P> {
     ) -> Self {
         // The control is used to register channels.
         // There is exactly one mailbox created for each channel that the peer is registered for.
-        let (control_sender, mut control_receiver) = mpsc::unbounded();
+        let (control_sender, mut control_receiver) = mpsc::unbounded_channel();
 
         // Whenever a message is received from a peer, it is placed in the inbox.
         // The router polls the inbox and forwards the message to the appropriate mailbox.
-        let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
+        let (inbox_sender, mut inbox_receiver) = mpsc::unbounded_channel();
 
         // Spawn router
         context.with_label("router").spawn(|context| async move {
@@ -1112,7 +1109,7 @@ impl<P: PublicKey> Peer<P> {
                 context,
                 on_stopped => {},
                 // Listen for control messages, which are used to register channels
-                control = control_receiver.next() => {
+                control = control_receiver.recv() => {
                     // If control is closed, exit
                     let (channel, sender, result_tx): (
                         Channel,
@@ -1124,7 +1121,7 @@ impl<P: PublicKey> Peer<P> {
                     };
 
                     // Register channel
-                    let (receiver_tx, receiver_rx) = mpsc::unbounded();
+                    let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
                     if let Some((_, existing_sender)) =
                         mailboxes.insert(channel, (receiver_tx, sender))
                     {
@@ -1135,7 +1132,7 @@ impl<P: PublicKey> Peer<P> {
                 },
 
                 // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
-                inbox = inbox_receiver.next() => {
+                inbox = inbox_receiver.recv() => {
                     // If inbox is closed, exit
                     let (channel, message) = match inbox {
                         Some(message) => message,
@@ -1145,7 +1142,7 @@ impl<P: PublicKey> Peer<P> {
                     // Send message to mailbox
                     match mailboxes.get_mut(&channel) {
                         Some((receiver_tx, _)) => {
-                            if let Err(err) = receiver_tx.send(message).await {
+                            if let Err(err) = receiver_tx.send(message) {
                                 debug!(?err, "failed to send message to mailbox");
                             }
                         }
@@ -1175,7 +1172,7 @@ impl<P: PublicKey> Peer<P> {
                 while let Ok((_, _, mut stream)) = listener.accept().await {
                     // New connection accepted. Spawn a task for this connection
                     context.with_label("receiver").spawn({
-                        let mut inbox_sender = inbox_sender.clone();
+                        let inbox_sender = inbox_sender.clone();
                         move |_| async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
@@ -1197,9 +1194,8 @@ impl<P: PublicKey> Peer<P> {
                                     data.as_ref()[..Channel::SIZE].try_into().unwrap(),
                                 );
                                 let message = data.slice(Channel::SIZE..);
-                                if let Err(err) = inbox_sender
-                                    .send((channel, (dialer.clone(), message)))
-                                    .await
+                                if let Err(err) =
+                                    inbox_sender.send((channel, (dialer.clone(), message)))
                                 {
                                     debug!(?err, "failed to send message to mailbox");
                                     break;
@@ -1232,7 +1228,6 @@ impl<P: PublicKey> Peer<P> {
         let (result_tx, result_rx) = oneshot::channel();
         self.control
             .send((channel, sender, result_tx))
-            .await
             .map_err(|_| Error::NetworkClosed)?;
         result_rx.await.map_err(|_| Error::NetworkClosed)
     }
@@ -1262,7 +1257,7 @@ impl Link {
     ) -> Self {
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
-        let (inbox, mut outbox) = mpsc::unbounded::<(Channel, IoBuf, SystemTime)>();
+        let (inbox, mut outbox) = mpsc::unbounded_channel::<(Channel, IoBuf, SystemTime)>();
         context.with_label("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
@@ -1272,7 +1267,7 @@ impl Link {
             }
 
             // Process messages in order, waiting for their receive time
-            while let Some((channel, message, receive_complete_at)) = outbox.next().await {
+            while let Some((channel, message, receive_complete_at)) = outbox.recv().await {
                 // Wait until the message should arrive at receiver
                 context.sleep_until(receive_complete_at).await;
 
@@ -1305,7 +1300,7 @@ impl Link {
         receive_complete_at: SystemTime,
     ) -> Result<(), Error> {
         self.inbox
-            .unbounded_send((channel, message, receive_complete_at))
+            .send((channel, message, receive_complete_at))
             .map_err(|_| Error::NetworkClosed)?;
         Ok(())
     }
@@ -1694,7 +1689,7 @@ mod tests {
             manager
                 .update(10, [pk1.clone(), pk2.clone()].try_into().unwrap())
                 .await;
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 10);
             assert_eq!(new.len(), 2);
             assert_eq!(all.len(), 2);
@@ -1706,7 +1701,7 @@ mod tests {
             // Add new peer set
             let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
             manager.update(11, [pk4.clone()].try_into().unwrap()).await;
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(new, [pk4.clone()].try_into().unwrap());
             assert_eq!(all, [pk1, pk2, pk4].try_into().unwrap());

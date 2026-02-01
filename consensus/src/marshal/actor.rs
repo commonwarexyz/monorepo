@@ -39,15 +39,12 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channels::fallible::OneshotExt,
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    try_join, StreamExt,
-};
+use futures::try_join;
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
@@ -311,7 +308,7 @@ where
             on_start => {
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 self.block_subscriptions.retain(|_, bs| {
-                    bs.subscribers.retain(|tx| !tx.is_canceled());
+                    bs.subscribers.retain(|tx| !tx.is_closed());
                     !bs.subscribers.is_empty()
                 });
             },
@@ -349,7 +346,7 @@ where
                 }
             },
             // Handle consensus inputs before backfill or resolver traffic
-            mailbox_message = self.mailbox.next() => {
+            mailbox_message = self.mailbox.recv() => {
                 let Some(message) = mailbox_message else {
                     info!("mailbox closed, shutting down");
                     break;
@@ -570,7 +567,7 @@ where
                 }
             },
             // Handle resolver messages last
-            message = resolver_rx.next() => {
+            message = resolver_rx.recv() => {
                 let Some(message) = message else {
                     info!("handler closed, shutting down");
                     break;

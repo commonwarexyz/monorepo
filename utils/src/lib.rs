@@ -241,7 +241,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     mod priority_set;
     pub use priority_set::PrioritySet;
 
-    pub mod channels;
+    pub mod channel;
     pub mod concurrency;
     pub mod futures;
 

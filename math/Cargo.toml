@@ -49,3 +49,4 @@ rand_chacha.workspace = true
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]

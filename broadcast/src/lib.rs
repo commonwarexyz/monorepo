@@ -7,7 +7,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::Codec;
-    use futures::channel::oneshot;
+    use commonware_utils::channel::oneshot;
     use std::future::Future;
 
     pub mod buffered;

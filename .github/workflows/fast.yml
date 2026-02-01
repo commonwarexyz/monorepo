@@ -278,6 +278,8 @@ jobs:
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
+    - name: Build math
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path math/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_math.wasm"
     - name: Build utils
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime

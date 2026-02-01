@@ -28,6 +28,7 @@ num-traits.workspace = true
 pin-project.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"], optional = true }
 zeroize.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -59,6 +60,7 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"thiserror/std",
+	"tokio",
 	"zeroize/std",
 ]
 arbitrary = [

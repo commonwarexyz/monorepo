@@ -1012,7 +1012,6 @@ dependencies = [
  "commonware-storage",
  "commonware-stream",
  "commonware-utils",
- "futures",
  "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
@@ -1030,7 +1029,6 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
- "futures",
  "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
@@ -1115,7 +1113,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "criterion",
- "futures",
  "num-rational",
  "proptest",
  "rand 0.8.5",
@@ -1150,7 +1147,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
- "futures",
  "prometheus-client",
  "rand 0.8.5",
  "thiserror 2.0.17",
@@ -1168,6 +1164,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
  "libfuzzer-sys",
  "rand 0.8.5",
@@ -1391,7 +1388,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "crossterm 0.29.0",
- "futures",
  "prometheus-client",
  "rand 0.8.5",
  "ratatui",
@@ -1405,6 +1401,7 @@ name = "commonware-macros"
 version = "0.0.65"
 dependencies = [
  "commonware-macros-impl",
+ "commonware-utils",
  "futures",
  "futures-timer",
  "tokio",
@@ -1720,6 +1717,7 @@ dependencies = [
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.17",
+ "tokio",
  "zeroize",
 ]
 

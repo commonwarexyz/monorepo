@@ -25,12 +25,12 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-use commonware_utils::futures::AbortablePool;
-use core::{future::Future, panic};
-use futures::{
+use commonware_utils::{
     channel::{mpsc, oneshot},
-    pin_mut, StreamExt,
+    futures::AbortablePool,
 };
+use core::{future::Future, panic};
+use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
@@ -71,7 +71,7 @@ impl<V: Viewable, R> Viewable for Request<V, R> {
 struct Waiter<'a, V: Viewable, R>(&'a mut Option<Request<V, R>>);
 
 impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
-    type Output = (V, Result<R, oneshot::Canceled>);
+    type Output = (V, Result<R, oneshot::error::RecvError>);
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let Waiter(slot) = self.get_mut();
@@ -789,7 +789,7 @@ impl<
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
         let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
-        let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::Canceled>)> =
+        let mut certify_pool: AbortablePool<(Rnd, Result<bool, oneshot::error::RecvError>)> =
             Default::default();
         select_loop! {
             self.context,
@@ -944,7 +944,7 @@ impl<
                     }
                 };
             },
-            mailbox = self.mailbox_receiver.next() => {
+            mailbox = self.mailbox_receiver.recv() => {
                 // Extract message
                 let Some(msg) = mailbox else {
                     break;
