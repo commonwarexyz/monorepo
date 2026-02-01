@@ -912,12 +912,8 @@ impl<
                     }
                 };
             },
-            result = certify_wait => {
-                // Aborted futures are expected when old views are pruned.
-                let Ok((round, certified)) = result else {
-                    continue;
-                };
-
+            // Aborted futures are expected when old views are pruned
+            Ok((round, certified)) = certify_wait else continue => {
                 // Handle response to our certification request.
                 view = round.view();
                 match certified {
@@ -944,12 +940,7 @@ impl<
                     }
                 };
             },
-            mailbox = self.mailbox_receiver.recv() => {
-                // Extract message
-                let Some(msg) = mailbox else {
-                    break;
-                };
-
+            Some(msg) = self.mailbox_receiver.recv() else break => {
                 // Handle messages from resolver and batcher
                 match msg {
                     Message::Proposal(proposal) => {

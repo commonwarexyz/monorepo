@@ -404,4 +404,133 @@ mod tests {
             assert!(did_shutdown);
         });
     }
+
+    #[test]
+    fn test_select_loop_refutable_pattern_else_variants() {
+        block_on(async move {
+            // else break
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            tx.send(1).unwrap();
+            tx.send(2).unwrap();
+            drop(tx);
+
+            let mut received = Vec::new();
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_stopped => {},
+                Some(msg) = rx.recv() else break => {
+                    received.push(msg);
+                },
+            }
+            assert_eq!(received, vec![1, 2]);
+
+            // else return
+            async fn with_return() -> Vec<i32> {
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tx.send(10).unwrap();
+                tx.send(20).unwrap();
+                drop(tx);
+
+                let mut received = Vec::new();
+                let mock_context = MockSignaler;
+                select_loop! {
+                    mock_context,
+                    on_stopped => {},
+                    Some(msg) = rx.recv() else return received => {
+                        received.push(msg);
+                    },
+                }
+                received.push(999); // Should not be reached
+                received
+            }
+            assert_eq!(with_return().await, vec![10, 20]);
+
+            // else custom block
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            tx.send(100).unwrap();
+            drop(tx);
+
+            let mut received = Vec::new();
+            let mut closed = false;
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_stopped => {},
+                Some(msg) = rx.recv() else {
+                    closed = true;
+                    break;
+                } => {
+                    received.push(msg);
+                },
+            }
+            assert_eq!(received, vec![100]);
+            assert!(closed);
+
+            // else continue
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            tx.send(Some(1)).unwrap();
+            tx.send(None).unwrap(); // Triggers else continue
+            tx.send(Some(2)).unwrap();
+            drop(tx);
+
+            let mut received = Vec::new();
+            let mut iterations = 0;
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_start => {
+                    iterations += 1;
+                    if iterations > 10 {
+                        break;
+                    }
+                },
+                on_stopped => {},
+                Some(Some(value)) = rx.recv() else continue => {
+                    received.push(value);
+                },
+            }
+            assert_eq!(received, vec![1, 2]);
+
+            // nested pattern
+            let (tx, mut rx) = mpsc::unbounded_channel::<Result<i32, &str>>();
+            tx.send(Ok(1)).unwrap();
+            tx.send(Err("skip")).unwrap();
+            drop(tx);
+
+            let mut received = Vec::new();
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_stopped => {},
+                Some(Ok(value)) = rx.recv() else break => {
+                    received.push(value);
+                },
+            }
+            assert_eq!(received, vec![1]);
+        });
+    }
+
+    #[test]
+    fn test_select_loop_backward_compatibility() {
+        // Verify existing patterns still work exactly as before
+        block_on(async move {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            tx.send(1).unwrap();
+            tx.send(2).unwrap();
+            drop(tx);
+
+            let mut received = Vec::new();
+            let mock_context = MockSignaler;
+            select_loop! {
+                mock_context,
+                on_stopped => {},
+                msg = rx.recv() => match msg {
+                    Some(v) => received.push(v),
+                    None => break,
+                },
+            }
+            assert_eq!(received, vec![1, 2]);
+        });
+    }
 }

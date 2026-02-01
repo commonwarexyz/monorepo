@@ -334,11 +334,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             on_stopped => {
                 debug!("context shutdown, stopping application");
             },
-            message = self.mailbox.recv() => {
-                let message = match message {
-                    Some(message) => message,
-                    None => break,
-                };
+            Some(message) = self.mailbox.recv() else break => {
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);
@@ -380,9 +376,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     }
                 }
             },
-            broadcast = self.broadcast.recv() => {
+            Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
-                let (digest, contents) = broadcast.expect("broadcast closed");
                 seen.insert(digest, contents.clone());
 
                 // Check if we have a waiter

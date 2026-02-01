@@ -191,12 +191,10 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            peer_set_update = peer_set_subscription.recv() => {
-                let Some((id, _, all)) = peer_set_update else {
-                    debug!("peer set subscription closed");
-                    return;
-                };
-
+            Some((id, _, all)) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                return;
+            } => {
                 // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
                 // reconcile with all tracked peers).
                 if self.last_peer_set_id < Some(id) {
@@ -217,11 +215,10 @@ impl<
                 self.fetcher.fetch(&mut sender).await;
             },
             // Handle mailbox messages
-            msg = self.mailbox.recv() => {
-                let Some(msg) = msg else {
-                    error!("mailbox closed");
-                    return;
-                };
+            Some(msg) = self.mailbox.recv() else {
+                error!("mailbox closed");
+                return;
+            } => {
                 match msg {
                     Message::Fetch(requests) => {
                         for FetchRequest { key, targets } in requests {

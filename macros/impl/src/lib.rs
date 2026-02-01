@@ -457,6 +457,14 @@ struct Branch {
     body: Expr,
 }
 
+/// Branch for [select_loop!] with optional `else` clause for `Some` patterns.
+struct SelectLoopBranch {
+    pattern: Pat,
+    future: Expr,
+    else_body: Option<Expr>,
+    body: Expr,
+}
+
 impl Parse for SelectInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let mut branches = Vec::new();
@@ -524,7 +532,7 @@ struct SelectLoopInput {
     context: Expr,
     start_expr: Option<Expr>,
     shutdown_expr: Expr,
-    branches: Vec<Branch>,
+    branches: Vec<SelectLoopBranch>,
     end_expr: Option<Expr>,
 }
 
@@ -581,12 +589,22 @@ impl Parse for SelectLoopInput {
             let pattern = Pat::parse_single(input)?;
             input.parse::<Token![=]>()?;
             let future: Expr = input.parse()?;
+
+            // Parse optional else clause: `else expr`
+            let else_body = if input.peek(Token![else]) {
+                input.parse::<Token![else]>()?;
+                Some(input.parse::<Expr>()?)
+            } else {
+                None
+            };
+
             input.parse::<Token![=>]>()?;
             let body: Expr = input.parse()?;
 
-            branches.push(Branch {
+            branches.push(SelectLoopBranch {
                 pattern,
                 future,
+                else_body,
                 body,
             });
 
@@ -634,6 +652,30 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
         end_expr,
     } = parse_macro_input!(input as SelectLoopInput);
 
+    fn is_irrefutable(pat: &Pat) -> bool {
+        match pat {
+            Pat::Wild(_) | Pat::Rest(_) => true,
+            Pat::Ident(i) => i.subpat.as_ref().is_none_or(|(_, p)| is_irrefutable(p)),
+            Pat::Type(t) => is_irrefutable(&t.pat),
+            Pat::Tuple(t) => t.elems.iter().all(is_irrefutable),
+            Pat::Reference(r) => is_irrefutable(&r.pat),
+            Pat::Paren(p) => is_irrefutable(&p.pat),
+            _ => false,
+        }
+    }
+
+    for b in &branches {
+        if b.else_body.is_none() && !is_irrefutable(&b.pattern) {
+            return Error::new_spanned(
+                &b.pattern,
+                "refutable patterns require an else clause: \
+                 `Some(msg) = future else break => { ... }`",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
     // Convert branches to tokens for the inner select!
     let branch_tokens: Vec<_> = branches
         .iter()
@@ -641,7 +683,21 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
             let pattern = &b.pattern;
             let future = &b.future;
             let body = &b.body;
-            quote! { #pattern = #future => #body, }
+
+            // If else clause is present, use let-else to unwrap
+            b.else_body.as_ref().map_or_else(
+                // No else: normal pattern binding (already validated as irrefutable)
+                || quote! { #pattern = #future => #body, },
+                // With else: use let-else for refutable patterns
+                |else_expr| {
+                    quote! {
+                        __select_result = #future => {
+                            let #pattern = __select_result else { #else_expr };
+                            #body
+                        },
+                    }
+                },
+            )
         })
         .collect();
 

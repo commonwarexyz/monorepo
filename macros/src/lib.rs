@@ -60,9 +60,10 @@ pub use commonware_macros_impl::select;
 ///     context,
 ///     on_start => { /* optional: runs at start of each iteration */ },
 ///     on_stopped => { cleanup },
-///     pattern = future => block,
+///     pattern = future => body,
+///     Some(x) = future else break => body,  // refutable pattern with else clause
 ///     // ...
-///     on_end => { /* optional: runs after non-shutdown arm completes */ },
+///     on_end => { /* optional: runs after select, skipped on shutdown/break/return/continue */ },
 /// }
 /// ```
 ///
@@ -71,8 +72,8 @@ pub use commonware_macros_impl::select;
 ///    Can use `continue` to skip the select or `break` to exit the loop.
 /// 2. `on_stopped` (required) - The shutdown handler, executed when shutdown is signaled.
 /// 3. Select arms - The futures to select over.
-/// 4. `on_end` (optional) - Runs after a non-shutdown arm completes. Skipped when shutdown
-///    is triggered. Useful for post-processing that should happen after each arm.
+/// 4. `on_end` (optional) - Runs after select completes. Skipped on shutdown or if an arm
+///    uses `break`/`return`/`continue`. Useful for per-iteration post-processing.
 ///
 /// All blocks share the same lexical scope within the loop body. Variables declared in
 /// `on_start` are visible in the select arms, `on_stopped`, and `on_end`. This allows
@@ -81,10 +82,91 @@ pub use commonware_macros_impl::select;
 /// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
 /// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
 ///
+/// # Refutable Patterns with `else`
+///
+/// For refutable patterns (patterns that may not match), use the `else` clause to specify
+/// what happens when the pattern fails to match. This uses Rust's let-else syntax internally:
+///
+/// ```rust,ignore
+/// // Option handling
+/// Some(msg) = rx.recv() else break => { handle(msg); }
+/// Some(msg) = rx.recv() else return => { handle(msg); }
+/// Some(msg) = rx.recv() else continue => { handle(msg); }
+///
+/// // Result handling
+/// Ok(value) = result_stream.recv() else break => { process(value); }
+///
+/// // Enum variants
+/// MyEnum::Data(x) = stream.recv() else continue => { use_data(x); }
+/// ```
+///
+/// This replaces the common pattern:
+/// ```rust,ignore
+/// // Before
+/// msg = mailbox.recv() => {
+///     let Some(msg) = msg else { break };
+///     // use msg
+/// }
+///
+/// // After
+/// Some(msg) = mailbox.recv() else break => {
+///     // use msg directly
+/// }
+/// ```
+///
+/// # Expansion
+///
+/// The macro expands to roughly the following code:
+///
+/// ```rust,ignore
+/// // Input:
+/// select_loop! {
+///     context,
+///     on_start => { start_code },
+///     on_stopped => { shutdown_code },
+///     pattern = future => { body },
+///     Some(msg) = rx.recv() else break => { handle(msg) },
+///     on_end => { end_code },
+/// }
+///
+/// // Expands to:
+/// {
+///     let mut shutdown = context.stopped();
+///     loop {
+///         // on_start runs at the beginning of each iteration
+///         { start_code }
+///
+///         select_biased! {
+///             // Shutdown branch (always first due to biased select)
+///             _ = &mut shutdown => {
+///                 { shutdown_code }
+///                 break; // on_end is NOT executed on shutdown
+///             },
+///
+///             // Regular pattern branch
+///             pattern = future => {
+///                 { body }
+///             },
+///
+///             // Refutable pattern with else clause (uses let-else)
+///             __select_result = rx.recv() => {
+///                 let Some(msg) = __select_result else { break };
+///                 { handle(msg) }
+///             },
+///         }
+///
+///         // on_end runs after select completes (skipped on shutdown/break/return/continue)
+///         { end_code }
+///     }
+/// }
+/// ```
+///
 /// # Example
 ///
 /// ```rust,ignore
-/// async fn run(context: impl commonware_runtime::Spawner) {
+/// use commonware_macros::select_loop;
+///
+/// async fn run(context: impl commonware_runtime::Spawner, mut receiver: Receiver<Message>) {
 ///     let mut counter = 0;
 ///     commonware_macros::select_loop! {
 ///         context,
@@ -97,7 +179,8 @@ pub use commonware_macros_impl::select;
 ///             println!("shutting down after {} iterations", counter);
 ///             drop(shutdown);
 ///         },
-///         msg = receiver.recv() => {
+///         // Refutable pattern: breaks when channel closes (None)
+///         Some(msg) = receiver.recv() else break => {
 ///             println!("received: {:?}", msg);
 ///         },
 ///         on_end => {

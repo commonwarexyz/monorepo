@@ -97,12 +97,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
             on_stopped => {
                 debug!("context shutdown, stopping router");
             },
-            msg = self.control.recv() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping router");
-                    break;
-                };
-
+            Some(msg) = self.control.recv() else {
+                debug!("mailbox closed, stopping router");
+                break;
+            } => {
                 match msg {
                     Message::Ready {
                         peer,

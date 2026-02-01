@@ -298,13 +298,10 @@ impl<
                 debug!("shutdown");
             },
             // Handle refresh epoch deadline
-            epoch = epoch_updates.recv() => {
-                // Error handling
-                let Some(epoch) = epoch else {
-                    error!("epoch subscription failed");
-                    break;
-                };
-
+            Some(epoch) = epoch_updates.recv() else {
+                error!("epoch subscription failed");
+                break;
+            } => {
                 // Refresh the epoch
                 debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                 assert!(epoch >= self.epoch);

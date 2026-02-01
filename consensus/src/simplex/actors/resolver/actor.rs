@@ -130,10 +130,7 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            mailbox = self.mailbox_receiver.recv() => {
-                let Some(message) = mailbox else {
-                    break;
-                };
+            Some(message) = self.mailbox_receiver.recv() else break => {
                 match message {
                     MailboxMessage::Certificate(certificate) => {
                         // Certificates from mailbox have no associated request view
@@ -146,10 +143,7 @@ impl<
                     }
                 }
             },
-            handler = handler_rx.recv() => {
-                let Some(message) = handler else {
-                    break;
-                };
+            Some(message) = handler_rx.recv() else break => {
                 self.handle_resolver(message, &mut voter, &mut resolver)
                     .await;
             },

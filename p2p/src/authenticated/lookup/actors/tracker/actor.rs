@@ -122,11 +122,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                         .await;
                 }
             },
-            msg = self.receiver.recv() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping tracker");
-                    break;
-                };
+            Some(msg) = self.receiver.recv() else {
+                debug!("mailbox closed, stopping tracker");
+                break;
+            } => {
                 self.handle_msg(msg).await;
             },
         }

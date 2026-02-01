@@ -148,14 +148,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // Reset ticker
                             deadline = context.current() + self.ping_frequency;
                         },
-                        msg_control = self.control.recv() => {
-                            let msg = match msg_control {
-                                Some(msg_control) => msg_control,
-                                None => return Err(Error::PeerDisconnected),
-                            };
-                            match msg {
-                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
-                            }
+                        Some(msg) = self.control.recv() else {
+                            return Err(Error::PeerDisconnected);
+                        } => match msg {
+                            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                         },
                         msg_high = self.high.recv() => {
                             // Data is already pre-encoded, just forward to stream

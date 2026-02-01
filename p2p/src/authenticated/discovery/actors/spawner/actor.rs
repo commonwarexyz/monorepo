@@ -108,12 +108,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
             on_stopped => {
                 debug!("context shutdown, stopping spawner");
             },
-            msg = self.receiver.recv() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping spawner");
-                    break;
-                };
-
+            Some(msg) = self.receiver.recv() else {
+                debug!("mailbox closed, stopping spawner");
+                break;
+            } => {
                 match msg {
                     Message::Spawn {
                         peer,
