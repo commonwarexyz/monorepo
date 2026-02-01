@@ -40,9 +40,10 @@ pub mod secp256r1;
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod bloomfilter;
-    pub mod lthash;
+    pub use crate::bloomfilter::BloomFilter;
 
-    pub use crate::{bloomfilter::BloomFilter, lthash::LtHash};
+    pub mod lthash;
+    pub use crate::lthash::LtHash;
 });
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Encode, ReadExt};
