@@ -193,7 +193,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
-        I: UnorderedIndex<Value = Location>,
+        I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
         const N: usize,
     > kv::Updatable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
@@ -212,7 +212,7 @@ impl<
         C: MutableContiguous<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
-        I: UnorderedIndex<Value = Location>,
+        I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
         const N: usize,
     > kv::Deletable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
@@ -233,7 +233,7 @@ where
     C: MutableContiguous<Item = Operation<K, V>>,
     K: Array,
     V: ValueEncoding,
-    I: UnorderedIndex<Value = Location>,
+    I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
