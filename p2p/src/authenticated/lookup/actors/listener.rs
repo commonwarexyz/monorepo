@@ -311,6 +311,7 @@ mod tests {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),
+                buffer_pool: None,
             };
 
             let (mut updates_tx, updates_rx) = mpsc::channel(1);
@@ -477,6 +478,7 @@ mod tests {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),
+                buffer_pool: None,
             };
 
             let (_updates_tx, updates_rx) = mpsc::channel(1);
@@ -557,6 +559,7 @@ mod tests {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),
+                buffer_pool: None,
             };
 
             let (_updates_tx, updates_rx) = mpsc::channel(1);
@@ -637,6 +640,7 @@ mod tests {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_millis(5),
+                buffer_pool: None,
             };
 
             let (mut updates_tx, updates_rx) = mpsc::channel(1);

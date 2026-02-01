@@ -66,7 +66,7 @@ use commonware_cryptography::{
     Signer,
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{BufferPool, Clock, Error as RuntimeError, IoBufs, Sink, Stream};
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
@@ -144,6 +144,13 @@ pub struct Config<S> {
 
     /// The allotted time for the handshake to complete.
     pub handshake_timeout: Duration,
+
+    /// Optional buffer pool for zero-allocation encryption.
+    ///
+    /// If provided, ciphertext buffers are allocated from this pool and
+    /// automatically returned when no longer needed. If `None` or if the
+    /// pool is exhausted, regular heap allocation is used as fallback.
+    pub buffer_pool: Option<BufferPool>,
 }
 
 impl<S> Config<S> {
@@ -202,6 +209,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
                 cipher: send,
                 sink,
                 max_message_size: config.max_message_size,
+                pool: config.buffer_pool,
             },
             Receiver {
                 cipher: recv,
@@ -269,6 +277,7 @@ pub async fn listen<
                 cipher: send,
                 sink,
                 max_message_size: config.max_message_size,
+                pool: config.buffer_pool,
             },
             Receiver {
                 cipher: recv,
@@ -289,6 +298,7 @@ pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
     max_message_size: u32,
+    pool: Option<BufferPool>,
 }
 
 impl<O: Sink> Sender<O> {
@@ -297,11 +307,30 @@ impl<O: Sink> Sender<O> {
         let bufs = buf.into();
         // Ensure contiguous memory for encryption.
         let msg = bufs.coalesce();
-        let c = self.cipher.send(msg.as_ref())?;
+        let ciphertext_len = msg.len() + handshake::CIPHERTEXT_OVERHEAD;
+
+        // Try to allocate from pool, fall back to Vec if pool unavailable or exhausted
+        let ciphertext = if let Some(ref pool) = self.pool {
+            if let Some(mut buf) = pool.alloc(ciphertext_len) {
+                // SAFETY: buf has capacity >= ciphertext_len, we write exactly ciphertext_len bytes
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(buf.as_mut_ptr(), ciphertext_len)
+                };
+                self.cipher.send_into_slice(msg.as_ref(), slice)?;
+                // SAFETY: send_into_slice wrote exactly ciphertext_len bytes
+                unsafe { buf.set_len(ciphertext_len) };
+                buf.freeze()
+            } else {
+                // Pool exhausted, fall back to Vec
+                self.cipher.send(msg.as_ref())?.into()
+            }
+        } else {
+            self.cipher.send(msg.as_ref())?.into()
+        };
 
         send_frame(
             &mut self.sink,
-            IoBuf::from(c),
+            ciphertext,
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
@@ -355,6 +384,7 @@ mod test {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_secs(1),
+                buffer_pool: None,
             };
 
             let listener_config = Config {
@@ -364,6 +394,7 @@ mod test {
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
                 handshake_timeout: Duration::from_secs(1),
+                buffer_pool: None,
             };
 
             let listener_handle = context.clone().spawn(move |context| async move {

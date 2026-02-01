@@ -33,6 +33,7 @@ thread_local! {
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),
+                buffer_pool: None,
             };
 
             let listener_config = Config {
@@ -42,6 +43,7 @@ thread_local! {
                 synchrony_bound: Duration::from_secs(3),
                 max_handshake_age: Duration::from_secs(5),
                 handshake_timeout: Duration::from_secs(2),
+                buffer_pool: None,
             };
 
 

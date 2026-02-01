@@ -55,28 +55,41 @@ cfg_if::cfg_if! {
                 Self(LessSafeKey::new(unbound_key))
             }
 
-            fn encrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn encrypt_into_slice(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                plaintext: &[u8],
+                out: &mut [u8],
+            ) -> Result<(), Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
-                let mut scratch = Vec::with_capacity(data.len() + CIPHERTEXT_OVERHEAD);
-                scratch.extend_from_slice(data);
-                self.0
-                    .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut scratch)
+                let (data_part, tag_part) = out.split_at_mut(plaintext.len());
+                data_part.copy_from_slice(plaintext);
+                let tag = self.0
+                    .seal_in_place_separate_tag(nonce, aead::Aad::empty(), data_part)
                     .map_err(|_| Error::EncryptionFailed)?;
-                Ok(scratch)
+                tag_part[..CIPHERTEXT_OVERHEAD].copy_from_slice(tag.as_ref());
+                Ok(())
             }
 
-            fn decrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn decrypt_into_slice(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                ciphertext: &[u8],
+                out: &mut [u8],
+            ) -> Result<usize, Error> {
+                if ciphertext.len() < CIPHERTEXT_OVERHEAD {
+                    return Err(Error::DecryptionFailed);
+                }
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
-                let mut scratch = data.to_vec();
-                self.0
-                    .open_in_place(nonce, aead::Aad::empty(), &mut scratch)
+                out[..ciphertext.len()].copy_from_slice(ciphertext);
+                let plaintext = self.0
+                    .open_in_place(nonce, aead::Aad::empty(), &mut out[..ciphertext.len()])
                     .map_err(|_| Error::DecryptionFailed)?;
-                scratch.truncate(data.len() - CIPHERTEXT_OVERHEAD);
-                Ok(scratch)
+                Ok(plaintext.len())
             }
         }
     } else {
-        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit as _};
+        use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit as _, Tag};
 
         struct Cipher(ChaCha20Poly1305);
 
@@ -85,16 +98,38 @@ cfg_if::cfg_if! {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
 
-            fn encrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
-                self.0
-                    .encrypt(nonce.into(), data)
-                    .map_err(|_| Error::EncryptionFailed)
+            fn encrypt_into_slice(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                plaintext: &[u8],
+                out: &mut [u8],
+            ) -> Result<(), Error> {
+                let (data_part, tag_part) = out.split_at_mut(plaintext.len());
+                data_part.copy_from_slice(plaintext);
+                let tag = self.0
+                    .encrypt_in_place_detached(nonce.into(), &[], data_part)
+                    .map_err(|_| Error::EncryptionFailed)?;
+                tag_part[..CIPHERTEXT_OVERHEAD].copy_from_slice(&tag);
+                Ok(())
             }
 
-            fn decrypt(&self, nonce: &[u8; NONCE_SIZE_BYTES], data: &[u8]) -> Result<Vec<u8>, Error> {
+            fn decrypt_into_slice(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                ciphertext: &[u8],
+                out: &mut [u8],
+            ) -> Result<usize, Error> {
+                if ciphertext.len() < CIPHERTEXT_OVERHEAD {
+                    return Err(Error::DecryptionFailed);
+                }
+                let plaintext_len = ciphertext.len() - CIPHERTEXT_OVERHEAD;
+                let (ct, tag_bytes) = ciphertext.split_at(plaintext_len);
+                let tag = Tag::from_slice(tag_bytes);
+                out[..plaintext_len].copy_from_slice(ct);
                 self.0
-                    .decrypt(nonce.into(), data)
-                    .map_err(|_| Error::DecryptionFailed)
+                    .decrypt_in_place_detached(nonce.into(), &[], &mut out[..plaintext_len], tag)
+                    .map_err(|_| Error::DecryptionFailed)?;
+                Ok(plaintext_len)
             }
         }
     }
@@ -117,10 +152,26 @@ impl SendCipher {
         }
     }
 
+    /// Encrypts data into a mutable slice.
+    ///
+    /// The output slice must have exactly `data.len() + CIPHERTEXT_OVERHEAD` bytes.
+    /// This is the most efficient method as it avoids all allocations.
+    pub fn send_into_slice(&mut self, data: &[u8], out: &mut [u8]) -> Result<(), Error> {
+        assert_eq!(
+            out.len(),
+            data.len() + CIPHERTEXT_OVERHEAD,
+            "output slice must be exactly plaintext.len() + CIPHERTEXT_OVERHEAD"
+        );
+        let nonce = self.nonce.inc()?;
+        self.inner
+            .expose(|cipher| cipher.encrypt_into_slice(&nonce, data, out))
+    }
+
     /// Encrypts data and returns the ciphertext.
     pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let nonce = self.nonce.inc()?;
-        self.inner.expose(|cipher| cipher.encrypt(&nonce, data))
+        let mut out = vec![0u8; data.len() + CIPHERTEXT_OVERHEAD];
+        self.send_into_slice(data, &mut out)?;
+        Ok(out)
     }
 }
 
@@ -141,6 +192,43 @@ impl RecvCipher {
         }
     }
 
+    /// Decrypts ciphertext into a mutable slice.
+    ///
+    /// The output slice must have at least `encrypted_data.len()` bytes to hold
+    /// the ciphertext during in-place decryption. Returns the plaintext length
+    /// (which is `encrypted_data.len() - CIPHERTEXT_OVERHEAD`). The plaintext
+    /// will be at the start of the output slice.
+    ///
+    /// This is the most efficient method as it avoids all allocations.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error in the following situations:
+    ///
+    /// - Too many messages have been received with this cipher.
+    /// - The ciphertext was corrupted in some way.
+    ///
+    /// In *both* cases, the `RecvCipher` will no longer be able to return
+    /// valid plaintexts, and will always return an error on subsequent calls.
+    /// Terminating (and optionally reestablishing) the connection is a simple
+    /// (and safe) way to handle this scenario.
+    pub fn recv_into_slice(
+        &mut self,
+        encrypted_data: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        if encrypted_data.len() < CIPHERTEXT_OVERHEAD {
+            return Err(Error::DecryptionFailed);
+        }
+        assert!(
+            out.len() >= encrypted_data.len(),
+            "output slice must be at least ciphertext.len()"
+        );
+        let nonce = self.nonce.inc()?;
+        self.inner
+            .expose(|cipher| cipher.decrypt_into_slice(&nonce, encrypted_data, out))
+    }
+
     /// Decrypts ciphertext and returns the original data.
     ///
     /// # Errors
@@ -155,9 +243,13 @@ impl RecvCipher {
     /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
     /// is a simple (and safe) way to handle this scenario.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
-        let nonce = self.nonce.inc()?;
-        self.inner
-            .expose(|cipher| cipher.decrypt(&nonce, encrypted_data))
+        if encrypted_data.len() < CIPHERTEXT_OVERHEAD {
+            return Err(Error::DecryptionFailed);
+        }
+        let mut out = vec![0u8; encrypted_data.len()];
+        let plaintext_len = self.recv_into_slice(encrypted_data, &mut out)?;
+        out.truncate(plaintext_len);
+        Ok(out)
     }
 }
 

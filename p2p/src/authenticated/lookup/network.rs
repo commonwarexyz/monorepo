@@ -155,6 +155,7 @@ impl<E: Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics, C: Sign
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
+            buffer_pool: None,
         };
         let listener = listener::Actor::new(
             self.context.with_label("listener"),

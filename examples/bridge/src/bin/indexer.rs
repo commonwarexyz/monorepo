@@ -244,6 +244,7 @@ fn main() {
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(5),
+            buffer_pool: None,
         };
         loop {
             // Listen for connection

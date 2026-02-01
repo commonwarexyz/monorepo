@@ -25,6 +25,7 @@ fn fuzz(data: &[u8]) {
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
+            buffer_pool: None,
         };
 
         let listener_config = Config {
@@ -34,6 +35,7 @@ fn fuzz(data: &[u8]) {
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
+            buffer_pool: None,
         };
 
         let listener_handle = context.clone().spawn(move |context| async move {

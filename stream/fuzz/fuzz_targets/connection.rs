@@ -99,6 +99,7 @@ fn fuzz(input: FuzzInput) {
             synchrony_bound,
             max_handshake_age,
             handshake_timeout,
+            buffer_pool: None,
         };
 
         let listener_config = Config {
@@ -108,6 +109,7 @@ fn fuzz(input: FuzzInput) {
             synchrony_bound,
             max_handshake_age,
             handshake_timeout,
+            buffer_pool: None,
         };
 
         let listener_handle = context.with_label("listener").spawn({

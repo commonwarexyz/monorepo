@@ -436,6 +436,7 @@ mod tests {
             synchrony_bound: Duration::from_secs(10),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(10),
+            buffer_pool: None,
         }
     }
 
