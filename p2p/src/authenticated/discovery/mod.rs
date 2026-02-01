@@ -904,12 +904,7 @@ mod tests {
                         select_loop! {
                             context,
                             on_stopped => {},
-                            result = receiver.recv() => {
-                                if result.is_err() {
-                                    // Channel closed due to shutdown
-                                    break;
-                                }
-                            },
+                            Ok(_) = receiver.recv() else break => {},
                         }
                     }
                 });

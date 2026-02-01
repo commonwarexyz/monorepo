@@ -376,9 +376,10 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     }
                 }
             },
-            broadcast = self.broadcast.recv() => {
+            Some((digest, contents)) = self.broadcast.recv() else {
+                panic!("broadcast closed");
+            } => {
                 // Record digest for future use
-                let (digest, contents) = broadcast.expect("broadcast closed");
                 seen.insert(digest, contents.clone());
 
                 // Check if we have a waiter

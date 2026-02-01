@@ -171,11 +171,7 @@ where
             },
 
             // Response from a handler
-            ready = processed.next_completed() => {
-                // Error handling
-                let Ok((peer, reply)) = ready else {
-                    continue;
-                };
+            Ok((peer, reply)) = processed.next_completed() else continue => {
                 self.responses.inc();
 
                 // Send the response

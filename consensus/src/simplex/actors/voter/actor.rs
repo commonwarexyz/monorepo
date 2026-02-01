@@ -912,12 +912,8 @@ impl<
                     }
                 };
             },
-            result = certify_wait => {
-                // Aborted futures are expected when old views are pruned.
-                let Ok((round, certified)) = result else {
-                    continue;
-                };
-
+            // Aborted futures are expected when old views are pruned
+            Ok((round, certified)) = certify_wait else continue => {
                 // Handle response to our certification request.
                 view = round.view();
                 match certified {

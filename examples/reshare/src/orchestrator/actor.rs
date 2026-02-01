@@ -235,52 +235,48 @@ where
                     .hint_finalized(boundary_height, NonEmptyVec::new(from))
                     .await;
             },
-            transition = self.mailbox.recv() => {
-                let Some(transition) = transition else {
-                    warn!("mailbox closed, shutting down orchestrator");
-                    break;
-                };
-
-                match transition {
-                    Message::Enter(transition) => {
-                        // If the epoch is already in the map, ignore.
-                        if engines.contains_key(&transition.epoch) {
-                            warn!(epoch = %transition.epoch, "entered existing epoch");
-                            continue;
-                        }
-
-                        // Register the new signing scheme with the scheme provider.
-                        let scheme = self.provider.scheme_for_epoch(&transition);
-                        assert!(self.provider.register(transition.epoch, scheme.clone()));
-
-                        // Enter the new epoch.
-                        let engine = self
-                            .enter_epoch(
-                                transition.epoch,
-                                scheme,
-                                &mut vote_mux,
-                                &mut certificate_mux,
-                                &mut resolver_mux,
-                            )
-                            .await;
-                        engines.insert(transition.epoch, engine);
-                        let _ = self.latest_epoch.try_set(transition.epoch.get());
-
-                        info!(epoch = %transition.epoch, "entered epoch");
+            Some(transition) = self.mailbox.recv() else {
+                warn!("mailbox closed, shutting down orchestrator");
+                break;
+            } => match transition {
+                Message::Enter(transition) => {
+                    // If the epoch is already in the map, ignore.
+                    if engines.contains_key(&transition.epoch) {
+                        warn!(epoch = %transition.epoch, "entered existing epoch");
+                        continue;
                     }
-                    Message::Exit(epoch) => {
-                        // Remove the engine and abort it.
-                        let Some(engine) = engines.remove(&epoch) else {
-                            warn!(%epoch, "exited non-existent epoch");
-                            continue;
-                        };
-                        engine.abort();
 
-                        // Unregister the signing scheme for the epoch.
-                        assert!(self.provider.unregister(&epoch));
+                    // Register the new signing scheme with the scheme provider.
+                    let scheme = self.provider.scheme_for_epoch(&transition);
+                    assert!(self.provider.register(transition.epoch, scheme.clone()));
 
-                        info!(%epoch, "exited epoch");
-                    }
+                    // Enter the new epoch.
+                    let engine = self
+                        .enter_epoch(
+                            transition.epoch,
+                            scheme,
+                            &mut vote_mux,
+                            &mut certificate_mux,
+                            &mut resolver_mux,
+                        )
+                        .await;
+                    engines.insert(transition.epoch, engine);
+                    let _ = self.latest_epoch.try_set(transition.epoch.get());
+
+                    info!(epoch = %transition.epoch, "entered epoch");
+                }
+                Message::Exit(epoch) => {
+                    // Remove the engine and abort it.
+                    let Some(engine) = engines.remove(&epoch) else {
+                        warn!(%epoch, "exited non-existent epoch");
+                        continue;
+                    };
+                    engine.abort();
+
+                    // Unregister the signing scheme for the epoch.
+                    assert!(self.provider.unregister(&epoch));
+
+                    info!(%epoch, "exited epoch");
                 }
             },
         }

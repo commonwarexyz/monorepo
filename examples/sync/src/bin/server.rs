@@ -342,17 +342,15 @@ where
             }
         },
 
-        outgoing = response_receiver.recv() => {
-            if let Some(response) = outgoing {
-                // We have a response to send to the client.
-                let response_data = response.encode();
-                if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
-                    info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            } else {
-                // Channel closed
+        Some(response) = response_receiver.recv() else {
+            // Channel closed
+            return Ok(());
+        } => {
+            // We have a response to send to the client.
+            let response_data = response.encode();
+            if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
+                info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+                state.error_counter.inc();
                 return Ok(());
             }
         },

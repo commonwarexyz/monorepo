@@ -315,11 +315,8 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
-            // Handle waiter completions first
-            result = waiters.next_completed() => {
-                let Ok((commitment, block)) = result else {
-                    continue; // Aborted future
-                };
+            // Handle waiter completions first (aborted futures are skipped)
+            Ok((commitment, block)) = waiters.next_completed() else continue => {
                 self.notify_subscribers(commitment, &block).await;
             },
             // Handle application acknowledgements next

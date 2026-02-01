@@ -117,28 +117,25 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
             },
             // Prefer control messages because network messages will
             // already block when full (providing backpressure).
-            control = self.control_rx.recv() => {
-                match control {
-                    Some(Control::Register { subchannel, sender }) => {
-                        // If the subchannel is already registered, drop the sender.
-                        if self.routes.contains_key(&subchannel) {
-                            continue;
-                        }
+            Some(control) = self.control_rx.recv() else {
+                // If the control channel is closed, we can shut down since there must
+                // be no more registrations, and all receivers must have been dropped.
+                return Ok(());
+            } => match control {
+                Control::Register { subchannel, sender } => {
+                    // If the subchannel is already registered, drop the sender.
+                    if self.routes.contains_key(&subchannel) {
+                        continue;
+                    }
 
-                        // Otherwise, create a new subchannel and send the receiver to the caller.
-                        let (tx, rx) = mpsc::channel(self.mailbox_size);
-                        self.routes.insert(subchannel, tx);
-                        let _ = sender.send(rx);
-                    }
-                    Some(Control::Deregister { subchannel }) => {
-                        // Remove the route.
-                        self.routes.remove(&subchannel);
-                    }
-                    None => {
-                        // If the control channel is closed, we can shut down since there must
-                        // be no more registrations, and all receivers must have been dropped.
-                        return Ok(());
-                    }
+                    // Otherwise, create a new subchannel and send the receiver to the caller.
+                    let (tx, rx) = mpsc::channel(self.mailbox_size);
+                    self.routes.insert(subchannel, tx);
+                    let _ = sender.send(rx);
+                }
+                Control::Deregister { subchannel } => {
+                    // Remove the route.
+                    self.routes.remove(&subchannel);
                 }
             },
             // Process network messages.
