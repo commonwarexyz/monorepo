@@ -376,9 +376,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     }
                 }
             },
-            Some((digest, contents)) = self.broadcast.recv() else {
-                panic!("broadcast closed");
-            } => {
+            Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
                 seen.insert(digest, contents.clone());
 

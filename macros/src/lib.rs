@@ -89,27 +89,27 @@ pub use commonware_macros_impl::select;
 ///
 /// ```rust,ignore
 /// // Option handling
-/// Some(msg) = rx.next() else break => { handle(msg); }
-/// Some(msg) = rx.next() else return => { handle(msg); }
-/// Some(msg) = rx.next() else continue => { handle(msg); }
+/// Some(msg) = rx.recv() else break => { handle(msg); }
+/// Some(msg) = rx.recv() else return => { handle(msg); }
+/// Some(msg) = rx.recv() else continue => { handle(msg); }
 ///
 /// // Result handling
-/// Ok(value) = result_stream.next() else break => { process(value); }
+/// Ok(value) = result_stream.recv() else break => { process(value); }
 ///
 /// // Enum variants
-/// MyEnum::Data(x) = stream.next() else continue => { use_data(x); }
+/// MyEnum::Data(x) = stream.recv() else continue => { use_data(x); }
 /// ```
 ///
 /// This replaces the common pattern:
 /// ```rust,ignore
 /// // Before
-/// msg = mailbox.next() => {
+/// msg = mailbox.recv() => {
 ///     let Some(msg) = msg else { break };
 ///     // use msg
 /// }
 ///
 /// // After
-/// Some(msg) = mailbox.next() else break => {
+/// Some(msg) = mailbox.recv() else break => {
 ///     // use msg directly
 /// }
 /// ```
@@ -125,7 +125,7 @@ pub use commonware_macros_impl::select;
 ///     on_start => { start_code },
 ///     on_stopped => { shutdown_code },
 ///     pattern = future => { body },
-///     Some(msg) = rx.next() else break => { handle(msg) },
+///     Some(msg) = rx.recv() else break => { handle(msg) },
 ///     on_end => { end_code },
 /// }
 ///
@@ -149,7 +149,7 @@ pub use commonware_macros_impl::select;
 ///             },
 ///
 ///             // Refutable pattern with else clause (uses let-else)
-///             __select_result = rx.next() => {
+///             __select_result = rx.recv() => {
 ///                 let Some(msg) = __select_result else { break };
 ///                 { handle(msg) }
 ///             },
@@ -180,7 +180,7 @@ pub use commonware_macros_impl::select;
 ///             drop(shutdown);
 ///         },
 ///         // Refutable pattern: breaks when channel closes (None)
-///         Some(msg) = receiver.next() else break => {
+///         Some(msg) = receiver.recv() else break => {
 ///             println!("received: {:?}", msg);
 ///         },
 ///         on_end => {
