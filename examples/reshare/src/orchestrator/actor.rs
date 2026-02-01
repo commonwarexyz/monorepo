@@ -24,8 +24,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell,
     Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -203,7 +202,7 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
-            Some((their_epoch, (from, _))) = vote_backup.next() else {
+            Some((their_epoch, (from, _))) = vote_backup.recv() else {
                 warn!("vote mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
@@ -236,7 +235,7 @@ where
                     .hint_finalized(boundary_height, NonEmptyVec::new(from))
                     .await;
             },
-            transition = self.mailbox.next() => {
+            transition = self.mailbox.recv() => {
                 let Some(transition) = transition else {
                     warn!("mailbox closed, shutting down orchestrator");
                     break;

@@ -3,7 +3,7 @@ use crate::{
     Automaton as A,
 };
 use commonware_cryptography::{Hasher, Sha256};
-use futures::channel::oneshot;
+use commonware_utils::channel::oneshot;
 use tracing::trace;
 
 #[derive(Clone, Debug)]

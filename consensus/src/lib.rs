@@ -67,8 +67,7 @@ commonware_macros::stability_scope!(BETA {
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
     use commonware_cryptography::Digest;
-    use commonware_utils::channels::fallible::OneshotExt;
-    use futures::channel::{oneshot, mpsc};
+    use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
     pub mod marshal;

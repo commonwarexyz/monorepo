@@ -5,10 +5,7 @@ use crate::{
 use commonware_macros::select_loop;
 use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
-};
+use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -43,7 +40,7 @@ async fn run_loop<E, Si, St, M>(
         Some(Request {
             request,
             response_tx,
-        }) = request_rx.next() else return => {
+        }) = request_rx.recv() else return => {
             let request_id = request.request_id();
             pending_requests.insert(request_id, response_tx);
             let data = request.encode();

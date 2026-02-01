@@ -12,10 +12,10 @@ use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, BufMut, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
-use commonware_utils::channels::fallible::FallibleExt;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+use commonware_utils::channel::{
+    fallible::FallibleExt,
+    mpsc::{self, error::TrySendError},
+    oneshot,
 };
 use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
@@ -81,7 +81,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
         receiver: R,
         mailbox_size: usize,
     ) -> MuxerBuilder<E, S, R> {
-        let (control_tx, control_rx) = mpsc::unbounded();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mux = Self {
             context: ContextCell::new(context),
             sender,
@@ -117,7 +117,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
             },
             // Prefer control messages because network messages will
             // already block when full (providing backpressure).
-            control = self.control_rx.next() => {
+            control = self.control_rx.recv() => {
                 match control {
                     Some(Control::Register { subchannel, sender }) => {
                         // If the subchannel is already registered, drop the sender.
@@ -171,7 +171,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                 // to avoid head-of-line blocking when one subchannel is slow.
                 if let Err(e) = sender.try_send((pk, bytes)) {
                     // Check if the channel is disconnected (receiver dropped)
-                    if e.is_disconnected() {
+                    if matches!(e, TrySendError::Closed(_)) {
                         // Remove the route for the subchannel.
                         self.routes.remove(&subchannel);
                         debug!(?subchannel, "subchannel receiver dropped, removing route");
@@ -209,7 +209,6 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
                 subchannel,
                 sender: tx,
             })
-            .await
             .map_err(|_| Error::Closed)?;
         let receiver = rx.await.map_err(|_| Error::AlreadyRegistered(subchannel))?;
 
@@ -261,7 +260,7 @@ impl<R: Receiver> Receiver for SubReceiver<R> {
     type PublicKey = R::PublicKey;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
-        self.receiver.next().await.ok_or(Error::RecvFailed)
+        self.receiver.recv().await.ok_or(Error::RecvFailed)
     }
 }
 
@@ -655,7 +654,7 @@ mod tests {
                     res.expect("should have received message");
                     count_std += 1;
                 },
-                res = backup_rx.next() => {
+                res = backup_rx.recv() => {
                     res.expect("should have received message");
                     count_backup += 1;
                 },
@@ -868,7 +867,7 @@ mod tests {
             send_burst(&mut [tx1], 1).await;
 
             // Get the message from pk2's backup channel and respond.
-            let (subchannel, (from, _)) = backup2.next().await.unwrap();
+            let (subchannel, (from, _)) = backup2.recv().await.unwrap();
             assert_eq!(subchannel, 1);
             assert_eq!(from, pk1);
             global_sender2

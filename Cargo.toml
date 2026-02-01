@@ -60,6 +60,7 @@ missing-const-for-fn = "warn"
 use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
+disallowed_types = "deny"
 disallowed_macros = "deny"
 undocumented_unsafe_blocks = "deny"
 # This generates false positives for methods that are correct, and the contortions

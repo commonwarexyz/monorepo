@@ -19,8 +19,11 @@ use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channels::fallible::OneshotExt, ordered::Quorum, sequence::U64};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc},
+    ordered::Quorum,
+    sequence::U64,
+};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
@@ -127,7 +130,7 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            Some(message) = self.mailbox_receiver.next() else break => {
+            Some(message) = self.mailbox_receiver.recv() else break => {
                 match message {
                     MailboxMessage::Certificate(certificate) => {
                         // Certificates from mailbox have no associated request view
@@ -140,7 +143,7 @@ impl<
                     }
                 }
             },
-            Some(message) = handler_rx.next() else break => {
+            Some(message) = handler_rx.recv() else break => {
                 self.handle_resolver(message, &mut voter, &mut resolver)
                     .await;
             },

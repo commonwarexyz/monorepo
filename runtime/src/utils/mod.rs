@@ -15,9 +15,9 @@ pub mod signal;
 
 mod handle;
 pub use handle::Handle;
-pub(crate) use handle::{Aborter, MetricHandle, Panicker};
 #[commonware_macros::stability(ALPHA)]
 pub(crate) use handle::Panicked;
+pub(crate) use handle::{Aborter, MetricHandle, Panicker};
 
 mod cell;
 pub use cell::Cell as ContextCell;

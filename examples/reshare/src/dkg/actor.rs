@@ -26,8 +26,7 @@ use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, Clock, ContextCell, Handle,
     Metrics, Spawner, Storage as RuntimeStorage,
 };
-use commonware_utils::{ordered::Set, Acknowledgement as _, N3f1, NZU32};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -433,7 +432,7 @@ where
                         }
                     }
                 },
-                mailbox_msg = self.mailbox.next() => {
+                mailbox_msg = self.mailbox.recv() => {
                     let Some(mailbox_msg) = mailbox_msg else {
                         warn!("dkg actor mailbox closed");
                         break 'actor;

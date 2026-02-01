@@ -14,8 +14,11 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channels::ring, NZUsize};
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_utils::{
+    channel::{mpsc, ring},
+    NZUsize,
+};
+use futures::SinkExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -94,7 +97,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
             on_stopped => {
                 debug!("context shutdown, stopping router");
             },
-            Some(msg) = self.control.next() else {
+            Some(msg) = self.control.recv() else {
                 debug!("mailbox closed, stopping router");
                 break;
             } => {

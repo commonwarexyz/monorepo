@@ -3,6 +3,11 @@
 //! This is an internal crate. Use [`commonware-macros`](https://docs.rs/commonware-macros)
 //! instead.
 
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+
 use crate::nextest::configured_test_groups;
 use proc_macro::TokenStream;
 use proc_macro2::Span;

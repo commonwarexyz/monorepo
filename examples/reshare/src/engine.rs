@@ -28,8 +28,8 @@ use commonware_runtime::{
     Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
-use futures::{channel::mpsc, future::try_join_all};
+use commonware_utils::{channel::mpsc, ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
+use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
     marker::PhantomData,

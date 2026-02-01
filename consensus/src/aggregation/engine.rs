@@ -298,7 +298,7 @@ impl<
                 debug!("shutdown");
             },
             // Handle refresh epoch deadline
-            Some(epoch) = epoch_updates.next() else {
+            Some(epoch) = epoch_updates.recv() else {
                 error!("epoch subscription failed");
                 break;
             } => {
