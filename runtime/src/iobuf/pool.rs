@@ -31,7 +31,7 @@
 //!
 //! Allocation requests are rounded up to the next size class. Requests larger
 //! than `max_size` return [`PoolError::Oversized`] from [`BufferPool::try_alloc`],
-//! or fall back to untracked heap allocation from [`BufferPool::alloc`].
+//! or fall back to an untracked aligned heap allocation from [`BufferPool::alloc`].
 
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
@@ -542,12 +542,9 @@ impl BufferPool {
     /// it until data has been written.
     pub fn alloc(&self, capacity: usize) -> IoBufMut {
         self.try_alloc(capacity).unwrap_or_else(|_| {
-            // Fall back to an untracked aligned allocation.
-            // Using Weak::new() means the buffer won't be returned to the pool on drop.
-            let size = capacity
-                .next_power_of_two()
-                .max(self.inner.config.min_size.get());
+            let size = capacity.max(self.inner.config.min_size.get());
             let buffer = AlignedBuffer::new(size, self.inner.config.alignment.get());
+            // Using Weak::new() means the buffer won't be returned to the pool on drop.
             IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()))
         })
     }
@@ -585,9 +582,10 @@ impl BufferPool {
     }
 }
 
-/// A mutable buffer from the pool.
+/// A mutable aligned buffer.
 ///
-/// When dropped, the underlying buffer is returned to the pool.
+/// When dropped, the underlying buffer is returned to the pool if tracked,
+/// or deallocated directly if untracked (e.g. fallback allocations).
 ///
 /// # Buffer Layout
 ///
@@ -653,6 +651,15 @@ impl PooledBufMut {
             len: 0,
             pool,
         }
+    }
+
+    /// Returns `true` if this buffer is tracked by a pool.
+    ///
+    /// Tracked buffers will be returned to their pool when dropped. Untracked
+    /// buffers (from fallback allocations) are deallocated directly.
+    #[inline]
+    pub(crate) fn is_tracked(&self) -> bool {
+        self.pool.strong_count() > 0
     }
 
     /// Returns the number of readable bytes remaining in the buffer.
@@ -1600,6 +1607,43 @@ mod tests {
         assert_eq!(result.unwrap_err(), PoolError::Exhausted);
     }
 
+    /// Test fallback allocation when pool is exhausted or oversized.
+    #[test]
+    fn test_fallback_allocation() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        // Exhaust the pool
+        let buf1 = pool.try_alloc(100).unwrap();
+        let buf2 = pool.try_alloc(100).unwrap();
+        assert!(buf1.is_pooled());
+        assert!(buf2.is_pooled());
+
+        // Fallback via alloc() when exhausted - still aligned, but untracked
+        let mut fallback_exhausted = pool.alloc(100);
+        assert!(!fallback_exhausted.is_pooled());
+        assert!((fallback_exhausted.as_mut_ptr() as usize).is_multiple_of(page));
+
+        // Fallback via alloc() when oversized - still aligned, but untracked
+        let mut fallback_oversized = pool.alloc(page * 10);
+        assert!(!fallback_oversized.is_pooled());
+        assert!((fallback_oversized.as_mut_ptr() as usize).is_multiple_of(page));
+
+        // Verify pool counters unchanged by fallback allocations
+        assert_eq!(get_allocated(&pool, page), 2);
+
+        // Drop fallback buffers - should not affect pool counters
+        drop(fallback_exhausted);
+        drop(fallback_oversized);
+        assert_eq!(get_allocated(&pool, page), 2);
+
+        // Drop tracked buffers - counters should decrease
+        drop(buf1);
+        drop(buf2);
+        assert_eq!(get_allocated(&pool, page), 0);
+    }
+
     /// Test is_pooled method.
     #[test]
     fn test_is_pooled() {
@@ -1777,13 +1821,14 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut buf = pool.try_alloc(100).unwrap();
-        // SAFETY: We claim 50 bytes as written (uninitialized, but we don't read them)
-        unsafe { buf.advance_mut(50) };
+        // Write 50 bytes of initialized data
+        buf.put_slice(&[0xAA; 50]);
         // Consume 20 bytes via Buf
         Buf::advance(&mut buf, 20);
         // Freeze should only contain 30 bytes
         let frozen = buf.freeze();
         assert_eq!(frozen.len(), 30);
+        assert_eq!(frozen.as_ref(), &[0xAA; 30]);
     }
 
     #[test]

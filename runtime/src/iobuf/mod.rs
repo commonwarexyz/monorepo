@@ -247,10 +247,17 @@ impl IoBufMut {
         }
     }
 
-    /// Returns `true` if this buffer is from a pool.
+    /// Returns `true` if this buffer is tracked by a pool.
+    ///
+    /// Tracked buffers will be returned to their pool when dropped. Fallback
+    /// allocations from [`BufferPool::alloc`] when the pool is exhausted or
+    /// oversized are aligned but untracked, so this returns `false`.
     #[inline]
-    pub const fn is_pooled(&self) -> bool {
-        matches!(&self.inner, IoBufMutInner::Pooled(_))
+    pub fn is_pooled(&self) -> bool {
+        match &self.inner {
+            IoBufMutInner::Owned(_) => false,
+            IoBufMutInner::Pooled(p) => p.is_tracked(),
+        }
     }
 
     /// Sets the length of the buffer.
