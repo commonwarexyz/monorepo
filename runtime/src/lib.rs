@@ -3484,11 +3484,11 @@ mod tests {
     {
         runner.start(|context| async move {
             // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = context.network_buffer_pool().alloc(1024);
+            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
             assert!(net_buf.capacity() >= 1024);
 
             // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = context.storage_buffer_pool().alloc(1024);
+            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
             assert!(storage_buf.capacity() >= 4096);
 
             // Verify pools have expected configurations
