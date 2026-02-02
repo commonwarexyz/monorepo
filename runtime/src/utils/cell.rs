@@ -206,7 +206,10 @@ commonware_macros::stability_scope!(BETA {
     where
         C: crate::ThreadPooler,
     {
-        fn create_thread_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+        fn create_thread_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError> {
             self.as_present().create_thread_pool(concurrency)
         }
     }

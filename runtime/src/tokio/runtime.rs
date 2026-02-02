@@ -334,14 +334,19 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry, network_buffer_pool.clone()).unwrap(),
-                runtime_registry,
-            );
-        } else {
-            let config = TokioNetworkConfig::default()
-                .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
+                    IoUringNetwork::start(
+                        config,
+                        iouring_registry,
+                        network_buffer_pool.clone(),
+                    )
+                    .unwrap(),
+                    runtime_registry,
+                );
+            } else {
+                let config = TokioNetworkConfig::default()
+                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,

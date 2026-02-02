@@ -265,7 +265,10 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
         /// be built.
-        fn create_thread_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
+        fn create_thread_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError>;
 
         /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
         ///
@@ -275,7 +278,10 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
         /// built.
-        fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
+        fn create_strategy(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<Rayon, ThreadPoolBuildError> {
             self.create_thread_pool(concurrency).map(Rayon::with_pool)
         }
     }

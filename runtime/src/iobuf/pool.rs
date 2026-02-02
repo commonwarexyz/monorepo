@@ -492,7 +492,8 @@ impl BufferPool {
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
-            let class = SizeClass::new(size, config.alignment, config.max_per_class, config.prefill);
+            let class =
+                SizeClass::new(size, config.alignment, config.max_per_class, config.prefill);
             classes.push(class);
         }
 
