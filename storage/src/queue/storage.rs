@@ -163,8 +163,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         if ack_floor < pruning_boundary {
             debug!(
                 old_ack_floor = ack_floor,
-                pruning_boundary,
-                "adjusting ack_floor to pruning_boundary after crash"
+                pruning_boundary, "adjusting ack_floor to pruning_boundary after crash"
             );
             // Remove any acked_above entries below new floor
             if pruning_boundary > 0 {
@@ -1209,10 +1208,9 @@ mod tests {
 
             // Third session: verify recovery handles stale metadata correctly
             {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("third"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("third"), cfg.clone())
+                    .await
+                    .unwrap();
 
                 // ack_floor should have been adjusted to pruning_boundary
                 let pruning_boundary = queue.journal.pruning_boundary();

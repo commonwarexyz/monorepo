@@ -10,9 +10,8 @@ use super::{Config, Error, Queue};
 use crate::Persistable;
 use commonware_codec::CodecShared;
 use commonware_runtime::{Clock, Metrics, Storage};
-use futures::channel::mpsc;
+use commonware_utils::channel::mpsc;
 use futures::lock::Mutex;
-use futures::StreamExt;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -94,7 +93,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
 
             // No item available, wait for notification
             // Returns None if writer is dropped
-            if self.notify.next().await.is_none() {
+            if self.notify.recv().await.is_none() {
                 // Writer dropped, drain any remaining items
                 return self.queue.lock().await.dequeue().await;
             }
@@ -110,7 +109,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
         // Drain any pending notifications (stop if channel empty or closed)
-        while let Ok(Some(_)) = self.notify.try_next() {}
+        while self.notify.try_recv().is_ok() {}
 
         self.queue.lock().await.dequeue().await
     }
@@ -243,7 +242,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Spawner};
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -373,7 +372,12 @@ mod tests {
 
             // Clean up manually since we dropped writer
             drop(reader);
-            Arc::try_unwrap(queue).unwrap().into_inner().destroy().await.unwrap();
+            Arc::try_unwrap(queue)
+                .unwrap()
+                .into_inner()
+                .destroy()
+                .await
+                .unwrap();
         });
     }
 
