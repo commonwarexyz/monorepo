@@ -436,12 +436,10 @@ pub mod tests {
         });
     }
 
-    /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
+    /// Run `test_prune_persists_bitmap_pruning_boundary` against a database factory.
     ///
-    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `into_merkleized()`. If `sync()` didn't call `write_pruned`, the
-    /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
-    pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
+    /// This test verifies that calling `prune()` persists the bitmap pruning boundary.
+    pub fn test_prune_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
     where
         C: CleanAny + BitmapPrunedBits,
         C::Key: TestKey,
@@ -465,24 +463,11 @@ pub mod tests {
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
 
-            // The bitmap should have been pruned during into_merkleized().
+            // Prune the database
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+
             let pruned_bits_before = db.pruned_bits();
-            warn!(
-                "pruned_bits_before={}, inactivity_floor={}, op_count={}",
-                pruned_bits_before,
-                *db.inactivity_floor_loc(),
-                *db.op_count()
-            );
-
-            // Verify we actually have some pruning (otherwise the test is meaningless).
-            assert!(
-                pruned_bits_before > 0,
-                "Expected bitmap to have pruned bits after merkleization"
-            );
-
-            // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
-            // during into_merkleized(), and sync() should persist it.
-            db.sync().await.unwrap();
+            assert!(pruned_bits_before > 0);
 
             // Record the root before dropping.
             let root_before = db.root();
@@ -491,15 +476,9 @@ pub mod tests {
             // Reopen the database.
             let db: C = open_db(context.with_label("second"), partition).await;
 
-            // The pruned bits count should match. If sync() didn't persist the bitmap pruned
-            // state, this would be 0.
+            // Verify the pruned bits count matches.
             let pruned_bits_after = db.pruned_bits();
-            warn!("pruned_bits_after={}", pruned_bits_after);
-
-            assert_eq!(
-                pruned_bits_after, pruned_bits_before,
-                "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
-            );
+            assert_eq!(pruned_bits_after, pruned_bits_before);
 
             // Also verify the root matches.
             assert_eq!(db.root(), root_before);

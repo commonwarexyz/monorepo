@@ -603,7 +603,7 @@ mod test {
 
     #[test_traced("WARN")]
     pub fn test_current_db_sync_persists_bitmap_pruning_boundary() {
-        tests::test_sync_persists_bitmap_pruning_boundary::<CleanCurrentTest, _, _>(open_db);
+        tests::test_prune_persists_bitmap_pruning_boundary::<CleanCurrentTest, _, _>(open_db);
     }
 
     #[test_traced("DEBUG")]

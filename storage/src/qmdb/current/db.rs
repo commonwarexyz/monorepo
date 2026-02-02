@@ -378,6 +378,10 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Merkleize the database and transition to the provable state.
+    ///
+    /// Note: This does NOT prune the bitmap. Bitmap pruning happens only in the
+    /// explicit `prune()` method, which handles crash-safety by persisting bitmap
+    /// state before pruning the ops log.
     pub async fn into_merkleized(
         self,
     ) -> Result<Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>, Error> {
@@ -385,13 +389,10 @@ where
         let mut any = self.any.into_merkleized();
         let hasher = &mut any.log.hasher;
 
-        let mut status = self.status;
-
         // Build the grafted MMR from current pinned nodes + fresh computation
-        // We must build this BEFORE pruning so the pinned nodes match.
         let grafted_mmr = build_grafted_mmr::<H, N>(
             hasher,
-            &status,
+            &self.status,
             &self.grafted_pinned_nodes,
             &any.log.mmr,
             grafting_height::<N>(),
@@ -399,35 +400,21 @@ where
         .await?;
 
         // Compute and cache the root
-        let cached_root = compute_root::<H, N>(
+        let root = compute_root::<H, N>(
             hasher,
-            &status,
+            &self.status,
             &grafted_mmr,
             &any.log.mmr,
             grafting_height::<N>(),
         )
         .await?;
 
-        // Now prune the bitmap to the inactivity floor
-        status.prune_to_bit(*any.inactivity_floor_loc);
-
-        // Compute pinned nodes for the new pruning boundary from the already-built grafted MMR
-        let new_prune_pos =
-            Position::try_from(Location::new_unchecked(status.pruned_chunks() as u64))?;
-        let new_pinned_nodes: Vec<_> = grafted_mmr
-            .nodes_to_pin(new_prune_pos)
-            .into_values()
-            .collect();
-
         Ok(Db {
             any,
-            status,
-            grafted_pinned_nodes: new_pinned_nodes,
+            status: self.status,
+            grafted_pinned_nodes: self.grafted_pinned_nodes,
             bitmap_metadata: self.bitmap_metadata,
-            state: Merkleized {
-                root: cached_root,
-                grafted_mmr,
-            },
+            state: Merkleized { root, grafted_mmr },
         })
     }
 }
