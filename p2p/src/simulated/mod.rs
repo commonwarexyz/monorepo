@@ -195,8 +195,7 @@ mod tests {
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{hostname, ordered::Map, NZU32};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use commonware_utils::{channel::mpsc, hostname, ordered::Map, NZU32};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -235,7 +234,7 @@ mod tests {
                     .await
                     .unwrap();
                 agents.insert(pk, sender);
-                let mut agent_sender = seen_sender.clone();
+                let agent_sender = seen_sender.clone();
                 context
                     .with_label("agent_receiver")
                     .spawn(move |_| async move {
@@ -304,7 +303,7 @@ mod tests {
             // Wait for all recipients
             let mut results = Vec::new();
             for _ in 0..size {
-                results.push(seen_receiver.next().await.unwrap());
+                results.push(seen_receiver.recv().await.unwrap());
             }
             (context.auditor().state(), results)
         })
@@ -2458,7 +2457,7 @@ mod tests {
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
             let mut subscription = manager.subscribe().await;
-            let (id, latest, all) = subscription.next().await.unwrap();
+            let (id, latest, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             let latest_keys: Vec<_> = Vec::from(latest.clone());
             assert_eq!(latest_keys, vec![pk1.clone(), pk2.clone()]);
@@ -2468,7 +2467,7 @@ mod tests {
             let peers: Map<_, _> = [(pk2.clone(), addr2)].try_into().unwrap();
             manager.update(2, peers).await;
 
-            let (id, latest, all) = subscription.next().await.unwrap();
+            let (id, latest, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             let latest_keys: Vec<_> = Vec::from(latest);
             assert_eq!(latest_keys, vec![pk2.clone()]);
@@ -2520,7 +2519,7 @@ mod tests {
 
             // Verify subscription works
             let mut subscription = manager.subscribe().await;
-            let (id, latest, _all) = subscription.next().await.unwrap();
+            let (id, latest, _all) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             let latest_keys: Vec<_> = Vec::from(latest);
             assert_eq!(latest_keys, vec![pk1, pk2]);
@@ -2690,7 +2689,7 @@ mod tests {
                         .unwrap(),
                 )
                 .await;
-            let (id, _, _) = subscription.next().await.unwrap();
+            let (id, _, _) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
 
             // Register channels
@@ -2739,7 +2738,7 @@ mod tests {
             manager
                 .update(2, vec![recipient_pk.clone(), other_pk].try_into().unwrap())
                 .await;
-            let (id, _, _) = subscription.next().await.unwrap();
+            let (id, _, _) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
 
             // Send message from untracked peer
@@ -2770,7 +2769,7 @@ mod tests {
                         .unwrap(),
                 )
                 .await;
-            let (id, _, _) = subscription.next().await.unwrap();
+            let (id, _, _) = subscription.recv().await.unwrap();
             assert_eq!(id, 3);
 
             // Send message from tracked peer (now back in a peer set)
@@ -2818,7 +2817,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 1);
             assert_eq!(peer_set, vec![pk1.clone(), pk2.clone()].try_into().unwrap());
             assert_eq!(all, vec![pk1.clone(), pk2.clone()].try_into().unwrap());
@@ -2829,7 +2828,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 2);
             assert_eq!(peer_set, vec![pk2.clone(), pk3.clone()].try_into().unwrap());
             assert_eq!(
@@ -2845,7 +2844,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 3);
             assert_eq!(peer_set, vec![pk1.clone(), pk3.clone()].try_into().unwrap());
             assert_eq!(
@@ -2861,7 +2860,7 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.next().await.unwrap();
+            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 4);
             assert_eq!(peer_set, vec![pk1.clone(), pk3.clone()].try_into().unwrap());
             assert_eq!(all, vec![pk1.clone(), pk3.clone()].try_into().unwrap());
@@ -2898,9 +2897,9 @@ mod tests {
                 .await;
 
             // Verify all subscriptions receive the notification
-            let (id1, _, _) = subscription1.next().await.unwrap();
-            let (id2, _, _) = subscription2.next().await.unwrap();
-            let (id3, _, _) = subscription3.next().await.unwrap();
+            let (id1, _, _) = subscription1.recv().await.unwrap();
+            let (id2, _, _) = subscription2.recv().await.unwrap();
+            let (id3, _, _) = subscription3.recv().await.unwrap();
 
             assert_eq!(id1, 1);
             assert_eq!(id2, 1);
@@ -2915,8 +2914,8 @@ mod tests {
                 .await;
 
             // Verify remaining subscriptions still receive notifications
-            let (id1, _, _) = subscription1.next().await.unwrap();
-            let (id3, _, _) = subscription3.next().await.unwrap();
+            let (id1, _, _) = subscription1.recv().await.unwrap();
+            let (id3, _, _) = subscription3.recv().await.unwrap();
 
             assert_eq!(id1, 2);
             assert_eq!(id3, 2);
@@ -2958,7 +2957,7 @@ mod tests {
                 .await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             assert_eq!(new.len(), 1);
             assert_eq!(all.len(), 1);
@@ -2991,7 +2990,7 @@ mod tests {
                 )
                 .await;
 
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             assert_eq!(new.len(), 2);
             assert_eq!(all.len(), 2);

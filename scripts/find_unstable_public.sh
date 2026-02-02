@@ -51,9 +51,10 @@ check_crate() {
         return 1
     fi
     
-    # Find the JSON file
+    # Find the JSON file (respect CARGO_TARGET_DIR if set)
+    local target_dir="${CARGO_TARGET_DIR:-target}"
     local json_file
-    json_file=$(find target/doc -name "${crate_underscore}.json" 2>/dev/null | head -1)
+    json_file=$(find "$target_dir/doc" -name "${crate_underscore}.json" 2>/dev/null | head -1)
     
     if [[ -z "$json_file" || ! -f "$json_file" ]]; then
         echo "  Warning: No JSON output found for $crate" >&2

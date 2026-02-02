@@ -68,7 +68,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use futures::{channel::mpsc, StreamExt};
+    use commonware_utils::channel::mpsc;
     use std::{num::NonZeroU32, time::Duration};
 
     /// Default rate limit set high enough to not interfere with normal operation
@@ -225,7 +225,7 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
             );
@@ -243,7 +243,7 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Nullification(n), _) if n.view() == view)
             );
@@ -260,7 +260,7 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == view)
             );
@@ -403,13 +403,13 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Should receive the leader's proposal first (participant 1 is leader)
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload"))
             );
 
             // Should receive notarization certificate from quorum of votes
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view));
         });
     }
@@ -559,7 +559,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive the leader's proposal (participant 1)
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(&output, voter::Message::Proposal(p) if p.view() == view));
 
             // Now send the certificate from network
@@ -576,7 +576,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive exactly one notarization
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
             );
@@ -600,7 +600,7 @@ mod tests {
 
             // Try to receive another message (with timeout)
             let got_duplicate = select! {
-                _ = voter_receiver.next() => { true },
+                _ = voter_receiver.recv() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
             };
 
@@ -736,7 +736,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // The batcher should receive the leader's proposal
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(
                 &output,
                 voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"payload_a")
@@ -768,7 +768,7 @@ mod tests {
 
             // Should NOT have a certificate yet
             let got_certificate = select! {
-                _output = voter_receiver.next() => { true },
+                _output = voter_receiver.recv() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
             };
             assert!(
@@ -801,7 +801,7 @@ mod tests {
 
             // Still should not have certificate (only 3 votes for proposal_a: 0, 1, 6)
             let got_certificate = select! {
-                _output = voter_receiver.next() => { true },
+                _output = voter_receiver.recv() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
             };
             assert!(
@@ -940,7 +940,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive the leader's proposal forwarded to voter
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
                 "Expected proposal to be forwarded after leader set"
@@ -1068,7 +1068,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive the leader's proposal forwarded to voter
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
                 "Expected proposal to be forwarded after leader set (vote arrived before leader was known)"
@@ -1371,7 +1371,7 @@ mod tests {
 
             // Should receive a notarization certificate (view 1 is above finalized=0)
             loop {
-                let output = voter_receiver.next().await.unwrap();
+                let output = voter_receiver.recv().await.unwrap();
                 match output {
                     voter::Message::Proposal(_) => continue,
                     voter::Message::Verified(Certificate::Notarization(n), _) => {
@@ -1417,7 +1417,7 @@ mod tests {
 
             // Should NOT receive any certificate for the finalized view
             select! {
-                msg = voter_receiver.next() => match msg {
+                msg = voter_receiver.recv() => match msg {
                     Some(voter::Message::Proposal(_)) => {}
                     Some(voter::Message::Verified(cert, _)) if cert.view() == view2 => {
                         panic!("should not receive any certificate for the finalized view");
@@ -1585,7 +1585,7 @@ mod tests {
 
             // Receive proposal and certificate
             loop {
-                let output = voter_receiver.next().await.unwrap();
+                let output = voter_receiver.recv().await.unwrap();
                 match output {
                     voter::Message::Proposal(_) => continue,
                     voter::Message::Verified(Certificate::Notarization(n), _) => {

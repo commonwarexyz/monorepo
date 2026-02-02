@@ -13,10 +13,9 @@ use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{channels::fallible::OneshotExt, futures::Pool};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc, oneshot},
+    futures::Pool,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{HashMap, HashSet};
@@ -126,59 +125,53 @@ where
         let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
 
         // Create futures pool
-        let mut processed: Pool<Result<(P, Rs), oneshot::Canceled>> = Pool::default();
+        let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            command = self.mailbox.next() => {
-                if let Some(command) = command {
-                    match command {
-                        Message::Send {
-                            request,
-                            recipients,
-                            responder,
-                        } => {
-                            // Track commitment (if not already tracked)
-                            let commitment = request.commitment();
-                            let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                                self.outstanding.inc();
-                                (HashSet::new(), HashSet::new())
-                            });
+            Some(command) = self.mailbox.recv() else continue => {
+                match command {
+                    Message::Send {
+                        request,
+                        recipients,
+                        responder,
+                    } => {
+                        // Track commitment (if not already tracked)
+                        let commitment = request.commitment();
+                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                            self.outstanding.inc();
+                            (HashSet::new(), HashSet::new())
+                        });
 
-                            // Send the request to recipients
-                            match req_tx
-                                .send(recipients, request, self.priority_request)
-                                .await
-                            {
-                                Ok(recipients) => {
-                                    entry.0.extend(recipients.iter().cloned());
-                                    responder.send_lossy(Ok(recipients));
-                                }
-                                Err(err) => {
-                                    error!(?err, ?commitment, "failed to send message");
-                                    responder.send_lossy(Err(Error::SendFailed(err.into())));
-                                }
+                        // Send the request to recipients
+                        match req_tx
+                            .send(recipients, request, self.priority_request)
+                            .await
+                        {
+                            Ok(recipients) => {
+                                entry.0.extend(recipients.iter().cloned());
+                                responder.send_lossy(Ok(recipients));
+                            }
+                            Err(err) => {
+                                error!(?err, ?commitment, "failed to send message");
+                                responder.send_lossy(Err(Error::SendFailed(err.into())));
                             }
                         }
-                        Message::Cancel { commitment } => {
-                            if self.tracked.remove(&commitment).is_none() {
-                                debug!(?commitment, "ignoring removal of unknown commitment");
-                            }
-                            let _ = self.outstanding.try_set(self.tracked.len());
+                    }
+                    Message::Cancel { commitment } => {
+                        if self.tracked.remove(&commitment).is_none() {
+                            debug!(?commitment, "ignoring removal of unknown commitment");
                         }
+                        let _ = self.outstanding.try_set(self.tracked.len());
                     }
                 }
             },
 
             // Response from a handler
-            ready = processed.next_completed() => {
-                // Error handling
-                let Ok((peer, reply)) = ready else {
-                    continue;
-                };
+            Ok((peer, reply)) = processed.next_completed() else continue => {
                 self.responses.inc();
 
                 // Send the response

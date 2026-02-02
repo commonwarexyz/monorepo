@@ -5,10 +5,7 @@ use crate::{
 use commonware_macros::select_loop;
 use commonware_runtime::{Handle, Sink, Spawner, Stream};
 use commonware_stream::utils::codec::{recv_frame, send_frame};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
-};
+use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -40,42 +37,34 @@ async fn run_loop<E, Si, St, M>(
         on_stopped => {
             debug!("context shutdown, terminating I/O task");
         },
-        outgoing = request_rx.next() => match outgoing {
-            Some(Request {
-                request,
-                response_tx,
-            }) => {
-                let request_id = request.request_id();
-                pending_requests.insert(request_id, response_tx);
-                let data = request.encode();
-                if let Err(e) = send_frame(&mut sink, data, MAX_MESSAGE_SIZE).await {
-                    if let Some(sender) = pending_requests.remove(&request_id) {
-                        let _ = sender.send(Err(Error::Network(e)));
-                    }
-                    return;
+        Some(Request {
+            request,
+            response_tx,
+        }) = request_rx.recv() else return => {
+            let request_id = request.request_id();
+            pending_requests.insert(request_id, response_tx);
+            let data = request.encode();
+            if let Err(e) = send_frame(&mut sink, data, MAX_MESSAGE_SIZE).await {
+                if let Some(sender) = pending_requests.remove(&request_id) {
+                    let _ = sender.send(Err(Error::Network(e)));
                 }
+                return;
             }
-            None => return,
         },
-        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-            match incoming {
-                Ok(response_data) => {
-                    match M::decode(response_data.coalesce()) {
-                        Ok(message) => {
-                            let request_id = message.request_id();
-                            if let Some(sender) = pending_requests.remove(&request_id) {
-                                let _ = sender.send(Ok(message));
-                            }
-                        }
-                        Err(_) => { /* ignore */ }
+        Ok(response_data) = recv_frame(&mut stream, MAX_MESSAGE_SIZE) else {
+            for (_, sender) in pending_requests.drain() {
+                let _ = sender.send(Err(Error::RequestChannelClosed));
+            }
+            return;
+        } => {
+            match M::decode(response_data.coalesce()) {
+                Ok(message) => {
+                    let request_id = message.request_id();
+                    if let Some(sender) = pending_requests.remove(&request_id) {
+                        let _ = sender.send(Ok(message));
                     }
                 }
-                Err(_e) => {
-                    for (_, sender) in pending_requests.drain() {
-                        let _ = sender.send(Err(Error::RequestChannelClosed));
-                    }
-                    return;
-                }
+                Err(_) => { /* ignore */ }
             }
         },
     }

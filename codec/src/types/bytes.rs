@@ -36,8 +36,6 @@ impl Read for Bytes {
 mod tests {
     use super::*;
     use crate::{Decode, Encode};
-    #[cfg(not(feature = "std"))]
-    use alloc::vec;
     use bytes::Bytes;
 
     #[test]

@@ -39,15 +39,12 @@ use commonware_storage::{
 };
 use commonware_utils::{
     acknowledgement::Exact,
-    channels::fallible::OneshotExt,
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    try_join, StreamExt,
-};
+use futures::try_join;
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
@@ -311,18 +308,15 @@ where
             on_start => {
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 self.block_subscriptions.retain(|_, bs| {
-                    bs.subscribers.retain(|tx| !tx.is_canceled());
+                    bs.subscribers.retain(|tx| !tx.is_closed());
                     !bs.subscribers.is_empty()
                 });
             },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
-            // Handle waiter completions first
-            result = waiters.next_completed() => {
-                let Ok((commitment, block)) = result else {
-                    continue; // Aborted future
-                };
+            // Handle waiter completions first (aborted futures are skipped)
+            Ok((commitment, block)) = waiters.next_completed() else continue => {
                 self.notify_subscribers(commitment, &block).await;
             },
             // Handle application acknowledgements next
@@ -349,11 +343,10 @@ where
                 }
             },
             // Handle consensus inputs before backfill or resolver traffic
-            mailbox_message = self.mailbox.next() => {
-                let Some(message) = mailbox_message else {
-                    info!("mailbox closed, shutting down");
-                    break;
-                };
+            Some(message) = self.mailbox.recv() else {
+                info!("mailbox closed, shutting down");
+                break;
+            } => {
                 match message {
                     Message::GetInfo {
                         identifier,
@@ -570,11 +563,10 @@ where
                 }
             },
             // Handle resolver messages last
-            message = resolver_rx.next() => {
-                let Some(message) = message else {
-                    info!("handler closed, shutting down");
-                    break;
-                };
+            Some(message) = resolver_rx.recv() else {
+                info!("handler closed, shutting down");
+                break;
+            } => {
                 match message {
                     handler::Message::Produce { key, response } => {
                         match key {

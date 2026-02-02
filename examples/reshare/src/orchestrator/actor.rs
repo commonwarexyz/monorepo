@@ -24,8 +24,7 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell,
     Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
@@ -203,13 +202,12 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping orchestrator");
             },
-            message = vote_backup.next() => {
+            Some((their_epoch, (from, _))) = vote_backup.recv() else {
+                warn!("vote mux backup channel closed, shutting down orchestrator");
+                break;
+            } => {
                 // If a message is received in an unregistered sub-channel in the vote network,
                 // ensure we have the boundary finalization.
-                let Some((their_epoch, (from, _))) = message else {
-                    warn!("vote mux backup channel closed, shutting down orchestrator");
-                    break;
-                };
                 let their_epoch = Epoch::new(their_epoch);
                 let Some(our_epoch) = engines.keys().last().copied() else {
                     debug!(%their_epoch, ?from, "received message from unregistered epoch with no known epochs");
@@ -237,52 +235,48 @@ where
                     .hint_finalized(boundary_height, NonEmptyVec::new(from))
                     .await;
             },
-            transition = self.mailbox.next() => {
-                let Some(transition) = transition else {
-                    warn!("mailbox closed, shutting down orchestrator");
-                    break;
-                };
-
-                match transition {
-                    Message::Enter(transition) => {
-                        // If the epoch is already in the map, ignore.
-                        if engines.contains_key(&transition.epoch) {
-                            warn!(epoch = %transition.epoch, "entered existing epoch");
-                            continue;
-                        }
-
-                        // Register the new signing scheme with the scheme provider.
-                        let scheme = self.provider.scheme_for_epoch(&transition);
-                        assert!(self.provider.register(transition.epoch, scheme.clone()));
-
-                        // Enter the new epoch.
-                        let engine = self
-                            .enter_epoch(
-                                transition.epoch,
-                                scheme,
-                                &mut vote_mux,
-                                &mut certificate_mux,
-                                &mut resolver_mux,
-                            )
-                            .await;
-                        engines.insert(transition.epoch, engine);
-                        let _ = self.latest_epoch.try_set(transition.epoch.get());
-
-                        info!(epoch = %transition.epoch, "entered epoch");
+            Some(transition) = self.mailbox.recv() else {
+                warn!("mailbox closed, shutting down orchestrator");
+                break;
+            } => match transition {
+                Message::Enter(transition) => {
+                    // If the epoch is already in the map, ignore.
+                    if engines.contains_key(&transition.epoch) {
+                        warn!(epoch = %transition.epoch, "entered existing epoch");
+                        continue;
                     }
-                    Message::Exit(epoch) => {
-                        // Remove the engine and abort it.
-                        let Some(engine) = engines.remove(&epoch) else {
-                            warn!(%epoch, "exited non-existent epoch");
-                            continue;
-                        };
-                        engine.abort();
 
-                        // Unregister the signing scheme for the epoch.
-                        assert!(self.provider.unregister(&epoch));
+                    // Register the new signing scheme with the scheme provider.
+                    let scheme = self.provider.scheme_for_epoch(&transition);
+                    assert!(self.provider.register(transition.epoch, scheme.clone()));
 
-                        info!(%epoch, "exited epoch");
-                    }
+                    // Enter the new epoch.
+                    let engine = self
+                        .enter_epoch(
+                            transition.epoch,
+                            scheme,
+                            &mut vote_mux,
+                            &mut certificate_mux,
+                            &mut resolver_mux,
+                        )
+                        .await;
+                    engines.insert(transition.epoch, engine);
+                    let _ = self.latest_epoch.try_set(transition.epoch.get());
+
+                    info!(epoch = %transition.epoch, "entered epoch");
+                }
+                Message::Exit(epoch) => {
+                    // Remove the engine and abort it.
+                    let Some(engine) = engines.remove(&epoch) else {
+                        warn!(%epoch, "exited non-existent epoch");
+                        continue;
+                    };
+                    engine.abort();
+
+                    // Unregister the signing scheme for the epoch.
+                    assert!(self.provider.unregister(&epoch));
+
+                    info!(%epoch, "exited epoch");
                 }
             },
         }

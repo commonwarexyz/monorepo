@@ -4,7 +4,7 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
@@ -12,12 +12,8 @@ commonware_macros::stability_scope!(BETA {
 
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, string::String, vec::Vec};
-
     use bytes::{BufMut, BytesMut};
-    use core::{
-        fmt::Write as FmtWrite,
-        time::Duration,
-    };
+    use core::{fmt::Write as FmtWrite, time::Duration};
     pub mod faults;
     pub use faults::{Faults, N3f1, N5f1};
 
@@ -166,7 +162,8 @@ commonware_macros::stability_scope!(BETA {
     pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
         use commonware_codec::EncodeSize;
         let len_prefix = namespace.len();
-        let mut buf = BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
+        let mut buf =
+            BytesMut::with_capacity(len_prefix.encode_size() + namespace.len() + msg.len());
         len_prefix.write(&mut buf);
         BufMut::put_slice(&mut buf, namespace);
         BufMut::put_slice(&mut buf, msg);
@@ -241,7 +238,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     mod priority_set;
     pub use priority_set::PrioritySet;
 
-    pub mod channels;
+    pub mod channel;
     pub mod concurrency;
     pub mod futures;
 

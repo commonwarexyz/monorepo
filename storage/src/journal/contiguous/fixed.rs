@@ -49,14 +49,6 @@
 //! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
 //! given point in history.
 //!
-//! # State Sync
-//!
-//! `Journal::init_sync` initializes a journal for state sync, handling existing data appropriately:
-//! - If no data exists, creates a journal at the sync range start
-//! - If data exists within range, prunes toward the lower bound (section-aligned)
-//! - If data exceeds the range, returns an error
-//! - If data is stale (before range), destroys and recreates
-//!
 //! # Replay
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
@@ -74,10 +66,6 @@ use commonware_codec::CodecFixedShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[commonware_macros::stability(ALPHA)]
-use std::ops::Range;
-#[commonware_macros::stability(ALPHA)]
-use tracing::debug;
 use tracing::warn;
 
 /// Metadata key for storing the pruning boundary.
@@ -452,79 +440,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             pruning_boundary: size, // No data exists yet
             metadata,
         })
-    }
-
-    /// Initialize a journal for synchronization, reusing existing data if possible.
-    ///
-    /// Handles sync scenarios based on existing journal data vs. the given sync range:
-    ///
-    /// 1. **No existing data**: Creates journal at `range.start` (or empty if `range.start == 0`)
-    /// 2. **Data within range**: Prunes toward `range.start` and reuses existing data.
-    ///    Since prune only removes complete sections, some items before `range.start`
-    ///    may be retained (from the section boundary to `range.start - 1`).
-    /// 3. **Data exceeds range**: Returns error
-    /// 4. **Stale data**: Destroys and recreates at `range.start`
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn init_sync(
-        context: E,
-        cfg: Config,
-        range: Range<u64>,
-    ) -> Result<Self, Error> {
-        assert!(!range.is_empty(), "range must not be empty");
-
-        debug!(
-            range.start,
-            range.end,
-            items_per_blob = cfg.items_per_blob.get(),
-            "initializing contiguous fixed journal for sync"
-        );
-
-        let mut journal = Self::init(context.with_label("journal"), cfg.clone()).await?;
-        let size = journal.size();
-
-        // No existing data - initialize at the start of the sync range if needed
-        if size == 0 {
-            if range.start == 0 {
-                debug!("no existing journal data, returning empty journal");
-                return Ok(journal);
-            } else {
-                debug!(
-                    range.start,
-                    "no existing journal data, initializing at sync range start"
-                );
-                journal.destroy().await?;
-                return Self::init_at_size(context, cfg, range.start).await;
-            }
-        }
-
-        // Check if data exceeds the sync range
-        if size > range.end {
-            return Err(Error::ItemOutOfRange(size));
-        }
-
-        // If all existing data is before our sync range, destroy and recreate fresh
-        if size <= range.start {
-            debug!(
-                size,
-                range.start, "existing journal data is stale, re-initializing at start position"
-            );
-            journal.destroy().await?;
-            return Self::init_at_size(context, cfg, range.start).await;
-        }
-
-        // Prune to lower bound if needed
-        let oldest = journal.oldest_retained_pos();
-        if let Some(oldest_pos) = oldest {
-            if oldest_pos < range.start {
-                debug!(
-                    oldest_pos,
-                    range.start, "pruning journal to sync range start"
-                );
-                journal.prune(range.start).await?;
-            }
-        }
-
-        Ok(journal)
     }
 
     /// Convert a global position to (section, position_in_section).

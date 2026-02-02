@@ -255,7 +255,10 @@ commonware_macros::stability_scope!(BETA {
             self.as_present().remove(partition, name)
         }
 
-        fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
+        fn scan(
+            &self,
+            partition: &str,
+        ) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
             self.as_present().scan(partition)
         }
     }

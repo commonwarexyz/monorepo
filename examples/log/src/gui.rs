@@ -4,12 +4,12 @@
 //! implemented to make consensus logging easier to follow.
 
 use commonware_runtime::{Metrics, Spawner};
+use commonware_utils::channel::mpsc;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{channel::mpsc, SinkExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -161,7 +161,7 @@ impl<E: Spawner + Metrics> Gui<E> {
         let mut terminal = Terminal::new(backend).unwrap();
 
         // Listen for input
-        let (mut tx, mut rx) = mpsc::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
         self.context.with_label("keyboard").spawn(|_| async move {
             loop {
                 match event::poll(Duration::from_millis(500)) {
@@ -271,7 +271,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                 .unwrap();
 
             // Handle input
-            let event = rx.next().await;
+            let event = rx.recv().await;
             let event = event.expect("failed to receive event");
             match event {
                 Event::Input(event) => match event.code {

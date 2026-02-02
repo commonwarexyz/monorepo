@@ -283,12 +283,16 @@ impl crate::Runner for Runner {
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
+                let iouring_registry =
+                    runtime_registry.sub_registry_with_prefix("iouring_storage");
                 let storage = MeteredStorage::new(
-                    IoUringStorage::start(IoUringConfig {
-                        storage_directory: self.cfg.storage_directory.clone(),
-                        iouring_config: Default::default(),
-                    }, iouring_registry),
+                    IoUringStorage::start(
+                        IoUringConfig {
+                            storage_directory: self.cfg.storage_directory.clone(),
+                            iouring_config: Default::default(),
+                        },
+                        iouring_registry,
+                    ),
                     runtime_registry,
                 );
             } else {
@@ -315,7 +319,8 @@ impl crate::Runner for Runner {
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
+                let iouring_registry =
+                    runtime_registry.sub_registry_with_prefix("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     iouring_config: iouring::Config {
@@ -341,6 +346,12 @@ impl crate::Runner for Runner {
                     TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,
                 );
+            } else {
+                let config = TokioNetworkConfig::default()
+                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
+                let network = MeteredNetwork::new(TokioNetwork::from(config), runtime_registry);
             }
         }
 
