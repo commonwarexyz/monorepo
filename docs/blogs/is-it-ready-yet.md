@@ -1,14 +1,18 @@
 ---
 title: "Is it ready yet?"
-description: "Large parts of the Commonware Library are now BETA. Stability levels tell you exactly which parts are ready for production and which are still evolving."
-date: "January 30th, 2026"
-published-time: "2026-01-30T00:00:00Z"
-modified-time: "2026-01-30T00:00:00Z"
+description: "TBD"
+date: "February 3rd, 2026"
+published-time: "2026-02-03T00:00:00Z"
+modified-time: "2026-02-03T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
+
+As we've added more and more primitives to the Commonware Library, it's become increasingly difficult to keep track of what is "ready" and what is not (especially when you consider primitive dependencies). While we could try to document each primitive or break things into dozens of crates
+
+TODO: how to anticipate the "why didn't you just break it into more crates" argument?
 
 The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives (and primitive dialects). Some have been battle-tested for over a year. Others landed last week. More will be added next month.
 
