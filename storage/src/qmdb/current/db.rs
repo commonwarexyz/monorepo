@@ -3,7 +3,6 @@
 //! The impl blocks in this file defines shared functionality across all Current QMDB variants.
 
 use crate::{
-    bitmap::partial_chunk_root,
     index::Unordered as UnorderedIndex,
     journal::{
         contiguous::{Contiguous, MutableContiguous},
@@ -36,6 +35,22 @@ use std::sync::Arc;
 /// Get the grafting height for a bitmap with chunk size determined by N.
 pub(super) const fn grafting_height<const N: usize>() -> u32 {
     PrunableBitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
+}
+
+/// Returns a root digest that incorporates bits not yet part of the MMR because they
+/// belong to the last (unfilled) chunk.
+pub(super) fn partial_chunk_root<H: Hasher, const N: usize>(
+    hasher: &mut H,
+    mmr_root: &H::Digest,
+    next_bit: u64,
+    last_chunk_digest: &H::Digest,
+) -> H::Digest {
+    assert!(next_bit > 0);
+    assert!(next_bit < PrunableBitMap::<N>::CHUNK_SIZE_BITS);
+    hasher.update(mmr_root);
+    hasher.update(&next_bit.to_be_bytes());
+    hasher.update(last_chunk_digest);
+    hasher.finalize()
 }
 
 /// Metadata key prefixes for bitmap persistence.
@@ -260,13 +275,18 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Prune the operations log first
-        self.any.prune(prune_loc).await?;
+        // CRASH SAFETY: We must persist bitmap state BEFORE pruning the ops log.
+        // If we crash after ops log prune but before bitmap persist, recovery would
+        // fail because build_grafted_mmr would try to access pruned ops_mmr positions.
+        //
+        // By persisting bitmap state first:
+        // - If crash after bitmap persist but before ops prune: safe, we have more
+        //   data in ops log than needed, recovery works correctly.
+        // - If crash after ops prune: bitmap state is already persisted, recovery
+        //   uses correct pinned nodes.
 
-        // Prune the bitmap to the new location
+        // Prune the bitmap in memory and compute new pinned nodes
         self.status.prune_to_bit(*prune_loc);
-
-        // Compute new pinned nodes for the new pruning boundary
         let grafted_mmr = self
             .grafted_mmr
             .as_ref()
@@ -278,8 +298,11 @@ where
             .into_values()
             .collect();
 
-        // Save updated bitmap state
-        self.save_bitmap_state().await
+        // Persist bitmap state BEFORE pruning ops log
+        self.save_bitmap_state().await?;
+
+        // Now safe to prune the operations log
+        self.any.prune(prune_loc).await
     }
 }
 

@@ -201,7 +201,8 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
         // when computing the hash, because the grafted_mmr was built with peak-tree positions.
         // This ensures verification produces the same digests as the grafted_mmr.
         if node_height > self.height {
-            let peak_pos = source_pos(pos, self.height).expect("node above grafting height should have source_pos");
+            let peak_pos = source_pos(pos, self.height)
+                .expect("node above grafting height should have source_pos");
             return self.hasher.node_digest(peak_pos, left_digest, right_digest);
         }
 
@@ -292,8 +293,12 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("size should be valid leaves");
-        let peak_positions: Vec<_> = PeakIterator::new(size).map(|(peak_pos, _)| peak_pos).collect();
-        let peak_futures = peak_positions.iter().map(|&peak_pos| self.get_node(peak_pos));
+        let peak_positions: Vec<_> = PeakIterator::new(size)
+            .map(|(peak_pos, _)| peak_pos)
+            .collect();
+        let peak_futures = peak_positions
+            .iter()
+            .map(|&peak_pos| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
         let unwrapped_peaks: Vec<_> = peaks
             .iter()

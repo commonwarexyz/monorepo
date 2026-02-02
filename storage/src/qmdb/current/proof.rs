@@ -4,8 +4,8 @@
 //! - [RangeProof]: Proves a range of operations exist in the database.
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
+use super::db::partial_chunk_root;
 use crate::{
-    bitmap::partial_chunk_root,
     journal::contiguous::Contiguous,
     mmr::{
         grafting::{Storage as GraftingStorage, Verifier},
@@ -38,12 +38,7 @@ pub struct RangeProof<D: Digest> {
 
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<
-        H: CHasher<Digest = D>,
-        S1: Storage<D>,
-        S2: Storage<D>,
-        const N: usize,
-    >(
+    pub async fn new<H: CHasher<Digest = D>, S1: Storage<D>, S2: Storage<D>, const N: usize>(
         hasher: &mut H,
         bitmap: &PrunableBitMap<N>,
         grafting_height: u32,
@@ -104,8 +99,15 @@ impl<D: Digest> RangeProof<D> {
         let end_loc = core::cmp::min(max_loc, leaves);
 
         // Generate the proof from the grafted MMR.
-        let proof =
-            Self::new(hasher, bitmap, height, grafted_mmr, ops_mmr, start_loc..end_loc).await?;
+        let proof = Self::new(
+            hasher,
+            bitmap,
+            height,
+            grafted_mmr,
+            ops_mmr,
+            start_loc..end_loc,
+        )
+        .await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);

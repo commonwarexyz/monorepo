@@ -167,13 +167,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "mmr_bitmap"
-path = "fuzz_targets/mmr_bitmap.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "qmdb_immutable"
 path = "fuzz_targets/qmdb_immutable.rs"
 test = false
