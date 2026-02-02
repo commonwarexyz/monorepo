@@ -486,15 +486,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             .sum()
     }
 
-    /// Returns the number of items currently retained in storage.
-    ///
-    /// This includes both acknowledged (awaiting prune) and unacknowledged items.
-    pub fn retained(&self) -> u64 {
-        self.journal
-            .size()
-            .saturating_sub(self.journal.pruning_boundary())
-    }
-
     /// Returns whether all enqueued items have been acknowledged.
     pub const fn is_empty(&self) -> bool {
         // If acked_above is non-empty, there's a gap at ack_floor (otherwise floor
