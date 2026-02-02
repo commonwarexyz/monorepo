@@ -100,9 +100,20 @@ where
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
+        let grafted_mmr = self
+            .grafted_mmr
+            .as_ref()
+            .expect("grafted_mmr must be set in Merkleized state");
 
-        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
+        OperationProof::<H::Digest, N>::new(
+            hasher,
+            &self.status,
+            height,
+            grafted_mmr.as_ref(),
+            &self.any.log.mmr,
+            loc,
+        )
+        .await
     }
 }
 

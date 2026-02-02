@@ -7,7 +7,7 @@ use crate::{
     index::ordered::Index,
     journal::contiguous::{Contiguous, MutableContiguous},
     kv::{self, Batchable},
-    mmr::{grafting::Storage as GraftingStorage, Location},
+    mmr::Location,
     qmdb::{
         any::{
             ordered::{Operation, Update},
@@ -169,9 +169,19 @@ where
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
-        let proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await?;
+        let grafted_mmr = self
+            .grafted_mmr
+            .as_ref()
+            .expect("grafted_mmr must be set in Merkleized state");
+        let proof = OperationProof::<H::Digest, N>::new(
+            hasher,
+            &self.status,
+            height,
+            grafted_mmr.as_ref(),
+            &self.any.log.mmr,
+            loc,
+        )
+        .await?;
 
         Ok(KeyValueProof {
             proof,
@@ -190,8 +200,10 @@ where
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
         let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
+        let grafted_mmr = self
+            .grafted_mmr
+            .as_ref()
+            .expect("grafted_mmr must be set in Merkleized state");
 
         let span = self.any.get_span(key).await?;
         let loc = match &span {
@@ -208,9 +220,15 @@ where
                 .expect("db shouldn't be empty"),
         };
 
-        let op_proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, &grafted_mmr, loc)
-                .await?;
+        let op_proof = OperationProof::<H::Digest, N>::new(
+            hasher,
+            &self.status,
+            height,
+            grafted_mmr.as_ref(),
+            &self.any.log.mmr,
+            loc,
+        )
+        .await?;
 
         Ok(match span {
             Some((_, key_data)) => super::ExclusionProof::KeyValue(op_proof, key_data),

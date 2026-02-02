@@ -3,18 +3,16 @@
 //! The impl blocks in this file defines shared functionality across all Current QMDB variants.
 
 use crate::{
-    bitmap::{CleanBitMap, DirtyBitMap},
+    bitmap::partial_chunk_root,
     index::Unordered as UnorderedIndex,
     journal::{
         contiguous::{Contiguous, MutableContiguous},
         Error as JournalError,
     },
+    metadata::Metadata,
     mmr::{
-        grafting::{Hasher as GraftingHasher, Storage as GraftingStorage},
-        hasher::Hasher as MmrHasher,
-        journaled::Mmr,
-        mem::Clean,
-        Location, Proof, StandardHasher,
+        grafting::destination_pos, hasher::Hasher as MmrHasher, mem::CleanMmr, Location, Position,
+        Proof, StandardHasher,
     },
     qmdb::{
         any::{
@@ -26,18 +24,23 @@ use crate::{
         store::{self, LogStore, MerkleizedStore, PrunableStore},
         DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
-    AuthenticatedBitMap as BitMap, Persistable,
+    Persistable,
 };
-use commonware_codec::{Codec, CodecShared};
+use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
+use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64, Array};
 use core::{num::NonZeroU64, ops::Range};
+use std::sync::Arc;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
-const fn grafting_height<const N: usize>() -> u32 {
+pub(super) const fn grafting_height<const N: usize>() -> u32 {
     PrunableBitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
+
+/// Metadata key prefixes for bitmap persistence.
+const BITMAP_PRUNED_CHUNKS_KEY: u8 = 0;
+const BITMAP_PINNED_NODE_PREFIX: u8 = 1;
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
@@ -54,12 +57,22 @@ pub struct Db<
     /// specific value.
     pub(super) any: any::db::Db<E, C, I, H, U, M, D>,
 
-    /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
-    /// order to further prove whether a key _currently_ has a specific value.
-    pub(super) status: BitMap<E, H::Digest, N, M>,
+    /// The bitmap over the activity status of each operation. Uses PrunableBitMap directly
+    /// without an internal MMR - the grafted MMR is built on demand during merkleization.
+    pub(super) status: PrunableBitMap<N>,
 
-    /// Cached root digest. Invariant: valid when in Clean state.
+    /// Pinned nodes from the grafted MMR at the pruning boundary.
+    /// These are grafted digests: H(chunk || ops_digest).
+    pub(super) grafted_pinned_nodes: Vec<H::Digest>,
+
+    /// Metadata storage for bitmap persistence (pruned_chunks and pinned_nodes).
+    pub(super) bitmap_metadata: Metadata<E, U64, Vec<u8>>,
+
+    /// Cached root digest. Valid when in Merkleized state.
     pub(super) cached_root: Option<H::Digest>,
+
+    /// Cached grafted MMR for proof generation. Only set in Merkleized state.
+    pub(super) grafted_mmr: Option<Arc<CleanMmr<H::Digest>>>,
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
@@ -134,6 +147,59 @@ where
 
         proof.verify(hasher, height, start_loc, ops, chunks, root)
     }
+
+    /// Load bitmap pruning state from metadata.
+    /// Returns (pruned_chunks, pinned_nodes).
+    pub(super) async fn load_bitmap_state(
+        metadata: &Metadata<E, U64, Vec<u8>>,
+    ) -> Result<(usize, Vec<H::Digest>), Error> {
+        // Load pruned_chunks
+        let pruned_chunks = match metadata.get(&U64::new(BITMAP_PRUNED_CHUNKS_KEY, 0)) {
+            Some(bytes) => {
+                let arr: [u8; 8] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::DataCorrupted("invalid pruned_chunks"))?;
+                u64::from_be_bytes(arr) as usize
+            }
+            None => 0,
+        };
+
+        // Load pinned nodes
+        let mut pinned_nodes = Vec::new();
+        for i in 0u64.. {
+            match metadata.get(&U64::new(BITMAP_PINNED_NODE_PREFIX, i)) {
+                Some(bytes) => {
+                    let digest = H::Digest::decode(bytes.as_ref())
+                        .map_err(|_| Error::DataCorrupted("invalid pinned node"))?;
+                    pinned_nodes.push(digest);
+                }
+                None => break,
+            }
+        }
+
+        Ok((pruned_chunks, pinned_nodes))
+    }
+
+    /// Save bitmap pruning state to metadata.
+    pub(super) async fn save_bitmap_state(&mut self) -> Result<(), Error> {
+        self.bitmap_metadata.clear();
+
+        // Save pruned_chunks
+        let pruned_chunks = self.status.pruned_chunks() as u64;
+        self.bitmap_metadata.put(
+            U64::new(BITMAP_PRUNED_CHUNKS_KEY, 0),
+            pruned_chunks.to_be_bytes().to_vec(),
+        );
+
+        // Save pinned nodes
+        for (i, node) in self.grafted_pinned_nodes.iter().enumerate() {
+            self.bitmap_metadata
+                .put(U64::new(BITMAP_PINNED_NODE_PREFIX, i as u64), node.to_vec());
+        }
+
+        self.bitmap_metadata.sync().await.map_err(Into::into)
+    }
 }
 
 // Functionality shared across Merkleized states, such as the ability to prune the log and retrieve
@@ -169,10 +235,15 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
+        let grafted_mmr = self
+            .grafted_mmr
+            .as_ref()
+            .expect("grafted_mmr must be set in Merkleized state");
         RangeProof::<H::Digest>::new_with_ops(
             hasher,
             &self.status,
             Self::grafting_height(),
+            grafted_mmr.as_ref(),
             &self.any.log.mmr,
             &self.any.log,
             start_loc,
@@ -189,12 +260,26 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
-        // failure during pruning. If we don't do this, we may not be able to recover the bitmap
-        // because it may require replaying of pruned operations.
-        self.status.write_pruned().await?;
+        // Prune the operations log first
+        self.any.prune(prune_loc).await?;
 
-        self.any.prune(prune_loc).await
+        // Prune the bitmap to the new location
+        self.status.prune_to_bit(*prune_loc);
+
+        // Compute new pinned nodes for the new pruning boundary
+        let grafted_mmr = self
+            .grafted_mmr
+            .as_ref()
+            .expect("grafted_mmr must be set in Merkleized state");
+        let new_prune_pos =
+            Position::try_from(Location::new_unchecked(self.status.pruned_chunks() as u64))?;
+        self.grafted_pinned_nodes = grafted_mmr
+            .nodes_to_pin(new_prune_pos)
+            .into_values()
+            .collect();
+
+        // Save updated bitmap state
+        self.save_bitmap_state().await
     }
 }
 
@@ -213,16 +298,13 @@ where
     /// Sync all database state to disk.
     pub async fn sync(&mut self) -> Result<(), Error> {
         self.any.sync().await?;
-
-        // Write the bitmap pruning boundary to disk so that next startup doesn't have to
-        // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status.write_pruned().await.map_err(Into::into)
+        self.save_bitmap_state().await
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        self.status.destroy().await?;
+        self.bitmap_metadata.destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -232,8 +314,11 @@ where
     pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
-            status: self.status.into_dirty(),
+            status: self.status,
+            grafted_pinned_nodes: self.grafted_pinned_nodes,
+            bitmap_metadata: self.bitmap_metadata,
             cached_root: None,
+            grafted_mmr: None,
         }
     }
 }
@@ -255,21 +340,51 @@ where
     pub async fn into_merkleized(self) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, D>, Error> {
         // Merkleize the any db
         let mut any = self.any.into_merkleized();
-
-        // Merkleize the bitmap using the clean MMR
         let hasher = &mut any.log.hasher;
-        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
 
-        // Prune the bitmap of no-longer-necessary bits.
-        status.prune_to_bit(*any.inactivity_floor_loc)?;
+        let mut status = self.status;
+
+        // Build the grafted MMR from current pinned nodes + fresh computation
+        // We must build this BEFORE pruning so the pinned nodes match.
+        let grafted_mmr = build_grafted_mmr::<H, N>(
+            hasher,
+            &status,
+            &self.grafted_pinned_nodes,
+            &any.log.mmr,
+            grafting_height::<N>(),
+        )
+        .await?;
 
         // Compute and cache the root
-        let cached_root = Some(root(hasher, &status, &any.log.mmr).await?);
+        let cached_root = Some(
+            compute_root::<H, N>(
+                hasher,
+                &status,
+                &grafted_mmr,
+                &any.log.mmr,
+                grafting_height::<N>(),
+            )
+            .await?,
+        );
+
+        // Now prune the bitmap to the inactivity floor
+        status.prune_to_bit(*any.inactivity_floor_loc);
+
+        // Compute pinned nodes for the new pruning boundary from the already-built grafted MMR
+        let new_prune_pos =
+            Position::try_from(Location::new_unchecked(status.pruned_chunks() as u64))?;
+        let new_pinned_nodes: Vec<_> = grafted_mmr
+            .nodes_to_pin(new_prune_pos)
+            .into_values()
+            .collect();
 
         Ok(Db {
             any,
             status,
+            grafted_pinned_nodes: new_pinned_nodes,
+            bitmap_metadata: self.bitmap_metadata,
             cached_root,
+            grafted_mmr: Some(Arc::new(grafted_mmr)),
         })
     }
 }
@@ -291,7 +406,10 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status,
+            grafted_pinned_nodes: self.grafted_pinned_nodes,
+            bitmap_metadata: self.bitmap_metadata,
             cached_root: None,
+            grafted_mmr: None,
         }
     }
 }
@@ -357,7 +475,10 @@ where
             Db {
                 any,
                 status: self.status,
+                grafted_pinned_nodes: self.grafted_pinned_nodes,
+                bitmap_metadata: self.bitmap_metadata,
                 cached_root: None, // Not merkleized yet
+                grafted_mmr: None,
             },
             range,
         ))
@@ -380,8 +501,11 @@ where
     pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
-            status: self.status.into_dirty(),
+            status: self.status,
+            grafted_pinned_nodes: self.grafted_pinned_nodes,
+            bitmap_metadata: self.bitmap_metadata,
             cached_root: None,
+            grafted_mmr: None,
         }
     }
 }
@@ -500,55 +624,104 @@ where
     }
 }
 
-/// Return the root of the current QMDB represented by the provided mmr and bitmap.
-pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize>(
+/// Build the grafted MMR from pinned nodes + fresh computation for unpruned chunks.
+pub(super) async fn build_grafted_mmr<H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &CleanBitMap<E, H::Digest, N>,
-    mmr: &Mmr<E, H::Digest, Clean<DigestOf<H>>>,
-) -> Result<H::Digest, Error> {
-    let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
-    let mmr_root = grafted_mmr.root(hasher).await?;
+    bitmap: &PrunableBitMap<N>,
+    pinned_nodes: &[H::Digest],
+    ops_mmr: &impl crate::mmr::storage::Storage<H::Digest>,
+    graft_height: u32,
+) -> Result<CleanMmr<H::Digest>, Error>
+where
+    H: Hasher,
+{
+    let pruned_chunks = bitmap.pruned_chunks();
 
-    // If we are on a chunk boundary, then the mmr_root fully captures the state of the DB.
-    let (last_chunk, next_bit) = status.last_chunk();
+    // Initialize MMR with pinned nodes if pruned
+    let mut mmr = if pruned_chunks > 0 {
+        let pruned_pos = Position::try_from(Location::new_unchecked(pruned_chunks as u64))?;
+        CleanMmr::init(
+            crate::mmr::mem::Config {
+                nodes: Vec::new(),
+                pruned_to_pos: pruned_pos,
+                pinned_nodes: pinned_nodes.to_vec(),
+            },
+            hasher,
+        )?
+    } else {
+        CleanMmr::new(hasher)
+    };
+
+    // Calculate complete chunks (exclude partial last chunk)
+    let total_chunks = bitmap.chunks_len() + pruned_chunks;
+    let complete_chunks = if bitmap.is_chunk_aligned() {
+        total_chunks
+    } else {
+        total_chunks.saturating_sub(1)
+    };
+
+    // Add fresh grafted leaves for unpruned complete chunks
+    for abs_chunk_idx in pruned_chunks..complete_chunks {
+        // Get chunk data (adjusted for pruning)
+        let rel_chunk_idx = abs_chunk_idx - pruned_chunks;
+        let chunk = bitmap.get_chunk(rel_chunk_idx);
+
+        // Get ops MMR node at grafting position
+        // The chunk index is used as a leaf location in the peak tree.
+        // We need to find the corresponding base tree position (at grafting height)
+        // to get the ops_digest.
+        let chunk_loc = Location::new_unchecked(abs_chunk_idx as u64);
+        // Convert leaf location to leaf POSITION in the peak tree
+        let peak_leaf_pos = Position::try_from(chunk_loc)?;
+        // destination_pos converts peak tree position to base tree position
+        let ops_pos = destination_pos(peak_leaf_pos, graft_height);
+        let ops_digest = ops_mmr
+            .get_node(ops_pos)
+            .await?
+            .ok_or(crate::mmr::Error::MissingNode(ops_pos))?;
+
+        // Compute grafted leaf: H(chunk || ops_digest)
+        // Use inner() to get a fresh hasher state for computing the grafted digest
+        hasher.inner().update(chunk);
+        hasher.inner().update(&ops_digest);
+        let leaf_digest = hasher.inner().finalize();
+
+        // Use add_leaf_digest to store the pre-computed grafted digest directly,
+        // without re-hashing it (which add() would do).
+        mmr.add_leaf_digest(hasher, leaf_digest);
+    }
+
+    Ok(mmr)
+}
+
+/// Compute the root of the current QMDB from the grafted MMR, ops MMR, and bitmap.
+pub(super) async fn compute_root<H: Hasher, const N: usize>(
+    hasher: &mut StandardHasher<H>,
+    bitmap: &PrunableBitMap<N>,
+    grafted_mmr: &CleanMmr<H::Digest>,
+    ops_mmr: &impl crate::mmr::storage::Storage<H::Digest>,
+    graft_height: u32,
+) -> Result<H::Digest, Error> {
+    use crate::mmr::grafting::Storage as GraftingStorage;
+
+    // Create grafted storage to compute the combined root
+    let grafted_storage = GraftingStorage::<'_, H, _, _>::new(grafted_mmr, ops_mmr, graft_height);
+    let mmr_root = grafted_storage.root(hasher).await?;
+
+    // If on a chunk boundary, mmr_root fully captures the state
+    let (last_chunk, next_bit) = bitmap.last_chunk();
     if next_bit == PrunableBitMap::<N>::CHUNK_SIZE_BITS {
-        // Last chunk is complete, no partial chunk to add
         return Ok(mmr_root);
     }
 
-    // There are bits in an uncommitted (partial) chunk, so we need to incorporate that information
-    // into the root digest to fully capture the database state. We do so by hashing the mmr root
-    // along with the number of bits within the last chunk and the digest of the last chunk.
+    // Include partial chunk in root
     hasher.inner().update(last_chunk);
     let last_chunk_digest = hasher.inner().finalize();
 
-    Ok(crate::bitmap::partial_chunk_root::<H, N>(
+    Ok(partial_chunk_root::<H, N>(
         hasher.inner(),
         &mmr_root,
         next_bit,
         &last_chunk_digest,
     ))
-}
-
-/// Consumes a `DirtyBitMap`, performs merkleization using the provided hasher and MMR storage,
-/// and returns a `CleanBitMap` containing the merkleized result.
-///
-/// # Arguments
-/// * `hasher` - The hasher used for merkleization.
-/// * `status` - The `DirtyBitMap` to be merkleized. Ownership is taken.
-/// * `mmr` - The MMR storage used for grafting.
-pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
-    hasher: &mut StandardHasher<H>,
-    status: DirtyBitMap<E, H::Digest, N>,
-    mmr: &impl crate::mmr::storage::Storage<H::Digest>,
-) -> Result<CleanBitMap<E, H::Digest, N>, Error>
-where
-    E: Storage + Clock + Metrics,
-    H: Hasher,
-{
-    let mut grafter = GraftingHasher::new(hasher, grafting_height::<N>());
-    grafter
-        .load_grafted_digests(&status.dirty_chunks(), mmr)
-        .await?;
-    status.merkleize(&mut grafter).await.map_err(Into::into)
 }

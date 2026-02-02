@@ -8,8 +8,8 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
-    bitmap::CleanBitMap,
     journal::contiguous::variable::Journal,
+    metadata::{Config as MetadataConfig, Metadata},
     mmr::{Location, StandardHasher},
     qmdb::{
         any::{
@@ -18,7 +18,7 @@ use crate::{
             VariableValue,
         },
         current::{
-            db::{merkleize_grafted_bitmap, root},
+            db::{build_grafted_mmr, compute_root, grafting_height},
             VariableConfig as Config,
         },
         Durable, Error, Merkleized,
@@ -28,7 +28,8 @@ use crate::{
 use commonware_codec::{FixedSize, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
+use std::sync::Arc;
 
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
@@ -45,8 +46,7 @@ impl<
 where
     Operation<K, V>: Read,
 {
-    /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
-    /// the bitmap MMR if a thread pool is provided.
+    /// Initializes a [Db] from the given `config`.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<K, V> as Read>::Cfg>,
@@ -65,20 +65,31 @@ where
             assert!(N.is_power_of_two(), "chunk size must be a power of 2");
         }
 
-        let thread_pool = config.thread_pool.clone();
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
-        let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::init(
-            context.with_label("bitmap"),
-            &bitmap_metadata_partition,
-            thread_pool,
-            &mut hasher,
+        // Initialize bitmap metadata
+        let bitmap_metadata = Metadata::init(
+            context.with_label("bitmap_meta"),
+            MetadataConfig {
+                partition: bitmap_metadata_partition,
+                codec_config: ((0..).into(), ()),
+            },
         )
-        .await?
-        .into_dirty();
+        .await?;
 
-        // Initialize the anydb with a callback that initializes the status bitmap.
+        // Load bitmap state (pruned_chunks and pinned_nodes)
+        let (pruned_chunks, grafted_pinned_nodes) =
+            Self::load_bitmap_state(&bitmap_metadata).await?;
+
+        // Initialize PrunableBitMap
+        let mut status = if pruned_chunks == 0 {
+            PrunableBitMap::new()
+        } else {
+            PrunableBitMap::new_with_pruned_chunks(pruned_chunks)
+                .expect("pruned_chunks should be valid")
+        };
+
+        // Initialize the anydb with a callback that builds the bitmap
         let last_known_inactivity_floor = Location::new_unchecked(status.len());
         let any = AnyDb::init_with_callback(
             context.with_label("any"),
@@ -93,15 +104,35 @@ where
         )
         .await?;
 
-        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+        // Build grafted MMR and compute root
+        let mut hasher = StandardHasher::<H>::new();
+        let grafted_mmr = build_grafted_mmr::<H, N>(
+            &mut hasher,
+            &status,
+            &grafted_pinned_nodes,
+            &any.log.mmr,
+            grafting_height::<N>(),
+        )
+        .await?;
 
-        // Compute and cache the root
-        let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
+        let cached_root = Some(
+            compute_root(
+                &mut hasher,
+                &status,
+                &grafted_mmr,
+                &any.log.mmr,
+                grafting_height::<N>(),
+            )
+            .await?,
+        );
 
         Ok(Self {
             any,
             status,
+            grafted_pinned_nodes,
+            bitmap_metadata,
             cached_root,
+            grafted_mmr: Some(Arc::new(grafted_mmr)),
         })
     }
 }
@@ -109,10 +140,9 @@ where
 #[cfg(test)]
 mod test {
     use crate::{
-        bitmap::CleanBitMap,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, StandardHasher},
-        qmdb::{
+        qmdb::{PrunableBitMap,
             any::ordered::variable::Operation,
             current::{
                 ordered::{db::KeyValueProof, variable::Db},
@@ -326,10 +356,8 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
-                    *proof_inactive.proof.loc
-                )
+                PrunableBitMap::<32>::unpruned_chunk(*active_loc),
+                PrunableBitMap::<32>::unpruned_chunk(*proof_inactive.proof.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;

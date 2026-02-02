@@ -55,11 +55,9 @@ use crate::{
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
-    DirtyAuthenticatedBitMap,
 };
-use commonware_cryptography::{Digest, DigestOf};
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::NZUsize;
+use commonware_cryptography::DigestOf;
+use commonware_utils::{bitmap::Prunable as PrunableBitMap, NZUsize};
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
@@ -111,6 +109,9 @@ pub enum Error {
 
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
+
+    #[error("data corrupted: {0}")]
+    DataCorrupted(&'static str),
 }
 
 impl From<crate::journal::authenticated::Error> for Error {
@@ -402,13 +403,9 @@ where
     /// # Panics
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<
-        E: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
+    pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
         &mut self,
-        status: &mut DirtyAuthenticatedBitMap<E, D, N>,
+        status: &mut PrunableBitMap<N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

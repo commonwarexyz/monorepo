@@ -331,7 +331,10 @@ impl<D: Digest> CleanMmr<D> {
 
     /// Add a leaf's `digest` to the MMR, generating the necessary parent nodes to maintain the
     /// MMR's structure.
-    pub(super) fn add_leaf_digest(
+    ///
+    /// This stores the digest directly without re-hashing, unlike `add()` which computes
+    /// `H(pos || element)` for the leaf digest.
+    pub(crate) fn add_leaf_digest(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
         digest: D,
