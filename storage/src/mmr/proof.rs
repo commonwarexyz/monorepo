@@ -60,8 +60,7 @@ pub enum ReconstructionError {
 #[derive(Clone, Debug, Eq)]
 pub struct Proof<D: Digest> {
     /// The total number of leaves in the MMR for MMR proofs, though other authenticated data
-    /// structures may override the meaning of this field. For example, a grafted bitmap structure
-    /// stores the number of bits in the bitmap within this field.
+    /// structures may override the meaning of this field.
     pub leaves: Location,
     /// The digests necessary for proving the inclusion of an element, or range of elements, in the
     /// MMR.
