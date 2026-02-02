@@ -10,7 +10,8 @@ mod pool;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
-pub use pool::{BufferPool, BufferPoolConfig, PoolError, PooledBufMut};
+use pool::PooledBufMut;
+pub use pool::{BufferPool, BufferPoolConfig, PoolError};
 use std::{collections::VecDeque, ops::RangeBounds};
 
 /// Immutable byte buffer.
@@ -288,7 +289,10 @@ impl IoBufMut {
     /// Whether the buffer is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.remaining() == 0
+        match &self.inner {
+            IoBufMutInner::Owned(b) => b.is_empty(),
+            IoBufMutInner::Pooled(b) => b.is_empty(),
+        }
     }
 
     /// Freeze into immutable `IoBuf`.

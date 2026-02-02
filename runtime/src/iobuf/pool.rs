@@ -530,7 +530,8 @@ impl BufferPool {
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Otherwise, falls back to an untracked heap allocation.
+    /// when dropped. Otherwise, falls back to an untracked aligned heap
+    /// allocation that is deallocated when dropped.
     ///
     /// Use [`Self::try_alloc`] if you need to distinguish between pooled and
     /// untracked allocations.
@@ -540,8 +541,15 @@ impl BufferPool {
     /// The returned buffer contains **uninitialized memory**. Do not read from
     /// it until data has been written.
     pub fn alloc(&self, capacity: usize) -> IoBufMut {
-        self.try_alloc(capacity)
-            .unwrap_or_else(|_| IoBufMut::with_capacity(capacity))
+        self.try_alloc(capacity).unwrap_or_else(|_| {
+            // Fall back to an untracked aligned allocation.
+            // Using Weak::new() means the buffer won't be returned to the pool on drop.
+            let size = capacity
+                .next_power_of_two()
+                .max(self.inner.config.min_size.get());
+            let buffer = AlignedBuffer::new(size, self.inner.config.alignment.get());
+            IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()))
+        })
     }
 
     /// Attempts to allocate a pooled buffer, returning an error on failure.
