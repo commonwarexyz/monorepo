@@ -720,10 +720,10 @@ stability_scope!(BETA {
     /// Interface that any runtime must implement to provide buffer pools.
     pub trait BufferPooler: Clone + Send + Sync + 'static {
         /// Returns the network [BufferPool].
-        fn get_network_pool(&self) -> &BufferPool;
+        fn network_buffer_pool(&self) -> &BufferPool;
 
         /// Returns the storage [BufferPool].
-        fn get_storage_pool(&self) -> &BufferPool;
+        fn storage_buffer_pool(&self) -> &BufferPool;
     }
 });
 stability_scope!(ALPHA, cfg(feature = "external") {
@@ -3476,5 +3476,42 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
+    }
+
+    fn test_buffer_pooler<R: Runner>(runner: R)
+    where
+        R::Context: BufferPooler,
+    {
+        runner.start(|context| async move {
+            // Verify network pool is accessible and works (cache-line aligned)
+            let net_buf = context
+                .network_buffer_pool()
+                .alloc(1024)
+                .expect("network alloc failed");
+            assert!(net_buf.capacity() >= 1024);
+
+            // Verify storage pool is accessible and works (page-aligned)
+            let storage_buf = context
+                .storage_buffer_pool()
+                .alloc(1024)
+                .expect("storage alloc failed");
+            assert!(storage_buf.capacity() >= 4096);
+
+            // Verify pools have expected configurations
+            assert_eq!(context.network_buffer_pool().config().max_per_class, 4096);
+            assert_eq!(context.storage_buffer_pool().config().max_per_class, 32);
+        });
+    }
+
+    #[test]
+    fn test_deterministic_buffer_pooler() {
+        let runner = deterministic::Runner::default();
+        test_buffer_pooler(runner);
+    }
+
+    #[test]
+    fn test_tokio_buffer_pooler() {
+        let runner = tokio::Runner::default();
+        test_buffer_pooler(runner);
     }
 }

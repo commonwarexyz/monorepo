@@ -1526,11 +1526,11 @@ impl crate::Storage for Context {
 }
 
 impl crate::BufferPooler for Context {
-    fn get_network_pool(&self) -> &crate::BufferPool {
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
         &self.network_pool
     }
 
-    fn get_storage_pool(&self) -> &crate::BufferPool {
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
         &self.storage_pool
     }
 }
@@ -1538,7 +1538,6 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BufferPooler;
     #[cfg(feature = "external")]
     use crate::FutureExt;
     #[cfg(feature = "external")]
@@ -2024,27 +2023,4 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_buffer_pooler() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = context
-                .get_network_pool()
-                .alloc(1024)
-                .expect("network alloc failed");
-            assert!(net_buf.capacity() >= 1024); // At least requested size
-
-            // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = context
-                .get_storage_pool()
-                .alloc(1024)
-                .expect("storage alloc failed");
-            assert!(storage_buf.capacity() >= 4096); // Page-aligned min size
-
-            // Verify pools have expected configurations
-            assert_eq!(context.get_network_pool().config().max_per_class, 4096);
-            assert_eq!(context.get_storage_pool().config().max_per_class, 32);
-        });
-    }
 }

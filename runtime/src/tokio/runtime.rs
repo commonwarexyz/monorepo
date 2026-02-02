@@ -735,11 +735,11 @@ impl crate::Storage for Context {
 }
 
 impl crate::BufferPooler for Context {
-    fn get_network_pool(&self) -> &BufferPool {
+    fn network_buffer_pool(&self) -> &BufferPool {
         &self.network_pool
     }
 
-    fn get_storage_pool(&self) -> &BufferPool {
+    fn storage_buffer_pool(&self) -> &BufferPool {
         &self.storage_pool
     }
 }

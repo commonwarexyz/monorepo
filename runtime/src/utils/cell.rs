@@ -313,11 +313,11 @@ impl<C> crate::BufferPooler for Cell<C>
 where
     C: crate::BufferPooler,
 {
-    fn get_network_pool(&self) -> &crate::BufferPool {
-        self.as_present().get_network_pool()
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
+        self.as_present().network_buffer_pool()
     }
 
-    fn get_storage_pool(&self) -> &crate::BufferPool {
-        self.as_present().get_storage_pool()
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
+        self.as_present().storage_buffer_pool()
     }
 }
