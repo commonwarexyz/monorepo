@@ -2025,7 +2025,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pooling_trait() {
+    fn test_buffer_pooler() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Verify network pool is accessible and works (cache-line aligned)

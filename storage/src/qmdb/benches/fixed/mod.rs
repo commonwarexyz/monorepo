@@ -6,7 +6,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, RayonPoolSpawner};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, ThreadPooler};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -177,35 +177,35 @@ fn variable_current_cfg(pool: ThreadPool) -> VariableCurrentConfig<EightCap, ()>
 
 /// Get an unordered fixed Any QMDB instance in clean state.
 async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an ordered fixed Any QMDB instance in clean state.
 async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an unordered variable Any QMDB instance in clean state.
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
     UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an ordered variable Any QMDB instance in clean state.
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let variable_any_cfg = variable_any_cfg(pool);
     OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an unordered current QMDB instance.
 async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
@@ -214,7 +214,7 @@ async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
 
 /// Get an ordered current QMDB instance.
 async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
@@ -223,7 +223,7 @@ async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
 
 /// Get an unordered variable current QMDB instance.
 async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let variable_current_cfg = variable_current_cfg(pool);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, variable_current_cfg)
         .await
@@ -232,7 +232,7 @@ async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
 
 /// Get an ordered variable current QMDB instance.
 async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let variable_current_cfg = variable_current_cfg(pool);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, variable_current_cfg)
         .await
