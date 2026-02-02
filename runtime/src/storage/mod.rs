@@ -72,76 +72,79 @@ stability_scope!(BETA {
     }
 
     impl Header {
-    /// Size of the header in bytes.
-    pub(crate) const SIZE: usize = 8;
+        /// Size of the header in bytes.
+        pub(crate) const SIZE: usize = 8;
 
-    /// Size of the header as u64 for offset calculations.
-    pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
+        /// Size of the header as u64 for offset calculations.
+        pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
 
-    /// Length of magic bytes.
-    pub(crate) const MAGIC_LENGTH: usize = 4;
+        /// Length of magic bytes.
+        pub(crate) const MAGIC_LENGTH: usize = 4;
 
-    /// Length of version fields.
-    #[cfg(test)]
-    pub(crate) const VERSION_LENGTH: usize = 2;
+        /// Length of version fields.
+        #[cfg(test)]
+        pub(crate) const VERSION_LENGTH: usize = 2;
 
-    /// Magic bytes identifying a valid commonware blob.
-    pub(crate) const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
+        /// Magic bytes identifying a valid commonware blob.
+        pub(crate) const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
 
-    /// The current version of the header format.
-    pub(crate) const RUNTIME_VERSION: u16 = 0;
+        /// The current version of the header format.
+        pub(crate) const RUNTIME_VERSION: u16 = 0;
 
-    /// Returns true if a blob is missing a valid header (new or corrupted).
-    pub(crate) const fn missing(raw_len: u64) -> bool {
-        raw_len < Self::SIZE_U64
-    }
-
-    /// Creates a header for a new blob using the latest version from the range.
-    /// Returns (header, blob_version).
-    pub(crate) const fn new(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
-        let blob_version = *versions.end();
-        let header = Self {
-            magic: Self::MAGIC,
-            runtime_version: Self::RUNTIME_VERSION,
-            blob_version,
-        };
-        (header, blob_version)
-    }
-
-    /// Parses and validates an existing header, returning the blob version and logical size.
-    pub(crate) fn from(
-        raw_bytes: [u8; Self::SIZE],
-        raw_len: u64,
-        versions: &RangeInclusive<u16>,
-    ) -> Result<(u16, u64), HeaderError> {
-        let header: Self = Self::decode(raw_bytes.as_slice())
-            .expect("header decode should never fail for correct size input");
-        header.validate(versions)?;
-        Ok((header.blob_version, raw_len - Self::SIZE_U64))
-    }
-
-    /// Validates the magic bytes, runtime version, and blob version.
-    pub(crate) fn validate(&self, blob_versions: &RangeInclusive<u16>) -> Result<(), HeaderError> {
-        if self.magic != Self::MAGIC {
-            return Err(HeaderError::InvalidMagic {
-                expected: Self::MAGIC,
-                found: self.magic,
-            });
+        /// Returns true if a blob is missing a valid header (new or corrupted).
+        pub(crate) const fn missing(raw_len: u64) -> bool {
+            raw_len < Self::SIZE_U64
         }
-        if self.runtime_version != Self::RUNTIME_VERSION {
-            return Err(HeaderError::UnsupportedRuntimeVersion {
-                expected: Self::RUNTIME_VERSION,
-                found: self.runtime_version,
-            });
+
+        /// Creates a header for a new blob using the latest version from the range.
+        /// Returns (header, blob_version).
+        pub(crate) const fn new(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
+            let blob_version = *versions.end();
+            let header = Self {
+                magic: Self::MAGIC,
+                runtime_version: Self::RUNTIME_VERSION,
+                blob_version,
+            };
+            (header, blob_version)
         }
-        if !blob_versions.contains(&self.blob_version) {
-            return Err(HeaderError::VersionMismatch {
-                expected: blob_versions.clone(),
-                found: self.blob_version,
-            });
+
+        /// Parses and validates an existing header, returning the blob version and logical size.
+        pub(crate) fn from(
+            raw_bytes: [u8; Self::SIZE],
+            raw_len: u64,
+            versions: &RangeInclusive<u16>,
+        ) -> Result<(u16, u64), HeaderError> {
+            let header: Self = Self::decode(raw_bytes.as_slice())
+                .expect("header decode should never fail for correct size input");
+            header.validate(versions)?;
+            Ok((header.blob_version, raw_len - Self::SIZE_U64))
         }
-        Ok(())
-    }
+
+        /// Validates the magic bytes, runtime version, and blob version.
+        pub(crate) fn validate(
+            &self,
+            blob_versions: &RangeInclusive<u16>,
+        ) -> Result<(), HeaderError> {
+            if self.magic != Self::MAGIC {
+                return Err(HeaderError::InvalidMagic {
+                    expected: Self::MAGIC,
+                    found: self.magic,
+                });
+            }
+            if self.runtime_version != Self::RUNTIME_VERSION {
+                return Err(HeaderError::UnsupportedRuntimeVersion {
+                    expected: Self::RUNTIME_VERSION,
+                    found: self.runtime_version,
+                });
+            }
+            if !blob_versions.contains(&self.blob_version) {
+                return Err(HeaderError::VersionMismatch {
+                    expected: blob_versions.clone(),
+                    found: self.blob_version,
+                });
+            }
+            Ok(())
+        }
     }
 
     impl FixedSize for Header {

@@ -374,38 +374,44 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
     /// Initialize an MMR for synchronization, reusing existing data if possible.
     ///
-    /// Handles three sync scenarios based on existing journal data vs. the given sync boundaries.
+    /// Handles sync scenarios based on existing journal data vs. the given sync range:
     ///
-    /// 1. **Fresh Start**: existing_size < range.start
+    /// 1. **Fresh Start**: existing_size <= range.start
     ///    - Deletes existing data (if any)
-    ///    - Creates new [Journal] with pruning boundary and size `range.start`
+    ///    - Creates new [Journal] with pruning boundary and size at `range.start`
     ///
-    /// 2. **Prune and Reuse**: range.start ≤ existing_size ≤ range.end
-    ///    - Sets in-memory MMR size to `existing_size`
+    /// 2. **Reuse**: range.start < existing_size <= range.end
+    ///    - Keeps existing journal data
     ///    - Prunes the journal toward `range.start` (section-aligned)
     ///
-    /// 3. **Prune and Rewind**: existing_size > range.end
-    ///    - Rewinds the journal to size `range.end`
-    ///    - Sets in-memory MMR size to `range.end`
-    ///    - Prunes the journal toward `range.start` (section-aligned)
+    /// 3. **Error**: existing_size > range.end
+    ///    - Returns [crate::journal::Error::ItemOutOfRange]
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
-        let journal: Journal<E, D> = Journal::init_sync(
-            context.with_label("mmr_journal"),
-            JConfig {
-                partition: cfg.config.journal_partition,
-                items_per_blob: cfg.config.items_per_blob,
-                write_buffer: cfg.config.write_buffer,
-                page_cache: cfg.config.page_cache.clone(),
-            },
-            *cfg.range.start..*cfg.range.end,
-        )
-        .await?;
+        let journal_cfg = JConfig {
+            partition: cfg.config.journal_partition.clone(),
+            items_per_blob: cfg.config.items_per_blob,
+            write_buffer: cfg.config.write_buffer,
+            page_cache: cfg.config.page_cache.clone(),
+        };
+
+        // Open the journal, handling existing data vs sync range.
+        assert!(!cfg.range.is_empty(), "range must not be empty");
+        let mut journal: Journal<E, D> =
+            Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
+        let size = journal.size();
+
+        if size > *cfg.range.end {
+            return Err(crate::journal::Error::ItemOutOfRange(size).into());
+        }
+        if size <= *cfg.range.start && *cfg.range.start != 0 {
+            journal.clear_to_size(*cfg.range.start).await?;
+        }
+
         let journal_size = Position::new(journal.size());
-        assert!(journal_size <= *cfg.range.end);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -423,13 +429,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
+            // Use caller-provided pinned nodes.
             let nodes_to_pin_persisted = nodes_to_pin(cfg.range.start);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
         }
 
-        // Create the in-memory MMR with the pinned nodes required for its size.
+        // Create the in-memory MMR with the pinned nodes required for its size. This must be
+        // performed *before* pruning the journal to range.start to ensure all pinned nodes are
+        // present.
         let nodes_to_pin_mem = nodes_to_pin(journal_size);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
@@ -447,11 +456,17 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         )?;
 
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
+        // This must also be done before pruning.
         if cfg.range.start < journal_size {
             Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, cfg.range.start)
                 .await?;
         }
+
+        // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
         metadata.sync().await?;
+
+        // Prune the journal to range.start.
+        journal.prune(*cfg.range.start).await?;
 
         Ok(Self {
             mem_mmr,
@@ -1773,9 +1788,8 @@ mod tests {
     }
 
     // Regression test that MMR init() handles stale metadata (lower pruning boundary than journal).
-    // Before the fix, this would panic with an assertion failure. After the fix, it
-    // returns a MissingNode error (which is expected when metadata is corrupted and
-    // pinned nodes are lost).
+    // Before the fix, this would panic with an assertion failure. After the fix, it returns a
+    // MissingNode error (which is expected when metadata is corrupted and pinned nodes are lost).
     #[test_traced("WARN")]
     fn test_journaled_mmr_init_stale_metadata_returns_error() {
         let executor = deterministic::Runner::default();
@@ -1871,6 +1885,65 @@ mod tests {
             assert_eq!(mmr.root(), expected_root);
 
             mmr.destroy().await.unwrap();
+        });
+    }
+
+    // Regression test: init_sync must compute pinned nodes BEFORE pruning the journal. Previously,
+    // init_sync would prune the journal first, then try to read pinned nodes from the pruned
+    // positions, causing MissingNode errors.
+    //
+    // Key setup: We create an MMR with data but DON'T prune it, so the metadata has no pinned
+    // nodes. Then init_sync must read pinned nodes from the journal before pruning it.
+    #[test_traced]
+    fn test_journaled_mmr_init_sync_computes_pinned_nodes_before_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Use small items_per_blob to create many sections and trigger pruning.
+            let cfg = Config {
+                journal_partition: "mmr_journal".to_string(),
+                metadata_partition: "mmr_metadata".to_string(),
+                items_per_blob: NZU64!(7),
+                write_buffer: NZUsize!(64),
+                thread_pool: None,
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // Create MMR with enough elements to span multiple sections.
+            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100 {
+                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+            }
+            mmr.sync().await.unwrap();
+
+            // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
+            // read pinned nodes from the journal.
+            let original_size = mmr.size();
+            let original_root = mmr.root();
+            drop(mmr);
+
+            // Reopen via init_sync with range.start > 0. This will prune the journal, so
+            // init_sync must read pinned nodes BEFORE pruning or they'll be lost.
+            let prune_pos = Position::new(50);
+            let sync_cfg = SyncConfig::<sha256::Digest> {
+                config: cfg,
+                range: prune_pos..Position::new(200),
+                pinned_nodes: None, // Force init_sync to compute pinned nodes from journal
+            };
+
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
+
+            // Verify the MMR state is correct.
+            assert_eq!(sync_mmr.size(), original_size);
+            assert_eq!(sync_mmr.root(), original_root);
+            assert_eq!(sync_mmr.pruned_to_pos(), prune_pos);
+
+            sync_mmr.destroy().await.unwrap();
         });
     }
 }

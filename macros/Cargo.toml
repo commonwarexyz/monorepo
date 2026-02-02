@@ -13,22 +13,20 @@ documentation = "https://docs.rs/commonware-macros"
 [lints]
 workspace = true
 
-[lib]
-bench = false
-proc-macro = true
-
 [dependencies]
+commonware-macros-impl.workspace = true
+tokio = { workspace = true, features = ["macros"], optional = true }
+
+[dev-dependencies]
+commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
-proc-macro-crate.workspace = true
-proc-macro2.workspace = true
-quote.workspace = true
-syn = { workspace = true, features = ["full"] }
-toml.workspace = true
+futures-timer.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-[dev-dependencies]
-futures-timer.workspace = true
+[features]
+default = [ "std" ]
+std = [ "tokio" ]
 
 [package.metadata.cargo-udeps.ignore]
 # `futures-timer` is exercised only in doctests, so cargo-udeps flags it falsely.

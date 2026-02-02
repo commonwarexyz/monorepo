@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event loop
-//! running in another thread. Operation results are returned via a [futures::channel::oneshot] channel.
+//! I/O operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop
+//! running in another thread. Operation results are returned via a [commonware_utils::channel::oneshot] channel.
 //!
 //! ## Memory Safety
 //!
@@ -26,12 +26,11 @@ use crate::{
     Error, IoBufMut, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{from_hex, hex};
-use futures::{
+use commonware_utils::{
     channel::{mpsc, oneshot},
-    executor::block_on,
-    SinkExt as _,
+    from_hex, hex,
 };
+use futures::executor::block_on;
 use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
@@ -275,7 +274,7 @@ impl crate::Blob for Blob {
 
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
-        let mut io_sender = self.io_sender.clone();
+        let io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -350,7 +349,7 @@ impl crate::Blob for Blob {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
         let buf_len = buf.len();
-        let mut io_sender = self.io_sender.clone();
+        let io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;

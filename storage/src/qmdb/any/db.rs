@@ -261,6 +261,32 @@ where
     }
 }
 
+// Functionality shared across Unmerkleized states.
+impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Unmerkleized, D>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Contiguous<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    D: DurabilityState,
+    Operation<K, V, U>: Codec,
+{
+    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
+        Db {
+            log: self.log.merkleize(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit_loc: self.last_commit_loc,
+            snapshot: self.snapshot,
+            active_keys: self.active_keys,
+            durable_state: self.durable_state,
+            _update: core::marker::PhantomData,
+        }
+    }
+}
+
 // Functionality specific to (Unmerkleized,Durable) state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
@@ -282,43 +308,6 @@ where
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: store::NonDurable { steps: 0 },
-            _update: core::marker::PhantomData,
-        }
-    }
-
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, Durable> {
-        Db {
-            log: self.log.merkleize(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: self.durable_state,
-            _update: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
-        Db {
-            log: self.log.merkleize(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: self.durable_state,
             _update: core::marker::PhantomData,
         }
     }

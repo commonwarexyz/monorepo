@@ -15,7 +15,7 @@ use crate::{
             ValueEncoding,
         },
         current::{
-            db::{Merkleized, Unmerkleized, State},
+            db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
         store, DurabilityState, Durable, Error, NonDurable,

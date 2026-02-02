@@ -58,13 +58,15 @@ use crate::{
     Reporter, VerifyingApplication,
 };
 use commonware_cryptography::{certificate::Scheme, Committable};
+use commonware_macros::select;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
-use commonware_utils::{channels::fallible::OneshotExt, futures::ClosedExt};
+use commonware_utils::channel::{
+    fallible::OneshotExt,
+    oneshot::{self, error::RecvError},
+};
 use futures::{
-    channel::oneshot::{self, Canceled},
-    future::{ready, select, Either, Ready},
+    future::{ready, Either, Ready},
     lock::Mutex,
-    pin_mut,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
@@ -176,11 +178,6 @@ where
             .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                // Create a future for tracking if the receiver is dropped, which could allow
-                // us to cancel work early.
-                let tx_closed = tx.closed();
-                pin_mut!(tx_closed);
-
                 let (parent_view, parent_commitment) = context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
@@ -191,22 +188,24 @@ where
                 .await;
 
                 // If consensus drops the receiver, we can stop work early.
-                let parent = match select(parent_request, &mut tx_closed).await {
-                    Either::Left((Ok(parent), _)) => parent,
-                    Either::Left((Err(_), _)) => {
-                        debug!(
-                            reason = "failed to fetch parent or block",
-                            "skipping verification"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
+                let parent = select! {
+                    _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
                             "skipping verification"
                         );
                         return;
-                    }
+                    },
+                    result = parent_request => match result {
+                        Ok(parent) => parent,
+                        Err(_) => {
+                            debug!(
+                                reason = "failed to fetch parent or block",
+                                "skipping verification"
+                            );
+                            return;
+                        }
+                    },
                 };
 
                 // Validate parent commitment and height contiguity.
@@ -236,18 +235,16 @@ where
                     (runtime_context.with_label("app_verify"), context.clone()),
                     ancestry_stream,
                 );
-                pin_mut!(validity_request);
-
                 // If consensus drops the receiver, we can stop work early.
-                let application_valid = match select(validity_request, &mut tx_closed).await {
-                    Either::Left((is_valid, _)) => is_valid,
-                    Either::Right(_) => {
+                let application_valid = select! {
+                    _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
                             "skipping verification"
                         );
                         return;
-                    }
+                    },
+                    valid = validity_request => valid,
                 };
 
                 // Handle the verification result.
@@ -332,11 +329,6 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                // Create a future for tracking if the receiver is dropped, which could allow
-                // us to cancel work early.
-                let tx_closed = tx.closed();
-                pin_mut!(tx_closed);
-
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
@@ -345,22 +337,23 @@ where
                     &mut marshal,
                 )
                 .await;
-                pin_mut!(parent_request);
 
-                let parent = match select(parent_request, &mut tx_closed).await {
-                    Either::Left((Ok(parent), _)) => parent,
-                    Either::Left((Err(_), _)) => {
-                        debug!(
-                            ?parent_commitment,
-                            reason = "failed to fetch parent block",
-                            "skipping proposal"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
+                let parent = select! {
+                    _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
-                    }
+                    },
+                    result = parent_request => match result {
+                        Ok(parent) => parent,
+                        Err(_) => {
+                            debug!(
+                                ?parent_commitment,
+                                reason = "failed to fetch parent block",
+                                "skipping proposal"
+                            );
+                            return;
+                        }
+                    },
                 };
 
                 // Special case: If the parent block is the last block in the epoch,
@@ -394,23 +387,25 @@ where
                     ),
                     ancestor_stream,
                 );
-                pin_mut!(build_request);
 
                 let start = Instant::now();
-                let built_block = match select(build_request, &mut tx_closed).await {
-                    Either::Left((Some(block), _)) => block,
-                    Either::Left((None, _)) => {
-                        debug!(
-                            ?parent_commitment,
-                            reason = "block building failed",
-                            "skipping proposal"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
+
+                let built_block = select! {
+                    _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
                         return;
-                    }
+                    },
+                    block = build_request => match block {
+                        Some(block) => block,
+                        _ => {
+                            debug!(
+                                ?parent_commitment,
+                                reason = "block building failed",
+                                "skipping proposal"
+                            );
+                            return;
+                        }
+                    },
                 };
                 let _ = build_duration.try_set(start.elapsed().as_millis());
 
@@ -444,29 +439,27 @@ where
             .with_label("optimistic_verify")
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
-                // Create a future for tracking if the receiver is dropped, which could allow
-                // us to cancel work early.
-                let tx_closed = tx.closed();
-                pin_mut!(tx_closed);
-
                 let block_request = marshal.subscribe(Some(context.round), commitment).await;
-                let block = match select(block_request, &mut tx_closed).await {
-                    Either::Left((Ok(block), _)) => block,
-                    Either::Left((Err(_), _)) => {
-                        debug!(
-                            ?commitment,
-                            reason = "failed to fetch block for optimistic verification",
-                            "skipping optimistic verification"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
+
+                let block = select! {
+                    _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
                             "skipping optimistic verification"
                         );
                         return;
-                    }
+                    },
+                    result = block_request => match result {
+                        Ok(block) => block,
+                        Err(_) => {
+                            debug!(
+                                ?commitment,
+                                reason = "failed to fetch block for optimistic verification",
+                                "skipping optimistic verification"
+                            );
+                            return;
+                        }
+                    },
                 };
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
@@ -598,28 +591,25 @@ where
             .with_label("certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
-                // Create a future for tracking if the receiver is dropped, which could allow
-                // us to cancel work early.
-                let tx_closed = tx.closed();
-                pin_mut!(tx_closed);
-
-                let block = match select(block_rx, &mut tx_closed).await {
-                    Either::Left((Ok(block), _)) => block,
-                    Either::Left((Err(_), _)) => {
-                        debug!(
-                            ?commitment,
-                            reason = "failed to fetch block for certification",
-                            "skipping certification"
-                        );
-                        return;
-                    }
-                    Either::Right(_) => {
+                let block = select! {
+                    _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
                             "skipping certification"
                         );
                         return;
-                    }
+                    },
+                    result = block_rx => match result {
+                        Ok(block) => block,
+                        Err(_) => {
+                            debug!(
+                                ?commitment,
+                                reason = "failed to fetch block for certification",
+                                "skipping certification"
+                            );
+                            return;
+                        }
+                    },
                 };
 
                 // Re-proposal detection for certify path: we don't have the consensus context,
@@ -734,7 +724,7 @@ async fn fetch_parent<E, S, A, B>(
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut marshal::Mailbox<S, B>,
-) -> Either<Ready<Result<B, Canceled>>, oneshot::Receiver<B>>
+) -> Either<Ready<Result<B, RecvError>>, oneshot::Receiver<B>>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,

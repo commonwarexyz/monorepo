@@ -12,10 +12,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_utils::channels::fallible::{AsyncFallibleExt, OneshotExt};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+use commonware_utils::channel::{
+    fallible::{AsyncFallibleExt, OneshotExt},
+    mpsc, oneshot,
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
@@ -335,11 +334,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             on_stopped => {
                 debug!("context shutdown, stopping application");
             },
-            message = self.mailbox.next() => {
-                let message = match message {
-                    Some(message) => message,
-                    None => break,
-                };
+            Some(message) = self.mailbox.recv() else break => {
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);
@@ -381,9 +376,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     }
                 }
             },
-            broadcast = self.broadcast.next() => {
+            Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
-                let (digest, contents) = broadcast.expect("broadcast closed");
                 seen.insert(digest, contents.clone());
 
                 // Check if we have a waiter

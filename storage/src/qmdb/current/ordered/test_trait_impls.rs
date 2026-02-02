@@ -165,7 +165,8 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > MerkleizedNonDurableAny for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>
+    > MerkleizedNonDurableAny
+    for variable::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, NonDurable>
 where
     VariableOperation<K, V>: Read,
 {

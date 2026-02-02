@@ -12,8 +12,10 @@ use commonware_storage::qmdb::sync;
 use commonware_sync::{
     any, crate_version, databases::DatabaseType, immutable, net::Resolver, Digest, Error, Key,
 };
-use commonware_utils::DurationExt;
-use futures::channel::mpsc;
+use commonware_utils::{
+    channel::mpsc::{self, error::TrySendError},
+    DurationExt,
+};
 use rand::Rng;
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -81,7 +83,7 @@ where
                             info!(old_target = ?current_target, new_target = ?new_target, "target updated");
                             current_target = new_target;
                         }
-                        Err(e) if e.is_disconnected() => {
+                        Err(TrySendError::Closed(_)) => {
                             debug!("sync client disconnected, terminating target update task");
                             return Ok(());
                         }
