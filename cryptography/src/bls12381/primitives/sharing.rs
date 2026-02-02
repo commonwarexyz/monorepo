@@ -223,11 +223,16 @@ impl<V: Variant> Sharing<V> {
                 self.evals
                     .get(usize::from(i))
                     .map(|e| {
-                        *e.get_or_init(|| self.poly.eval_msm(&self.scalar(i).expect("i < total"), &Sequential))
+                        *e.get_or_init(|| {
+                            self.poly
+                                .eval_msm(&self.scalar(i).expect("i < total"), &Sequential)
+                        })
                     })
                     .ok_or(Error::InvalidIndex)
             } else {
-                Ok(self.poly.eval_msm(&self.scalar(i).ok_or(Error::InvalidIndex)?, &Sequential))
+                Ok(self
+                    .poly
+                    .eval_msm(&self.scalar(i).ok_or(Error::InvalidIndex)?, &Sequential))
             }
         }
     }

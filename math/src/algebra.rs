@@ -350,11 +350,7 @@ pub mod test_suites {
     }
 
     fn check_add_associates<T: Additive>((a, b, c): (T, T, T)) -> TestResult {
-        prop_assert_eq!(
-            (a.clone() + &b) + &c,
-            a + &(b + &c),
-            "+ not associative"
-        );
+        prop_assert_eq!((a.clone() + &b) + &c, a + &(b + &c), "+ not associative");
         Ok(())
     }
 

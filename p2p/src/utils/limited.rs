@@ -3,7 +3,7 @@
 use crate::{Recipients, UnlimitedSender};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufMut, KeyedRateLimiter, Quota};
-use commonware_utils::channels::ring;
+use commonware_utils::channel::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
@@ -216,7 +216,7 @@ mod tests {
     use crate::CheckedSender as _;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic::Runner, IoBuf, Quota, Runner as _};
-    use commonware_utils::{channels::ring, NZUsize, NZU32};
+    use commonware_utils::{channel::ring, NZUsize, NZU32};
     use thiserror::Error;
 
     type PublicKey = ed25519::PublicKey;

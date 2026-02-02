@@ -1,7 +1,6 @@
 //! Traits for interacting with a key/value store.
 
-use commonware_macros::stability;
-use commonware_macros::stability_mod;
+use commonware_macros::{stability, stability_mod};
 
 stability_mod!(ALPHA, mod batch);
 #[stability(ALPHA)]

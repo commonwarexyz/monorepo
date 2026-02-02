@@ -3,8 +3,7 @@ use crate::{
     types::{Participant, View},
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use commonware_utils::channels::fallible::AsyncFallibleExt;
-use futures::channel::{mpsc, oneshot};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {

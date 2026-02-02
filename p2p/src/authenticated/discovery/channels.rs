@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufMut, Quota};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::channel::mpsc;
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and
@@ -104,7 +104,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
+        let (sender, message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
@@ -112,7 +112,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,
