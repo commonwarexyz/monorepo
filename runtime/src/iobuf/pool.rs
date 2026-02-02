@@ -525,27 +525,27 @@ impl BufferPool {
     /// `BytesMut::with_capacity`. Use `put_slice` or other `BufMut` methods
     /// to write data to the buffer.
     ///
-    /// The actual capacity is rounded up to the next power-of-two size class.
-    /// The buffer will be returned to the pool when dropped.
+    /// If the pool can provide a buffer (capacity within limits and pool not
+    /// exhausted), returns a pooled buffer that will be returned to the pool
+    /// when dropped. Otherwise, falls back to an untracked heap allocation.
     ///
-    /// # Errors
-    ///
-    /// Returns `None` if:
-    /// - `capacity` exceeds the configured `max_size` (oversized request)
-    /// - The pool is exhausted for the required size class
+    /// Use [`Self::try_alloc`] if you need to distinguish between pooled and
+    /// untracked allocations.
     ///
     /// # Initialization
     ///
     /// The returned buffer contains **uninitialized memory**. Do not read from
     /// it until data has been written.
-    pub fn alloc(&self, capacity: usize) -> Option<IoBufMut> {
-        self.try_alloc(capacity).ok()
+    pub fn alloc(&self, capacity: usize) -> IoBufMut {
+        self.try_alloc(capacity)
+            .unwrap_or_else(|_| IoBufMut::with_capacity(capacity))
     }
 
-    /// Attempts to allocate a buffer, returning an error on failure.
+    /// Attempts to allocate a pooled buffer, returning an error on failure.
     ///
-    /// This is like [`Self::alloc`] but returns a [`Result`] that distinguishes
-    /// between different failure modes.
+    /// Unlike [`Self::alloc`], this method does not fall back to untracked
+    /// allocation. Use this when you need to know whether the buffer came
+    /// from the pool.
     ///
     /// # Errors
     ///
@@ -955,7 +955,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
 
         // Allocate a buffer - returns buffer with len=0, capacity >= requested
-        let buf = pool.alloc(100).expect("alloc should succeed");
+        let buf = pool.try_alloc(100).unwrap();
         assert!(buf.capacity() >= page);
         assert_eq!(buf.len(), 0);
 
@@ -963,7 +963,7 @@ mod tests {
         drop(buf);
 
         // Can allocate again
-        let buf2 = pool.alloc(100).expect("alloc should succeed");
+        let buf2 = pool.try_alloc(100).unwrap();
         assert!(buf2.capacity() >= page);
         assert_eq!(buf2.len(), 0);
     }
@@ -975,11 +975,11 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
         // Allocate max buffers
-        let _buf1 = pool.alloc(100).expect("first alloc should succeed");
-        let _buf2 = pool.alloc(100).expect("second alloc should succeed");
+        let _buf1 = pool.try_alloc(100).expect("first alloc should succeed");
+        let _buf2 = pool.try_alloc(100).expect("second alloc should succeed");
 
         // Third allocation should fail
-        assert!(pool.alloc(100).is_none());
+        assert!(pool.try_alloc(100).is_err());
     }
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page * 2, 10), &mut registry);
 
         // Request larger than max_size
-        assert!(pool.alloc(page * 4).is_none());
+        assert!(pool.try_alloc(page * 4).is_err());
     }
 
     #[test]
@@ -999,14 +999,14 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
 
         // Small request gets smallest class
-        let buf1 = pool.alloc(100).unwrap();
+        let buf1 = pool.try_alloc(100).unwrap();
         assert_eq!(buf1.capacity(), page);
 
         // Larger request gets appropriate class
-        let buf2 = pool.alloc(page + 1).unwrap();
+        let buf2 = pool.try_alloc(page + 1).unwrap();
         assert_eq!(buf2.capacity(), page * 2);
 
-        let buf3 = pool.alloc(page * 3).unwrap();
+        let buf3 = pool.try_alloc(page * 3).unwrap();
         assert_eq!(buf3.capacity(), page * 4);
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
         // Allocate and initialize a buffer
-        let mut buf = pool.alloc(11).unwrap();
+        let mut buf = pool.try_alloc(11).unwrap();
         buf.put_slice(&[0u8; 11]);
         assert_eq!(buf.len(), 11);
 
@@ -1052,11 +1052,11 @@ mod tests {
         // Should be able to allocate max_per_class buffers immediately
         let mut bufs = Vec::new();
         for _ in 0..5 {
-            bufs.push(pool.alloc(100).expect("alloc should succeed"));
+            bufs.push(pool.try_alloc(100).expect("alloc should succeed"));
         }
 
         // Next allocation should fail
-        assert!(pool.alloc(100).is_none());
+        assert!(pool.try_alloc(100).is_err());
     }
 
     #[test]
@@ -1109,7 +1109,7 @@ mod tests {
         assert_eq!(get_available(&pool, page), 0);
 
         // Allocate and freeze
-        let buf = pool.alloc(100).unwrap();
+        let buf = pool.try_alloc(100).unwrap();
         assert_eq!(get_allocated(&pool, page), 1);
         assert_eq!(get_available(&pool, page), 0);
 
@@ -1129,7 +1129,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let buf = pool.alloc(100).unwrap();
+        let buf = pool.try_alloc(100).unwrap();
         let iobuf = buf.freeze();
 
         // Clone the IoBuf multiple times (this clones the inner Bytes via Arc)
@@ -1160,7 +1160,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0u8; 100]);
         let iobuf = buf.freeze();
 
@@ -1184,7 +1184,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0x42u8; 100]);
         let mut iobuf = buf.freeze();
 
@@ -1214,7 +1214,7 @@ mod tests {
 
         // Simulate the pattern in Messenger::content where we clone for multiple recipients
         for _ in 0..100 {
-            let buf = pool.alloc(100).unwrap();
+            let buf = pool.try_alloc(100).unwrap();
             let iobuf = buf.freeze();
 
             // Simulate sending to 10 recipients (clone for each)
@@ -1239,7 +1239,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let buf = pool.alloc(100).unwrap();
+        let buf = pool.try_alloc(100).unwrap();
         assert_eq!(get_allocated(&pool, page), 1);
 
         let iobuf = buf.freeze();
@@ -1279,7 +1279,7 @@ mod tests {
 
         for _ in 0..100 {
             // Incoming data (could be IoBuf or IoBufMut)
-            let mut incoming = pool.alloc(100).unwrap();
+            let mut incoming = pool.try_alloc(100).unwrap();
             incoming.put_slice(&[0x42u8; 100]);
             let incoming_iobuf = incoming.freeze();
 
@@ -1289,7 +1289,7 @@ mod tests {
 
             // Allocate encryption buffer with capacity (no init needed, we write to it)
             let ciphertext_len = plaintext_len + 16; // +16 for tag
-            let mut encryption_buf = pool.alloc(ciphertext_len).unwrap();
+            let mut encryption_buf = pool.try_alloc(ciphertext_len).unwrap();
             // SAFETY: We fill the entire buffer before reading
             unsafe { encryption_buf.set_len(ciphertext_len) };
 
@@ -1335,17 +1335,16 @@ mod tests {
             let pool = pool.clone();
             let handle = thread::spawn(move || {
                 for _ in 0..1000 {
-                    if let Some(buf) = pool.alloc(100) {
-                        let iobuf = buf.freeze();
+                    let buf = pool.try_alloc(100).unwrap();
+                    let iobuf = buf.freeze();
 
-                        // Clone a few times
-                        let clones: Vec<_> = (0..5).map(|_| iobuf.clone()).collect();
-                        drop(iobuf);
+                    // Clone a few times
+                    let clones: Vec<_> = (0..5).map(|_| iobuf.clone()).collect();
+                    drop(iobuf);
 
-                        // Drop clones
-                        for clone in clones {
-                            drop(clone);
-                        }
+                    // Drop clones
+                    for clone in clones {
+                        drop(clone);
                     }
                 }
             });
@@ -1379,7 +1378,7 @@ mod tests {
 
         // Allocate and freeze on main thread
         for _ in 0..50 {
-            let buf = pool.alloc(100).unwrap();
+            let buf = pool.try_alloc(100).unwrap();
             let iobuf = buf.freeze();
             tx.send(iobuf).unwrap();
         }
@@ -1407,7 +1406,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0u8; 100]);
         let iobuf = buf.freeze();
 
@@ -1432,7 +1431,7 @@ mod tests {
         let mut bytes = BytesMut::with_capacity(100);
         bytes.put_slice(&[0xAAu8; 50]);
 
-        let mut pooled = pool.alloc(100).unwrap();
+        let mut pooled = pool.try_alloc(100).unwrap();
         pooled.put_slice(&[0xAAu8; 50]);
 
         // remaining()
@@ -1465,7 +1464,7 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
         let mut bytes = BytesMut::with_capacity(100);
-        let mut pooled = pool.alloc(100).unwrap();
+        let mut pooled = pool.try_alloc(100).unwrap();
 
         // remaining_mut()
         assert!(BufMut::remaining_mut(&bytes) >= 100);
@@ -1499,7 +1498,7 @@ mod tests {
         bytes.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut bytes, 10);
 
-        let mut pooled = pool.alloc(100).unwrap();
+        let mut pooled = pool.try_alloc(100).unwrap();
         pooled.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut pooled, 10);
 
@@ -1526,7 +1525,7 @@ mod tests {
         bytes.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut bytes, 10);
 
-        let mut pooled = pool.alloc(100).unwrap();
+        let mut pooled = pool.try_alloc(100).unwrap();
         pooled.put_slice(&[0xAAu8; 50]);
         Buf::advance(&mut pooled, 10);
 
@@ -1547,17 +1546,17 @@ mod tests {
         let pool = BufferPool::new(test_config(page, page, 3), &mut registry);
 
         // Exhaust the pool
-        let buf1 = pool.alloc(100).expect("first alloc");
-        let buf2 = pool.alloc(100).expect("second alloc");
-        let buf3 = pool.alloc(100).expect("third alloc");
-        assert!(pool.alloc(100).is_none(), "pool should be exhausted");
+        let buf1 = pool.try_alloc(100).expect("first alloc");
+        let buf2 = pool.try_alloc(100).expect("second alloc");
+        let buf3 = pool.try_alloc(100).expect("third alloc");
+        assert!(pool.try_alloc(100).is_err(), "pool should be exhausted");
 
         // Return one buffer
         drop(buf1);
 
         // Should be able to allocate again
-        let buf4 = pool.alloc(100).expect("alloc after return");
-        assert!(pool.alloc(100).is_none(), "pool exhausted again");
+        let buf4 = pool.try_alloc(100).expect("alloc after return");
+        assert!(pool.try_alloc(100).is_err(), "pool exhausted again");
 
         // Return all and verify freelist reuse
         drop(buf2);
@@ -1568,7 +1567,7 @@ mod tests {
         assert_eq!(get_available(&pool, page), 3);
 
         // Allocate again - should reuse from freelist
-        let _buf5 = pool.alloc(100).expect("reuse from freelist");
+        let _buf5 = pool.try_alloc(100).expect("reuse from freelist");
         assert_eq!(get_available(&pool, page), 2);
     }
 
@@ -1597,7 +1596,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let pooled = pool.alloc(100).unwrap();
+        let pooled = pool.try_alloc(100).unwrap();
         assert!(pooled.is_pooled());
 
         let owned = IoBufMut::with_capacity(100);
@@ -1613,7 +1612,7 @@ mod tests {
         let mut bytes = BytesMut::with_capacity(page);
         bytes.put_slice(&[0xAAu8; 50]);
 
-        let mut pooled = pool.alloc(page).unwrap();
+        let mut pooled = pool.try_alloc(page).unwrap();
         pooled.put_slice(&[0xAAu8; 50]);
 
         // Before advance
@@ -1641,7 +1640,7 @@ mod tests {
         bytes.resize(50, 0xBB);
         Buf::advance(&mut bytes, 20);
 
-        let mut pooled = pool.alloc(page).unwrap();
+        let mut pooled = pool.try_alloc(page).unwrap();
         pooled.put_slice(&[0xBB; 50]);
         Buf::advance(&mut pooled, 20);
 
@@ -1669,7 +1668,7 @@ mod tests {
         let cap_before_clear = bytes.capacity();
         bytes.clear();
 
-        let mut pooled = pool.alloc(page).unwrap();
+        let mut pooled = pool.try_alloc(page).unwrap();
         pooled.put_slice(&[0xCC; 50]);
         Buf::advance(&mut pooled, 20);
         let pooled_cap_before = pooled.capacity();
@@ -1692,7 +1691,7 @@ mod tests {
         Buf::advance(&mut bytes, 10);
         bytes.put_slice(&[0xBB; 10]);
 
-        let mut pooled = pool.alloc(100).unwrap();
+        let mut pooled = pool.try_alloc(100).unwrap();
         pooled.put_slice(&[0xAA; 30]);
         Buf::advance(&mut pooled, 10);
         pooled.put_slice(&[0xBB; 10]);
@@ -1708,7 +1707,7 @@ mod tests {
 
         // Storage preset - page aligned
         let storage_pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let mut buf = storage_pool.alloc(100).unwrap();
+        let mut buf = storage_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % page,
             0,
@@ -1717,7 +1716,7 @@ mod tests {
 
         // Network preset - cache-line aligned
         let network_pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
-        let mut buf = network_pool.alloc(100).unwrap();
+        let mut buf = network_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % cache_line,
             0,
@@ -1731,7 +1730,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0x42; 100]);
         Buf::advance(&mut buf, 100);
 
@@ -1745,9 +1744,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let buf = pool.alloc(0);
-        assert!(buf.is_some());
-        let buf = buf.unwrap();
+        let buf = pool.try_alloc(0).expect("zero capacity should succeed");
         assert_eq!(buf.capacity(), page);
         assert_eq!(buf.len(), 0);
     }
@@ -1758,9 +1755,8 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let buf = pool.alloc(page);
-        assert!(buf.is_some());
-        assert_eq!(buf.unwrap().capacity(), page);
+        let buf = pool.try_alloc(page).expect("exact max size should succeed");
+        assert_eq!(buf.capacity(), page);
     }
 
     #[test]
@@ -1769,7 +1765,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         // SAFETY: We claim 50 bytes as written (uninitialized, but we don't read them)
         unsafe { buf.advance_mut(50) };
         // Consume 20 bytes via Buf
@@ -1785,7 +1781,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(b"hello");
         Buf::advance(&mut buf, 2);
         buf.put_slice(b"world");
@@ -1798,7 +1794,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0x42; 100]);
         let iobuf = buf.freeze();
         let slice = iobuf.slice(10..50);
@@ -1829,7 +1825,7 @@ mod tests {
         assert_eq!(bytes.len(), 50);
 
         // PooledBufMut should match
-        let mut pooled = pool.alloc(100).unwrap();
+        let mut pooled = pool.try_alloc(100).unwrap();
         pooled.put_slice(&[0xAA; 50]);
         pooled.truncate(100); // Should be no-op
         assert_eq!(pooled.len(), 50);
@@ -1841,7 +1837,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0xAA; 50]);
         buf.clear();
 
@@ -1860,7 +1856,7 @@ mod tests {
         let mut registry = test_registry();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
 
-        let mut buf = pool.alloc(100).unwrap();
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0; 100]);
 
         // Initially aligned

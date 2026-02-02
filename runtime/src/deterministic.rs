@@ -63,10 +63,8 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
-#[stability(BETA)]
 use commonware_codec::Encode;
-use commonware_macros::{select, stability};
-#[stability(BETA)]
+use commonware_macros::select;
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
@@ -86,7 +84,6 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
-#[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -2022,5 +2019,4 @@ mod tests {
                 .with_attribute("epoch", "new");
         });
     }
-
 }
