@@ -55,27 +55,23 @@
 pub mod shards;
 pub mod types;
 
-pub(crate) mod cache;
-
-mod mailbox;
-pub use mailbox::Mailbox;
-
-mod actor;
-pub use actor::Actor;
+mod variant;
+pub use variant::Coding;
 
 mod marshaled;
 pub use marshaled::{Marshaled, MarshaledConfig};
 
 #[cfg(test)]
 mod tests {
-    use super::actor;
+    use super::Coding;
     use crate::{
         marshal::{
             coding::{
-                self, shards,
+                shards,
                 types::{coding_config_for_participants, CodedBlock, DigestOrCommitment, Shard},
             },
             config::Config,
+            core::{Actor, Mailbox},
             mocks::{application::Application, block::Block},
             resolver::p2p as resolver,
             Identifier,
@@ -130,6 +126,7 @@ mod tests {
     type V = MinPk;
     type S = bls12381_threshold_vrf::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
+    type Variant = Coding<B, ReedSolomon<H>, K>;
 
     /// Default leader key for tests.
     fn default_leader() -> K {
@@ -181,8 +178,8 @@ mod tests {
         provider: P,
     ) -> (
         Application<B>,
-        coding::Mailbox<S, B, ReedSolomon<H>>,
-        coding::shards::Mailbox<B, S, ReedSolomon<H>, K>,
+        Mailbox<S, Variant>,
+        shards::Mailbox<B, S, ReedSolomon<H>, K>,
         Height,
     ) {
         let config = Config {
@@ -323,7 +320,7 @@ mod tests {
             shards::Engine::new(context.clone(), buffer, (), config.mailbox_size, Sequential);
         shard_engine.start();
 
-        let (actor, mailbox, processed_height) = actor::Actor::init(
+        let (actor, mailbox, processed_height) = Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -880,13 +877,14 @@ mod tests {
                     let network = control.register(1, TEST_QUOTA).await.unwrap();
                     broadcast_engine.start(network);
 
-                    let (shard_engine, shard_mailbox) = shards::Engine::new(
-                        context.clone(),
-                        buffer,
-                        (),
-                        config.mailbox_size,
-                        Sequential,
-                    );
+                    let (shard_engine, shard_mailbox) =
+                        shards::Engine::<_, S, _, _, B, K, _>::new(
+                            context.clone(),
+                            buffer,
+                            (),
+                            config.mailbox_size,
+                            Sequential,
+                        );
                     shard_engine.start();
 
                     // Initialize prunable archives
@@ -932,7 +930,7 @@ mod tests {
                     .await
                     .expect("failed to initialize finalized blocks archive");
 
-                    let (actor, mailbox, _processed_height) = actor::Actor::init(
+                    let (actor, mailbox, _processed_height) = Actor::init(
                         ctx.clone(),
                         finalizations_by_height,
                         finalized_blocks,
@@ -1122,10 +1120,7 @@ mod tests {
             let digest = block.digest();
 
             let subscription_rx = actor
-                .subscribe(
-                    Some(Round::new(Epoch::zero(), View::new(1))),
-                    DigestOrCommitment::Digest(digest),
-                )
+                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest))
                 .await;
 
             shards
@@ -1186,22 +1181,13 @@ mod tests {
             let digest2 = block2.digest();
 
             let sub1_rx = actor
-                .subscribe(
-                    Some(Round::new(Epoch::zero(), View::new(1))),
-                    DigestOrCommitment::Digest(digest1),
-                )
+                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest1))
                 .await;
             let sub2_rx = actor
-                .subscribe(
-                    Some(Round::new(Epoch::zero(), View::new(2))),
-                    DigestOrCommitment::Digest(digest2),
-                )
+                .subscribe(Some(Round::new(Epoch::zero(), View::new(2))), DigestOrCommitment::Digest(digest2))
                 .await;
             let sub3_rx = actor
-                .subscribe(
-                    Some(Round::new(Epoch::zero(), View::new(1))),
-                    DigestOrCommitment::Digest(digest1),
-                )
+                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest1))
                 .await;
 
             shards
@@ -1274,16 +1260,10 @@ mod tests {
             let digest2 = block2.digest();
 
             let sub1_rx = actor
-                .subscribe(
-                    Some(Round::new(Epoch::zero(), View::new(1))),
-                    DigestOrCommitment::Digest(digest1),
-                )
+                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest1))
                 .await;
             let sub2_rx = actor
-                .subscribe(
-                    Some(Round::new(Epoch::zero(), View::new(2))),
-                    DigestOrCommitment::Digest(digest2),
-                )
+                .subscribe(Some(Round::new(Epoch::zero(), View::new(2))), DigestOrCommitment::Digest(digest2))
                 .await;
 
             drop(sub1_rx);
@@ -1359,15 +1339,9 @@ mod tests {
                 &Sequential,
             );
 
-            let sub1_rx = actor
-                .subscribe(None, DigestOrCommitment::Digest(block1.digest()))
-                .await;
-            let sub2_rx = actor
-                .subscribe(None, DigestOrCommitment::Digest(block2.digest()))
-                .await;
-            let sub3_rx = actor
-                .subscribe(None, DigestOrCommitment::Digest(block3.digest()))
-                .await;
+            let sub1_rx = actor.subscribe(None, DigestOrCommitment::Digest(block1.digest())).await;
+            let sub2_rx = actor.subscribe(None, DigestOrCommitment::Digest(block2.digest())).await;
+            let sub3_rx = actor.subscribe(None, DigestOrCommitment::Digest(block3.digest())).await;
 
             // Block1: Broadcasted and notarized by the actor
             shards.proposed(block1.clone(), participants.clone()).await;
@@ -2013,6 +1987,7 @@ mod tests {
     /// as their context type, not `Context<D, K>`.
     type CodingCtx = Context<CodingCommitment, K>;
     type CodingB = Block<D, CodingCtx>;
+    type CodingVariant = Coding<CodingB, ReedSolomon<H>, K>;
 
     /// Create a test block with a CodingCommitment-based context.
     fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestamp: u64) -> CodingB {
@@ -2042,8 +2017,8 @@ mod tests {
         partition_prefix: &str,
     ) -> (
         Application<CodingB>,
-        coding::Mailbox<S, CodingB, ReedSolomon<H>>,
-        coding::shards::Mailbox<CodingB, S, ReedSolomon<H>, K>,
+        Mailbox<S, CodingVariant>,
+        shards::Mailbox<CodingB, S, ReedSolomon<H>, K>,
         Height,
     ) {
         let config = Config {
@@ -2180,7 +2155,7 @@ mod tests {
             shards::Engine::new(context.clone(), buffer, (), config.mailbox_size, Sequential);
         shard_engine.start();
 
-        let (actor, mailbox, processed_height) = actor::Actor::init(
+        let (actor, mailbox, processed_height) = Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,

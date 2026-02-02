@@ -53,9 +53,11 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         coding::{
-            self, shards,
+            shards,
             types::{coding_config_for_participants, CodedBlock, DigestOrCommitment},
+            Coding,
         },
+        core,
         Update,
     },
     simplex::{scheme::Scheme, types::Context},
@@ -117,7 +119,7 @@ where
     /// The underlying application to wrap.
     pub application: A,
     /// Mailbox for communicating with the marshal engine.
-    pub marshal: coding::Mailbox<Z::Scheme, B, C>,
+    pub marshal: core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
     pub shards: shards::Mailbox<B, Z::Scheme, C, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
@@ -148,7 +150,7 @@ where
 {
     context: E,
     application: A,
-    marshal: coding::Mailbox<Z::Scheme, B, C>,
+    marshal: core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
     shards: shards::Mailbox<B, Z::Scheme, C, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
@@ -929,7 +931,7 @@ async fn fetch_parent<E, S, A, B, C>(
     parent_commitment: CodingCommitment,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut coding::Mailbox<S, B, C>,
+    marshal: &mut core::Mailbox<S, Coding<B, C, S::PublicKey>>,
 ) -> Either<
     Ready<Result<CodedBlock<B, C>, oneshot::error::RecvError>>,
     oneshot::Receiver<CodedBlock<B, C>>,
@@ -950,10 +952,7 @@ where
     } else {
         Either::Right(
             marshal
-                .subscribe(
-                    parent_round,
-                    DigestOrCommitment::Commitment(parent_commitment),
-                )
+                .subscribe(parent_round, DigestOrCommitment::Commitment(parent_commitment))
                 .await,
         )
     }

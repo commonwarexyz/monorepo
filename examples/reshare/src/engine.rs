@@ -12,7 +12,7 @@ use commonware_consensus::{
     marshal::{
         self,
         resolver::handler,
-        standard::{self, BroadcastBlock, Marshaled},
+        standard::{self, Marshaled, StandardBlock},
     },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
@@ -94,8 +94,8 @@ where
     config: Config<C, P, B, V, T>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
-    buffered_mailbox: buffered::Mailbox<C::PublicKey, BroadcastBlock<Block<H, C, V>>>,
+    buffer: buffered::Engine<E, C::PublicKey, StandardBlock<Block<H, C, V>>>,
+    buffered_mailbox: buffered::Mailbox<C::PublicKey, StandardBlock<Block<H, C, V>>>,
     #[allow(clippy::type_complexity)]
     marshal: standard::Actor<
         E,

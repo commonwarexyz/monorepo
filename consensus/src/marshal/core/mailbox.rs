@@ -1,3 +1,4 @@
+use super::Variant;
 use crate::{
     marshal::{
         ancestry::{AncestorStream, AncestryProvider},
@@ -5,9 +6,9 @@ use crate::{
     },
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
-    Block, Reporter,
+    Reporter,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
     vec::NonEmptyVec,
@@ -17,15 +18,14 @@ use commonware_utils::{
 ///
 /// These messages are sent from the consensus engine and other parts of the
 /// system to drive the state of the marshal.
-pub(crate) enum Message<S: Scheme, B: Block> {
-    // -------------------- Application Messages --------------------
+pub(crate) enum Message<S: Scheme, V: Variant> {
     /// A request to retrieve the (height, commitment) of a block by its identifier.
     /// The block must be finalized; returns `None` if the block is not finalized.
     GetInfo {
         /// The identifier of the block to get the information of.
-        identifier: Identifier<B::Digest>,
+        identifier: Identifier<<V::Block as Digestible>::Digest>,
         /// A channel to send the retrieved (height, commitment).
-        response: oneshot::Sender<Option<(Height, B::Digest)>>,
+        response: oneshot::Sender<Option<(Height, <V::Block as Digestible>::Digest)>>,
     },
     /// A request to retrieve a block by its identifier.
     ///
@@ -33,16 +33,16 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// blocks, whereas requesting by commitment may return non-finalized or even unverified blocks.
     GetBlock {
         /// The identifier of the block to retrieve.
-        identifier: Identifier<B::Digest>,
+        identifier: Identifier<<V::Block as Digestible>::Digest>,
         /// A channel to send the retrieved block.
-        response: oneshot::Sender<Option<B>>,
+        response: oneshot::Sender<Option<V::Block>>,
     },
     /// A request to retrieve a finalization by height.
     GetFinalization {
         /// The height of the finalization to retrieve.
         height: Height,
         /// A channel to send the retrieved finalization.
-        response: oneshot::Sender<Option<Finalization<S, B::Digest>>>,
+        response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -60,29 +60,38 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// Target peers to fetch from. Added to any existing targets for this height.
         targets: NonEmptyVec<S::PublicKey>,
     },
-    /// A request to retrieve a block by its commitment.
+    /// A request to retrieve a block by its lookup ID.
     Subscribe {
         /// The view in which the block was notarized. This is an optimization
         /// to help locate the block.
         round: Option<Round>,
-        /// The commitment of the block to retrieve.
-        commitment: B::Digest,
+        /// The lookup ID of the block to retrieve.
+        ///
+        /// For standard marshal, this is the block digest.
+        /// For coding marshal, this is a `DigestOrCommitment` which allows
+        /// passing the full commitment for shard reconstruction.
+        lookup: V::LookupId,
         /// A channel to send the retrieved block.
-        response: oneshot::Sender<B>,
+        response: oneshot::Sender<V::Block>,
     },
-    /// A request to broadcast a proposed block to all peers.
+    /// A request to broadcast a proposed block to peers.
     Proposed {
         /// The round in which the block was proposed.
         round: Round,
         /// The block to broadcast.
-        block: B,
+        block: V::Block,
+        /// The recipients for the broadcast.
+        ///
+        /// - Standard: `()` (broadcasts to all peers)
+        /// - Coding: `Vec<P>` (specific peers for shard distribution)
+        recipients: V::Recipients,
     },
     /// A notification that a block has been verified by the application.
     Verified {
         /// The round in which the block was verified.
         round: Round,
         /// The verified block.
-        block: B,
+        block: V::Block,
     },
     /// Sets the sync starting point (advances if higher than current).
     ///
@@ -106,37 +115,35 @@ pub(crate) enum Message<S: Scheme, B: Block> {
         /// The minimum height to keep (blocks below this are pruned).
         height: Height,
     },
-
-    // -------------------- Consensus Engine Messages --------------------
     /// A notarization from the consensus engine.
     Notarization {
         /// The notarization.
-        notarization: Notarization<S, B::Digest>,
+        notarization: Notarization<S, V::Commitment>,
     },
     /// A finalization from the consensus engine.
     Finalization {
         /// The finalization.
-        finalization: Finalization<S, B::Digest>,
+        finalization: Finalization<S, V::Commitment>,
     },
 }
 
 /// A mailbox for sending messages to the marshal [Actor](super::Actor).
 #[derive(Clone)]
-pub struct Mailbox<S: Scheme, B: Block> {
-    sender: mpsc::Sender<Message<S, B>>,
+pub struct Mailbox<S: Scheme, V: Variant> {
+    sender: mpsc::Sender<Message<S, V>>,
 }
 
-impl<S: Scheme, B: Block> Mailbox<S, B> {
+impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: mpsc::Sender<Message<S, B>>) -> Self {
+    pub(crate) const fn new(sender: mpsc::Sender<Message<S, V>>) -> Self {
         Self { sender }
     }
 
     /// A request to retrieve the information about the highest finalized block.
     pub async fn get_info(
         &mut self,
-        identifier: impl Into<Identifier<B::Digest>>,
-    ) -> Option<(Height, B::Digest)> {
+        identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
+    ) -> Option<(Height, <V::Block as Digestible>::Digest)> {
         let identifier = identifier.into();
         self.sender
             .request(|response| Message::GetInfo {
@@ -149,7 +156,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
     /// A best-effort attempt to retrieve a given block from local
     /// storage. It is not an indication to go fetch the block from the network.
-    pub async fn get_block(&mut self, identifier: impl Into<Identifier<B::Digest>>) -> Option<B> {
+    pub async fn get_block(
+        &mut self,
+        identifier: impl Into<Identifier<<V::Block as Digestible>::Digest>>,
+    ) -> Option<V::Block> {
         let identifier = identifier.into();
         self.sender
             .request(|response| Message::GetBlock {
@@ -162,7 +172,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
 
     /// A best-effort attempt to retrieve a given [Finalization] from local
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
-    pub async fn get_finalization(&mut self, height: Height) -> Option<Finalization<S, B::Digest>> {
+    pub async fn get_finalization(
+        &mut self,
+        height: Height,
+    ) -> Option<Finalization<S, V::Commitment>> {
         self.sender
             .request(|response| Message::GetFinalization { height, response })
             .await
@@ -190,7 +203,7 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
             .await;
     }
 
-    /// A request to retrieve a block by its commitment.
+    /// A request to retrieve a block by its lookup ID.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
@@ -199,16 +212,20 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// it may never become available.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
+    ///
+    /// For standard marshal, the lookup ID is just the block digest.
+    /// For coding marshal, the lookup ID is a `DigestOrCommitment` which can include
+    /// the full commitment for shard reconstruction.
     pub async fn subscribe(
         &mut self,
         round: Option<Round>,
-        commitment: B::Digest,
-    ) -> oneshot::Receiver<B> {
+        lookup: V::LookupId,
+    ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send_lossy(Message::Subscribe {
                 round,
-                commitment,
+                lookup,
                 response: tx,
             })
             .await;
@@ -220,24 +237,31 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry(
         &mut self,
-        (start_round, start_digest): (Option<Round>, B::Digest),
-    ) -> Option<AncestorStream<Self, B>> {
-        self.subscribe(start_round, start_digest)
+        (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
+    ) -> Option<AncestorStream<Self, V::ApplicationBlock>> {
+        self.subscribe(start_round, V::lookup_from_digest(start_digest))
             .await
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.clone(), [block]))
+            .map(|block| AncestorStream::new(self.clone(), [V::unwrap_working(block)]))
     }
 
-    /// Proposed requests that a proposed block is sent to all peers.
-    pub async fn proposed(&mut self, round: Round, block: B) {
+    /// Proposed requests that a proposed block is sent to peers.
+    ///
+    /// For standard marshal, `recipients` is `()` (broadcasts to all peers).
+    /// For coding marshal, `recipients` is the list of peers for shard distribution.
+    pub async fn proposed(&mut self, round: Round, block: V::Block, recipients: V::Recipients) {
         self.sender
-            .send_lossy(Message::Proposed { round, block })
+            .send_lossy(Message::Proposed {
+                round,
+                block,
+                recipients,
+            })
             .await;
     }
 
     /// Notifies the actor that a block has been verified.
-    pub async fn verified(&mut self, round: Round, block: B) {
+    pub async fn verified(&mut self, round: Round, block: V::Block) {
         self.sender
             .send_lossy(Message::Verified { round, block })
             .await;
@@ -266,19 +290,20 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     }
 }
 
-impl<S: Scheme, B: Block> AncestryProvider for Mailbox<S, B> {
-    type Block = B;
+impl<S: Scheme, V: Variant> AncestryProvider for Mailbox<S, V> {
+    type Block = V::ApplicationBlock;
 
-    async fn fetch_block(mut self, digest: B::Digest) -> B {
-        let subscription = self.subscribe(None, digest).await;
-        subscription
+    async fn fetch_block(mut self, digest: <V::Block as Digestible>::Digest) -> Self::Block {
+        let subscription = self.subscribe(None, V::lookup_from_digest(digest)).await;
+        let block = subscription
             .await
-            .expect("marshal actor dropped before fulfilling subscription")
+            .expect("marshal actor dropped before fulfilling subscription");
+        V::unwrap_working(block)
     }
 }
 
-impl<S: Scheme, B: Block> Reporter for Mailbox<S, B> {
-    type Activity = Activity<S, B::Digest>;
+impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
+    type Activity = Activity<S, V::Commitment>;
 
     async fn report(&mut self, activity: Self::Activity) {
         let message = match activity {

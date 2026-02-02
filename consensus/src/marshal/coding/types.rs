@@ -608,6 +608,12 @@ impl<D: Digest> DigestOrCommitment<D> {
     }
 }
 
+impl<D: Digest> From<D> for DigestOrCommitment<D> {
+    fn from(digest: D) -> Self {
+        Self::Digest(digest)
+    }
+}
+
 /// Compute the [CodingConfig] for a given number of participants.
 ///
 /// Currently, this function assumes `3f + 1` participants to tolerate at max `f` faults.

@@ -1,67 +1,40 @@
-//! Ordered delivery of directly broadcasted blocks.
+//! Standard variant for Marshal.
 //!
 //! # Overview
 //!
-//! The standard marshal connects the consensus pipeline to a "full-block" gossip channel. Blocks
-//! are proposed by the application, fanned out via [`commonware_broadcast::buffered`], and later
-//! finalized once `simplex` produces notarizations/finalizations. Unlike the coding variant, this
-//! module stores and forwards entire blocks without erasure encoding, trading additional bandwidth
-//! for simpler recovery.
+//! The standard variant broadcasts complete blocks to all peers without erasure coding.
+//! This is simpler but uses more bandwidth than the coding variant.
 //!
 //! # Components
 //!
-//! - [`Actor`]: coordinates notarizations/finalizations, persists finalized blocks, drives repair
-//!   loops, and delivers ordered updates to the application’s [`crate::Reporter`].
-//! - [`Mailbox`]: accepts messages from other local tasks (resolver deliveries, application signals,
-//!   etc.) and forwards them to the actor without requiring a direct handle.
-//! - [`crate::marshal::resolver`]: contacts remote peers when the actor needs to fetch missing blocks or
-//!   certificates referenced by consensus.
-//! - Cache: maintains prunable archives of notarized blocks and certificates per epoch to keep
-//!   hot storage bounded while the actor retains enough history to advance.
-//! - [`Marshaled`]: wraps an [`crate::Application`] implementation so it enforces epoch boundaries
-//!   and makes the correct calls into the marshal actor.
+//! - [`Standard`]: The variant marker type that configures marshal for full-block broadcast.
+//! - [`Marshaled`]: Wraps an [`crate::Application`] implementation to enforce epoch boundaries
+//!   and coordinate with the marshal actor.
 //!
-//! # Data Flow
+//! # Usage
 //!
-//! 1. [`Marshaled`] asks the application to build/verify blocks and hands them to [`Actor`] through
-//!    the module mailbox.
-//! 2. Blocks are broadcast through [`commonware_broadcast::buffered`]; any peer may request a
-//!    resend via the resolver path.
-//! 3. The actor ingests notarizations/finalizations from `simplex`, validates the referenced blocks,
-//!    and persists finalized payloads to immutable archives.
-//! 4. Ordered, finalized blocks are delivered to the reporter at-least-once, gated by
-//!    acknowledgements so downstream consumers can signal durability.
-//!
-//! # Storage and Backfill
-//!
-//! Prunable caches hold notarized data while immutable archives store finalized blocks. When the
-//! actor detects a gap (e.g., a notarization references an unknown block), it issues resolver
-//! requests through [`super::resolver`] to fetch the artifact from peers. Successful repairs are
-//! written to disk and replayed to the application in order.
+//! The standard variant uses the core [`crate::marshal::core::Actor`] and
+//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
+//! Blocks are broadcast through [`commonware_broadcast::buffered`].
 //!
 //! # When to Use
 //!
-//! Prefer this module when validators can afford to ship entire blocks to every peer or when
-//! erasure coding is unnecessary. Applications can switch between standard and coding marshal by
-//! swapping the mailbox pair they supply to [`Marshaled`] and the consensus automaton.
-
-mod mailbox;
-pub use mailbox::Mailbox;
-
-mod actor;
-pub use actor::{Actor, BroadcastBlock};
+//! Prefer this variant when validators can afford to ship entire blocks to every peer or when
+//! erasure coding is unnecessary.
 
 mod marshaled;
 pub use marshaled::Marshaled;
 
-pub(crate) mod cache;
+mod variant;
+pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
-    use super::{actor, mailbox};
+    use super::Standard;
     use crate::{
         marshal::{
             ancestry::{AncestorStream, AncestryProvider},
+            core::{Actor, Mailbox},
             mocks::{application::Application, block::Block},
             resolver::p2p as resolver,
             standard::Marshaled,
@@ -115,6 +88,7 @@ mod tests {
     type V = MinPk;
     type S = bls12381_threshold_vrf::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
+    type Variant = Standard<B>;
 
     /// Default leader key for tests.
     fn default_leader() -> K {
@@ -164,7 +138,7 @@ mod tests {
         oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
-    ) -> (Application<B>, mailbox::Mailbox<S, B>, Height) {
+    ) -> (Application<B>, Mailbox<S, Variant>, Height) {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -292,7 +266,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox, last_processed_height) = actor::Actor::init(
+        let (actor, mailbox, last_processed_height) = Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -471,7 +445,7 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height.get() % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.proposed(round, block.clone()).await;
+                actor.proposed(round, block.clone(), ()).await;
                 actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
@@ -621,7 +595,7 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height.get() % (applications.len() as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.proposed(round, block.clone()).await;
+                actor.proposed(round, block.clone(), ()).await;
                 actor.verified(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
@@ -850,7 +824,7 @@ mod tests {
                     .await
                     .expect("failed to initialize finalized blocks archive");
 
-                    let (actor, mailbox, _processed_height) = actor::Actor::init(
+                    let (actor, mailbox, _processed_height) = Actor::init(
                         ctx.clone(),
                         finalizations_by_height,
                         finalized_blocks,
@@ -1232,7 +1206,7 @@ mod tests {
 
             // Block1: Broadcasted by the actor
             actor
-                .proposed(Round::new(Epoch::zero(), View::new(1)), block1.clone())
+                .proposed(Round::new(Epoch::zero(), View::new(1)), block1.clone(), ())
                 .await;
             context.sleep(Duration::from_millis(20)).await;
 
@@ -1291,7 +1265,7 @@ mod tests {
             // Block5: Broadcasted by a remote node (different actor)
             let remote_actor = &mut actors[1].clone();
             remote_actor
-                .proposed(Round::new(Epoch::zero(), View::new(5)), block5.clone())
+                .proposed(Round::new(Epoch::zero(), View::new(5)), block5.clone(), ())
                 .await;
             context.sleep(Duration::from_millis(20)).await;
 
@@ -1881,6 +1855,7 @@ mod tests {
                 .proposed(
                     Round::new(Epoch::new(1), View::new(35)),
                     malicious_block.clone(),
+                    (),
                 )
                 .await;
 
@@ -1930,6 +1905,7 @@ mod tests {
                 .proposed(
                     Round::new(Epoch::new(1), View::new(22)),
                     malicious_block.clone(),
+                    (),
                 )
                 .await;
 
@@ -2274,7 +2250,7 @@ mod tests {
             let block_digest = block.digest();
             marshal
                 .clone()
-                .proposed(Round::new(Epoch::new(1), View::new(20)), block)
+                .proposed(Round::new(Epoch::new(1), View::new(20)), block, ())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2323,7 +2299,7 @@ mod tests {
 
             // Broadcast the block
             actor
-                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone(), ())
                 .await;
 
             // Ensure the block is cached and retrievable; This should hit the in-memory cache
@@ -2446,7 +2422,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
             let digest_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a).await;
+            marshal.clone().proposed(round_a, block_a, ()).await;
 
             // Block B at view 10 (height 2, different block same height - could happen with
             // different proposers or re-proposals)
@@ -2458,7 +2434,7 @@ mod tests {
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
             let digest_b = block_b.digest();
-            marshal.clone().proposed(round_b, block_b).await;
+            marshal.clone().proposed(round_b, block_b, ()).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2606,7 +2582,7 @@ mod tests {
             // Make the boundary block available for subscription
             marshal
                 .clone()
-                .proposed(boundary_round, boundary_block.clone())
+                .proposed(boundary_round, boundary_block.clone(), ())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2651,7 +2627,7 @@ mod tests {
             // Make the non-boundary block available
             marshal
                 .clone()
-                .proposed(non_boundary_round, non_boundary_block.clone())
+                .proposed(non_boundary_round, non_boundary_block.clone(), ())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2721,7 +2697,7 @@ mod tests {
             let normal_digest = normal_block.digest();
             marshal
                 .clone()
-                .proposed(normal_round, normal_block.clone())
+                .proposed(normal_round, normal_block.clone(), ())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;

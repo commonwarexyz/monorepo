@@ -79,6 +79,8 @@ pub mod resolver;
 pub mod standard;
 pub mod store;
 
+pub mod core;
+
 stability_mod!(ALPHA, pub mod coding);
 
 #[cfg(test)]
