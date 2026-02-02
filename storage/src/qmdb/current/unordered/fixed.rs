@@ -138,6 +138,7 @@ pub mod test {
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
+                db::Unmerkleized,
                 proof::RangeProof,
                 tests::{self, apply_random_ops},
             },
@@ -179,16 +180,8 @@ pub mod test {
     type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
     /// A type alias for the concrete mutable [Db] type used in these unit tests.
-    type MutableCurrentTest = Db<
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-        TwoCap,
-        32,
-        crate::qmdb::current::db::Unmerkleized,
-        NonDurable,
-    >;
+    type MutableCurrentTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32, Unmerkleized, NonDurable>;
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(

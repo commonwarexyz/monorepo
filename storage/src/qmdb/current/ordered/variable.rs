@@ -128,10 +128,7 @@ where
             status,
             grafted_pinned_nodes,
             bitmap_metadata,
-            state: Merkleized {
-                root,
-                grafted_mmr: grafted_mmr,
-            },
+            state: Merkleized { root, grafted_mmr },
         })
     }
 }
@@ -144,6 +141,7 @@ mod test {
         qmdb::{
             any::ordered::variable::Operation,
             current::{
+                db::Unmerkleized,
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
                 tests::{self, apply_random_ops},
@@ -189,16 +187,8 @@ mod test {
     type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
     /// A type alias for the Mutable variant of CurrentTest (Unmerkleized, NonDurable state).
-    type MutableCurrentTest = Db<
-        deterministic::Context,
-        Digest,
-        Digest,
-        Sha256,
-        OneCap,
-        32,
-        crate::qmdb::current::db::Unmerkleized,
-        NonDurable,
-    >;
+    type MutableCurrentTest =
+        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Unmerkleized, NonDurable>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(
