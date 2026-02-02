@@ -1,26 +1,11 @@
 //! Queue storage implementation.
 
 use super::{metrics, Error};
-use crate::{
-    journal::contiguous::variable,
-    metadata::{self, Metadata},
-    rmap::RMap,
-    Persistable,
-};
+use crate::{journal::contiguous::variable, rmap::RMap, Persistable};
 use commonware_codec::CodecShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use commonware_utils::sequence::U64;
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
-
-/// Metadata key for storing ack floor.
-const ACK_FLOOR_KEY: U64 = U64::new(0);
-
-/// Metadata key for storing ack ranges count.
-const ACK_RANGES_KEY: U64 = U64::new(1);
-
-/// Suffix for the ack metadata partition.
-const ACK_SUFFIX: &str = "_ack";
 
 /// Configuration for [Queue].
 #[derive(Clone)]
@@ -50,13 +35,6 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-impl<C> Config<C> {
-    /// Returns the partition name for the ack metadata.
-    fn ack_partition(&self) -> String {
-        format!("{}{}", self.partition, ACK_SUFFIX)
-    }
-}
-
 /// A durable, at-least-once delivery queue with per-item acknowledgment.
 ///
 /// Items are durably stored in a journal and survive crashes. The reader must
@@ -67,7 +45,7 @@ impl<C> Config<C> {
 ///
 /// The queue tracks acknowledgments using:
 /// - `ack_floor`: All items at positions < floor are considered acknowledged
-/// - `acked_above`: An [RMap] of acknowledged positions >= floor
+/// - `acked_above`: An in-memory [RMap] of acknowledged positions >= floor
 ///
 /// When items are acked contiguously from the floor (e.g., floor=5, then ack 5, 6, 7),
 /// the floor advances automatically. This coalescing keeps memory usage bounded.
@@ -76,40 +54,35 @@ impl<C> Config<C> {
 ///
 /// - **Enqueue**: Durably persists the item and returns its position.
 /// - **Dequeue**: Returns unacked items in FIFO order, skipping already-acked items.
-/// - **Ack**: Marks an item as processed and auto-prunes when the floor advances.
+/// - **Ack**: Marks an item as processed. Pruning happens during [Persistable::sync].
 ///
 /// # Crash Recovery
 ///
-/// On restart, the queue loads the persisted ack state and replays from the ack floor,
-/// skipping items that were previously acknowledged. This means:
-/// - Enqueued items are always durable (never lost)
-/// - Items that were acked but not synced will be re-delivered
-/// - Items above the ack floor that were acked and synced will be skipped
+/// On restart, the queue replays from the journal's pruning boundary (the oldest
+/// non-pruned item). Acknowledgment state is not persisted, so:
+/// - Items that were pruned before crash are considered acknowledged (deleted)
+/// - Items that were acked but not pruned will be re-delivered
+///
+/// This provides at-least-once delivery with minimal complexity.
 pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
-
-    /// Metadata store for persisting ack state.
-    ack_metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Position of the next item to dequeue.
     ///
     /// Invariant: `ack_floor <= read_pos <= journal.size()`
     read_pos: u64,
 
-    /// All items at positions < ack_floor are acknowledged.
+    /// All items at positions < ack_floor are considered acknowledged.
     ///
-    /// Invariant: `journal.pruning_boundary() <= ack_floor`
+    /// On restart, this is initialized to `journal.pruning_boundary()`.
     ack_floor: u64,
 
-    /// Ranges of acknowledged items at positions >= ack_floor.
+    /// Ranges of acknowledged items at positions >= ack_floor (in-memory only).
     ///
     /// When an item at position == ack_floor is acked, the floor advances
-    /// and any contiguous acked items are consumed.
+    /// and any contiguous acked items are consumed. Lost on restart.
     acked_above: RMap,
-
-    /// Whether ack state has been modified since last sync.
-    ack_dirty: bool,
 
     /// Metrics for monitoring queue state.
     metrics: metrics::Metrics,
@@ -118,16 +91,14 @@ pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
 impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Initialize a queue from storage.
     ///
-    /// On first initialization, creates an empty queue. On restart, loads the persisted
-    /// ack state and begins reading from the ack floor (providing at-least-once delivery
-    /// for unacked items).
+    /// On first initialization, creates an empty queue. On restart, begins reading
+    /// from the journal's pruning boundary (providing at-least-once delivery for
+    /// all non-pruned items).
     ///
     /// # Errors
     ///
-    /// Returns an error if the underlying journal or metadata cannot be initialized.
+    /// Returns an error if the underlying journal cannot be initialized.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let ack_partition = cfg.ack_partition();
-
         // Initialize metrics before creating sub-contexts
         let metrics = metrics::Metrics::init(&context);
 
@@ -144,128 +115,25 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         )
         .await?;
 
-        let ack_metadata = Metadata::init(
-            context.with_label("ack"),
-            metadata::Config {
-                partition: ack_partition,
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await?;
+        // On restart, ack_floor is the pruning boundary (items below are deleted).
+        // acked_above is empty (in-memory state lost on restart).
+        let ack_floor = journal.pruning_boundary();
+        let acked_above = RMap::new();
 
-        // Load persisted ack state
-        let (mut ack_floor, mut acked_above) = Self::load_ack_state(&ack_metadata);
-
-        // Ensure consistency after crash recovery: if the journal was pruned but
-        // ack metadata wasn't synced, ack_floor might be stale (less than pruning_boundary).
-        // Adjust to prevent reading pruned positions.
-        let pruning_boundary = journal.pruning_boundary();
-        if ack_floor < pruning_boundary {
-            debug!(
-                old_ack_floor = ack_floor,
-                pruning_boundary, "adjusting ack_floor to pruning_boundary after crash"
-            );
-            // Remove any acked_above entries below new floor
-            if pruning_boundary > 0 {
-                acked_above.remove(0, pruning_boundary - 1);
-            }
-            ack_floor = pruning_boundary;
-
-            // Coalesce: if ack_floor or subsequent positions are in acked_above,
-            // consume them and advance the floor. This handles the case where
-            // acked_above contained the pruning_boundary position.
-            while acked_above.get(&ack_floor).is_some() {
-                acked_above.remove(ack_floor, ack_floor);
-                ack_floor += 1;
-            }
-        }
-
-        // On restart, begin reading from the ack floor
-        let start_pos = ack_floor;
-
-        debug!(
-            start_pos,
-            ack_floor,
-            size = journal.size(),
-            pruning_boundary,
-            "queue initialized"
-        );
+        debug!(ack_floor, size = journal.size(), "queue initialized");
 
         // Set initial metric values
         metrics.size.set(journal.size() as i64);
         metrics.ack_floor.set(ack_floor as i64);
-        metrics
-            .acked_above_ranges
-            .set(acked_above.iter().count() as i64);
+        metrics.acked_above_ranges.set(0);
 
         Ok(Self {
             journal,
-            ack_metadata,
-            read_pos: start_pos,
+            read_pos: ack_floor,
             ack_floor,
             acked_above,
-            ack_dirty: false,
             metrics,
         })
-    }
-
-    /// Load ack state from metadata.
-    fn load_ack_state(metadata: &Metadata<E, U64, Vec<u8>>) -> (u64, RMap) {
-        // Load ack floor
-        let ack_floor = metadata
-            .get(&ACK_FLOOR_KEY)
-            .and_then(|bytes| {
-                if bytes.len() >= 8 {
-                    Some(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
-
-        // Load ack ranges
-        let mut acked_above = RMap::new();
-        if let Some(bytes) = metadata.get(&ACK_RANGES_KEY) {
-            // Format: [count: u64][start: u64, end: u64]*
-            if bytes.len() >= 8 {
-                let count = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
-                let mut offset = 8;
-                for _ in 0..count {
-                    if offset + 16 <= bytes.len() {
-                        let start =
-                            u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-                        let end =
-                            u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap());
-                        // Insert each value in the range
-                        for pos in start..=end {
-                            acked_above.insert(pos);
-                        }
-                        offset += 16;
-                    }
-                }
-            }
-        }
-
-        (ack_floor, acked_above)
-    }
-
-    /// Save ack state to metadata.
-    fn save_ack_state(&mut self) {
-        // Save ack floor
-        self.ack_metadata
-            .put(ACK_FLOOR_KEY, self.ack_floor.to_le_bytes().to_vec());
-
-        // Save ack ranges
-        let ranges: Vec<_> = self.acked_above.iter().collect();
-        let mut bytes = Vec::with_capacity(8 + ranges.len() * 16);
-        bytes.extend_from_slice(&(ranges.len() as u64).to_le_bytes());
-        for (&start, &end) in &ranges {
-            bytes.extend_from_slice(&start.to_le_bytes());
-            bytes.extend_from_slice(&end.to_le_bytes());
-        }
-        self.ack_metadata.put(ACK_RANGES_KEY, bytes);
-
-        self.ack_dirty = false;
     }
 
     /// Check if a position is acknowledged.
@@ -341,8 +209,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
     /// Acknowledge processing of an item at the given position.
     ///
-    /// After acknowledgment, the item will be skipped on dequeue. When the ack floor
-    /// advances, acknowledged items are automatically pruned from storage.
+    /// After acknowledgment, the item will be skipped on dequeue. Pruning of
+    /// acknowledged items happens during [Persistable::sync].
     ///
     /// If items are acked contiguously from the ack floor, the floor advances
     /// automatically to keep memory bounded.
@@ -370,8 +238,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             return Ok(());
         }
 
-        self.ack_dirty = true;
-
         if position == self.ack_floor {
             // Advance floor
             self.ack_floor = position + 1;
@@ -395,9 +261,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             .acked_above_ranges
             .set(self.acked_above.iter().count() as i64);
 
-        // Auto-prune (no-op unless floor crossed a section boundary)
-        self.journal.prune(self.ack_floor).await?;
-
         Ok(())
     }
 
@@ -405,7 +268,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     ///
     /// This is a convenience method for batch acknowledgment. It's equivalent to calling
     /// [Queue::ack] for each position in `[ack_floor, up_to)`, but more efficient as it
-    /// directly advances the ack floor. Acknowledged items are automatically pruned.
+    /// directly advances the ack floor. Pruning happens during [Persistable::sync].
     ///
     /// # Arguments
     ///
@@ -425,8 +288,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             return Ok(());
         }
 
-        self.ack_dirty = true;
-
         // Remove any acked_above entries that will be covered by the new floor
         self.acked_above.remove(self.ack_floor, up_to - 1);
 
@@ -444,9 +305,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.metrics
             .acked_above_ranges
             .set(self.acked_above.iter().count() as i64);
-
-        // Auto-prune (section-granular, no-op unless we crossed a boundary)
-        self.journal.prune(self.ack_floor).await?;
 
         debug!(ack_floor = self.ack_floor, "batch acked up to");
         Ok(())
@@ -508,9 +366,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
     /// Manually prune acknowledged items from storage.
     ///
-    /// Note: Pruning now happens automatically when items are acknowledged and the
-    /// ack floor advances. This method is only needed if you want to force a prune
-    /// check without acknowledging any items.
+    /// Note: Pruning happens automatically during [Persistable::sync] and
+    /// [Persistable::commit]. This method is only needed if you want to force
+    /// a prune check without syncing.
     ///
     /// Returns `true` if any data was pruned.
     ///
@@ -543,42 +401,33 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Queue<E, V> {
     type Error = Error;
 
-    /// Checkpoint ack state to storage.
+    /// Prune acknowledged items and commit the journal.
     ///
     /// Enqueued items are already durable (persisted in [Queue::enqueue]). This method
-    /// persists the acknowledgment state so that acked items won't be re-delivered
-    /// after a crash.
+    /// prunes items below the ack floor and commits the journal state.
     ///
-    /// If you skip calling this, items that were acked will be re-delivered on restart
-    /// (at-least-once semantics).
+    /// Items that were acked but not pruned (i.e., ack_floor hasn't crossed a section
+    /// boundary) will be re-delivered on restart. This is at-least-once semantics.
     async fn commit(&mut self) -> Result<(), Self::Error> {
-        if self.ack_dirty {
-            self.save_ack_state();
-        }
+        self.journal.prune(self.ack_floor).await?;
         self.journal.commit().await?;
-        self.ack_metadata.sync().await?;
         Ok(())
     }
 
-    /// Checkpoint ack state to storage with full sync.
+    /// Prune acknowledged items and sync the journal.
     ///
     /// Similar to [Persistable::commit] but ensures the journal doesn't require
     /// recovery on startup.
     ///
-    /// If you skip calling this, items that were acked will be re-delivered on restart
-    /// (at-least-once semantics).
+    /// Items that were acked but not pruned will be re-delivered on restart.
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        if self.ack_dirty {
-            self.save_ack_state();
-        }
+        self.journal.prune(self.ack_floor).await?;
         self.journal.sync().await?;
-        self.ack_metadata.sync().await?;
         Ok(())
     }
 
     async fn destroy(self) -> Result<(), Self::Error> {
         self.journal.destroy().await?;
-        self.ack_metadata.destroy().await?;
         Ok(())
     }
 }
@@ -959,13 +808,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Enqueue items (more than items_per_section to test auto-pruning)
+            // Enqueue items (more than items_per_section to test pruning)
             for i in 0..25u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
             queue.sync().await.unwrap();
 
-            // Read and ack some items (auto-prunes when crossing section boundaries)
+            // Read and ack some items
             for i in 0..15 {
                 queue.dequeue().await.unwrap();
                 queue.ack(i).await.unwrap();
@@ -996,7 +845,7 @@ mod tests {
             }
             queue.sync().await.unwrap();
 
-            // First batch: ack items 0-14 (auto-prunes when crossing section boundaries)
+            // First batch: ack items 0-14
             for i in 0..15 {
                 queue.dequeue().await.unwrap();
                 queue.ack(i).await.unwrap();
@@ -1008,7 +857,7 @@ mod tests {
             assert_eq!(p, 15);
             assert_eq!(item, vec![15]);
 
-            // Second batch: ack items 15-29 (auto-prunes)
+            // Second batch: ack items 15-29
             queue.ack(15).await.unwrap();
             for i in 16..30 {
                 queue.dequeue().await.unwrap();
@@ -1021,7 +870,7 @@ mod tests {
             assert_eq!(p, 30);
             assert_eq!(item, vec![30]);
 
-            // Third batch: ack remaining items (auto-prunes)
+            // Third batch: ack remaining items
             queue.ack(30).await.unwrap();
             for i in 31..50 {
                 queue.dequeue().await.unwrap();
@@ -1038,75 +887,13 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_crash_recovery_preserves_ack_state() {
+    fn test_crash_recovery_replays_from_pruning_boundary() {
+        // On restart, ack_floor = pruning_boundary. Items not pruned are re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_recovery_ack");
+            let cfg = test_config("test_recovery_replay");
 
-            // First session: enqueue, ack out of order, sync
-            {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
-
-                for i in 0..10u8 {
-                    queue.enqueue(vec![i]).await.unwrap();
-                }
-
-                // Ack items 0, 1, 2, 5, 7
-                queue.ack(0).await.unwrap();
-                queue.ack(1).await.unwrap();
-                queue.ack(2).await.unwrap();
-                queue.ack(5).await.unwrap();
-                queue.ack(7).await.unwrap();
-
-                assert_eq!(queue.ack_floor(), 3); // 0,1,2 consumed
-
-                queue.sync().await.unwrap();
-                drop(queue);
-            }
-
-            // Second session: verify ack state is preserved
-            {
-                let mut queue =
-                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
-                        .await
-                        .unwrap();
-
-                assert_eq!(queue.ack_floor(), 3);
-                assert!(queue.is_position_acked(5));
-                assert!(queue.is_position_acked(7));
-                assert!(!queue.is_position_acked(4));
-                assert!(!queue.is_position_acked(6));
-
-                // Dequeue should return items 3, 4, 6, 8, 9 (skipping acked 5, 7)
-                let (p, _) = queue.dequeue().await.unwrap().unwrap();
-                assert_eq!(p, 3);
-
-                let (p, _) = queue.dequeue().await.unwrap().unwrap();
-                assert_eq!(p, 4);
-
-                let (p, _) = queue.dequeue().await.unwrap().unwrap();
-                assert_eq!(p, 6); // Skipped 5
-
-                let (p, _) = queue.dequeue().await.unwrap().unwrap();
-                assert_eq!(p, 8); // Skipped 7
-
-                let (p, _) = queue.dequeue().await.unwrap().unwrap();
-                assert_eq!(p, 9);
-
-                queue.destroy().await.unwrap();
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_crash_recovery_unsynced_acks_lost() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_config("test_recovery_unsync");
-
-            // First session: enqueue, ack, but don't sync
+            // First session: enqueue items, ack some (but not enough to prune)
             {
                 let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
                     .await
@@ -1115,26 +902,25 @@ mod tests {
                 for i in 0..5u8 {
                     queue.enqueue(vec![i]).await.unwrap();
                 }
-                queue.sync().await.unwrap(); // Sync journal only
 
-                // Ack without sync
+                // Ack items 0, 1, 2 - but items_per_section=10, so no pruning
                 queue.ack(0).await.unwrap();
                 queue.ack(1).await.unwrap();
                 queue.ack(2).await.unwrap();
                 assert_eq!(queue.ack_floor(), 3);
 
-                // Don't sync - simulate crash
+                queue.sync().await.unwrap();
                 drop(queue);
             }
 
-            // Second session: ack state should be lost
+            // Second session: all items are re-delivered (no pruning occurred)
             {
                 let mut queue =
                     Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
                         .await
                         .unwrap();
 
-                // Ack floor should be 0 (lost)
+                // ack_floor = pruning_boundary = 0 (nothing was pruned)
                 assert_eq!(queue.ack_floor(), 0);
 
                 // All items re-delivered
@@ -1149,11 +935,8 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_crash_recovery_pruned_journal_stale_metadata() {
-        // Tests the scenario where:
-        // 1. Items are acked and journal is pruned
-        // 2. Journal sync completes but ack metadata sync doesn't (crash)
-        // 3. On recovery, ack_floor should be adjusted to pruning_boundary
+    fn test_crash_recovery_with_pruning() {
+        // Items pruned before crash are not re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_recovery_pruned");
@@ -1169,13 +952,13 @@ mod tests {
                     queue.enqueue(vec![i]).await.unwrap();
                 }
 
-                // Ack items 0-14 to advance floor and trigger pruning of section 0
+                // Ack items 0-14 to advance floor past section 0
                 for i in 0..15 {
                     queue.ack(i).await.unwrap();
                 }
                 assert_eq!(queue.ack_floor(), 15);
 
-                // Sync everything (both journal prune state and ack metadata)
+                // Sync triggers pruning
                 queue.sync().await.unwrap();
 
                 // Verify pruning occurred
@@ -1185,63 +968,25 @@ mod tests {
                 drop(queue);
             }
 
-            // Simulate crash: manually reset ack metadata to stale state
-            // This simulates a crash after journal sync but before metadata sync
+            // Second session: only non-pruned items are available
             {
-                let ack_partition = format!("{}_ack", cfg.partition);
-                let mut ack_metadata: Metadata<_, U64, Vec<u8>> = Metadata::init(
-                    context.with_label("corrupt"),
-                    metadata::Config {
-                        partition: ack_partition,
-                        codec_config: ((0..).into(), ()),
-                    },
-                )
-                .await
-                .unwrap();
+                let mut queue =
+                    Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg.clone())
+                        .await
+                        .unwrap();
 
-                // Write stale ack_floor = 0 (simulating unsynced metadata)
-                ack_metadata.put(ACK_FLOOR_KEY, 0u64.to_le_bytes().to_vec());
-                ack_metadata.put(ACK_RANGES_KEY, 0u64.to_le_bytes().to_vec()); // No ranges
-                ack_metadata.sync().await.unwrap();
-            }
-
-            // Third session: verify recovery handles stale metadata correctly
-            {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("third"), cfg.clone())
-                    .await
-                    .unwrap();
-
-                // ack_floor should have been adjusted to pruning_boundary
+                // ack_floor = pruning_boundary (items 0-9 were pruned)
                 let pruning_boundary = queue.journal.pruning_boundary();
-                assert!(
-                    queue.ack_floor() >= pruning_boundary,
-                    "ack_floor ({}) should be >= pruning_boundary ({})",
-                    queue.ack_floor(),
-                    pruning_boundary
-                );
+                assert_eq!(queue.ack_floor(), pruning_boundary);
 
-                // read_pos should also be at or above pruning_boundary
-                assert!(
-                    queue.read_position() >= pruning_boundary,
-                    "read_position ({}) should be >= pruning_boundary ({})",
-                    queue.read_position(),
-                    pruning_boundary
-                );
-
-                // Dequeue should work without panicking (no reading pruned data)
-                let result = queue.dequeue().await;
-                assert!(result.is_ok(), "dequeue should not fail after recovery");
-
-                // If there are items, they should be at valid positions
-                if let Ok(Some((pos, _))) = result {
-                    assert!(
-                        pos >= pruning_boundary,
-                        "dequeued position ({}) should be >= pruning_boundary ({})",
-                        pos,
-                        pruning_boundary
-                    );
+                // Items from pruning_boundary to 24 are re-delivered
+                for i in pruning_boundary..25 {
+                    let (p, item) = queue.dequeue().await.unwrap().unwrap();
+                    assert_eq!(p, i);
+                    assert_eq!(item, vec![i as u8]);
                 }
 
+                assert!(queue.dequeue().await.unwrap().is_none());
                 queue.destroy().await.unwrap();
             }
         });
@@ -1439,114 +1184,6 @@ mod tests {
             assert_eq!(queue.acked_above_count(), 0);
 
             queue.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_crash_recovery_acked_above_at_floor() {
-        // Regression test: After crash recovery, if acked_above contains a position
-        // equal to the adjusted ack_floor, ack() should still advance the floor.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_config("test_recovery_floor");
-
-            // First session: enqueue items, ack some out of order, prune
-            {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
-                    .await
-                    .unwrap();
-
-                // Enqueue items across multiple sections (items_per_section = 10)
-                for i in 0..25u8 {
-                    queue.enqueue(vec![i]).await.unwrap();
-                }
-
-                // Ack items 0-9 to advance floor to 10 and trigger pruning of section 0
-                for i in 0..10 {
-                    queue.ack(i).await.unwrap();
-                }
-                assert_eq!(queue.ack_floor(), 10);
-
-                // Also ack item 10 (which will be at the pruning boundary)
-                queue.ack(10).await.unwrap();
-                assert_eq!(queue.ack_floor(), 11);
-
-                // Sync to persist the ack state
-                queue.sync().await.unwrap();
-                drop(queue);
-            }
-
-            // Simulate crash: manually corrupt ack metadata to have stale floor but keep
-            // acked_above entries. This simulates partial sync where journal pruned but
-            // ack_floor wasn't updated.
-            {
-                let ack_partition = format!("{}_ack", cfg.partition);
-                let mut ack_metadata: Metadata<_, U64, Vec<u8>> = Metadata::init(
-                    context.with_label("corrupt"),
-                    metadata::Config {
-                        partition: ack_partition,
-                        codec_config: ((0..).into(), ()),
-                    },
-                )
-                .await
-                .unwrap();
-
-                // Write stale ack_floor = 5, but keep acked_above with position 10
-                // This simulates: floor at 5, acked_above = {10}
-                // After recovery adjustment: floor should be 10, but 10 is in acked_above
-                ack_metadata.put(ACK_FLOOR_KEY, 5u64.to_le_bytes().to_vec());
-
-                // Format: [count: u64][start: u64, end: u64]*
-                // We want range [10, 10] (single item)
-                let mut bytes = Vec::new();
-                bytes.extend_from_slice(&1u64.to_le_bytes()); // count = 1
-                bytes.extend_from_slice(&10u64.to_le_bytes()); // start = 10
-                bytes.extend_from_slice(&10u64.to_le_bytes()); // end = 10
-                ack_metadata.put(ACK_RANGES_KEY, bytes);
-                ack_metadata.sync().await.unwrap();
-            }
-
-            // Third session: verify recovery handles this correctly
-            {
-                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("third"), cfg.clone())
-                    .await
-                    .unwrap();
-
-                // The pruning boundary should be 10 (section 0 was pruned)
-                let pruning_boundary = queue.journal.pruning_boundary();
-                assert_eq!(pruning_boundary, 10, "expected pruning_boundary to be 10");
-
-                // After recovery, ack_floor should be >= 10
-                // The bug: if acked_above contains 10, floor might be stuck at 10
-                // The fix: should coalesce and advance to 11
-                assert!(
-                    queue.ack_floor() >= 10,
-                    "ack_floor ({}) should be >= 10",
-                    queue.ack_floor()
-                );
-
-                // Key test: calling ack(10) should not leave the floor stuck
-                // (it should be a no-op if already past 10, or advance if at 10)
-                let floor_before = queue.ack_floor();
-                queue.ack(10).await.unwrap();
-                let floor_after = queue.ack_floor();
-
-                // If floor was at 10 before, it should advance to 11
-                // If floor was already past 10, it should stay the same
-                if floor_before == 10 {
-                    assert_eq!(
-                        floor_after, 11,
-                        "ack(10) should advance floor from 10 to 11"
-                    );
-                } else {
-                    assert_eq!(
-                        floor_after, floor_before,
-                        "ack(10) should be no-op when floor > 10"
-                    );
-                }
-
-                queue.destroy().await.unwrap();
-            }
         });
     }
 

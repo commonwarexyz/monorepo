@@ -2,8 +2,11 @@
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! Items are durably stored in a journal and will survive crashes. The reader must
-//! explicitly acknowledge each item after processing. If a crash occurs before
-//! acknowledgment, items will be re-delivered on restart.
+//! explicitly acknowledge each item after processing.
+//!
+//! On restart, the queue replays from the journal's pruning boundary. Items that were
+//! acknowledged but not yet pruned will be re-delivered. This provides simple, robust
+//! at-least-once delivery without complex metadata synchronization.
 //!
 //! # Concurrent Access
 //!
@@ -37,7 +40,8 @@
 //! The queue guarantees that every enqueued item will be delivered at least once.
 //! Duplicate delivery may occur if:
 //! - The reader processes an item but crashes before acknowledging it
-//! - The reader acknowledges items but the process crashes before the journal syncs
+//! - The reader acknowledges items but the ack floor hasn't crossed a section boundary
+//!   (pruning is section-granular)
 //!
 //! Applications must be prepared to handle duplicate messages (idempotent processing).
 //!
@@ -47,11 +51,15 @@
 //! This enables:
 //! - Parallel processing with multiple workers
 //! - Selective retries (one stuck item doesn't block others)
-//! - More efficient crash recovery (only truly unprocessed items are re-delivered)
+//! - Flexible processing order
 //!
-//! Acknowledged items are tracked using an "ack floor" plus ranges of acked items above
-//! the floor. When items are acked contiguously from the floor, the floor advances and
-//! acknowledged items are automatically pruned from storage.
+//! Acknowledged items are tracked in-memory using an "ack floor" plus ranges of acked
+//! items above the floor. When items are acked contiguously from the floor, the floor
+//! advances. Pruning happens during [`Persistable::sync`](crate::Persistable::sync) and
+//! removes complete sections below the ack floor.
+//!
+//! Note: The ack state is not persisted. On restart, items not yet pruned will be
+//! re-delivered regardless of prior acknowledgments.
 //!
 //! # Example
 //!
@@ -82,7 +90,7 @@
 //!         // Process the item...
 //!         println!("Processing item at position {}", position);
 //!
-//!         // Acknowledge after successful processing (auto-prunes)
+//!         // Acknowledge after successful processing
 //!         queue.ack(position).await.unwrap();
 //!     }
 //!

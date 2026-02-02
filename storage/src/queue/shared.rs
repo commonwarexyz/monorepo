@@ -57,7 +57,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
         self.queue.lock().await.size()
     }
 
-    /// Checkpoint ack state to storage.
+    /// Prune acknowledged items and sync the journal.
     ///
     /// See [Persistable::sync] for details.
     pub async fn sync(&self) -> Result<(), Error> {
@@ -163,7 +163,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
         self.queue.lock().await.reset();
     }
 
-    /// Checkpoint ack state to storage.
+    /// Prune acknowledged items and sync the journal.
     ///
     /// See [Persistable::sync] for details.
     pub async fn sync(&self) -> Result<(), Error> {
