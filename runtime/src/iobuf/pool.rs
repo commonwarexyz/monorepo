@@ -30,7 +30,8 @@
 //! - Class 3: 32768 bytes
 //!
 //! Allocation requests are rounded up to the next size class. Requests larger
-//! than `max_size` return `None`.
+//! than `max_size` return [`PoolError::Oversized`] from [`BufferPool::try_alloc`],
+//! or fall back to untracked heap allocation from [`BufferPool::alloc`].
 
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
