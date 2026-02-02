@@ -170,6 +170,14 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
                 acked_above.remove(0, pruning_boundary - 1);
             }
             ack_floor = pruning_boundary;
+
+            // Coalesce: if ack_floor or subsequent positions are in acked_above,
+            // consume them and advance the floor. This handles the case where
+            // acked_above contained the pruning_boundary position.
+            while acked_above.get(&ack_floor).is_some() {
+                acked_above.remove(ack_floor, ack_floor);
+                ack_floor += 1;
+            }
         }
 
         // On restart, begin reading from the ack floor
@@ -1431,6 +1439,114 @@ mod tests {
             assert_eq!(queue.acked_above_count(), 0);
 
             queue.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_crash_recovery_acked_above_at_floor() {
+        // Regression test: After crash recovery, if acked_above contains a position
+        // equal to the adjusted ack_floor, ack() should still advance the floor.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_recovery_floor");
+
+            // First session: enqueue items, ack some out of order, prune
+            {
+                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+                // Enqueue items across multiple sections (items_per_section = 10)
+                for i in 0..25u8 {
+                    queue.enqueue(vec![i]).await.unwrap();
+                }
+
+                // Ack items 0-9 to advance floor to 10 and trigger pruning of section 0
+                for i in 0..10 {
+                    queue.ack(i).await.unwrap();
+                }
+                assert_eq!(queue.ack_floor(), 10);
+
+                // Also ack item 10 (which will be at the pruning boundary)
+                queue.ack(10).await.unwrap();
+                assert_eq!(queue.ack_floor(), 11);
+
+                // Sync to persist the ack state
+                queue.sync().await.unwrap();
+                drop(queue);
+            }
+
+            // Simulate crash: manually corrupt ack metadata to have stale floor but keep
+            // acked_above entries. This simulates partial sync where journal pruned but
+            // ack_floor wasn't updated.
+            {
+                let ack_partition = format!("{}_ack", cfg.partition);
+                let mut ack_metadata: Metadata<_, U64, Vec<u8>> = Metadata::init(
+                    context.with_label("corrupt"),
+                    metadata::Config {
+                        partition: ack_partition,
+                        codec_config: ((0..).into(), ()),
+                    },
+                )
+                .await
+                .unwrap();
+
+                // Write stale ack_floor = 5, but keep acked_above with position 10
+                // This simulates: floor at 5, acked_above = {10}
+                // After recovery adjustment: floor should be 10, but 10 is in acked_above
+                ack_metadata.put(ACK_FLOOR_KEY, 5u64.to_le_bytes().to_vec());
+
+                // Format: [count: u64][start: u64, end: u64]*
+                // We want range [10, 10] (single item)
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(&1u64.to_le_bytes()); // count = 1
+                bytes.extend_from_slice(&10u64.to_le_bytes()); // start = 10
+                bytes.extend_from_slice(&10u64.to_le_bytes()); // end = 10
+                ack_metadata.put(ACK_RANGES_KEY, bytes);
+                ack_metadata.sync().await.unwrap();
+            }
+
+            // Third session: verify recovery handles this correctly
+            {
+                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("third"), cfg.clone())
+                    .await
+                    .unwrap();
+
+                // The pruning boundary should be 10 (section 0 was pruned)
+                let pruning_boundary = queue.journal.pruning_boundary();
+                assert_eq!(pruning_boundary, 10, "expected pruning_boundary to be 10");
+
+                // After recovery, ack_floor should be >= 10
+                // The bug: if acked_above contains 10, floor might be stuck at 10
+                // The fix: should coalesce and advance to 11
+                assert!(
+                    queue.ack_floor() >= 10,
+                    "ack_floor ({}) should be >= 10",
+                    queue.ack_floor()
+                );
+
+                // Key test: calling ack(10) should not leave the floor stuck
+                // (it should be a no-op if already past 10, or advance if at 10)
+                let floor_before = queue.ack_floor();
+                queue.ack(10).await.unwrap();
+                let floor_after = queue.ack_floor();
+
+                // If floor was at 10 before, it should advance to 11
+                // If floor was already past 10, it should stay the same
+                if floor_before == 10 {
+                    assert_eq!(
+                        floor_after, 11,
+                        "ack(10) should advance floor from 10 to 11"
+                    );
+                } else {
+                    assert_eq!(
+                        floor_after, floor_before,
+                        "ack(10) should be no-op when floor > 10"
+                    );
+                }
+
+                queue.destroy().await.unwrap();
+            }
         });
     }
 
