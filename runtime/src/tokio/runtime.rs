@@ -302,14 +302,14 @@ impl crate::Runner for Runner {
             }
         }
 
-        // Initialize buffer pools (before network, as network uses the pool)
+        // Initialize buffer pools
         let network_pool = BufferPool::new(
             BufferPoolConfig::for_network(),
-            runtime_registry.sub_registry_with_prefix("network"),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_pool = BufferPool::new(
             BufferPoolConfig::for_storage(),
-            runtime_registry.sub_registry_with_prefix("storage"),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
         // Initialize network
