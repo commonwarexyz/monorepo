@@ -355,9 +355,6 @@ impl Drop for AlignedBuffer {
 /// The freelist stores `Option<AlignedBuffer>` where:
 /// - `Some(buf)` = a reusable buffer
 /// - `None` = an available slot for creating a new buffer
-///
-/// This design uses the queue capacity to enforce the pool limit without
-/// needing atomic CAS operations for slot reservation.
 struct SizeClass {
     /// The buffer size for this class.
     size: usize,
@@ -1706,8 +1703,8 @@ mod tests {
         let mut registry = test_registry();
 
         // Storage preset - page aligned
-        let storage_pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let mut buf = storage_pool.try_alloc(100).unwrap();
+        let storage_buffer_pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let mut buf = storage_buffer_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % page,
             0,
@@ -1715,8 +1712,8 @@ mod tests {
         );
 
         // Network preset - cache-line aligned
-        let network_pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
-        let mut buf = network_pool.try_alloc(100).unwrap();
+        let network_buffer_pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let mut buf = network_buffer_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % cache_line,
             0,

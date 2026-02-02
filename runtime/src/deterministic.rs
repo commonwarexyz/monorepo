@@ -809,8 +809,8 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    network_pool: Arc<BufferPool>,
-    storage_pool: Arc<BufferPool>,
+    network_buffer_pool: Arc<BufferPool>,
+    storage_buffer_pool: Arc<BufferPool>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -825,8 +825,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
-            network_pool: self.network_pool.clone(),
-            storage_pool: self.storage_pool.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -856,11 +856,11 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
-        let network_pool = BufferPool::new(
+        let network_buffer_pool = BufferPool::new(
             BufferPoolConfig::for_network(),
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
-        let storage_pool = BufferPool::new(
+        let storage_buffer_pool = BufferPool::new(
             BufferPoolConfig::for_storage(),
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
@@ -891,8 +891,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                network_pool: Arc::new(network_pool),
-                storage_pool: Arc::new(storage_pool),
+                network_buffer_pool: Arc::new(network_buffer_pool),
+                storage_buffer_pool: Arc::new(storage_buffer_pool),
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -925,11 +925,11 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
-        let network_pool = BufferPool::new(
+        let network_buffer_pool = BufferPool::new(
             BufferPoolConfig::for_network(),
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
-        let storage_pool = BufferPool::new(
+        let storage_buffer_pool = BufferPool::new(
             BufferPoolConfig::for_storage(),
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
@@ -962,8 +962,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                network_pool: Arc::new(network_pool),
-                storage_pool: Arc::new(storage_pool),
+                network_buffer_pool: Arc::new(network_buffer_pool),
+                storage_buffer_pool: Arc::new(storage_buffer_pool),
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -1524,11 +1524,11 @@ impl crate::Storage for Context {
 
 impl crate::BufferPooler for Context {
     fn network_buffer_pool(&self) -> &crate::BufferPool {
-        &self.network_pool
+        &self.network_buffer_pool
     }
 
     fn storage_buffer_pool(&self) -> &crate::BufferPool {
-        &self.storage_pool
+        &self.storage_buffer_pool
     }
 }
 

@@ -303,11 +303,11 @@ impl crate::Runner for Runner {
         }
 
         // Initialize buffer pools
-        let network_pool = BufferPool::new(
+        let network_buffer_pool = BufferPool::new(
             BufferPoolConfig::for_network(),
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
-        let storage_pool = BufferPool::new(
+        let storage_buffer_pool = BufferPool::new(
             BufferPoolConfig::for_storage(),
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
@@ -329,7 +329,7 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry, network_pool.clone()).unwrap(),
+                    IoUringNetwork::start(config, iouring_registry, network_buffer_pool.clone()).unwrap(),
                 runtime_registry,
             );
         } else {
@@ -338,7 +338,7 @@ impl crate::Runner for Runner {
                 .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::new(config, network_pool.clone()),
+                    TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,
                 );
             }
@@ -365,8 +365,8 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            network_pool,
-            storage_pool,
+            network_buffer_pool,
+            storage_buffer_pool,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -403,8 +403,8 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    network_pool: BufferPool,
-    storage_pool: BufferPool,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -419,8 +419,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            network_pool: self.network_pool.clone(),
-            storage_pool: self.storage_pool.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree: child,
             execution: Execution::default(),
             instrumented: false,
@@ -736,10 +736,10 @@ impl crate::Storage for Context {
 
 impl crate::BufferPooler for Context {
     fn network_buffer_pool(&self) -> &BufferPool {
-        &self.network_pool
+        &self.network_buffer_pool
     }
 
     fn storage_buffer_pool(&self) -> &BufferPool {
-        &self.storage_pool
+        &self.storage_buffer_pool
     }
 }
