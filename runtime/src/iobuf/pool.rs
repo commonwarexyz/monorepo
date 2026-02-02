@@ -452,7 +452,7 @@ impl BufferPoolInner {
     }
 }
 
-/// A pool of reusable, page-aligned buffers.
+/// A pool of reusable, aligned buffers.
 ///
 /// Buffers are organized into power-of-two size classes. When a buffer is requested,
 /// the smallest size class that fits is used. Buffers are automatically returned to
@@ -599,7 +599,7 @@ impl BufferPool {
 /// # Invariants
 ///
 /// - `cursor <= len <= raw_capacity`
-/// - Bytes in `0..len` are initialized (safe to read)
+/// - Bytes in `0..len` have been initialized (safe to read)
 /// - Bytes in `len..raw_capacity` are uninitialized (write-only via `BufMut`)
 ///
 /// # Computed Values
@@ -649,7 +649,7 @@ impl PooledBufMut {
 
     /// Returns the number of readable bytes remaining in the buffer.
     ///
-    /// This is `written_len - cursor`, matching `BytesMut` semantics.
+    /// This is `len - cursor`, matching `BytesMut` semantics.
     #[inline]
     pub const fn len(&self) -> usize {
         self.len - self.cursor
@@ -792,9 +792,9 @@ impl Buf for PooledBufMut {
 }
 
 // SAFETY: BufMut implementation for PooledBufMut.
-// - `remaining_mut()` reports bytes available for writing (raw_capacity - write_pos)
-// - `chunk_mut()` returns uninitialized memory from write_pos to raw_capacity
-// - `advance_mut()` advances the write position within bounds
+// - `remaining_mut()` reports bytes available for writing (raw_capacity - len)
+// - `chunk_mut()` returns uninitialized memory from len to raw_capacity
+// - `advance_mut()` advances len within bounds
 unsafe impl BufMut for PooledBufMut {
     #[inline]
     fn remaining_mut(&self) -> usize {

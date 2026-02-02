@@ -4,7 +4,7 @@
 //! - [`IoBufMut`]: Mutable byte buffer
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
-//! - [`BufferPool`]: Pool of reusable, page-aligned buffers
+//! - [`BufferPool`]: Pool of reusable, aligned buffers
 
 mod pool;
 
@@ -199,7 +199,8 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 ///
 /// Can be either an owned buffer (backed by `BytesMut`) or a pooled buffer
 /// (allocated from a `BufferPool`). Pooled buffers are automatically returned
-/// to the pool when dropped or frozen.
+/// to the pool when dropped. Freezing transfers ownership to the resulting
+/// `IoBuf`, which returns the buffer to the pool when all references are dropped.
 #[derive(Debug)]
 pub struct IoBufMut {
     inner: IoBufMutInner,
