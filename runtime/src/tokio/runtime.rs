@@ -18,10 +18,10 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    BufferPools, Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf,
-    METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
+    Spawner as _, StreamOf, METRICS_PREFIX,
 };
-use commonware_macros::{stability, select};
+use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
@@ -303,8 +303,13 @@ impl crate::Runner for Runner {
         }
 
         // Initialize buffer pools (before network, as network uses the pool)
-        let buffer_pools = crate::BufferPools::with_defaults(
-            runtime_registry.sub_registry_with_prefix("buffer_pool"),
+        let network_pool = BufferPool::new(
+            BufferPoolConfig::for_network(),
+            runtime_registry.sub_registry_with_prefix("network"),
+        );
+        let storage_pool = BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            runtime_registry.sub_registry_with_prefix("storage"),
         );
 
         // Initialize network
@@ -324,7 +329,7 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry, buffer_pools.network().clone()).unwrap(),
+                    IoUringNetwork::start(config, iouring_registry, network_pool.clone()).unwrap(),
                 runtime_registry,
             );
         } else {
@@ -333,7 +338,7 @@ impl crate::Runner for Runner {
                 .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                 .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::new(config, buffer_pools.network().clone()),
+                    TokioNetwork::new(config, network_pool.clone()),
                     runtime_registry,
                 );
             }
@@ -360,7 +365,8 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            buffer_pools: Arc::new(buffer_pools),
+            network_pool,
+            storage_pool,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -397,7 +403,8 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    buffer_pools: Arc<BufferPools>,
+    network_pool: BufferPool,
+    storage_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -412,8 +419,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            buffer_pools: self.buffer_pools.clone(),
-
+            network_pool: self.network_pool.clone(),
+            storage_pool: self.storage_pool.clone(),
             tree: child,
             execution: Execution::default(),
             instrumented: false,
@@ -537,8 +544,11 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+impl crate::ThreadPooler for Context {
+    fn create_thread_pool(
+        &self,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
         ThreadPoolBuilder::new()
             .num_threads(concurrency.get())
             .spawn_handler(move |thread| {
@@ -724,8 +734,12 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::Pooling for Context {
-    fn buffer_pools(&self) -> &BufferPools {
-        &self.buffer_pools
+impl crate::BufferPooler for Context {
+    fn get_network_pool(&self) -> &BufferPool {
+        &self.network_pool
+    }
+
+    fn get_storage_pool(&self) -> &BufferPool {
+        &self.storage_pool
     }
 }

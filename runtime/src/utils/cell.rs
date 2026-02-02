@@ -202,12 +202,12 @@ commonware_macros::stability_scope!(BETA {
     use commonware_parallel::ThreadPool;
     use rayon::ThreadPoolBuildError;
 
-    impl<C> crate::RayonPoolSpawner for Cell<C>
+    impl<C> crate::ThreadPooler for Cell<C>
     where
-        C: crate::RayonPoolSpawner,
+        C: crate::ThreadPooler,
     {
-        fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-            self.as_present().create_pool(concurrency)
+        fn create_thread_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+            self.as_present().create_thread_pool(concurrency)
         }
     }
 
@@ -309,11 +309,15 @@ where
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
 
-impl<C> crate::Pooling for Cell<C>
+impl<C> crate::BufferPooler for Cell<C>
 where
-    C: crate::Pooling,
+    C: crate::BufferPooler,
 {
-    fn buffer_pools(&self) -> &crate::BufferPools {
-        self.as_present().buffer_pools()
+    fn get_network_pool(&self) -> &crate::BufferPool {
+        self.as_present().get_network_pool()
+    }
+
+    fn get_storage_pool(&self) -> &crate::BufferPool {
+        self.as_present().get_storage_pool()
     }
 }

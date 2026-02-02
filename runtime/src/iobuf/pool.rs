@@ -602,45 +602,6 @@ impl BufferPool {
     }
 }
 
-/// Composite type holding buffer pools for different I/O domains.
-#[derive(Clone)]
-pub struct BufferPools {
-    network: BufferPool,
-    storage: BufferPool,
-}
-
-impl BufferPools {
-    /// Creates buffer pools with the given configurations.
-    pub fn new(
-        network_config: BufferPoolConfig,
-        storage_config: BufferPoolConfig,
-        registry: &mut Registry,
-    ) -> Self {
-        let network = BufferPool::new(network_config, registry.sub_registry_with_prefix("network"));
-        let storage = BufferPool::new(storage_config, registry.sub_registry_with_prefix("storage"));
-        Self { network, storage }
-    }
-
-    /// Creates buffer pools with default configurations.
-    pub fn with_defaults(registry: &mut Registry) -> Self {
-        Self::new(
-            BufferPoolConfig::for_network(),
-            BufferPoolConfig::for_storage(),
-            registry,
-        )
-    }
-
-    /// Returns the network buffer pool.
-    pub const fn network(&self) -> &BufferPool {
-        &self.network
-    }
-
-    /// Returns the storage buffer pool.
-    pub const fn storage(&self) -> &BufferPool {
-        &self.storage
-    }
-}
-
 /// A mutable buffer from the pool.
 ///
 /// When dropped, the underlying buffer is returned to the pool.
@@ -1146,20 +1107,6 @@ mod tests {
         assert_eq!(config.max_per_class, 32);
         assert!(!config.prefill);
         assert_eq!(config.alignment, page_size());
-    }
-
-    #[test]
-    fn test_buffer_pools_with_defaults() {
-        let mut registry = test_registry();
-        let pools = BufferPools::with_defaults(&mut registry);
-
-        // Verify network pool works (cache-line aligned)
-        let net_buf = pools.network().alloc(1024).expect("network alloc failed");
-        assert!(net_buf.capacity() >= cache_line_size());
-
-        // Verify storage pool works (page-aligned)
-        let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
-        assert!(storage_buf.capacity() >= page_size());
     }
 
     /// Helper to get the number of allocated buffers for a size class.

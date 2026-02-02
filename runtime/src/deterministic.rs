@@ -58,14 +58,14 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, BufferPools, Clock, Error, Execution, Handle, ListenerOf, Metrics as _,
-    Panicked, Spawner as _, METRICS_PREFIX,
+    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
+    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
-use commonware_macros::{stability, select};
 #[stability(BETA)]
 use commonware_codec::Encode;
+use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -812,7 +812,8 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
-    buffer_pools: Arc<BufferPools>,
+    network_pool: Arc<BufferPool>,
+    storage_pool: Arc<BufferPool>,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -827,7 +828,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
-            buffer_pools: self.buffer_pools.clone(),
+            network_pool: self.network_pool.clone(),
+            storage_pool: self.storage_pool.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -857,8 +859,14 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
-        let buffer_pools =
-            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
+        let network_pool = BufferPool::new(
+            BufferPoolConfig::for_network(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_pool = BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -886,7 +894,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
-                buffer_pools: Arc::new(buffer_pools),
+                network_pool: Arc::new(network_pool),
+                storage_pool: Arc::new(storage_pool),
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -919,8 +928,14 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
-        let buffer_pools =
-            BufferPools::with_defaults(runtime_registry.sub_registry_with_prefix("buffer_pool"));
+        let network_pool = BufferPool::new(
+            BufferPoolConfig::for_network(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_pool = BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
@@ -950,7 +965,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
-                buffer_pools: Arc::new(buffer_pools),
+                network_pool: Arc::new(network_pool),
+                storage_pool: Arc::new(storage_pool),
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -1101,9 +1117,11 @@ impl crate::Spawner for Context {
     }
 }
 
-#[stability(BETA)]
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+impl crate::ThreadPooler for Context {
+    fn create_thread_pool(
+        &self,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
         let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
 
         if rayon::current_thread_index().is_none() {
@@ -1507,25 +1525,30 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::Pooling for Context {
-    fn buffer_pools(&self) -> &BufferPools {
-        &self.buffer_pools
+impl crate::BufferPooler for Context {
+    fn get_network_pool(&self) -> &crate::BufferPool {
+        &self.network_pool
+    }
+
+    fn get_storage_pool(&self) -> &crate::BufferPool {
+        &self.storage_pool
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BufferPooler;
     #[cfg(feature = "external")]
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
     use crate::{
-        deterministic, reschedule, Blob, IoBufMut, Metrics, Pooling, Resolver, Runner as _, Storage,
+        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
     };
+    use futures::stream::FuturesUnordered;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    use futures::stream::FuturesUnordered;
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -2005,20 +2028,23 @@ mod tests {
     fn test_pooling_trait() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Access buffer pools via trait
-            let pools = context.buffer_pools();
-
             // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = pools.network().alloc(1024).expect("network alloc failed");
+            let net_buf = context
+                .get_network_pool()
+                .alloc(1024)
+                .expect("network alloc failed");
             assert!(net_buf.capacity() >= 1024); // At least requested size
 
             // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = pools.storage().alloc(1024).expect("storage alloc failed");
+            let storage_buf = context
+                .get_storage_pool()
+                .alloc(1024)
+                .expect("storage alloc failed");
             assert!(storage_buf.capacity() >= 4096); // Page-aligned min size
 
             // Verify pools have expected configurations
-            assert_eq!(pools.network().config().max_per_class, 4096);
-            assert_eq!(pools.storage().config().max_per_class, 32);
+            assert_eq!(context.get_network_pool().config().max_per_class, 4096);
+            assert_eq!(context.get_storage_pool().config().max_per_class, 32);
         });
     }
 }
