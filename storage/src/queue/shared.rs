@@ -134,7 +134,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     /// # Errors
     ///
     /// Returns an error if the position is out of range or storage fails.
-    pub async fn ack(&mut self, position: u64) -> Result<(), Error> {
+    pub async fn ack(&self, position: u64) -> Result<(), Error> {
         self.state.lock().await.queue.ack(position).await
     }
 
@@ -145,7 +145,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     /// # Errors
     ///
     /// Returns an error if the position is out of range or storage fails.
-    pub async fn ack_up_to(&mut self, up_to: u64) -> Result<(), Error> {
+    pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
         self.state.lock().await.queue.ack_up_to(up_to).await
     }
 
@@ -172,7 +172,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     }
 
     /// Reset the read position to re-deliver all unacknowledged items.
-    pub async fn reset(&mut self) {
+    pub async fn reset(&self) {
         self.state.lock().await.queue.reset();
     }
 
