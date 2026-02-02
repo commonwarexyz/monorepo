@@ -234,19 +234,20 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
             );
             return digest;
         };
-        let rel_index = index - self.loc;
-        if rel_index >= self.elements.len() as u64 {
+        let index = index - self.loc;
+        if index >= self.elements.len() as u64 {
             // malformed proof input
             debug!(
-                ?rel_index,
+                ?index,
                 len = self.elements.len(),
                 "grafting index is out of bounds"
             );
             return digest;
         }
         self.hasher
-            .update_with_element(self.elements[*rel_index as usize]);
+            .update_with_element(self.elements[*index as usize]);
         self.hasher.update_with_digest(&digest);
+
         self.hasher.finalize()
     }
 
@@ -293,22 +294,15 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("size should be valid leaves");
-        let peak_positions: Vec<_> = PeakIterator::new(size)
-            .map(|(peak_pos, _)| peak_pos)
-            .collect();
-        let peak_futures = peak_positions
-            .iter()
-            .map(|&peak_pos| self.get_node(peak_pos));
+        let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
-        let unwrapped_peaks: Vec<_> = peaks
-            .iter()
-            .map(|p| {
-                p.as_ref()
-                    .expect("peak should be non-none, are the trees unaligned?")
-            })
-            .collect();
+        let unwrapped_peaks = peaks.iter().map(|p| {
+            p.as_ref()
+                .expect("peak should be non-none, are the trees unaligned?")
+        });
+        let digest = hasher.root(leaves, unwrapped_peaks);
 
-        Ok(hasher.root(leaves, unwrapped_peaks.iter().copied()))
+        Ok(digest)
     }
 }
 
