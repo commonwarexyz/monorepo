@@ -16,24 +16,19 @@ use futures::StreamExt;
 use std::sync::Arc;
 use tracing::debug;
 
-/// Shared state between writer and reader.
-struct SharedState<E: Clock + Storage + Metrics, V: CodecShared> {
-    queue: Queue<E, V>,
-}
-
 /// Writer handle for enqueueing items.
 ///
 /// This handle can be cloned to allow multiple tasks to enqueue items concurrently.
 /// All clones share the same underlying queue and notification channel.
 pub struct QueueWriter<E: Clock + Storage + Metrics, V: CodecShared> {
-    state: Arc<Mutex<SharedState<E, V>>>,
+    queue: Arc<Mutex<Queue<E, V>>>,
     notify: Arc<Mutex<mpsc::Sender<()>>>,
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
     fn clone(&self) -> Self {
         Self {
-            state: self.state.clone(),
+            queue: self.queue.clone(),
             notify: self.notify.clone(),
         }
     }
@@ -49,10 +44,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn enqueue(&self, item: V) -> Result<u64, Error> {
-        let pos = {
-            let mut state = self.state.lock().await;
-            state.queue.enqueue(item).await?
-        };
+        let pos = self.queue.lock().await.enqueue(item).await?;
 
         // Notify reader (ignore errors: full means already notified, disconnected means reader dropped)
         let _ = self.notify.lock().await.try_send(());
@@ -63,14 +55,14 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
 
     /// Returns the total number of items that have been enqueued.
     pub async fn size(&self) -> u64 {
-        self.state.lock().await.queue.size()
+        self.queue.lock().await.size()
     }
 
     /// Checkpoint ack state to storage.
     ///
     /// See [Persistable::sync] for details.
     pub async fn sync(&self) -> Result<(), Error> {
-        self.state.lock().await.queue.sync().await
+        self.queue.lock().await.sync().await
     }
 }
 
@@ -78,7 +70,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
 ///
 /// There should only be one reader per shared queue.
 pub struct QueueReader<E: Clock + Storage + Metrics, V: CodecShared> {
-    state: Arc<Mutex<SharedState<E, V>>>,
+    queue: Arc<Mutex<Queue<E, V>>>,
     notify: mpsc::Receiver<()>,
 }
 
@@ -96,19 +88,15 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     pub async fn recv(&mut self) -> Result<Option<(u64, V)>, Error> {
         loop {
             // Try to dequeue an item
-            {
-                let mut state = self.state.lock().await;
-                if let Some(item) = state.queue.dequeue().await? {
-                    return Ok(Some(item));
-                }
+            if let Some(item) = self.queue.lock().await.dequeue().await? {
+                return Ok(Some(item));
             }
 
             // No item available, wait for notification
             // Returns None if writer is dropped
             if self.notify.next().await.is_none() {
                 // Writer dropped, drain any remaining items
-                let mut state = self.state.lock().await;
-                return state.queue.dequeue().await;
+                return self.queue.lock().await.dequeue().await;
             }
         }
     }
@@ -121,10 +109,10 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain any pending notifications
-        while self.notify.try_next().is_ok() {}
+        // Drain any pending notifications (stop if channel empty or closed)
+        while let Ok(Some(_)) = self.notify.try_next() {}
 
-        self.state.lock().await.queue.dequeue().await
+        self.queue.lock().await.dequeue().await
     }
 
     /// Acknowledge processing of an item at the given position.
@@ -135,7 +123,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the position is out of range or storage fails.
     pub async fn ack(&self, position: u64) -> Result<(), Error> {
-        self.state.lock().await.queue.ack(position).await
+        self.queue.lock().await.ack(position).await
     }
 
     /// Acknowledge all items up to (but not including) the given position.
@@ -146,41 +134,41 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the position is out of range or storage fails.
     pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
-        self.state.lock().await.queue.ack_up_to(up_to).await
+        self.queue.lock().await.ack_up_to(up_to).await
     }
 
     /// Peek at the next unacknowledged item without advancing the read position.
     ///
     /// See [Queue::peek] for details.
     pub async fn peek(&self) -> Result<Option<(u64, V)>, Error> {
-        self.state.lock().await.queue.peek().await
+        self.queue.lock().await.peek().await
     }
 
     /// Returns the current ack floor.
     pub async fn ack_floor(&self) -> u64 {
-        self.state.lock().await.queue.ack_floor()
+        self.queue.lock().await.ack_floor()
     }
 
     /// Returns the current read position.
     pub async fn read_position(&self) -> u64 {
-        self.state.lock().await.queue.read_position()
+        self.queue.lock().await.read_position()
     }
 
     /// Returns whether all enqueued items have been acknowledged.
     pub async fn is_empty(&self) -> bool {
-        self.state.lock().await.queue.is_empty()
+        self.queue.lock().await.is_empty()
     }
 
     /// Reset the read position to re-deliver all unacknowledged items.
     pub async fn reset(&self) {
-        self.state.lock().await.queue.reset();
+        self.queue.lock().await.reset();
     }
 
     /// Checkpoint ack state to storage.
     ///
     /// See [Persistable::sync] for details.
     pub async fn sync(&self) -> Result<(), Error> {
-        self.state.lock().await.queue.sync().await
+        self.queue.lock().await.sync().await
     }
 }
 
@@ -212,18 +200,16 @@ pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
     context: E,
     cfg: Config<V::Cfg>,
 ) -> Result<(QueueWriter<E, V>, QueueReader<E, V>), Error> {
-    let queue = Queue::init(context, cfg).await?;
-    let state = Arc::new(Mutex::new(SharedState { queue }));
-
+    let queue = Arc::new(Mutex::new(Queue::init(context, cfg).await?));
     let (notify_tx, notify_rx) = mpsc::channel(1);
 
     let writer = QueueWriter {
-        state: state.clone(),
+        queue: queue.clone(),
         notify: Arc::new(Mutex::new(notify_tx)),
     };
 
     let reader = QueueReader {
-        state,
+        queue,
         notify: notify_rx,
     };
 
@@ -247,9 +233,8 @@ pub async fn destroy<E: Clock + Storage + Metrics, V: CodecShared>(
 
     // Extract the queue from the Arc<Mutex<...>>
     // This will succeed since we have both handles
-    let state = Arc::try_unwrap(writer.state).expect("shared state still has references");
-    let inner = state.into_inner();
-    inner.queue.destroy().await
+    let queue = Arc::try_unwrap(writer.queue).expect("shared queue still has references");
+    queue.into_inner().destroy().await
 }
 
 #[cfg(test)]
@@ -371,8 +356,8 @@ mod tests {
             writer.enqueue(b"item1".to_vec()).await.unwrap();
             writer.enqueue(b"item2".to_vec()).await.unwrap();
 
-            // Get the state before dropping writer
-            let state = writer.state.clone();
+            // Get the queue before dropping writer
+            let queue = writer.queue.clone();
             drop(writer);
 
             // Reader should still get existing items
@@ -388,8 +373,7 @@ mod tests {
 
             // Clean up manually since we dropped writer
             drop(reader);
-            let inner = Arc::try_unwrap(state).unwrap().into_inner();
-            inner.queue.destroy().await.unwrap();
+            Arc::try_unwrap(queue).unwrap().into_inner().destroy().await.unwrap();
         });
     }
 
