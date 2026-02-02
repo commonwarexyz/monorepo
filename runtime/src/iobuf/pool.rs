@@ -35,6 +35,7 @@
 
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
+use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -44,6 +45,7 @@ use prometheus_client::{
 use std::{
     alloc::{alloc, dealloc, Layout},
     mem::ManuallyDrop,
+    num::NonZeroUsize,
     ptr::NonNull,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -112,16 +114,16 @@ const fn cache_line_size() -> usize {
 #[derive(Debug, Clone)]
 pub struct BufferPoolConfig {
     /// Minimum buffer size. Must be >= alignment and a power of two.
-    pub min_size: usize,
+    pub min_size: NonZeroUsize,
     /// Maximum buffer size. Must be a power of two and >= min_size.
-    pub max_size: usize,
+    pub max_size: NonZeroUsize,
     /// Maximum number of buffers per size class.
-    pub max_per_class: usize,
+    pub max_per_class: NonZeroUsize,
     /// Whether to pre-allocate all buffers on pool creation.
     pub prefill: bool,
     /// Buffer alignment. Must be a power of two.
     /// Use `page_size()` for storage I/O, `cache_line_size()` for network I/O.
-    pub alignment: usize,
+    pub alignment: NonZeroUsize,
 }
 
 impl Default for BufferPoolConfig {
@@ -139,11 +141,11 @@ impl BufferPoolConfig {
     /// Cache-line alignment is used because network buffers don't require page
     /// alignment for DMA, and smaller alignment reduces internal fragmentation.
     pub const fn for_network() -> Self {
-        let cache_line = cache_line_size();
+        let cache_line = NZUsize!(cache_line_size());
         Self {
             min_size: cache_line,
-            max_size: 64 * 1024,
-            max_per_class: 4096,
+            max_size: NZUsize!(64 * 1024),
+            max_per_class: NZUsize!(4096),
             prefill: false,
             alignment: cache_line,
         }
@@ -154,11 +156,11 @@ impl BufferPoolConfig {
     ///
     /// Page alignment is required for direct I/O and efficient DMA transfers.
     pub fn for_storage() -> Self {
-        let page = page_size();
+        let page = NZUsize!(page_size());
         Self {
             min_size: page,
-            max_size: 64 * 1024,
-            max_per_class: 32,
+            max_size: NZUsize!(64 * 1024),
+            max_per_class: NZUsize!(32),
             prefill: false,
             alignment: page,
         }
@@ -173,7 +175,6 @@ impl BufferPoolConfig {
     /// - `max_size` is not a power of two
     /// - `min_size < alignment`
     /// - `max_size < min_size`
-    /// - `max_per_class` is 0
     fn validate(&self) {
         assert!(
             self.alignment.is_power_of_two(),
@@ -197,30 +198,29 @@ impl BufferPoolConfig {
             self.max_size >= self.min_size,
             "max_size must be >= min_size"
         );
-        assert!(self.max_per_class > 0, "max_per_class must be > 0");
     }
 
     /// Returns the number of size classes.
-    const fn num_classes(&self) -> usize {
+    fn num_classes(&self) -> usize {
         if self.max_size < self.min_size {
             return 0;
         }
         // Classes are: min_size, min_size*2, min_size*4, ..., max_size
-        (self.max_size / self.min_size).trailing_zeros() as usize + 1
+        (self.max_size.get() / self.min_size.get()).trailing_zeros() as usize + 1
     }
 
     /// Returns the size class index for a given size.
     /// Returns None if size > max_size.
-    const fn class_index(&self, size: usize) -> Option<usize> {
-        if size > self.max_size {
+    fn class_index(&self, size: usize) -> Option<usize> {
+        if size > self.max_size.get() {
             return None;
         }
-        if size <= self.min_size {
+        if size <= self.min_size.get() {
             return Some(0);
         }
         // Find the smallest power-of-two class that fits
         let size_class = size.next_power_of_two();
-        let index = (size_class / self.min_size).trailing_zeros() as usize;
+        let index = (size_class / self.min_size.get()).trailing_zeros() as usize;
         if index < self.num_classes() {
             Some(index)
         } else {
@@ -230,7 +230,7 @@ impl BufferPoolConfig {
 
     /// Returns the buffer size for a given class index.
     const fn class_size(&self, index: usize) -> usize {
-        self.min_size << index
+        self.min_size.get() << index
     }
 }
 
@@ -492,8 +492,12 @@ impl BufferPool {
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
-            let class =
-                SizeClass::new(size, config.alignment, config.max_per_class, config.prefill);
+            let class = SizeClass::new(
+                size,
+                config.alignment.get(),
+                config.max_per_class.get(),
+                config.prefill,
+            );
             classes.push(class);
         }
 
@@ -882,11 +886,11 @@ mod tests {
     /// Creates a test config with page alignment.
     fn test_config(min_size: usize, max_size: usize, max_per_class: usize) -> BufferPoolConfig {
         BufferPoolConfig {
-            min_size,
-            max_size,
-            max_per_class,
+            min_size: NZUsize!(min_size),
+            max_size: NZUsize!(max_size),
+            max_per_class: NZUsize!(max_per_class),
             prefill: false,
-            alignment: page_size(),
+            alignment: NZUsize!(page_size()),
         }
     }
 
@@ -922,11 +926,11 @@ mod tests {
     #[should_panic(expected = "min_size must be a power of two")]
     fn test_config_invalid_min_size() {
         let config = BufferPoolConfig {
-            min_size: 3000,
-            max_size: 8192,
-            max_per_class: 10,
+            min_size: NZUsize!(3000),
+            max_size: NZUsize!(8192),
+            max_per_class: NZUsize!(10),
             prefill: false,
-            alignment: page_size(),
+            alignment: NZUsize!(page_size()),
         };
         config.validate();
     }
@@ -1035,13 +1039,13 @@ mod tests {
 
     #[test]
     fn test_prefill() {
-        let page = page_size();
+        let page = NZUsize!(page_size());
         let mut registry = test_registry();
         let pool = BufferPool::new(
             BufferPoolConfig {
                 min_size: page,
                 max_size: page,
-                max_per_class: 5,
+                max_per_class: NZUsize!(5),
                 prefill: true,
                 alignment: page,
             },
@@ -1062,22 +1066,22 @@ mod tests {
     fn test_config_for_network() {
         let config = BufferPoolConfig::for_network();
         config.validate();
-        assert_eq!(config.min_size, cache_line_size());
-        assert_eq!(config.max_size, 64 * 1024);
-        assert_eq!(config.max_per_class, 4096);
+        assert_eq!(config.min_size.get(), cache_line_size());
+        assert_eq!(config.max_size.get(), 64 * 1024);
+        assert_eq!(config.max_per_class.get(), 4096);
         assert!(!config.prefill);
-        assert_eq!(config.alignment, cache_line_size());
+        assert_eq!(config.alignment.get(), cache_line_size());
     }
 
     #[test]
     fn test_config_for_storage() {
         let config = BufferPoolConfig::for_storage();
         config.validate();
-        assert_eq!(config.min_size, page_size());
-        assert_eq!(config.max_size, 64 * 1024);
-        assert_eq!(config.max_per_class, 32);
+        assert_eq!(config.min_size.get(), page_size());
+        assert_eq!(config.max_size.get(), 64 * 1024);
+        assert_eq!(config.max_per_class.get(), 32);
         assert!(!config.prefill);
-        assert_eq!(config.alignment, page_size());
+        assert_eq!(config.alignment.get(), page_size());
     }
 
     /// Helper to get the number of allocated buffers for a size class.

@@ -3496,8 +3496,14 @@ mod tests {
             assert!(storage_buf.capacity() >= 4096);
 
             // Verify pools have expected configurations
-            assert_eq!(context.network_buffer_pool().config().max_per_class, 4096);
-            assert_eq!(context.storage_buffer_pool().config().max_per_class, 32);
+            assert_eq!(
+                context.network_buffer_pool().config().max_per_class.get(),
+                4096
+            );
+            assert_eq!(
+                context.storage_buffer_pool().config().max_per_class.get(),
+                32
+            );
         });
     }
 
