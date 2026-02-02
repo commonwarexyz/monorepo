@@ -908,13 +908,14 @@ impl<const N: usize> DirtyBitMap<N> {
         };
 
         // Capture all chunks between the new and old endpoints.
-        // Skip chunks that were already pruned before this started.
-        for chunk_idx in new_last_chunk..=old_last_chunk {
-            if chunk_idx < self.state.base_pruned_chunks {
-                // This chunk was already pruned before, skip it
-                continue;
-            }
 
+        // Handle the case where we popped all unpruned bits, leaving new_last_chunk
+        // < self.state.base_pruned_chunks. For example, suppose bitmap has 10 bits per chunk,
+        // and 50 entries, where 40 are pruned. Then we pop 10 bits to make the bitmap have 40 entries,
+        // where all 40 are pruned. Then new_last_chunk is 3 and self.state.base_pruned_chunks is 4.
+        let start_chunk = self.state.base_pruned_chunks.max(new_last_chunk);
+
+        for chunk_idx in start_chunk..=old_last_chunk {
             changes.entry(chunk_idx).or_insert_with(|| {
                 let old_chunk = self
                     .get_chunk_from_current(chunk_idx)
