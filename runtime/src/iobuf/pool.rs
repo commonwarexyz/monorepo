@@ -351,42 +351,40 @@ impl Drop for AlignedBuffer {
 }
 
 /// Per-size-class state.
+///
+/// The freelist stores `Option<AlignedBuffer>` where:
+/// - `Some(buf)` = a reusable buffer
+/// - `None` = an available slot for creating a new buffer
+///
+/// This design uses the queue capacity to enforce the pool limit without
+/// needing atomic CAS operations for slot reservation.
 struct SizeClass {
     /// The buffer size for this class.
     size: usize,
     /// Buffer alignment.
     alignment: usize,
-    /// Free list of available buffers.
-    freelist: ArrayQueue<AlignedBuffer>,
+    /// Free list storing either reusable buffers or empty slots.
+    freelist: ArrayQueue<Option<AlignedBuffer>>,
     /// Number of buffers currently allocated (out of pool).
     allocated: AtomicUsize,
-    /// Total buffers ever created for this class (monotonically increasing).
-    /// Used to enforce `max_per_class` limit without races.
-    total_created: AtomicUsize,
 }
 
 impl SizeClass {
-    fn new(size: usize, alignment: usize, max_buffers: usize) -> Self {
+    fn new(size: usize, alignment: usize, max_buffers: usize, prefill: bool) -> Self {
+        let freelist = ArrayQueue::new(max_buffers);
+        for _ in 0..max_buffers {
+            let entry = if prefill {
+                Some(AlignedBuffer::new(size, alignment))
+            } else {
+                None
+            };
+            let _ = freelist.push(entry);
+        }
         Self {
             size,
             alignment,
-            freelist: ArrayQueue::new(max_buffers),
+            freelist,
             allocated: AtomicUsize::new(0),
-            total_created: AtomicUsize::new(0),
-        }
-    }
-
-    /// Pre-fill the freelist with buffers.
-    fn prefill(&self, max_buffers: usize) {
-        for _ in 0..max_buffers {
-            if self
-                .freelist
-                .push(AlignedBuffer::new(self.size, self.alignment))
-                .is_err()
-            {
-                break;
-            }
-            self.total_created.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -400,57 +398,34 @@ pub(crate) struct BufferPoolInner {
 
 impl BufferPoolInner {
     /// Try to allocate a buffer from the given size class.
-    ///
-    /// Retries a few times on CAS contention to avoid unnecessary fallback
-    /// to heap allocations when pool capacity is available.
     fn try_alloc(&self, class_index: usize) -> Option<AlignedBuffer> {
-        // Spurious CAS failures are possible under extreme contention, so we
-        // retry several times before giving up and falling back to heap.
-        const MAX_RETRIES: usize = 8;
-
         let class = &self.classes[class_index];
         let label = SizeClassLabel {
             size_class: class.size as u64,
         };
 
-        for _ in 0..MAX_RETRIES {
-            // Try to get a buffer from the freelist
-            if let Some(buffer) = class.freelist.pop() {
+        match class.freelist.pop() {
+            Some(Some(buffer)) => {
+                // Reuse existing buffer
                 class.allocated.fetch_add(1, Ordering::Relaxed);
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
                 self.metrics.available.get_or_create(&label).dec();
-
-                return Some(buffer);
+                Some(buffer)
             }
-
-            // Freelist empty - try to create a new buffer if under limit.
-            // Use total_created (not allocated + freelist.len()) to avoid races.
-            let created = class.total_created.load(Ordering::Acquire);
-            if created >= self.config.max_per_class {
-                // At hard limit, no point retrying
-                break;
-            }
-
-            // Try to reserve a slot for a new buffer
-            if class
-                .total_created
-                .compare_exchange(created, created + 1, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
+            Some(None) => {
+                // Create new buffer (we have a slot)
                 class.allocated.fetch_add(1, Ordering::Relaxed);
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
-
-                return Some(AlignedBuffer::new(class.size, class.alignment));
+                Some(AlignedBuffer::new(class.size, class.alignment))
             }
-            // CAS failed due to contention, hint CPU and retry
-            std::hint::spin_loop();
+            None => {
+                // Pool exhausted (no slots available)
+                self.metrics.exhausted_total.get_or_create(&label).inc();
+                None
+            }
         }
-
-        // Pool exhausted
-        self.metrics.exhausted_total.get_or_create(&label).inc();
-        None
     }
 
     /// Return a buffer to the pool.
@@ -466,7 +441,7 @@ impl BufferPoolInner {
             self.metrics.allocated.get_or_create(&label).dec();
 
             // Try to return to freelist
-            match class.freelist.push(buffer) {
+            match class.freelist.push(Some(buffer)) {
                 Ok(()) => {
                     self.metrics.available.get_or_create(&label).inc();
                 }
@@ -519,10 +494,7 @@ impl BufferPool {
         let mut classes = Vec::with_capacity(config.num_classes());
         for i in 0..config.num_classes() {
             let size = config.class_size(i);
-            let class = SizeClass::new(size, config.alignment, config.max_per_class);
-            if config.prefill {
-                class.prefill(config.max_per_class);
-            }
+            let class = SizeClass::new(size, config.alignment, config.max_per_class, config.prefill);
             classes.push(class);
         }
 
@@ -1118,9 +1090,12 @@ mod tests {
     }
 
     /// Helper to get the number of available buffers in freelist for a size class.
-    fn get_available(pool: &BufferPool, size: usize) -> usize {
+    fn get_available(pool: &BufferPool, size: usize) -> i64 {
         let class_index = pool.inner.config.class_index(size).unwrap();
-        pool.inner.classes[class_index].freelist.len()
+        let label = SizeClassLabel {
+            size_class: pool.inner.classes[class_index].size as u64,
+        };
+        pool.inner.metrics.available.get_or_create(&label).get()
     }
 
     #[test]
