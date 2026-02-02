@@ -14,9 +14,11 @@ use crate::{
             unordered::{Operation, Update},
             ValueEncoding,
         },
-        current::proof::OperationProof,
-        store, DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable,
-        Unmerkleized,
+        current::{
+            db::{Merkleized, State as MerkleizationState, Unmerkleized},
+            proof::OperationProof,
+        },
+        store, DurabilityState, Durable, Error, NonDurable,
     },
     translator::Translator,
 };
@@ -29,7 +31,7 @@ use commonware_utils::Array;
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
 
 /// The generic Db type for unordered Current QMDB variants.
-pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
+pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
     super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
@@ -78,7 +80,7 @@ impl<
         T: Translator,
         const N: usize,
         D: store::State,
-    > Db<E, C, K, V, H, T, N, Merkleized<H>, D>
+    > Db<E, C, K, V, H, T, N, Merkleized<DigestOf<H>>, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -100,16 +102,12 @@ where
             return Err(Error::KeyNotFound);
         };
         let height = Self::grafting_height();
-        let grafted_mmr = self
-            .grafted_mmr
-            .as_ref()
-            .expect("grafted_mmr must be set in Merkleized state");
 
         OperationProof::<H::Digest, N>::new(
             hasher,
             &self.status,
             height,
-            grafted_mmr.as_ref(),
+            &self.state.grafted_mmr,
             &self.any.log.mmr,
             loc,
         )

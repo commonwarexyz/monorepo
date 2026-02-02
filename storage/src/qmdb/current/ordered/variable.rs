@@ -18,20 +18,19 @@ use crate::{
             VariableValue,
         },
         current::{
-            db::{build_grafted_mmr, compute_root, grafting_height},
+            db::{build_grafted_mmr, compute_root, grafting_height, Merkleized},
             VariableConfig as Config,
         },
-        Durable, Error, Merkleized,
+        Durable, Error,
     },
     translator::Translator,
 };
 use commonware_codec::{FixedSize, Read};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
-use std::sync::Arc;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
+pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, H, T, N, S, D>;
 
 // Functionality for the Clean state - init only.
@@ -42,7 +41,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 where
     Operation<K, V>: Read,
 {
@@ -115,24 +114,24 @@ where
         )
         .await?;
 
-        let cached_root = Some(
-            compute_root(
-                &mut hasher,
-                &status,
-                &grafted_mmr,
-                &any.log.mmr,
-                grafting_height::<N>(),
-            )
-            .await?,
-        );
+        let root = compute_root(
+            &mut hasher,
+            &status,
+            &grafted_mmr,
+            &any.log.mmr,
+            grafting_height::<N>(),
+        )
+        .await?;
 
         Ok(Self {
             any,
             status,
             grafted_pinned_nodes,
             bitmap_metadata,
-            cached_root,
-            grafted_mmr: Some(Arc::new(grafted_mmr)),
+            state: Merkleized {
+                root,
+                grafted_mmr: grafted_mmr,
+            },
         })
     }
 }
@@ -142,7 +141,7 @@ mod test {
     use crate::{
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, StandardHasher},
-        qmdb::{PrunableBitMap,
+        qmdb::{
             any::ordered::variable::Operation,
             current::{
                 ordered::{db::KeyValueProof, variable::Db},
@@ -154,7 +153,7 @@ mod test {
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
             },
-            Durable, Error, Merkleized, NonDurable, Unmerkleized,
+            Error, NonDurable, PrunableBitMap,
         },
         translator::OneCap,
     };
@@ -187,12 +186,19 @@ mod test {
     }
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
-    type CleanCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Merkleized<Sha256>, Durable>;
+    type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;
 
     /// A type alias for the Mutable variant of CurrentTest (Unmerkleized, NonDurable state).
-    type MutableCurrentTest =
-        Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Unmerkleized, NonDurable>;
+    type MutableCurrentTest = Db<
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        32,
+        crate::qmdb::current::db::Unmerkleized,
+        NonDurable,
+    >;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(

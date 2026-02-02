@@ -21,16 +21,19 @@ use crate::{
         },
         current::proof::RangeProof,
         store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
+        DurabilityState, Durable, Error, NonDurable,
     },
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
-use commonware_cryptography::{DigestOf, Hasher};
+use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::prefixed_u64::U64, Array};
 use core::{num::NonZeroU64, ops::Range};
-use std::sync::Arc;
+
+/// Metadata key prefixes for bitmap persistence.
+const BITMAP_PRUNED_CHUNKS_KEY: u8 = 0;
+const BITMAP_PINNED_NODE_PREFIX: u8 = 1;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
 pub(super) const fn grafting_height<const N: usize>() -> u32 {
@@ -53,9 +56,35 @@ pub(super) fn partial_chunk_root<H: Hasher, const N: usize>(
     hasher.finalize()
 }
 
-/// Metadata key prefixes for bitmap persistence.
-const BITMAP_PRUNED_CHUNKS_KEY: u8 = 0;
-const BITMAP_PINNED_NODE_PREFIX: u8 = 1;
+mod private {
+    pub trait Sealed {}
+}
+
+/// Trait for valid [Db] type states.
+pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
+    type AnyState: crate::mmr::mem::State<D>;
+}
+
+/// Merkleized state: the database has been merkleized and the root is cached.
+pub struct Merkleized<D: Digest> {
+    /// The cached root of the database (combining bitmap and operations MMR).
+    pub(super) root: D,
+    /// The grafted MMR of the database.
+    pub(super) grafted_mmr: CleanMmr<D>,
+}
+
+impl<D: Digest> private::Sealed for Merkleized<D> {}
+impl<D: Digest> State<D> for Merkleized<D> {
+    type AnyState = crate::mmr::mem::Clean<D>;
+}
+
+/// Unmerkleized state: the database has pending changes not yet merkleized.
+pub struct Unmerkleized;
+
+impl private::Sealed for Unmerkleized {}
+impl<D: Digest> State<D> for Unmerkleized {
+    type AnyState = crate::mmr::mem::Dirty;
+}
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
@@ -65,12 +94,12 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
-    M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
+    M: State<DigestOf<H>> = Merkleized<DigestOf<H>>,
     D: DurabilityState = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U, M, D>,
+    pub(super) any: any::db::Db<E, C, I, H, U, M::AnyState, D>,
 
     /// The bitmap over the activity status of each operation. Uses PrunableBitMap directly
     /// without an internal MMR - the grafted MMR is built on demand during merkleization.
@@ -83,11 +112,7 @@ pub struct Db<
     /// Metadata storage for bitmap persistence (pruned_chunks and pinned_nodes).
     pub(super) bitmap_metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// Cached root digest. Valid when in Merkleized state.
-    pub(super) cached_root: Option<H::Digest>,
-
-    /// Cached grafted MMR for proof generation. Only set in Merkleized state.
-    pub(super) grafted_mmr: Option<Arc<CleanMmr<H::Digest>>>,
+    pub(super) state: M,
 }
 
 // Functionality shared across all DB states, such as most non-mutating operations.
@@ -100,7 +125,7 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
+    M: State<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -219,7 +244,7 @@ where
 
 // Functionality shared across Merkleized states, such as the ability to prune the log and retrieve
 // the state root
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, D>
+impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -232,7 +257,7 @@ where
     Operation<K, V, U>: Codec,
 {
     pub const fn root(&self) -> H::Digest {
-        self.cached_root.expect("Cached root must be set")
+        self.state.root
     }
 
     /// Returns a proof that the specified range of operations are part of the database, along with
@@ -250,15 +275,12 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
-        let grafted_mmr = self
-            .grafted_mmr
-            .as_ref()
-            .expect("grafted_mmr must be set in Merkleized state");
+        let grafted_mmr = &self.state.grafted_mmr;
         RangeProof::<H::Digest>::new_with_ops(
             hasher,
             &self.status,
             Self::grafting_height(),
-            grafted_mmr.as_ref(),
+            grafted_mmr,
             &self.any.log.mmr,
             &self.any.log,
             start_loc,
@@ -287,10 +309,7 @@ where
 
         // Prune the bitmap in memory and compute new pinned nodes
         self.status.prune_to_bit(*prune_loc);
-        let grafted_mmr = self
-            .grafted_mmr
-            .as_ref()
-            .expect("grafted_mmr must be set in Merkleized state");
+        let grafted_mmr = &self.state.grafted_mmr;
         let new_prune_pos =
             Position::try_from(Location::new_unchecked(self.status.pruned_chunks() as u64))?;
         self.grafted_pinned_nodes = grafted_mmr
@@ -307,7 +326,7 @@ where
 }
 
 // Functionality specific to Clean state, such as ability to persist the database.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, Durable>
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -340,8 +359,7 @@ where
             status: self.status,
             grafted_pinned_nodes: self.grafted_pinned_nodes,
             bitmap_metadata: self.bitmap_metadata,
-            cached_root: None,
-            grafted_mmr: None,
+            state: Unmerkleized,
         }
     }
 }
@@ -360,7 +378,9 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Merkleize the database and transition to the provable state.
-    pub async fn into_merkleized(self) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, D>, Error> {
+    pub async fn into_merkleized(
+        self,
+    ) -> Result<Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>, Error> {
         // Merkleize the any db
         let mut any = self.any.into_merkleized();
         let hasher = &mut any.log.hasher;
@@ -379,16 +399,14 @@ where
         .await?;
 
         // Compute and cache the root
-        let cached_root = Some(
-            compute_root::<H, N>(
-                hasher,
-                &status,
-                &grafted_mmr,
-                &any.log.mmr,
-                grafting_height::<N>(),
-            )
-            .await?,
-        );
+        let cached_root = compute_root::<H, N>(
+            hasher,
+            &status,
+            &grafted_mmr,
+            &any.log.mmr,
+            grafting_height::<N>(),
+        )
+        .await?;
 
         // Now prune the bitmap to the inactivity floor
         status.prune_to_bit(*any.inactivity_floor_loc);
@@ -406,8 +424,10 @@ where
             status,
             grafted_pinned_nodes: new_pinned_nodes,
             bitmap_metadata: self.bitmap_metadata,
-            cached_root,
-            grafted_mmr: Some(Arc::new(grafted_mmr)),
+            state: Merkleized {
+                root: cached_root,
+                grafted_mmr,
+            },
         })
     }
 }
@@ -431,8 +451,7 @@ where
             status: self.status,
             grafted_pinned_nodes: self.grafted_pinned_nodes,
             bitmap_metadata: self.bitmap_metadata,
-            cached_root: None,
-            grafted_mmr: None,
+            state: Unmerkleized,
         }
     }
 }
@@ -500,8 +519,7 @@ where
                 status: self.status,
                 grafted_pinned_nodes: self.grafted_pinned_nodes,
                 bitmap_metadata: self.bitmap_metadata,
-                cached_root: None, // Not merkleized yet
-                grafted_mmr: None,
+                state: Unmerkleized,
             },
             range,
         ))
@@ -509,7 +527,7 @@ where
 }
 
 // Functionality specific to (Merkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<H>, NonDurable>
+impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, NonDurable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -527,14 +545,13 @@ where
             status: self.status,
             grafted_pinned_nodes: self.grafted_pinned_nodes,
             bitmap_metadata: self.bitmap_metadata,
-            cached_root: None,
-            grafted_mmr: None,
+            state: Unmerkleized,
         }
     }
 }
 
 impl<E, K, V, U, C, I, H, const N: usize> Persistable
-    for Db<E, C, I, H, U, N, Merkleized<H>, Durable>
+    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -566,7 +583,7 @@ where
 // proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
 // root.
 impl<E, K, V, U, C, I, H, D, const N: usize> MerkleizedStore
-    for Db<E, C, I, H, U, N, Merkleized<H>, D>
+    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -606,7 +623,7 @@ where
     C: Contiguous<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    M: MerkleizationState<DigestOf<H>>,
+    M: State<DigestOf<H>>,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
@@ -630,7 +647,7 @@ where
 }
 
 impl<E, K, V, U, C, I, H, const N: usize, D> PrunableStore
-    for Db<E, C, I, H, U, N, Merkleized<H>, D>
+    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
 where
     E: Storage + Clock + Metrics,
     K: Array,
