@@ -484,7 +484,7 @@ impl BufferPool {
     /// # Panics
     ///
     /// Panics if the configuration is invalid.
-    pub fn new(config: BufferPoolConfig, registry: &mut Registry) -> Self {
+    pub(crate) fn new(config: BufferPoolConfig, registry: &mut Registry) -> Self {
         config.validate();
 
         let metrics = PoolMetrics::new(registry);
