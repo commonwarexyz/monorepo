@@ -207,7 +207,7 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
         }
 
         let digest = self.hasher.node_digest(pos, left_digest, right_digest);
-        if node_height != self.height {
+        if node_height < self.height {
             // If we're below the grafting boundary we use the digest as-is.
             return digest;
         }
