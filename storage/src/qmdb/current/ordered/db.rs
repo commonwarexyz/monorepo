@@ -13,9 +13,12 @@ use crate::{
             ordered::{Operation, Update},
             ValueEncoding,
         },
-        current::proof::OperationProof,
+        current::{
+            db::{Merkleized, State, Unmerkleized},
+            proof::OperationProof,
+        },
         store::{self, LogStore as _},
-        DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
+        DurabilityState, Durable, Error, NonDurable,
     },
     translator::Translator,
 };
@@ -33,7 +36,7 @@ pub struct KeyValueProof<K: Array, D: Digest, const N: usize> {
 }
 
 /// The generic Db type for ordered Current QMDB variants.
-pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
+pub type Db<E, C, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
     super::super::db::Db<E, C, Index<T, Location>, H, Update<K, V>, N, S, D>;
 
 // Functionality shared across all DB states, such as most non-mutating operations.
@@ -45,9 +48,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        M: MerkleizationState<DigestOf<H>>,
+        S: State<DigestOf<H>>,
         D: DurabilityState,
-    > Db<E, C, K, V, H, T, N, M, D>
+    > Db<E, C, K, V, H, T, N, S, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -109,11 +112,16 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, Index<T, Location>, H, Update<K, V>, M, D>::span_contains(
-                    &data.key,
-                    &data.next_key,
-                    key,
-                ) {
+                if !crate::qmdb::any::db::Db::<
+                    E,
+                    C,
+                    Index<T, Location>,
+                    H,
+                    Update<K, V>,
+                    S::AnyState,
+                    D,
+                >::span_contains(&data.key, &data.next_key, key)
+                {
                     // If the key is not within the span, then this proof cannot prove its
                     // exclusion.
                     return false;
@@ -147,7 +155,7 @@ impl<
         T: Translator,
         const N: usize,
         D: store::State,
-    > Db<E, C, K, V, H, T, N, Merkleized<H>, D>
+    > Db<E, C, K, V, H, T, N, Merkleized<DigestOf<H>>, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
@@ -291,9 +299,9 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-        M: MerkleizationState<DigestOf<H>>,
+        S: State<DigestOf<H>>,
         D: DurabilityState,
-    > kv::Gettable for Db<E, C, K, V, H, T, N, M, D>
+    > kv::Gettable for Db<E, C, K, V, H, T, N, S, D>
 where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
