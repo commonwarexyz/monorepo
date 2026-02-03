@@ -1292,6 +1292,7 @@ dependencies = [
  "arbitrary",
  "blake3",
  "blst",
+ "bytes",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-math",

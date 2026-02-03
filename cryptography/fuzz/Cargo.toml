@@ -12,6 +12,7 @@ cargo-fuzz = true
 arbitrary = { workspace = true, features = ["derive"] }
 blake3.workspace = true
 blst = { workspace = true, features = ["no-threads"] }
+bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary"] }
 commonware-math.workspace = true
@@ -133,6 +134,13 @@ bench = false
 [[bin]]
 name = "bls12381_dkg"
 path = "fuzz_targets/bls12381_dkg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
 test = false
 doc = false
 bench = false
