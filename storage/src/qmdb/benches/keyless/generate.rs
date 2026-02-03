@@ -6,7 +6,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    RayonPoolSpawner,
+    ThreadPooler as _,
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
@@ -60,7 +60,7 @@ type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let keyless_cfg = keyless_cfg(pool);
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 

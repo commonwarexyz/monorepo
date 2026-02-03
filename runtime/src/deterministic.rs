@@ -59,16 +59,16 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
-    Spawner as _, METRICS_PREFIX,
+    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
+    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
-#[stability(BETA)]
 use commonware_codec::Encode;
-use commonware_macros::{select, stability};
-#[stability(BETA)]
+use commonware_macros::select;
 use commonware_parallel::ThreadPool;
+#[cfg(miri)]
+use commonware_utils::NZUsize;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -87,7 +87,6 @@ use prometheus_client::{
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
-#[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -828,6 +827,8 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -842,6 +843,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -881,6 +884,32 @@ impl Context {
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize buffer pools
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+            } else {
+                let network_config = BufferPoolConfig::for_network();
+                let storage_config = BufferPoolConfig::for_storage();
+            }
+        }
+        let network_buffer_pool = BufferPool::new(
+            network_config,
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            storage_config,
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
@@ -907,6 +936,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                network_buffer_pool,
+                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -938,6 +969,32 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize buffer pools
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under Miri
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+            } else {
+                let network_config = BufferPoolConfig::for_network();
+                let storage_config = BufferPoolConfig::for_storage();
+            }
+        }
+        let network_buffer_pool = BufferPool::new(
+            network_config,
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            storage_config,
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
 
@@ -966,6 +1023,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
+                network_buffer_pool,
+                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -1125,9 +1184,11 @@ impl crate::Spawner for Context {
     }
 }
 
-#[stability(BETA)]
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+impl crate::ThreadPooler for Context {
+    fn create_thread_pool(
+        &self,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
         let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
 
         if rayon::current_thread_index().is_none() {
@@ -1528,6 +1589,16 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+impl crate::BufferPooler for Context {
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
+        &self.network_buffer_pool
+    }
+
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
+        &self.storage_buffer_pool
     }
 }
 

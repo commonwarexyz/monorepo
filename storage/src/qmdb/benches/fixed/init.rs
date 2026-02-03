@@ -11,7 +11,7 @@ use crate::fixed::{
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    RayonPoolSpawner, Runner as _,
+    Runner as _, ThreadPooler,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -108,7 +108,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.create_pool(THREADS).unwrap();
+                            let pool = ctx.create_thread_pool(THREADS).unwrap();
                             let any_cfg = any_cfg(pool.clone());
                             let current_cfg = current_cfg(pool.clone());
                             let variable_any_cfg = variable_any_cfg(pool.clone());

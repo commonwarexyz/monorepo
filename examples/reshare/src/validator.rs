@@ -14,7 +14,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
 use commonware_p2p::authenticated::discovery;
-use commonware_runtime::{tokio, Metrics, Quota, RayonPoolSpawner};
+use commonware_runtime::{tokio, Metrics, Quota, ThreadPooler};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
 use futures::future::try_join_all;
 use std::{

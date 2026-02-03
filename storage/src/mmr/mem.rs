@@ -803,7 +803,7 @@ mod tests {
         hasher::{Hasher as _, Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{deterministic, tokio, RayonPoolSpawner, Runner};
+    use commonware_runtime::{deterministic, tokio, Runner, ThreadPooler};
     use commonware_utils::NZUsize;
 
     /// Test empty MMR behavior.
@@ -1066,7 +1066,7 @@ mod tests {
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let pool = context.create_pool(NZUsize!(4)).unwrap();
+            let pool = context.create_thread_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
             let mut mmr = Mmr::init(
@@ -1258,7 +1258,7 @@ mod tests {
             )
             .unwrap();
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
-            let pool = ctx.create_pool(NZUsize!(4)).unwrap();
+            let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
             do_batch_update(&mut hasher, mmr, Some(pool));
         });
     }
