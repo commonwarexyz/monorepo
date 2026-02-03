@@ -10,7 +10,34 @@ use crate::Block;
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Committable, Digest, Digestible};
 use commonware_utils::channel::oneshot;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
+
+/// A trait for cached block types that can be converted to the underlying block.
+///
+/// This trait allows buffer implementations to use efficient internal representations
+/// (e.g., `Arc<Block>`) while providing a uniform way to extract the block.
+pub trait IntoBlock<B>: Clone + Send {
+    /// Convert this cached block into the underlying block type.
+    fn into_block(self) -> B;
+}
+
+/// Blanket implementation for any cloneable block type.
+///
+/// This covers the standard variant where `CachedBlock = B`.
+impl<B: Clone + Send> IntoBlock<B> for B {
+    fn into_block(self) -> B {
+        self
+    }
+}
+
+/// Implementation for `Arc<B>` to support the coding variant.
+///
+/// Uses `Arc::unwrap_or_clone` to avoid cloning when the refcount is 1.
+impl<B: Clone + Send + Sync> IntoBlock<B> for Arc<B> {
+    fn into_block(self) -> B {
+        Self::unwrap_or_clone(self)
+    }
+}
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -60,8 +87,8 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// The cached block type held internally by the buffer.
     ///
     /// This allows buffers to use efficient internal representations (e.g., `Arc<Block>`)
-    /// while exposing the block via `AsRef`.
-    type CachedBlock: AsRef<V::Block> + Clone + Send;
+    /// while providing conversion to the underlying block type via [`IntoBlock`].
+    type CachedBlock: IntoBlock<V::Block>;
 
     /// Attempt to find a block by its digest.
     ///

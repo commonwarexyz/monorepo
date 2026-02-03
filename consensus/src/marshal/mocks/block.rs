@@ -134,9 +134,3 @@ impl<D: Digest, C: Codec<Cfg = ()> + Clone + Send + Sync + 'static> crate::Certi
         self.context.clone()
     }
 }
-
-impl<D: Digest, C> AsRef<Self> for Block<D, C> {
-    fn as_ref(&self) -> &Self {
-        self
-    }
-}

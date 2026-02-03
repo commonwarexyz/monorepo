@@ -1,7 +1,7 @@
 use super::{
     cache,
     mailbox::{Mailbox, Message},
-    BlockBuffer, Variant,
+    BlockBuffer, IntoBlock, Variant,
 };
 use crate::{
     marshal::{
@@ -506,7 +506,7 @@ where
                             Entry::Vacant(entry) => {
                                 let rx = buffer.subscribe_by_digest(digest).await;
                                 let aborter = waiters.push(async move {
-                                    rx.await.expect("buffer subscriber closed").as_ref().clone()
+                                    rx.await.expect("buffer subscriber closed").into_block()
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
@@ -552,7 +552,7 @@ where
                             Entry::Vacant(entry) => {
                                 let rx = buffer.subscribe_by_commitment(commitment).await;
                                 let aborter = waiters.push(async move {
-                                    rx.await.expect("buffer subscriber closed").as_ref().clone()
+                                    rx.await.expect("buffer subscriber closed").into_block()
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
@@ -1070,7 +1070,7 @@ where
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_digest(digest).await {
-            return Some(block.as_ref().clone());
+            return Some(block.into_block());
         }
         self.find_block_in_storage(digest).await
     }
@@ -1085,7 +1085,7 @@ where
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
-            return Some(block.as_ref().clone());
+            return Some(block.into_block());
         }
         self.find_block_in_storage(V::commitment_to_digest(commitment))
             .await

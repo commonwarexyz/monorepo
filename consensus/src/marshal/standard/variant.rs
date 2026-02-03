@@ -55,7 +55,7 @@ where
 
 impl<B, K> BlockBuffer<Standard<B>> for buffered::Mailbox<K, B>
 where
-    B: Block + Committable<Commitment = <B as Digestible>::Digest> + AsRef<B>,
+    B: Block + Committable<Commitment = <B as Digestible>::Digest>,
     K: PublicKey,
 {
     type CachedBlock = B;
