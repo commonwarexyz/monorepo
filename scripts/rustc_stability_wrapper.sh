@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+
 # Wrapper that injects stability cfg flags only for workspace crates.
 # Used by `just check-stability` to avoid recompiling dependencies.
 #
