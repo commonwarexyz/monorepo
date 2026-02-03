@@ -145,15 +145,6 @@ impl SendCipher {
         }
     }
 
-    /// Encrypts data and returns the ciphertext.
-    pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut buf = vec![0u8; data.len() + TAG_SIZE];
-        buf[..data.len()].copy_from_slice(data);
-        let tag = self.send_in_place(&mut buf[..data.len()])?;
-        buf[data.len()..].copy_from_slice(&tag);
-        Ok(buf)
-    }
-
     /// Encrypts `data` in-place and returns the authentication tag.
     ///
     /// The caller is responsible for appending the returned tag to the buffer.
@@ -161,6 +152,15 @@ impl SendCipher {
         let nonce = self.nonce.inc()?;
         self.inner
             .expose(|cipher| cipher.encrypt_in_place(&nonce, data))
+    }
+
+    /// Encrypts data and returns the ciphertext.
+    pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut buf = vec![0u8; data.len() + TAG_SIZE];
+        buf[..data.len()].copy_from_slice(data);
+        let tag = self.send_in_place(&mut buf[..data.len()])?;
+        buf[data.len()..].copy_from_slice(&tag);
+        Ok(buf)
     }
 }
 
@@ -179,26 +179,6 @@ impl RecvCipher {
             nonce: CounterNonce::new(),
             inner: Secret::new(Cipher::from_key(&key_bytes)),
         }
-    }
-
-    /// Decrypts ciphertext and returns the original data.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error in the following situations:
-    ///
-    /// - Too many messages have been received with this cipher.
-    /// - The ciphertext was corrupted in some way.
-    ///
-    /// In *both* cases, the `RecvCipher` will no longer be able to return
-    /// valid ciphertexts, and will always return an error on subsequent calls
-    /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
-    /// is a simple (and safe) way to handle this scenario.
-    pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut buf = encrypted_data.to_vec();
-        let plaintext_len = self.recv_in_place(&mut buf)?;
-        buf.truncate(plaintext_len);
-        Ok(buf)
     }
 
     /// Decrypts `encrypted_data` in-place and returns the plaintext length.
@@ -225,6 +205,26 @@ impl RecvCipher {
         let nonce = self.nonce.inc()?;
         self.inner
             .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
+    }
+
+    /// Decrypts ciphertext and returns the original data.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error in the following situations:
+    ///
+    /// - Too many messages have been received with this cipher.
+    /// - The ciphertext was corrupted in some way.
+    ///
+    /// In *both* cases, the `RecvCipher` will no longer be able to return
+    /// valid ciphertexts, and will always return an error on subsequent calls
+    /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
+    /// is a simple (and safe) way to handle this scenario.
+    pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut buf = encrypted_data.to_vec();
+        let plaintext_len = self.recv_in_place(&mut buf)?;
+        buf.truncate(plaintext_len);
+        Ok(buf)
     }
 }
 
