@@ -116,7 +116,6 @@ fn fuzz_diff_hash(data: &[u8]) {
 }
 
 fn fuzz_determinism(chunks: &[Vec<u8>]) {
-    // Two fresh hashers with same input produce identical output
     let mut hasher1 = OurCrc32::default();
     let mut hasher2 = OurCrc32::default();
     for chunk in chunks {
@@ -127,7 +126,6 @@ fn fuzz_determinism(chunks: &[Vec<u8>]) {
     let digest2 = hasher2.finalize();
     assert_eq!(digest1, digest2);
 
-    // Debug and Display produce identical hex output
     let debug_str = format!("{digest1:?}");
     let display_str = format!("{digest1}");
     assert_eq!(debug_str, display_str);
