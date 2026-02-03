@@ -1,10 +1,7 @@
 //! Mailbox for the shard buffer engine.
 
 use crate::{
-    marshal::coding::{
-        shards::ReconstructionError,
-        types::{CodedBlock, DigestOrCommitment},
-    },
+    marshal::coding::{shards::ReconstructionError, types::CodedBlock},
     simplex::types::{Activity, Notarize},
     types::CodingCommitment,
     Block, Reporter, Scheme,
@@ -53,10 +50,22 @@ where
         #[allow(clippy::type_complexity)]
         response: oneshot::Sender<Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>>>,
     },
-    /// Subscribe to notifications for when a block is fully reconstructed.
-    SubscribeBlock {
-        /// The [DigestOrCommitment] of the block to subscribe to.
-        id: DigestOrCommitment<B::Digest>,
+    /// Subscribe to notifications for when a block is fully reconstructed, by digest.
+    ///
+    /// This subscription cannot trigger shard reconstruction since we don't have
+    /// the full commitment needed.
+    SubscribeBlockByDigest {
+        /// The digest of the block to subscribe to.
+        digest: B::Digest,
+        /// A response channel to send the reconstructed block to.
+        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
+    },
+    /// Subscribe to notifications for when a block is fully reconstructed, by commitment.
+    ///
+    /// Having the commitment enables shard reconstruction when enough shards are available.
+    SubscribeBlockByCommitment {
+        /// The [CodingCommitment] for the block to subscribe to.
+        commitment: CodingCommitment,
         /// A response channel to send the reconstructed block to.
         response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     },
@@ -136,13 +145,36 @@ where
         rx.await.expect("mailbox closed")
     }
 
-    /// Subscribe to notifications for when a block is fully reconstructed.
-    pub async fn subscribe_block(
+    /// Subscribe to notifications for when a block is fully reconstructed, by digest.
+    ///
+    /// This subscription cannot trigger shard reconstruction since we don't have
+    /// the full commitment needed.
+    pub async fn subscribe_block_by_digest(
         &mut self,
-        id: DigestOrCommitment<B::Digest>,
+        digest: B::Digest,
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
         let (tx, rx) = oneshot::channel();
-        let msg = Message::SubscribeBlock { id, response: tx };
+        let msg = Message::SubscribeBlockByDigest {
+            digest,
+            response: tx,
+        };
+        self.sender.send(msg).await.expect("mailbox closed");
+
+        rx
+    }
+
+    /// Subscribe to notifications for when a block is fully reconstructed, by commitment.
+    ///
+    /// Having the commitment enables shard reconstruction when enough shards are available.
+    pub async fn subscribe_block_by_commitment(
+        &mut self,
+        commitment: CodingCommitment,
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
+        let (tx, rx) = oneshot::channel();
+        let msg = Message::SubscribeBlockByCommitment {
+            commitment,
+            response: tx,
+        };
         self.sender.send(msg).await.expect("mailbox closed");
 
         rx

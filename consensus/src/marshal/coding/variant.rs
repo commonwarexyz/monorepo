@@ -2,7 +2,7 @@ use crate::{
     marshal::{
         coding::{
             shards,
-            types::{CodedBlock, DigestOrCommitment, StoredCodedBlock},
+            types::{CodedBlock, StoredCodedBlock},
         },
         core::{BlockBuffer, Variant},
     },
@@ -26,7 +26,6 @@ impl<B: Block, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
     type Block = CodedBlock<B, C>;
     type StoredBlock = StoredCodedBlock<B, C>;
     type Commitment = CodingCommitment;
-    type LookupId = DigestOrCommitment<<B as Digestible>::Digest>;
     type Recipients = Vec<P>;
 
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
@@ -44,18 +43,6 @@ impl<B: Block, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
     fn unwrap_stored(stored: Self::StoredBlock) -> Self::Block {
         stored.into_coded_block()
     }
-
-    fn lookup_from_commitment(commitment: Self::Commitment) -> Self::LookupId {
-        DigestOrCommitment::Commitment(commitment)
-    }
-
-    fn lookup_from_digest(digest: <Self::Block as Digestible>::Digest) -> Self::LookupId {
-        DigestOrCommitment::Digest(digest)
-    }
-
-    fn lookup_to_digest(lookup: Self::LookupId) -> <Self::Block as Digestible>::Digest {
-        lookup.block_digest()
-    }
 }
 
 impl<B, S, C, P> BlockBuffer<Coding<B, C, P>> for shards::Mailbox<B, S, C, P>
@@ -67,26 +54,37 @@ where
 {
     type CachedBlock = Arc<CodedBlock<B, C>>;
 
-    async fn find(&mut self, lookup: DigestOrCommitment<B::Digest>) -> Option<Self::CachedBlock> {
-        match lookup {
-            DigestOrCommitment::Commitment(commitment) => {
-                self.try_reconstruct(commitment).await.ok().flatten()
-            }
-            DigestOrCommitment::Digest(_digest) => {
-                // With only a digest, we cannot reconstruct from shards because we don't have the coding commitment.
-                // The caller should check cache/archives instead.
-                None
-            }
-        }
-    }
-
-    async fn subscribe(
+    async fn find_by_digest(
         &mut self,
-        lookup: DigestOrCommitment<B::Digest>,
-    ) -> oneshot::Receiver<Self::CachedBlock> {
-        self.subscribe_block(lookup).await
+        _digest: <CodedBlock<B, C> as Digestible>::Digest,
+    ) -> Option<Self::CachedBlock> {
+        // With only a digest, we cannot reconstruct from shards because we don't have the coding commitment.
+        // The caller should check cache/archives instead.
+        None
     }
 
+    async fn find_by_commitment(
+        &mut self,
+        commitment: CodingCommitment,
+    ) -> Option<Self::CachedBlock> {
+        self.try_reconstruct(commitment).await.ok().flatten()
+    }
+
+    async fn subscribe_by_digest(
+        &mut self,
+        digest: <CodedBlock<B, C> as Digestible>::Digest,
+    ) -> oneshot::Receiver<Self::CachedBlock> {
+        self.subscribe_block_by_digest(digest).await
+    }
+
+    async fn subscribe_by_commitment(
+        &mut self,
+        commitment: CodingCommitment,
+    ) -> oneshot::Receiver<Self::CachedBlock> {
+        self.subscribe_block_by_commitment(commitment).await
+    }
+
+    #[allow(clippy::use_self)] // Need to call inherent method, not trait method
     async fn finalized(&mut self, commitment: CodingCommitment) {
         shards::Mailbox::finalized(self, commitment).await;
     }

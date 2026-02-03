@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
-use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
+use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use std::{marker::PhantomData, ops::Deref};
 
@@ -591,29 +591,6 @@ impl<B: Block + PartialEq, C: Scheme> PartialEq for StoredCodedBlock<B, C> {
 
 impl<B: Block + Eq, C: Scheme> Eq for StoredCodedBlock<B, C> {}
 
-/// A block identifier, either by its digest or its consensus [CodingCommitment].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum DigestOrCommitment<D: Digest> {
-    Digest(D),
-    Commitment(CodingCommitment),
-}
-
-impl<D: Digest> DigestOrCommitment<D> {
-    /// Returns the inner block [Digest] for this identifier.
-    pub fn block_digest(&self) -> D {
-        match self {
-            Self::Digest(digest) => *digest,
-            Self::Commitment(commitment) => commitment.block_digest(),
-        }
-    }
-}
-
-impl<D: Digest> From<D> for DigestOrCommitment<D> {
-    fn from(digest: D) -> Self {
-        Self::Digest(digest)
-    }
-}
-
 /// Compute the [CodingConfig] for a given number of participants.
 ///
 /// Currently, this function assumes `3f + 1` participants to tolerate at max `f` faults.
@@ -637,7 +614,7 @@ mod test {
     use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
     use commonware_codec::{Decode, Encode};
     use commonware_coding::{CodecConfig, ReedSolomon};
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB

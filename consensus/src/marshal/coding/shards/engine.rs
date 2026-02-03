@@ -3,7 +3,7 @@
 use crate::{
     marshal::coding::{
         shards::mailbox::{Mailbox, Message},
-        types::{CodedBlock, DigestOrCommitment, DistributionShard, Shard},
+        types::{CodedBlock, DistributionShard, Shard},
     },
     types::{CodingCommitment, Height},
     Block, Heightable, Scheme,
@@ -240,11 +240,17 @@ where
                             // Send the response; if the receiver has been dropped, we don't care.
                             response.send_lossy(result);
                         }
-                        Message::SubscribeBlock {
-                            id,
+                        Message::SubscribeBlockByDigest {
+                            digest,
                             response,
                         } => {
-                            self.subscribe_block(id, response).await;
+                            self.subscribe_block_by_digest(digest, response).await;
+                        }
+                        Message::SubscribeBlockByCommitment {
+                            commitment,
+                            response,
+                        } => {
+                            self.subscribe_block_by_commitment(commitment, response).await;
                         }
                         Message::Finalized { commitment } => {
                             // Evict the finalized block and any blocks at or below its height.
@@ -526,24 +532,55 @@ where
     ///
     /// The responder will be sent the block when it is available; either instantly (if cached)
     /// or when it is received from the network. The request can be canceled by dropping the
-    /// responder
+    /// responder.
+    ///
+    /// This subscription cannot trigger shard reconstruction since we don't have the full
+    /// commitment needed.
     #[inline]
-    async fn subscribe_block(
+    async fn subscribe_block_by_digest(
         &mut self,
-        id: DigestOrCommitment<B::Digest>,
+        digest: B::Digest,
         responder: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     ) {
-        let block = match id {
-            DigestOrCommitment::Digest(digest) => self
-                .reconstructed_blocks
-                .values()
-                .find(|b| b.digest() == digest),
-            DigestOrCommitment::Commitment(commitment) => {
-                self.reconstructed_blocks.get(&commitment)
-            }
-        };
+        // Check if we already have the block reconstructed
+        let block = self
+            .reconstructed_blocks
+            .values()
+            .find(|b| b.digest() == digest);
         if let Some(block) = block {
-            // If we already have the block reconstructed, send it immediately.
+            responder.send_lossy(Arc::clone(block));
+            return;
+        }
+
+        // Add to subscriptions (no reconstruction attempt since we don't have commitment)
+        match self.block_subscriptions.entry(digest) {
+            Entry::Vacant(entry) => {
+                entry.insert(BlockSubscription {
+                    subscribers: vec![responder],
+                    commitment: None,
+                });
+            }
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().subscribers.push(responder);
+            }
+        }
+    }
+
+    /// Subscribes to a [CodedBlock] by commitment with an externally prepared responder.
+    ///
+    /// The responder will be sent the block when it is available; either instantly (if cached)
+    /// or when it is received from the network. The request can be canceled by dropping the
+    /// responder.
+    ///
+    /// Having the commitment enables shard reconstruction when enough shards are available.
+    #[inline]
+    async fn subscribe_block_by_commitment(
+        &mut self,
+        commitment: CodingCommitment,
+        responder: oneshot::Sender<Arc<CodedBlock<B, C>>>,
+    ) {
+        // Check if we already have the block reconstructed
+        if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             responder.send_lossy(Arc::clone(block));
             return;
         }
@@ -552,29 +589,25 @@ where
         // This handles the case where shards arrived before this subscription was created
         // (e.g., when receiving a notarization after other validators have already broadcast
         // their shards).
-        let commitment = if let DigestOrCommitment::Commitment(commitment) = id {
-            if let Ok(Some(block)) = self.try_reconstruct(commitment).await {
-                responder.send_lossy(block);
-                return;
-            }
-            Some(commitment)
-        } else {
-            None
-        };
+        if let Ok(Some(block)) = self.try_reconstruct(commitment).await {
+            responder.send_lossy(block);
+            return;
+        }
 
-        match self.block_subscriptions.entry(id.block_digest()) {
+        let digest = commitment.block_digest();
+        match self.block_subscriptions.entry(digest) {
             Entry::Vacant(entry) => {
                 entry.insert(BlockSubscription {
                     subscribers: vec![responder],
-                    commitment,
+                    commitment: Some(commitment),
                 });
             }
             Entry::Occupied(mut entry) => {
                 let sub = entry.get_mut();
                 sub.subscribers.push(responder);
                 // Update commitment if we now have one and didn't before
-                if sub.commitment.is_none() && commitment.is_some() {
-                    sub.commitment = commitment;
+                if sub.commitment.is_none() {
+                    sub.commitment = Some(commitment);
                 }
             }
         }
@@ -1057,7 +1090,7 @@ mod test {
             // they don't have enough shards yet.
             let second_mailbox = mailboxes.get_mut(&peers[1]).unwrap();
             let block_subscription = second_mailbox
-                .subscribe_block(DigestOrCommitment::Digest(coded_block.digest()))
+                .subscribe_block_by_digest(coded_block.digest())
                 .await;
             let block_reconstruction_result = second_mailbox
                 .try_reconstruct(coded_block.commitment())
@@ -1146,7 +1179,7 @@ mod test {
             // We only subscribe on one peer to verify the pruning behavior.
             let second_mailbox = mailboxes.get_mut(&peers[1]).unwrap();
             let orphan_rx = second_mailbox
-                .subscribe_block(DigestOrCommitment::Commitment(orphan_block.commitment()))
+                .subscribe_block_by_commitment(orphan_block.commitment())
                 .await;
 
             // Now broadcast the orphan block's shards so it gets reconstructed

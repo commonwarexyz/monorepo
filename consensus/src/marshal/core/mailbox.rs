@@ -60,17 +60,29 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// Target peers to fetch from. Added to any existing targets for this height.
         targets: NonEmptyVec<S::PublicKey>,
     },
-    /// A request to retrieve a block by its lookup ID.
-    Subscribe {
+    /// A request to retrieve a block by its digest.
+    ///
+    /// This is used when we only have a digest (e.g., during gap repair following
+    /// parent links). In coding mode, this cannot trigger shard reconstruction.
+    SubscribeByDigest {
         /// The view in which the block was notarized. This is an optimization
         /// to help locate the block.
         round: Option<Round>,
-        /// The lookup ID of the block to retrieve.
-        ///
-        /// For standard marshal, this is the block digest.
-        /// For coding marshal, this is a `DigestOrCommitment` which allows
-        /// passing the full commitment for shard reconstruction.
-        lookup: V::LookupId,
+        /// The digest of the block to retrieve.
+        digest: <V::Block as Digestible>::Digest,
+        /// A channel to send the retrieved block.
+        response: oneshot::Sender<V::Block>,
+    },
+    /// A request to retrieve a block by its commitment.
+    ///
+    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
+    /// In coding mode, having the commitment enables shard reconstruction.
+    SubscribeByCommitment {
+        /// The view in which the block was notarized. This is an optimization
+        /// to help locate the block.
+        round: Option<Round>,
+        /// The commitment of the block to retrieve.
+        commitment: V::Commitment,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
@@ -203,7 +215,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .await;
     }
 
-    /// A request to retrieve a block by its lookup ID.
+    /// A request to retrieve a block by its digest.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
@@ -213,19 +225,46 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     ///
-    /// For standard marshal, the lookup ID is just the block digest.
-    /// For coding marshal, the lookup ID is a `DigestOrCommitment` which can include
-    /// the full commitment for shard reconstruction.
-    pub async fn subscribe(
+    /// This is used when we only have a digest (e.g., during gap repair following parent links).
+    /// In coding mode, this cannot trigger shard reconstruction.
+    pub async fn subscribe_by_digest(
         &mut self,
         round: Option<Round>,
-        lookup: V::LookupId,
+        digest: <V::Block as Digestible>::Digest,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send_lossy(Message::Subscribe {
+            .send_lossy(Message::SubscribeByDigest {
                 round,
-                lookup,
+                digest,
+                response: tx,
+            })
+            .await;
+        rx
+    }
+
+    /// A request to retrieve a block by its commitment.
+    ///
+    /// If the block is found available locally, the block will be returned immediately.
+    ///
+    /// If the block is not available locally, the request will be registered and the caller will
+    /// be notified when the block is available. If the block is not finalized, it's possible that
+    /// it may never become available.
+    ///
+    /// The oneshot receiver should be dropped to cancel the subscription.
+    ///
+    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
+    /// In coding mode, having the commitment enables shard reconstruction.
+    pub async fn subscribe_by_commitment(
+        &mut self,
+        round: Option<Round>,
+        commitment: V::Commitment,
+    ) -> oneshot::Receiver<V::Block> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send_lossy(Message::SubscribeByCommitment {
+                round,
+                commitment,
                 response: tx,
             })
             .await;
@@ -239,7 +278,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         &mut self,
         (start_round, start_digest): (Option<Round>, <V::Block as Digestible>::Digest),
     ) -> Option<AncestorStream<Self, V::ApplicationBlock>> {
-        self.subscribe(start_round, V::lookup_from_digest(start_digest))
+        self.subscribe_by_digest(start_round, start_digest)
             .await
             .await
             .ok()
@@ -294,7 +333,7 @@ impl<S: Scheme, V: Variant> AncestryProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
 
     async fn fetch_block(mut self, digest: <V::Block as Digestible>::Digest) -> Self::Block {
-        let subscription = self.subscribe(None, V::lookup_from_digest(digest)).await;
+        let subscription = self.subscribe_by_digest(None, digest).await;
         let block = subscription
             .await
             .expect("marshal actor dropped before fulfilling subscription");

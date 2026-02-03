@@ -34,6 +34,7 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
+#[allow(clippy::type_complexity)]
 struct Cache<R, V, S>
 where
     R: Rng + Spawner + Metrics + Clock + Storage,

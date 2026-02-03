@@ -161,6 +161,17 @@ where
     }
 }
 
+impl<H, C, V> AsRef<Self> for Block<H, C, V>
+where
+    H: Hasher,
+    C: Signer,
+    V: Variant,
+{
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
 /// Returns the genesis block with the given context.
 ///
 /// The genesis block has an empty parent digest and height zero.

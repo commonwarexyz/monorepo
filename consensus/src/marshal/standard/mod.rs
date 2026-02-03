@@ -999,7 +999,7 @@ mod tests {
             let commitment = block.digest();
 
             let subscription_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), commitment)
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), commitment)
                 .await;
 
             actor
@@ -1056,13 +1056,13 @@ mod tests {
             let commitment2 = block2.digest();
 
             let sub1_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), commitment1)
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), commitment1)
                 .await;
             let sub2_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(2))), commitment2)
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), commitment2)
                 .await;
             let sub3_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), commitment1)
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), commitment1)
                 .await;
 
             actor
@@ -1131,10 +1131,10 @@ mod tests {
             let commitment2 = block2.digest();
 
             let sub1_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), commitment1)
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), commitment1)
                 .await;
             let sub2_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(2))), commitment2)
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), commitment2)
                 .await;
 
             drop(sub1_rx);
@@ -1198,11 +1198,11 @@ mod tests {
             let block4 = make_block(block3.digest(), Height::new(4), 4);
             let block5 = make_block(block4.digest(), Height::new(5), 5);
 
-            let sub1_rx = actor.subscribe(None, block1.digest()).await;
-            let sub2_rx = actor.subscribe(None, block2.digest()).await;
-            let sub3_rx = actor.subscribe(None, block3.digest()).await;
-            let sub4_rx = actor.subscribe(None, block4.digest()).await;
-            let sub5_rx = actor.subscribe(None, block5.digest()).await;
+            let sub1_rx = actor.subscribe_by_digest(None, block1.digest()).await;
+            let sub2_rx = actor.subscribe_by_digest(None, block2.digest()).await;
+            let sub3_rx = actor.subscribe_by_digest(None, block3.digest()).await;
+            let sub4_rx = actor.subscribe_by_digest(None, block4.digest()).await;
+            let sub5_rx = actor.subscribe_by_digest(None, block5.digest()).await;
 
             // Block1: Broadcasted by the actor
             actor

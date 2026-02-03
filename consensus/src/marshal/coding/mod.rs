@@ -10,19 +10,18 @@
 //!
 //! # Components
 //!
-//! - [`Actor`]: drives the state machine that orders finalized blocks, handles acknowledgements
-//!   from the application, and requests repairs when gaps are detected.
-//! - [`shards::Engine`]: broadcasts shards, verifies locally held fragments, and reconstructs
+//! - [`crate::marshal::core::Actor`]: The unified marshal actor that orders finalized blocks,
+//!   handles acknowledgements from the application, and requests repairs when gaps are detected.
+//!   Used with [`Coding`] as the variant type parameter.
+//! - [`crate::marshal::core::Mailbox`]: Accepts requests from other local subsystems and forwards
+//!   them to the actor. Used with [`Coding`] as the variant type parameter.
+//! - [`shards::Engine`]: Broadcasts shards, verifies locally held fragments, and reconstructs
 //!   entire [`types::CodedBlock`]s on demand.
-//! - [`Mailbox`]: accepts requests coming from other local subsystems and forwards them to the
-//!   actor without requiring direct handles.
-//! - [`crate::marshal::resolver`]: issues outbound fetches to remote peers when marshal is missing a block,
-//!   notarization, or finalization referenced by consensus.
-//! - Cache: keeps per-epoch prunable archives of notarized blocks and certificates so the
-//!   actor can roll forward quickly without retaining the entire chain in hot storage.
-//! - [`types`]: defines commitments, distribution shards, and helper builders used across the
+//! - [`crate::marshal::resolver`]: Issues outbound fetches to remote peers when marshal is missing
+//!   a block, notarization, or finalization referenced by consensus.
+//! - [`types`]: Defines commitments, distribution shards, and helper builders used across the
 //!   module.
-//! - [`Marshaled`]: wraps an [`crate::Application`] implementation so it automatically enforces
+//! - [`Marshaled`]: Wraps an [`crate::Application`] implementation so it automatically enforces
 //!   epoch boundaries and performs erasure encoding before a proposal leaves the application.
 //!
 //! # Data Flow
@@ -31,26 +30,26 @@
 //!    obtains a [`crate::types::CodingCommitment`] describing the shard layout.
 //! 2. The block is broadcast via [`shards::Engine`]; each participant receives exactly one shard
 //!    and reshares it to everyone else once it verifies the fragment.
-//! 3. The [`Actor`] ingests notarizations/finalizations from `simplex`, pulls reconstructed blocks
-//!    from the shard engine or backfills them through [`crate::marshal::resolver`], and durably persists the
-//!    ordered data.
-//! 4. The actor reports finalized blocks to the node’s [`crate::Reporter`] at-least-once and
+//! 3. The actor ingests notarizations/finalizations from `simplex`, pulls reconstructed blocks
+//!    from the shard engine or backfills them through [`crate::marshal::resolver`], and durably
+//!    persists the ordered data.
+//! 4. The actor reports finalized blocks to the node's [`crate::Reporter`] at-least-once and
 //!    drives repair loops whenever notarizations reference yet-to-be-delivered payloads.
 //!
 //! # Storage and Repair
 //!
-//! Notarized data and certificates live in prunable archives managed by the cache manager, while
-//! finalized blocks are migrated into immutable archives. Any gaps are filled by asking peers for
-//! specific commitments through the resolver pipeline (`ingress::handler` implements the bridge to
-//! [`commonware_resolver`]). The shard engine keeps only ephemeral, in-memory caches; once a block
-//! is finalized it is evicted from the reconstruction map, reducing memory pressure.
+//! Notarized data and certificates live in prunable archives managed internally, while finalized
+//! blocks are migrated into immutable archives. Any gaps are filled by asking peers for specific
+//! commitments through the resolver pipeline. The shard engine keeps only ephemeral, in-memory
+//! caches; once a block is finalized it is evicted from the reconstruction map, reducing memory
+//! pressure.
 //!
 //! # When to Use
 //!
 //! Choose this module when the consensus deployment wants erasure-coded dissemination with the
 //! same ordering guarantees provided by [`super::standard`]. The API mirrors the standard marshal,
-//! so applications can switch between the two by swapping the mailbox pair they hand to
-//! [`Marshaled`] and the consensus automaton.
+//! so applications can switch between the two by swapping the variant type and buffer implementation
+//! they provide to the core actor.
 
 pub mod shards;
 pub mod types;
@@ -68,7 +67,7 @@ mod tests {
         marshal::{
             coding::{
                 shards,
-                types::{coding_config_for_participants, CodedBlock, DigestOrCommitment, Shard},
+                types::{coding_config_for_participants, CodedBlock, Shard},
             },
             config::Config,
             core::{Actor, Mailbox},
@@ -877,14 +876,13 @@ mod tests {
                     let network = control.register(1, TEST_QUOTA).await.unwrap();
                     broadcast_engine.start(network);
 
-                    let (shard_engine, shard_mailbox) =
-                        shards::Engine::<_, S, _, _, B, K, _>::new(
-                            context.clone(),
-                            buffer,
-                            (),
-                            config.mailbox_size,
-                            Sequential,
-                        );
+                    let (shard_engine, shard_mailbox) = shards::Engine::<_, S, _, _, B, K, _>::new(
+                        context.clone(),
+                        buffer,
+                        (),
+                        config.mailbox_size,
+                        Sequential,
+                    );
                     shard_engine.start();
 
                     // Initialize prunable archives
@@ -1120,7 +1118,7 @@ mod tests {
             let digest = block.digest();
 
             let subscription_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest))
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest)
                 .await;
 
             shards
@@ -1181,13 +1179,13 @@ mod tests {
             let digest2 = block2.digest();
 
             let sub1_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest1))
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
                 .await;
             let sub2_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(2))), DigestOrCommitment::Digest(digest2))
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2)
                 .await;
             let sub3_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest1))
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
                 .await;
 
             shards
@@ -1260,10 +1258,10 @@ mod tests {
             let digest2 = block2.digest();
 
             let sub1_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(1))), DigestOrCommitment::Digest(digest1))
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest1)
                 .await;
             let sub2_rx = actor
-                .subscribe(Some(Round::new(Epoch::zero(), View::new(2))), DigestOrCommitment::Digest(digest2))
+                .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(2))), digest2)
                 .await;
 
             drop(sub1_rx);
@@ -1339,9 +1337,9 @@ mod tests {
                 &Sequential,
             );
 
-            let sub1_rx = actor.subscribe(None, DigestOrCommitment::Digest(block1.digest())).await;
-            let sub2_rx = actor.subscribe(None, DigestOrCommitment::Digest(block2.digest())).await;
-            let sub3_rx = actor.subscribe(None, DigestOrCommitment::Digest(block3.digest())).await;
+            let sub1_rx = actor.subscribe_by_digest(None, block1.digest()).await;
+            let sub2_rx = actor.subscribe_by_digest(None, block2.digest()).await;
+            let sub3_rx = actor.subscribe_by_digest(None, block3.digest()).await;
 
             // Block1: Broadcasted and notarized by the actor
             shards.proposed(block1.clone(), participants.clone()).await;

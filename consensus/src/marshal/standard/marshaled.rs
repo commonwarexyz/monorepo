@@ -224,8 +224,7 @@ where
                 }
 
                 // Request verification from the application.
-                let ancestry_stream =
-                    AncestorStream::new(marshal.clone(), [block.clone(), parent]);
+                let ancestry_stream = AncestorStream::new(marshal.clone(), [block.clone(), parent]);
                 let validity_request = application.verify(
                     (runtime_context.with_label("app_verify"), context.clone()),
                     ancestry_stream,
@@ -435,7 +434,7 @@ where
             .with_label("optimistic_verify")
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
-                let block_request = marshal.subscribe(Some(context.round), digest).await;
+                let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -579,7 +578,7 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe(Some(round), digest).await;
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -735,6 +734,8 @@ where
         tx.send_lossy(genesis);
         rx
     } else {
-        marshal.subscribe(parent_round, parent_digest).await
+        marshal
+            .subscribe_by_digest(parent_round, parent_digest)
+            .await
     }
 }

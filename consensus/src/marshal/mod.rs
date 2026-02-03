@@ -2,19 +2,20 @@
 //!
 //! # Architecture
 //!
-//! The core of the module is the [standard::Actor] / [coding::Actor]. It marshals the finalized blocks into order by:
+//! The core of the module is the unified [`core::Actor`]. It marshals finalized blocks into order by:
 //!
 //! - Receiving uncertified blocks from a broadcast mechanism
 //! - Receiving notarizations and finalizations from consensus
 //! - Reconstructing a total order of finalized blocks
 //! - Providing a backfill mechanism for missing blocks
 //!
-//! The actor interacts with four main components:
-//! - [crate::Reporter]: Receives ordered, finalized blocks at-least-once
-//! - [crate::simplex]: Provides consensus messages
+//! The actor interacts with several main components:
+//! - [`crate::Reporter`]: Receives ordered, finalized blocks at-least-once
+//! - [`crate::simplex`]: Provides consensus messages
 //! - Application: Provides verified blocks
-//! - [commonware_broadcast::buffered]: Provides uncertified blocks received from the network
-//! - [commonware_resolver::Resolver]: Provides a backfill mechanism for missing blocks
+//! - [`commonware_broadcast::buffered`]: Provides uncertified blocks (standard mode)
+//! - [`coding::shards::Engine`]: Provides erasure-coded shards (coding mode)
+//! - [`resolver`]: Provides a backfill mechanism for missing blocks
 //!
 //! # Design
 //!
@@ -42,9 +43,9 @@
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
-//! to store blocks and finalizations. Internal storage is used to store data that is only needed for a short
-//! period of time, such as unverified blocks or notarizations. External storage is used to
-//! store data that needs to be persisted indefinitely, such as finalized blocks.
+//! to store blocks and finalizations. Internal storage (in-memory caches) is used for data that is only
+//! needed for a short period of time, such as unverified blocks or notarizations. External storage
+//! (archive backends) is used to persist finalized blocks and certificates indefinitely.
 //!
 //! Marshal will store all blocks after a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. When

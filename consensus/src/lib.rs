@@ -47,9 +47,6 @@ commonware_macros::stability_scope!(BETA {
     /// Block is the interface for a block in the blockchain.
     ///
     /// Blocks are used to track the progress of the consensus engine.
-    ///
-    /// The [`Committable`] bound ensures blocks can produce a commitment for consensus
-    /// certificates. For simple blocks, the commitment is typically the block's digest.
     pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;

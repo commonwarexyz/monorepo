@@ -32,18 +32,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
 
-    /// The type used for block lookups.
-    ///
-    /// This abstracts over whether we have a full commitment or just a digest:
-    /// - Standard: `B::Digest` (commitment and digest are the same type)
-    /// - Coding: `DigestOrCommitment<B::Digest>` (can be either)
-    ///
-    /// This is necessary because during gap repair, we only have the parent digest
-    /// (from `block.parent()`), not the full commitment. But when handling
-    /// notarizations/finalizations, we have the full commitment which enables
-    /// shard reconstruction in coding mode.
-    type LookupId: Clone + Send + Sync;
-
     /// The type used for broadcast recipients.
     ///
     /// - Standard: `()` (broadcasts to all peers via the underlying network)
@@ -61,21 +49,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Converts a stored block to the application block type.
     fn unwrap_stored(stored: Self::StoredBlock) -> Self::Block;
-
-    /// Creates a lookup ID from a commitment.
-    ///
-    /// In coding mode, this creates a `DigestOrCommitment::Commitment` which
-    /// enables shard reconstruction when looking up blocks.
-    fn lookup_from_commitment(commitment: Self::Commitment) -> Self::LookupId;
-
-    /// Creates a lookup ID from a digest.
-    ///
-    /// In coding mode, this creates a `DigestOrCommitment::Digest` which
-    /// only searches cache/archives (no shard reconstruction).
-    fn lookup_from_digest(digest: <Self::Block as Digestible>::Digest) -> Self::LookupId;
-
-    /// Extracts the block digest from a lookup ID.
-    fn lookup_to_digest(lookup: Self::LookupId) -> <Self::Block as Digestible>::Digest;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different
@@ -86,12 +59,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
 /// - `shards::Mailbox` (coding): Distributes erasure-coded shards and reconstructs blocks
 ///
 /// The trait is generic over a [`Variant`] which provides the block, commitment,
-/// lookup, and recipient types. This avoids duplicating associated types between
-/// `Variant` and `BlockBuffer`.
+/// and recipient types.
 ///
-/// Lookup operations use [`Variant::LookupId`] which can represent either a commitment
-/// or a digest. In standard mode these are the same type. In coding mode, a commitment
-/// enables shard reconstruction while a digest only searches cache/archives.
+/// Lookup operations come in two forms:
+/// - By digest: Simple lookup, no shard reconstruction possible
+/// - By commitment: In coding mode, enables shard reconstruction
 pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// The cached block type held internally by the buffer.
     ///
@@ -102,28 +74,58 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// - Coding: `Arc<CodedBlock<B, C>>` for efficient sharing
     type CachedBlock: AsRef<V::Block> + Clone + Send;
 
-    /// Attempt to find a block by its lookup ID.
+    /// Attempt to find a block by its digest.
     ///
     /// Returns `Some(block)` if the block is immediately available in the buffer,
     /// or `None` if it is not currently cached.
     ///
     /// This is a non-blocking lookup that does not trigger network fetches.
-    /// In coding mode with a commitment-based lookup, this may attempt shard
-    /// reconstruction if enough shards are available.
-    fn find(
+    /// In coding mode, this does NOT attempt shard reconstruction since we
+    /// don't have the full commitment needed for reconstruction.
+    fn find_by_digest(
         &mut self,
-        lookup: V::LookupId,
+        digest: <V::Block as Digestible>::Digest,
     ) -> impl Future<Output = Option<Self::CachedBlock>> + Send;
 
-    /// Subscribe to a block's availability by lookup ID.
+    /// Attempt to find a block by its commitment.
+    ///
+    /// Returns `Some(block)` if the block is immediately available in the buffer,
+    /// or `None` if it is not currently cached.
+    ///
+    /// This is a non-blocking lookup that does not trigger network fetches.
+    /// In coding mode, this MAY attempt shard reconstruction since we have
+    /// the full commitment needed for reconstruction.
+    ///
+    /// In standard mode, commitment equals digest, so this behaves the same
+    /// as [`Self::find_by_digest`].
+    fn find_by_commitment(
+        &mut self,
+        commitment: V::Commitment,
+    ) -> impl Future<Output = Option<Self::CachedBlock>> + Send;
+
+    /// Subscribe to a block's availability by its digest.
     ///
     /// Returns a receiver that will resolve when the block becomes available.
     /// If the block is already cached, the receiver may resolve immediately.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
-    fn subscribe(
+    fn subscribe_by_digest(
         &mut self,
-        lookup: V::LookupId,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> impl Future<Output = oneshot::Receiver<Self::CachedBlock>> + Send;
+
+    /// Subscribe to a block's availability by its commitment.
+    ///
+    /// Returns a receiver that will resolve when the block becomes available.
+    /// If the block is already cached, the receiver may resolve immediately.
+    ///
+    /// In coding mode, having the commitment enables shard reconstruction
+    /// to satisfy the subscription.
+    ///
+    /// The returned receiver can be dropped to cancel the subscription.
+    fn subscribe_by_commitment(
+        &mut self,
+        commitment: V::Commitment,
     ) -> impl Future<Output = oneshot::Receiver<Self::CachedBlock>> + Send;
 
     /// Notify the buffer that a block has been finalized.
@@ -131,9 +133,6 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// This allows the buffer to perform cleanup operations:
     /// - Standard: No-op (cleanup handled elsewhere)
     /// - Coding: Releases shard storage for the finalized block
-    ///
-    /// Takes a commitment (not lookup ID) since we always have the full
-    /// commitment when a block is finalized.
     fn finalized(&mut self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
 
     /// Broadcast a proposed block to peers.

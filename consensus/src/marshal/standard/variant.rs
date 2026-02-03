@@ -17,7 +17,7 @@ use commonware_utils::channel::oneshot;
 /// This variant sends the entire block to all peers. It's simpler than
 /// the coding variant but uses more bandwidth.
 ///
-/// Since [`Block`] now requires [`Committable`](commonware_cryptography::Committable),
+/// Since [`Block`] now requires [`Committable`],
 /// the standard variant can use `B` directly without a wrapper type.
 ///
 /// The `Standard` variant requires that `B::Commitment = B::Digest`, meaning
@@ -34,7 +34,6 @@ where
     type Block = B;
     type StoredBlock = B;
     type Commitment = B::Commitment;
-    type LookupId = B::Digest;
     type Recipients = ();
 
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
@@ -52,18 +51,6 @@ where
     fn unwrap_stored(stored: Self::StoredBlock) -> Self::Block {
         stored
     }
-
-    fn lookup_from_commitment(commitment: Self::Commitment) -> Self::LookupId {
-        commitment
-    }
-
-    fn lookup_from_digest(digest: <Self::Block as Digestible>::Digest) -> Self::LookupId {
-        digest
-    }
-
-    fn lookup_to_digest(lookup: Self::LookupId) -> <Self::Block as Digestible>::Digest {
-        lookup
-    }
 }
 
 impl<B, K> BlockBuffer<Standard<B>> for buffered::Mailbox<K, B>
@@ -73,15 +60,31 @@ where
 {
     type CachedBlock = B;
 
-    async fn find(&mut self, lookup: B::Digest) -> Option<Self::CachedBlock> {
+    async fn find_by_digest(&mut self, digest: B::Digest) -> Option<Self::CachedBlock> {
         // Try to get the block from the buffer
-        self.get(None, lookup, None).await.into_iter().next()
+        self.get(None, digest, None).await.into_iter().next()
     }
 
-    async fn subscribe(&mut self, lookup: B::Digest) -> oneshot::Receiver<Self::CachedBlock> {
+    async fn find_by_commitment(&mut self, commitment: B::Digest) -> Option<Self::CachedBlock> {
+        // In standard mode, commitment = digest
+        self.find_by_digest(commitment).await
+    }
+
+    async fn subscribe_by_digest(
+        &mut self,
+        digest: B::Digest,
+    ) -> oneshot::Receiver<Self::CachedBlock> {
         let (tx, rx) = oneshot::channel();
-        self.subscribe_prepared(None, lookup, None, tx).await;
+        self.subscribe_prepared(None, digest, None, tx).await;
         rx
+    }
+
+    async fn subscribe_by_commitment(
+        &mut self,
+        commitment: B::Digest,
+    ) -> oneshot::Receiver<Self::CachedBlock> {
+        // In standard mode, commitment = digest
+        self.subscribe_by_digest(commitment).await
     }
 
     async fn finalized(&mut self, _commitment: B::Digest) {

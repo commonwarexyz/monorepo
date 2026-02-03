@@ -391,8 +391,7 @@ where
 
                         // Search for block locally, otherwise fetch it remotely.
                         // Use commitment-based lookup to enable shard reconstruction in coding mode.
-                        let lookup = V::lookup_from_commitment(commitment);
-                        if let Some(block) = self.find_block(&mut buffer, lookup).await {
+                        if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             // If found, persist the block
                             self.cache_block(round, digest, block).await;
                         } else {
@@ -413,8 +412,7 @@ where
 
                         // Search for block locally, otherwise fetch it remotely.
                         // Use commitment-based lookup to enable shard reconstruction in coding mode.
-                        let lookup = V::lookup_from_commitment(commitment);
-                        if let Some(block) = self.find_block(&mut buffer, lookup).await {
+                        if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
                             self.finalize(
@@ -438,8 +436,7 @@ where
                         match identifier {
                             BlockID::Digest(digest) => {
                                 // Use digest-based lookup (no shard reconstruction)
-                                let lookup = V::lookup_from_digest(digest);
-                                let result = self.find_block(&mut buffer, lookup).await;
+                                let result = self.find_block_by_digest(&mut buffer, digest).await;
                                 response.send_lossy(result);
                             }
                             BlockID::Height(height) => {
@@ -450,8 +447,7 @@ where
                                 let block = match self.get_latest().await {
                                     Some((_, digest, _)) => {
                                         // Use digest-based lookup (no shard reconstruction)
-                                        let lookup = V::lookup_from_digest(digest);
-                                        self.find_block(&mut buffer, lookup).await
+                                        self.find_block_by_digest(&mut buffer, digest).await
                                     }
                                     None => None,
                                 };
@@ -478,16 +474,12 @@ where
                         let request = Request::<V::Block>::Finalized { height };
                         resolver.fetch_targeted(request, targets).await;
                     }
-                    Message::Subscribe { round, lookup, response } => {
-                        // Check for block locally. For coding variant, this may trigger
-                        // shard reconstruction if the lookup contains a commitment.
-                        if let Some(block) = self.find_block(&mut buffer, lookup.clone()).await {
+                    Message::SubscribeByDigest { round, digest, response } => {
+                        // Check for block locally using digest-based lookup (no shard reconstruction)
+                        if let Some(block) = self.find_block_by_digest(&mut buffer, digest).await {
                             response.send_lossy(block);
                             continue;
                         }
-
-                        // Extract the digest from the lookup for subscription tracking
-                        let digest = V::lookup_to_digest(lookup.clone());
 
                         // We don't have the block locally, so fetch the block from the network
                         // if we have an associated view. If we only have the digest, don't make
@@ -516,7 +508,54 @@ where
                                 entry.get_mut().subscribers.push(response);
                             }
                             Entry::Vacant(entry) => {
-                                let rx = buffer.subscribe(lookup).await;
+                                let rx = buffer.subscribe_by_digest(digest).await;
+                                let aborter = waiters.push(async move {
+                                    rx.await.expect("buffer subscriber closed").as_ref().clone()
+                                });
+                                entry.insert(BlockSubscription {
+                                    subscribers: vec![response],
+                                    _aborter: aborter,
+                                });
+                            }
+                        }
+                    }
+                    Message::SubscribeByCommitment { round, commitment, response } => {
+                        // Check for block locally. For coding variant, this may trigger
+                        // shard reconstruction since we have the full commitment.
+                        if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
+                            response.send_lossy(block);
+                            continue;
+                        }
+
+                        // Extract the digest from the commitment for subscription tracking
+                        let digest = V::commitment_to_digest(commitment);
+
+                        // We don't have the block locally, so fetch the block from the network
+                        // if we have an associated view.
+                        if let Some(round) = round {
+                            if round < self.last_processed_round {
+                                // At this point, we have failed to find the block locally, and
+                                // we know that its round is less than the last processed round.
+                                // This means that something else was finalized in that round,
+                                // so we drop the response to indicate that the block may never
+                                // be available.
+                                continue;
+                            }
+                            // Attempt to fetch the block (with notarization) from the resolver.
+                            // If this is a valid view, this request should be fine to keep open
+                            // until resolution or pruning (even if the oneshot is canceled).
+                            debug!(?round, ?digest, "requested block missing");
+                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
+                        }
+
+                        // Register subscriber
+                        debug!(?round, ?digest, "registering subscriber");
+                        match self.block_subscriptions.entry(digest) {
+                            Entry::Occupied(mut entry) => {
+                                entry.get_mut().subscribers.push(response);
+                            }
+                            Entry::Vacant(entry) => {
+                                let rx = buffer.subscribe_by_commitment(commitment).await;
                                 let aborter = waiters.push(async move {
                                     rx.await.expect("buffer subscriber closed").as_ref().clone()
                                 });
@@ -578,8 +617,7 @@ where
                         match key {
                             Request::Block(digest) => {
                                 // Check for block locally using digest-based lookup (no shard reconstruction)
-                                let lookup = V::lookup_from_digest(digest);
-                                let Some(block) = self.find_block(&mut buffer, lookup).await else {
+                                let Some(block) = self.find_block_by_digest(&mut buffer, digest).await else {
                                     debug!(?digest, "block missing on request");
                                     continue;
                                 };
@@ -611,8 +649,7 @@ where
                                 // Get block using commitment-based lookup (enables shard reconstruction
                                 // since we have the full commitment from the notarization)
                                 let commitment = notarization.proposal.payload;
-                                let lookup = V::lookup_from_commitment(commitment);
-                                let Some(block) = self.find_block(&mut buffer, lookup).await else {
+                                let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await else {
                                     let digest = V::commitment_to_digest(commitment);
                                     debug!(?digest, "block missing on request");
                                     continue;
@@ -1012,26 +1049,11 @@ where
 
     // -------------------- Mixed Storage --------------------
 
-    /// Looks for a block anywhere in local storage.
-    ///
-    /// Takes a lookup ID which can be either a commitment or a digest:
-    /// - Commitment: Enables shard reconstruction in coding mode
-    /// - Digest: Only searches cache/archives (no shard reconstruction)
-    ///
-    /// Use `V::lookup_from_commitment()` when you have a full commitment (e.g., from
-    /// notarizations/finalizations). Use `V::lookup_from_digest()` when you only have
-    /// a digest (e.g., during gap repair following parent links).
-    async fn find_block<Buf: BlockBuffer<V>>(
-        &mut self,
-        buffer: &mut Buf,
-        lookup: V::LookupId,
+    /// Looks for a block in cache and finalized storage by digest.
+    async fn find_block_in_storage(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
-        // Check buffer (passes lookup ID for potential shard reconstruction if commitment-based)
-        if let Some(block) = buffer.find(lookup.clone()).await {
-            return Some(block.as_ref().clone());
-        }
-        // Extract digest for cache/archive lookups
-        let digest = V::lookup_to_digest(lookup);
         // Check verified / notarized blocks via cache manager.
         if let Some(block) = self.cache.find_block(digest).await {
             return Some(V::unwrap_stored(block));
@@ -1042,6 +1064,39 @@ where
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
+    }
+
+    /// Looks for a block anywhere in local storage using only the digest.
+    ///
+    /// This is used when we only have a digest (e.g., during gap repair following
+    /// parent links). In coding mode, this does NOT attempt shard reconstruction.
+    async fn find_block_by_digest<Buf: BlockBuffer<V>>(
+        &self,
+        buffer: &mut Buf,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<V::Block> {
+        // Check buffer (digest-only lookup, no shard reconstruction)
+        if let Some(block) = buffer.find_by_digest(digest).await {
+            return Some(block.as_ref().clone());
+        }
+        self.find_block_in_storage(digest).await
+    }
+
+    /// Looks for a block anywhere in local storage using the full commitment.
+    ///
+    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
+    /// In coding mode, having the commitment enables shard reconstruction.
+    async fn find_block_by_commitment<Buf: BlockBuffer<V>>(
+        &self,
+        buffer: &mut Buf,
+        commitment: V::Commitment,
+    ) -> Option<V::Block> {
+        // Check buffer (commitment-based lookup, may trigger shard reconstruction)
+        if let Some(block) = buffer.find_by_commitment(commitment).await {
+            return Some(block.as_ref().clone());
+        }
+        self.find_block_in_storage(V::commitment_to_digest(commitment))
+            .await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
@@ -1076,8 +1131,7 @@ where
                 let parent_digest = cursor.parent();
                 // Use digest-based lookup since we only have the parent digest
                 // (no shard reconstruction possible during gap repair)
-                let lookup = V::lookup_from_digest(parent_digest);
-                if let Some(block) = self.find_block(buffer, lookup).await {
+                if let Some(block) = self.find_block_by_digest(buffer, parent_digest).await {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
                     self.store_finalization(
                         block.height(),
