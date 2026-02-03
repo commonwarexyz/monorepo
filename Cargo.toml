@@ -4,12 +4,13 @@ members = [
     "codec",
     "coding",
     "collector",
-    "conformance/macros",
     "conformance",
+    "conformance/macros",
     "consensus",
     "cryptography",
     "deployer",
     "macros",
+    "macros/impl",
     "math",
     "p2p",
     "parallel",
@@ -49,15 +50,18 @@ homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
+warnings = "deny"
 
 [workspace.lints.clippy]
 missing-const-for-fn = "warn"
 use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
+disallowed_types = "deny"
+disallowed_macros = "deny"
 undocumented_unsafe_blocks = "deny"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
@@ -89,7 +93,8 @@ commonware-conformance-macros = { version = "0.0.65", path = "conformance/macros
 commonware-consensus = { version = "0.0.65", path = "consensus" }
 commonware-cryptography = { version = "0.0.65", path = "cryptography", default-features = false }
 commonware-deployer = { version = "0.0.65", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.65", path = "macros" }
+commonware-macros = { version = "0.0.65", path = "macros", default-features = false }
+commonware-macros-impl = { version = "0.0.65", path = "macros/impl" }
 commonware-math = { version = "0.0.65", path = "math", default-features = false }
 commonware-p2p = { version = "0.0.65", path = "p2p" }
 commonware-parallel = { version = "0.0.65", path = "parallel", default-features = false }

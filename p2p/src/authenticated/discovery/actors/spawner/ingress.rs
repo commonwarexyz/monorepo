@@ -1,8 +1,8 @@
 use crate::authenticated::{discovery::actors::tracker::Reservation, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
-use commonware_stream::{Receiver, Sender};
-use commonware_utils::channels::fallible::AsyncFallibleExt;
+use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_utils::channel::fallible::AsyncFallibleExt;
 
 /// Messages that can be processed by the spawner actor.
 pub enum Message<O: Sink, I: Stream, P: PublicKey> {

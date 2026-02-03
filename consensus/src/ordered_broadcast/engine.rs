@@ -40,9 +40,8 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
-use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum};
+use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
-    channel::oneshot,
     future::{self, Either},
     pin_mut, StreamExt,
 };
@@ -336,13 +335,10 @@ impl<
                 debug!("shutdown");
             },
             // Handle refresh epoch deadline
-            epoch = epoch_updates.next() => {
-                // Error handling
-                let Some(epoch) = epoch else {
-                    error!("epoch subscription failed");
-                    break;
-                };
-
+            Some(epoch) = epoch_updates.recv() else {
+                error!("epoch subscription failed");
+                break;
+            } => {
                 // Refresh the epoch
                 debug!(current = %self.epoch, new = %epoch, "refresh epoch");
                 assert!(epoch >= self.epoch);

@@ -2,8 +2,7 @@ use crate::Broadcaster;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
-use commonware_utils::channels::fallible::AsyncFallibleExt;
-use futures::channel::{mpsc, oneshot};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
 
 /// Message types that can be sent to the `Mailbox`
 pub enum Message<P: PublicKey, M: Committable + Digestible> {

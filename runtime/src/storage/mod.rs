@@ -1,172 +1,198 @@
 //! Implementations of the `Storage` trait that can be used by the runtime.
 
-use crate::{Buf, BufMut};
-use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
-use commonware_utils::hex;
-use std::ops::RangeInclusive;
+use commonware_macros::stability_scope;
 
-/// Errors that can occur when validating a blob header.
-#[derive(Debug)]
-pub(crate) enum HeaderError {
-    InvalidMagic {
-        expected: [u8; 4],
-        found: [u8; 4],
-    },
-    UnsupportedRuntimeVersion {
-        expected: u16,
-        found: u16,
-    },
-    VersionMismatch {
-        expected: RangeInclusive<u16>,
-        found: u16,
-    },
-}
+stability_scope!(ALPHA {
+    pub mod audited;
+    pub mod memory;
+});
+stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
+    pub mod iouring;
+});
+stability_scope!(BETA, cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage"))) {
+    pub mod tokio;
+});
+stability_scope!(BETA {
+    use crate::{Buf, BufMut};
+    use commonware_codec::{DecodeExt, FixedSize, Read as CodecRead, Write as CodecWrite};
+    use commonware_utils::hex;
+    use std::ops::RangeInclusive;
 
-impl HeaderError {
-    /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
-    pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
-        match self {
-            Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
-                partition.into(),
-                hex(name),
-                format!("invalid magic: expected {expected:?}, found {found:?}"),
-            ),
-            Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
-                partition.into(),
-                hex(name),
-                format!("unsupported runtime version: expected {expected}, found {found}"),
-            ),
-            Self::VersionMismatch { expected, found } => {
-                crate::Error::BlobVersionMismatch { expected, found }
+    pub mod faulty;
+    pub mod metered;
+
+    /// Errors that can occur when validating a blob header.
+    #[derive(Debug)]
+    pub(crate) enum HeaderError {
+        InvalidMagic {
+            expected: [u8; 4],
+            found: [u8; 4],
+        },
+        UnsupportedRuntimeVersion {
+            expected: u16,
+            found: u16,
+        },
+        VersionMismatch {
+            expected: RangeInclusive<u16>,
+            found: u16,
+        },
+    }
+
+    impl HeaderError {
+        /// Converts this error into an [`Error`](enum@crate::Error) with partition and name context.
+        pub(crate) fn into_error(self, partition: &str, name: &[u8]) -> crate::Error {
+            match self {
+                Self::InvalidMagic { expected, found } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("invalid magic: expected {expected:?}, found {found:?}"),
+                ),
+                Self::UnsupportedRuntimeVersion { expected, found } => crate::Error::BlobCorrupt(
+                    partition.into(),
+                    hex(name),
+                    format!("unsupported runtime version: expected {expected}, found {found}"),
+                ),
+                Self::VersionMismatch { expected, found } => {
+                    crate::Error::BlobVersionMismatch { expected, found }
+                }
             }
         }
     }
-}
 
-pub mod audited;
-pub mod faulty;
-#[cfg(feature = "iouring-storage")]
-pub mod iouring;
-pub mod memory;
-pub mod metered;
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "iouring-storage")))]
-pub mod tokio;
-
-/// Fixed-size header at the start of each [crate::Blob].
-///
-/// On-disk layout (8 bytes, big-endian):
-/// - Bytes 0-3: [Header::MAGIC]
-/// - Bytes 4-5: Runtime Version (u16)
-/// - Bytes 6-7: Blob Version (u16)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Header {
-    magic: [u8; Self::MAGIC_LENGTH],
-    runtime_version: u16,
-    pub(crate) blob_version: u16,
-}
-
-impl Header {
-    /// Size of the header in bytes.
-    pub(crate) const SIZE: usize = 8;
-
-    /// Size of the header as u64 for offset calculations.
-    pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
-
-    /// Length of magic bytes.
-    pub(crate) const MAGIC_LENGTH: usize = 4;
-
-    /// Length of version fields.
-    #[cfg(test)]
-    pub(crate) const VERSION_LENGTH: usize = 2;
-
-    /// Magic bytes identifying a valid commonware blob.
-    pub(crate) const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
-
-    /// The current version of the header format.
-    pub(crate) const RUNTIME_VERSION: u16 = 0;
-
-    /// Returns true if a blob is missing a valid header (new or corrupted).
-    pub(crate) const fn missing(raw_len: u64) -> bool {
-        raw_len < Self::SIZE_U64
+    /// Fixed-size header at the start of each [crate::Blob].
+    ///
+    /// On-disk layout (8 bytes, big-endian):
+    /// - Bytes 0-3: [Header::MAGIC]
+    /// - Bytes 4-5: Runtime Version (u16)
+    /// - Bytes 6-7: Blob Version (u16)
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Header {
+        magic: [u8; Self::MAGIC_LENGTH],
+        runtime_version: u16,
+        pub(crate) blob_version: u16,
     }
 
-    /// Creates a header for a new blob using the latest version from the range.
-    /// Returns (header, blob_version).
-    pub(crate) const fn new(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
-        let blob_version = *versions.end();
-        let header = Self {
-            magic: Self::MAGIC,
-            runtime_version: Self::RUNTIME_VERSION,
-            blob_version,
-        };
-        (header, blob_version)
-    }
+    impl Header {
+        /// Size of the header in bytes.
+        pub(crate) const SIZE: usize = 8;
 
-    /// Parses and validates an existing header, returning the blob version and logical size.
-    pub(crate) fn from(
-        raw_bytes: [u8; Self::SIZE],
-        raw_len: u64,
-        versions: &RangeInclusive<u16>,
-    ) -> Result<(u16, u64), HeaderError> {
-        let header: Self = Self::decode(raw_bytes.as_slice())
-            .expect("header decode should never fail for correct size input");
-        header.validate(versions)?;
-        Ok((header.blob_version, raw_len - Self::SIZE_U64))
-    }
+        /// Size of the header as u64 for offset calculations.
+        pub(crate) const SIZE_U64: u64 = Self::SIZE as u64;
 
-    /// Validates the magic bytes, runtime version, and blob version.
-    pub(crate) fn validate(&self, blob_versions: &RangeInclusive<u16>) -> Result<(), HeaderError> {
-        if self.magic != Self::MAGIC {
-            return Err(HeaderError::InvalidMagic {
-                expected: Self::MAGIC,
-                found: self.magic,
-            });
+        /// Length of magic bytes.
+        pub(crate) const MAGIC_LENGTH: usize = 4;
+
+        /// Length of version fields.
+        #[cfg(test)]
+        pub(crate) const VERSION_LENGTH: usize = 2;
+
+        /// Magic bytes identifying a valid commonware blob.
+        pub(crate) const MAGIC: [u8; Self::MAGIC_LENGTH] = *b"CWIC"; // Commonware Is CWIC
+
+        /// The current version of the header format.
+        pub(crate) const RUNTIME_VERSION: u16 = 0;
+
+        /// Returns true if a blob is missing a valid header (new or corrupted).
+        pub(crate) const fn missing(raw_len: u64) -> bool {
+            raw_len < Self::SIZE_U64
         }
-        if self.runtime_version != Self::RUNTIME_VERSION {
-            return Err(HeaderError::UnsupportedRuntimeVersion {
-                expected: Self::RUNTIME_VERSION,
-                found: self.runtime_version,
-            });
+
+        /// Creates a header for a new blob using the latest version from the range.
+        /// Returns (header, blob_version).
+        pub(crate) const fn new(versions: &std::ops::RangeInclusive<u16>) -> (Self, u16) {
+            let blob_version = *versions.end();
+            let header = Self {
+                magic: Self::MAGIC,
+                runtime_version: Self::RUNTIME_VERSION,
+                blob_version,
+            };
+            (header, blob_version)
         }
-        if !blob_versions.contains(&self.blob_version) {
-            return Err(HeaderError::VersionMismatch {
-                expected: blob_versions.clone(),
-                found: self.blob_version,
-            });
+
+        /// Parses and validates an existing header, returning the blob version and logical size.
+        pub(crate) fn from(
+            raw_bytes: [u8; Self::SIZE],
+            raw_len: u64,
+            versions: &RangeInclusive<u16>,
+        ) -> Result<(u16, u64), HeaderError> {
+            let header: Self = Self::decode(raw_bytes.as_slice())
+                .expect("header decode should never fail for correct size input");
+            header.validate(versions)?;
+            Ok((header.blob_version, raw_len - Self::SIZE_U64))
+        }
+
+        /// Validates the magic bytes, runtime version, and blob version.
+        pub(crate) fn validate(
+            &self,
+            blob_versions: &RangeInclusive<u16>,
+        ) -> Result<(), HeaderError> {
+            if self.magic != Self::MAGIC {
+                return Err(HeaderError::InvalidMagic {
+                    expected: Self::MAGIC,
+                    found: self.magic,
+                });
+            }
+            if self.runtime_version != Self::RUNTIME_VERSION {
+                return Err(HeaderError::UnsupportedRuntimeVersion {
+                    expected: Self::RUNTIME_VERSION,
+                    found: self.runtime_version,
+                });
+            }
+            if !blob_versions.contains(&self.blob_version) {
+                return Err(HeaderError::VersionMismatch {
+                    expected: blob_versions.clone(),
+                    found: self.blob_version,
+                });
+            }
+            Ok(())
+        }
+    }
+
+    impl FixedSize for Header {
+        const SIZE: usize = Self::SIZE;
+    }
+
+    impl CodecWrite for Header {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_slice(&self.magic);
+            buf.put_u16(self.runtime_version);
+            buf.put_u16(self.blob_version);
+        }
+    }
+
+    impl CodecRead for Header {
+        type Cfg = ();
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            if buf.remaining() < Self::SIZE {
+                return Err(commonware_codec::Error::EndOfBuffer);
+            }
+            let mut magic = [0u8; Self::MAGIC_LENGTH];
+            buf.copy_to_slice(&mut magic);
+            let runtime_version = buf.get_u16();
+            let blob_version = buf.get_u16();
+            Ok(Self {
+                magic,
+                runtime_version,
+                blob_version,
+            })
+        }
+    }
+
+    /// Validate that a partition name contains only allowed characters.
+    ///
+    /// Partition names must only contain alphanumeric characters, dashes ('-'),
+    /// or underscores ('_').
+    pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
+        if partition.is_empty()
+            || partition
+                .chars()
+                .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
+        {
+            return Err(crate::Error::PartitionNameInvalid(partition.into()));
         }
         Ok(())
     }
-}
-
-impl FixedSize for Header {
-    const SIZE: usize = Self::SIZE;
-}
-
-impl CodecWrite for Header {
-    fn write(&self, buf: &mut impl BufMut) {
-        buf.put_slice(&self.magic);
-        buf.put_u16(self.runtime_version);
-        buf.put_u16(self.blob_version);
-    }
-}
-
-impl CodecRead for Header {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        if buf.remaining() < Self::SIZE {
-            return Err(commonware_codec::Error::EndOfBuffer);
-        }
-        let mut magic = [0u8; Self::MAGIC_LENGTH];
-        buf.copy_to_slice(&mut magic);
-        let runtime_version = buf.get_u16();
-        let blob_version = buf.get_u16();
-        Ok(Self {
-            magic,
-            runtime_version,
-            blob_version,
-        })
-    }
-}
+});
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Header {
@@ -174,21 +200,6 @@ impl arbitrary::Arbitrary<'_> for Header {
         let version: u16 = u.arbitrary()?;
         Ok(Self::new(&(version..=version)).0)
     }
-}
-
-/// Validate that a partition name contains only allowed characters.
-///
-/// Partition names must only contain alphanumeric characters, dashes ('-'),
-/// or underscores ('_').
-pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
-    if partition.is_empty()
-        || partition
-            .chars()
-            .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
-    {
-        return Err(crate::Error::PartitionNameInvalid(partition.into()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

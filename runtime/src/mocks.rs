@@ -2,7 +2,7 @@
 
 use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
-use futures::channel::oneshot;
+use commonware_utils::channel::oneshot;
 use std::sync::{Arc, Mutex};
 
 /// Default read buffer size for the stream's local buffer (64 KB).
@@ -365,7 +365,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Spawn recv that will block waiting
-            let (tx, rx) = futures::channel::oneshot::channel();
+            let (tx, rx) = oneshot::channel();
             let recv_handle = context.clone().spawn(|_| async move {
                 let data = stream.recv(3).await.unwrap();
                 tx.send(stream).ok();

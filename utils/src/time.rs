@@ -14,7 +14,8 @@ cfg_if::cfg_if! {
         /// Source: [`FILETIME` range](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)
         /// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
         /// 11_644_473_600 seconds yields the remaining representable span.
-        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
+        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
+            Duration::new(910_692_730_085, 477_580_700);
 
         /// The precision of [`SystemTime`] on Windows.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
@@ -26,7 +27,8 @@ cfg_if::cfg_if! {
         /// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
         /// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
         #[cfg(not(windows))]
-        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
+        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
+            Duration::new(i64::MAX as u64, 999_999_999);
 
         /// The precision of [`SystemTime`] on Unix.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);

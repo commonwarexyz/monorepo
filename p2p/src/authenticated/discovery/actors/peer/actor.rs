@@ -17,9 +17,11 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::{Receiver, Sender};
-use commonware_utils::time::SYSTEM_TIME_PRECISION;
-use futures::{channel::mpsc, StreamExt};
+use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_utils::{
+    channel::mpsc::{self, error::TrySendError},
+    time::SYSTEM_TIME_PRECISION,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -160,11 +162,9 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
-                        msg_control = self.control.next() => {
-                            let msg = match msg_control {
-                                Some(msg_control) => msg_control,
-                                None => return Err(Error::PeerDisconnected),
-                            };
+                        Some(msg) = self.control.recv() else {
+                            return Err(Error::PeerDisconnected);
+                        } => {
                             let (metric, payload) = match msg {
                                 Message::BitVec(bit_vec) => (
                                     metrics::Message::new_bit_vec(&peer),
@@ -184,7 +184,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             )
                             .await?;
                         },
-                        msg_high = self.high.next() => {
+                        msg_high = self.high.recv() => {
                             // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
                             Self::send_encoded(
@@ -195,7 +195,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             )
                             .await?;
                         },
-                        msg_low = self.low.next() => {
+                        msg_low = self.low.recv() => {
                             // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
                             Self::send_encoded(
@@ -336,7 +336,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                             // peer connection to stall and potentially disconnect.
                             let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender.try_send((peer.clone(), data.message)) {
-                                if e.is_full() {
+                                if matches!(e, TrySendError::Full(_)) {
                                     self.dropped_messages
                                         .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                         .inc();
@@ -397,7 +397,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-    use commonware_stream::{self, Config as StreamConfig};
+    use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
@@ -465,7 +465,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -480,7 +480,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -564,7 +564,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -579,7 +579,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -669,7 +669,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -684,7 +684,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),
@@ -772,7 +772,7 @@ mod tests {
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.clone().spawn({
                 move |ctx| async move {
-                    commonware_stream::listen(
+                    commonware_stream::encrypted::listen(
                         ctx,
                         |_| async { true },
                         remote_config,
@@ -787,7 +787,7 @@ mod tests {
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::dial(
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
                 context.clone(),
                 local_config,
                 remote_pk.clone(),

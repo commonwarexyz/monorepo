@@ -45,7 +45,7 @@ impl core::fmt::Debug for F {
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let x = u.arbitrary::<u64>()?;
-        Ok(F::reduce_64(x))
+        Ok(Self::reduce_64(x))
     }
 }
 
@@ -333,30 +333,30 @@ impl Add for F {
     }
 }
 
-impl<'a> Add<&'a F> for F {
-    type Output = F;
+impl<'a> Add<&'a Self> for F {
+    type Output = Self;
 
-    fn add(self, rhs: &'a F) -> Self::Output {
+    fn add(self, rhs: &'a Self) -> Self::Output {
         self + *rhs
     }
 }
 
-impl<'a> AddAssign<&'a F> for F {
-    fn add_assign(&mut self, rhs: &'a F) {
+impl<'a> AddAssign<&'a Self> for F {
+    fn add_assign(&mut self, rhs: &'a Self) {
         *self = *self + rhs
     }
 }
 
-impl<'a> Sub<&'a F> for F {
+impl<'a> Sub<&'a Self> for F {
     type Output = Self;
 
-    fn sub(self, rhs: &'a F) -> Self::Output {
+    fn sub(self, rhs: &'a Self) -> Self::Output {
         self - *rhs
     }
 }
 
-impl<'a> SubAssign<&'a F> for F {
-    fn sub_assign(&mut self, rhs: &'a F) {
+impl<'a> SubAssign<&'a Self> for F {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         *self = *self - rhs;
     }
 }
@@ -383,16 +383,16 @@ impl Mul for F {
     }
 }
 
-impl<'a> Mul<&'a F> for F {
-    type Output = F;
+impl<'a> Mul<&'a Self> for F {
+    type Output = Self;
 
-    fn mul(self, rhs: &'a F) -> Self::Output {
+    fn mul(self, rhs: &'a Self) -> Self::Output {
         self * *rhs
     }
 }
 
-impl<'a> MulAssign<&'a F> for F {
-    fn mul_assign(&mut self, rhs: &'a F) {
+impl<'a> MulAssign<&'a Self> for F {
+    fn mul_assign(&mut self, rhs: &'a Self) {
         *self = *self * rhs;
     }
 }
@@ -421,7 +421,7 @@ impl Ring for F {
 
 impl Field for F {
     fn inv(&self) -> Self {
-        F::inv(*self)
+        Self::inv(*self)
     }
 }
 

@@ -12,10 +12,9 @@ use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::IoBufMut;
 use commonware_utils::{
-    channels::{fallible::AsyncFallibleExt, ring},
+    channel::{fallible::AsyncFallibleExt, oneshot, ring},
     NZUsize,
 };
-use futures::channel::oneshot;
 
 /// Messages that can be processed by the router.
 #[derive(Debug)]
@@ -64,8 +63,8 @@ impl<P: PublicKey> Mailbox<Message<P>> {
     }
 }
 
-#[derive(Clone, Debug)]
 /// Sends messages containing content to the router to send to peers.
+#[derive(Clone, Debug)]
 pub struct Messenger<P: PublicKey> {
     sender: Mailbox<Message<P>>,
 }

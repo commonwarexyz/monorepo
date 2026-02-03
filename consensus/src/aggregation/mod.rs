@@ -105,9 +105,10 @@ mod tests {
         Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{
-        channels::fallible::OneshotExt, test_rng, NZUsize, NonZeroDuration, NZU16,
+        channel::{fallible::OneshotExt, oneshot},
+        test_rng, NZUsize, NonZeroDuration, NZU16,
     };
-    use futures::{channel::oneshot, future::join_all};
+    use futures::future::join_all;
     use rand::{rngs::StdRng, Rng};
     use std::{
         collections::BTreeMap,

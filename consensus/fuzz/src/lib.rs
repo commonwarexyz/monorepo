@@ -29,8 +29,8 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::{Faults, N3f1, NZUsize, NZU16};
-use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
+use commonware_utils::{channel::mpsc::Receiver, Faults, N3f1, NZUsize, NZU16};
+use futures::future::join_all;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     cell::RefCell,
@@ -275,7 +275,7 @@ fn run<P: Simplex>(input: FuzzInput) {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest.get() < containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }

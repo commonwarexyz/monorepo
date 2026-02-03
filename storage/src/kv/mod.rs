@@ -1,6 +1,9 @@
 //! Traits for interacting with a key/value store.
 
-mod batch;
+use commonware_macros::{stability, stability_mod};
+
+stability_mod!(ALPHA, mod batch);
+#[stability(ALPHA)]
 pub use batch::{Batch, Batchable};
 use std::future::Future;
 
