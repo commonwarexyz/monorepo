@@ -390,7 +390,6 @@ where
                         ).await;
 
                         // Search for block locally, otherwise fetch it remotely.
-                        // Use commitment-based lookup to enable shard reconstruction in coding mode.
                         if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             // If found, persist the block
                             self.cache_block(round, digest, block).await;
@@ -411,7 +410,6 @@ where
                         ).await;
 
                         // Search for block locally, otherwise fetch it remotely.
-                        // Use commitment-based lookup to enable shard reconstruction in coding mode.
                         if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
@@ -435,7 +433,6 @@ where
                     Message::GetBlock { identifier, response } => {
                         match identifier {
                             BlockID::Digest(digest) => {
-                                // Use digest-based lookup (no shard reconstruction)
                                 let result = self.find_block_by_digest(&mut buffer, digest).await;
                                 response.send_lossy(result);
                             }
@@ -446,7 +443,6 @@ where
                             BlockID::Latest => {
                                 let block = match self.get_latest().await {
                                     Some((_, digest, _)) => {
-                                        // Use digest-based lookup (no shard reconstruction)
                                         self.find_block_by_digest(&mut buffer, digest).await
                                     }
                                     None => None,
@@ -475,7 +471,7 @@ where
                         resolver.fetch_targeted(request, targets).await;
                     }
                     Message::SubscribeByDigest { round, digest, response } => {
-                        // Check for block locally using digest-based lookup (no shard reconstruction)
+                        // Check for block locally
                         if let Some(block) = self.find_block_by_digest(&mut buffer, digest).await {
                             response.send_lossy(block);
                             continue;
@@ -520,8 +516,7 @@ where
                         }
                     }
                     Message::SubscribeByCommitment { round, commitment, response } => {
-                        // Check for block locally. For coding variant, this may trigger
-                        // shard reconstruction since we have the full commitment.
+                        // Check for block locally
                         if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             response.send_lossy(block);
                             continue;
@@ -616,7 +611,7 @@ where
                     handler::Message::Produce { key, response } => {
                         match key {
                             Request::Block(digest) => {
-                                // Check for block locally using digest-based lookup (no shard reconstruction)
+                                // Check for block locally
                                 let Some(block) = self.find_block_by_digest(&mut buffer, digest).await else {
                                     debug!(?digest, "block missing on request");
                                     continue;
@@ -646,8 +641,7 @@ where
                                     continue;
                                 };
 
-                                // Get block using commitment-based lookup (enables shard reconstruction
-                                // since we have the full commitment from the notarization)
+                                // Get block
                                 let commitment = notarization.proposal.payload;
                                 let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await else {
                                     let digest = V::commitment_to_digest(commitment);
@@ -865,7 +859,7 @@ where
         let digest = V::commitment_to_digest(commitment);
         resolver.cancel(Request::<V::Block>::Block(digest)).await;
 
-        // Notify buffer that finalization occurred (for cleanup, e.g., shard eviction)
+        // Notify buffer that finalization occurred (for cleanup)
         buffer.finalized(commitment).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1069,13 +1063,12 @@ where
     /// Looks for a block anywhere in local storage using only the digest.
     ///
     /// This is used when we only have a digest (e.g., during gap repair following
-    /// parent links). In coding mode, this does NOT attempt shard reconstruction.
+    /// parent links).
     async fn find_block_by_digest<Buf: BlockBuffer<V>>(
         &self,
         buffer: &mut Buf,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
-        // Check buffer (digest-only lookup, no shard reconstruction)
         if let Some(block) = buffer.find_by_digest(digest).await {
             return Some(block.as_ref().clone());
         }
@@ -1085,13 +1078,12 @@ where
     /// Looks for a block anywhere in local storage using the full commitment.
     ///
     /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
-    /// In coding mode, having the commitment enables shard reconstruction.
+    /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: BlockBuffer<V>>(
         &self,
         buffer: &mut Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
-        // Check buffer (commitment-based lookup, may trigger shard reconstruction)
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block.as_ref().clone());
         }
@@ -1129,8 +1121,6 @@ where
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
                 let parent_digest = cursor.parent();
-                // Use digest-based lookup since we only have the parent digest
-                // (no shard reconstruction possible during gap repair)
                 if let Some(block) = self.find_block_by_digest(buffer, parent_digest).await {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
                     self.store_finalization(

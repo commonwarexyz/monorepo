@@ -60,12 +60,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// Target peers to fetch from. Added to any existing targets for this height.
         targets: NonEmptyVec<S::PublicKey>,
     },
-    /// A request to retrieve a block by its digest.
-    ///
-    /// This is used when we only have a digest (e.g., during gap repair following
-    /// parent links). In coding mode, this cannot trigger shard reconstruction.
+    /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
-        /// The view in which the block was notarized. This is an optimization
+        /// The round in which the block was notarized. This is an optimization
         /// to help locate the block.
         round: Option<Round>,
         /// The digest of the block to retrieve.
@@ -73,12 +70,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
-    /// A request to retrieve a block by its commitment.
-    ///
-    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
-    /// In coding mode, having the commitment enables shard reconstruction.
+    /// A request to subscribe to a block by its commitment.
     SubscribeByCommitment {
-        /// The view in which the block was notarized. This is an optimization
+        /// The round in which the block was notarized. This is an optimization
         /// to help locate the block.
         round: Option<Round>,
         /// The commitment of the block to retrieve.
@@ -215,7 +209,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .await;
     }
 
-    /// A request to retrieve a block by its digest.
+    /// Subscribe to a block by its digest.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
@@ -224,9 +218,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// it may never become available.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
-    ///
-    /// This is used when we only have a digest (e.g., during gap repair following parent links).
-    /// In coding mode, this cannot trigger shard reconstruction.
     pub async fn subscribe_by_digest(
         &mut self,
         round: Option<Round>,
@@ -243,7 +234,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         rx
     }
 
-    /// A request to retrieve a block by its commitment.
+    /// Subscribe to a block by its commitment.
     ///
     /// If the block is found available locally, the block will be returned immediately.
     ///
@@ -251,10 +242,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// be notified when the block is available. If the block is not finalized, it's possible that
     /// it may never become available.
     ///
-    /// The oneshot receiver should be dropped to cancel the subscription.
+    /// For variants where commitment differs from digest (e.g., coding), this may enable
+    /// additional retrieval mechanisms such as shard reconstruction.
     ///
-    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
-    /// In coding mode, having the commitment enables shard reconstruction.
+    /// The oneshot receiver should be dropped to cancel the subscription.
     pub async fn subscribe_by_commitment(
         &mut self,
         round: Option<Round>,

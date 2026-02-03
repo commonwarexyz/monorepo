@@ -1,10 +1,10 @@
 //! Marshal variant and buffer traits.
 //!
-//! This module defines the core abstractions for unifying the standard and coding
-//! marshal implementations:
+//! This module defines the core abstractions that allow the marshal actor to work
+//! with different block dissemination strategies:
 //!
-//! - [`Variant`]: Describes the types used by a marshal variant (standard vs coding)
-//! - [`BlockBuffer`]: Abstracts over block dissemination strategies (whole blocks vs shards)
+//! - [`Variant`]: Describes the types used by a marshal variant
+//! - [`BlockBuffer`]: Abstracts over block dissemination strategies
 
 use crate::Block;
 use commonware_codec::{Codec, Read};
@@ -31,9 +31,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
     type Commitment: Digest;
 
     /// The type used for broadcast recipients.
-    ///
-    /// - Standard: `()` (broadcasts to all peers via the underlying network)
-    /// - Coding: `Vec<P>` (specific peers for shard distribution)
     type Recipients: Send;
 
     /// Extracts the block digest from a consensus commitment.
@@ -52,24 +49,18 @@ pub trait Variant: Clone + Send + Sync + 'static {
 /// A buffer for block storage and retrieval, abstracting over different
 /// dissemination strategies.
 ///
-/// This trait unifies the interfaces of:
-/// - `buffered::Mailbox` (standard): Broadcasts and caches whole blocks
-/// - `shards::Mailbox` (coding): Distributes erasure-coded shards and reconstructs blocks
-///
 /// The trait is generic over a [`Variant`] which provides the block, commitment,
 /// and recipient types.
 ///
 /// Lookup operations come in two forms:
-/// - By digest: Simple lookup, no shard reconstruction possible
-/// - By commitment: In coding mode, enables shard reconstruction
+/// - By digest: Simple lookup using only the block hash
+/// - By commitment: Lookup using the full consensus commitment, which may enable
+///   additional retrieval mechanisms depending on the variant
 pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// The cached block type held internally by the buffer.
     ///
     /// This allows buffers to use efficient internal representations (e.g., `Arc<Block>`)
     /// while exposing the block via `AsRef`.
-    ///
-    /// - Standard: `V::Block` (no wrapper needed)
-    /// - Coding: `Arc<CodedBlock<B, C>>` for efficient sharing
     type CachedBlock: AsRef<V::Block> + Clone + Send;
 
     /// Attempt to find a block by its digest.
@@ -78,8 +69,6 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// or `None` if it is not currently cached.
     ///
     /// This is a non-blocking lookup that does not trigger network fetches.
-    /// In coding mode, this does NOT attempt shard reconstruction since we
-    /// don't have the full commitment needed for reconstruction.
     fn find_by_digest(
         &mut self,
         digest: <V::Block as Digestible>::Digest,
@@ -91,11 +80,8 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// or `None` if it is not currently cached.
     ///
     /// This is a non-blocking lookup that does not trigger network fetches.
-    /// In coding mode, this MAY attempt shard reconstruction since we have
-    /// the full commitment needed for reconstruction.
-    ///
-    /// In standard mode, commitment equals digest, so this behaves the same
-    /// as [`Self::find_by_digest`].
+    /// Having the full commitment may enable additional retrieval mechanisms
+    /// depending on the variant implementation.
     fn find_by_commitment(
         &mut self,
         commitment: V::Commitment,
@@ -117,8 +103,8 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// Returns a receiver that will resolve when the block becomes available.
     /// If the block is already cached, the receiver may resolve immediately.
     ///
-    /// In coding mode, having the commitment enables shard reconstruction
-    /// to satisfy the subscription.
+    /// Having the full commitment may enable additional retrieval mechanisms
+    /// depending on the variant implementation.
     ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_commitment(
@@ -128,16 +114,13 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
 
     /// Notify the buffer that a block has been finalized.
     ///
-    /// This allows the buffer to perform cleanup operations:
-    /// - Standard: No-op (cleanup handled elsewhere)
-    /// - Coding: Releases shard storage for the finalized block
+    /// This allows the buffer to perform variant-specific cleanup operations.
     fn finalized(&mut self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
 
     /// Broadcast a proposed block to peers.
     ///
-    /// This handles the initial dissemination of a newly proposed block:
-    /// - Standard: Broadcasts the complete block to all peers (recipients is `()`)
-    /// - Coding: Distributes erasure-coded shards to assigned peers (recipients is `Vec<P>`)
+    /// This handles the initial dissemination of a newly proposed block.
+    /// The `recipients` parameter is variant-specific.
     fn broadcast(
         &mut self,
         block: V::Block,
