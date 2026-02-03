@@ -4,7 +4,7 @@ use crate::{
     marshal::coding::{shards::ReconstructionError, types::CodedBlock},
     simplex::types::{Activity, Notarize},
     types::CodingCommitment,
-    Block, Reporter, Scheme,
+    CertifiableBlock, Reporter, Scheme,
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::PublicKey;
@@ -20,7 +20,7 @@ use tracing::error;
 /// [Engine]: super::Engine
 pub enum Message<B, S, C, P>
 where
-    B: Block,
+    B: CertifiableBlock,
     S: Scheme,
     C: CodingScheme,
     P: PublicKey,
@@ -87,7 +87,7 @@ where
 #[derive(Clone)]
 pub struct Mailbox<B, S, C, P>
 where
-    B: Block,
+    B: CertifiableBlock,
     S: Scheme,
     C: CodingScheme,
     P: PublicKey,
@@ -97,7 +97,7 @@ where
 
 impl<B, S, C, P> Mailbox<B, S, C, P>
 where
-    B: Block,
+    B: CertifiableBlock,
     S: Scheme,
     C: CodingScheme,
     P: PublicKey,
@@ -189,7 +189,7 @@ where
 
 impl<B, S, C, P> Reporter for Mailbox<B, S, C, P>
 where
-    B: Block,
+    B: CertifiableBlock,
     S: Scheme,
     C: CodingScheme,
     P: PublicKey,

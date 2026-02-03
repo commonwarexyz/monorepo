@@ -6,7 +6,7 @@ use crate::{
         types::{CodedBlock, DistributionShard, Shard},
     },
     types::{CodingCommitment, Height},
-    Block, Heightable, Scheme,
+    Block, CertifiableBlock, Heightable, Scheme,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::Error as CodecError;
@@ -50,7 +50,7 @@ pub enum ReconstructionError<C: CodingScheme> {
 }
 
 /// A subscription for a reconstructed [Block] by its [CodingCommitment].
-struct BlockSubscription<B: Block, C: CodingScheme> {
+struct BlockSubscription<B: CertifiableBlock, C: CodingScheme> {
     /// A list of subscribers waiting for the block to be reconstructed
     subscribers: Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>,
     /// The commitment associated with this subscription, if known.
@@ -77,7 +77,7 @@ where
     S: Scheme,
     C: CodingScheme,
     H: Hasher,
-    B: Block,
+    B: CertifiableBlock,
     P: PublicKey,
     T: Strategy,
 {
@@ -118,7 +118,7 @@ where
     S: Scheme,
     C: CodingScheme,
     H: Hasher,
-    B: Block,
+    B: CertifiableBlock,
     P: PublicKey,
     T: Strategy,
 {
@@ -1096,6 +1096,7 @@ mod test {
             for shard in shards {
                 let _ = sender_buffered
                     .broadcast(Recipients::One(receiver.clone()), shard)
+                    .await
                     .await;
             }
 

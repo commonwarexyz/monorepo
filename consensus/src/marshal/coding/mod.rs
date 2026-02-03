@@ -81,6 +81,7 @@ mod tests {
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
+    use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
         sha256::Sha256,
@@ -251,9 +252,8 @@ mod tests {
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
-                partition_prefix: "test_certify_marshaled".to_string(),
             };
-            let mut marshaled = Marshaled::init(context.clone(), cfg).await;
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
 
             // Create parent block at height 1
             let parent_ctx = CodingCtx {
@@ -381,9 +381,8 @@ mod tests {
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
-                partition_prefix: "test_reproposal_marshaled".to_string(),
             };
-            let mut marshaled = Marshaled::init(context.clone(), cfg).await;
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
 
             // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
             // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
@@ -544,6 +543,94 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_marshaled_rejects_mismatched_context_hash() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Create parent block at height 1 so the commitment is well-formed.
+            let parent_ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards
+                .clone()
+                .proposed(coded_parent, participants.clone())
+                .await;
+
+            // Build a block with context A (commitment hash uses this context).
+            let round_a = Round::new(Epoch::zero(), View::new(2));
+            let context_a = CodingCtx {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_a = make_coding_block(context_a, parent.digest(), Height::new(2), 200);
+            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>> =
+                CodedBlock::new(block_a, coding_config, &Sequential);
+            let commitment_a = coded_block_a.commitment();
+
+            // Verify using a different consensus context B (hash mismatch).
+            let round_b = Round::new(Epoch::zero(), View::new(3));
+            let context_b = CodingCtx {
+                round: round_b,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            let verify_rx = marshaled.verify(context_b, commitment_a).await;
+            select! {
+                result = verify_rx => {
+                    assert!(!result.unwrap(), "mismatched context hash should be rejected");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should reject mismatched context hash promptly");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_marshaled_rejects_unsupported_epoch() {
         #[derive(Clone)]
         struct LimitedEpocher {
@@ -619,9 +706,8 @@ mod tests {
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: limited_epocher,
                 strategy: Sequential,
-                partition_prefix: "test_unsupported_epoch_marshaled".to_string(),
             };
-            let mut marshaled = Marshaled::init(context.clone(), cfg).await;
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent_ctx = CodingCtx {
@@ -722,9 +808,8 @@ mod tests {
                 scheme_provider: ConstantProvider::new(schemes[0].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 strategy: Sequential,
-                partition_prefix: "test_invalid_ancestry_marshaled".to_string(),
             };
-            let mut marshaled = Marshaled::init(context.clone(), cfg).await;
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
 
             // Test case 1: Non-contiguous height
             //
@@ -752,17 +837,18 @@ mod tests {
                 .await;
 
             // Byzantine proposer broadcasts malicious block at height 35
-            // In reality this would come via buffered broadcast, but for test simplicity
-            // we call broadcast() directly which makes it available for subscription
-            let malicious_ctx1 = CodingCtx {
-                round: Round::new(Epoch::new(1), View::new(35)),
-                leader: default_leader(),
-                parent: (View::new(21), parent_commitment),
+            // The block has the correct context (matching what consensus will provide)
+            // but contains invalid content (non-contiguous height: 21 -> 35 instead of 21 -> 22)
+            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
+            let byzantine_context = CodingCtx {
+                round: byzantine_round,
+                leader: me.clone(),
+                parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
             let malicious_block = make_coding_block(
-                malicious_ctx1,
+                byzantine_context.clone(),
                 parent_digest,
-                Height::new(BLOCKS_PER_EPOCH.get() + 15),
+                Height::new(BLOCKS_PER_EPOCH.get() + 15), // Byzantine: non-contiguous height
                 2000,
             );
             let coded_malicious =
@@ -775,18 +861,6 @@ mod tests {
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
-
-            // Consensus determines parent should be block at height 21
-            // and calls verify on the Marshaled automaton with a block at height 35
-            //
-            // In the coding marshal, verify() returns shard validity while deferred_verify
-            // runs in the background. We need to use certify() to get the deferred_verify result.
-            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
-            let byzantine_context = CodingCtx {
-                round: byzantine_round,
-                leader: me.clone(),
-                parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
-            };
 
             // Marshaled.verify() kicks off deferred verification in the background.
             // The Marshaled verifier will:
@@ -809,17 +883,19 @@ mod tests {
                 "Byzantine block with non-contiguous heights should be rejected"
             );
 
-            // Test case 2: Mismatched parent commitment
+            // Test case 2: Mismatched parent digest
             //
-            // Create another malicious block with correct height but invalid parent commitment
-            let malicious_ctx2 = CodingCtx {
-                round: Round::new(Epoch::new(1), View::new(22)),
-                leader: default_leader(),
-                parent: (View::zero(), genesis_commitment()), // Claims genesis as parent
+            // Create another malicious block with correct context and height
+            // but referencing the wrong parent digest (genesis instead of honest_parent)
+            let byzantine_round2 = Round::new(Epoch::new(1), View::new(22));
+            let byzantine_context2 = CodingCtx {
+                round: byzantine_round2,
+                leader: me.clone(),
+                parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
             let malicious_block2 = make_coding_block(
-                malicious_ctx2,
-                genesis.digest(),
+                byzantine_context2.clone(),
+                genesis.digest(), // Byzantine: wrong parent digest
                 Height::new(BLOCKS_PER_EPOCH.get() + 2),
                 3000,
             );
@@ -833,15 +909,6 @@ mod tests {
 
             // Small delay to ensure broadcast is processed
             context.sleep(Duration::from_millis(10)).await;
-
-            // Consensus determines parent should be block at height 21
-            // and calls verify on the Marshaled automaton with a block at height 22
-            let byzantine_round2 = Round::new(Epoch::new(1), View::new(22));
-            let byzantine_context2 = CodingCtx {
-                round: byzantine_round2,
-                leader: me.clone(),
-                parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
-            };
 
             // Marshaled.verify() kicks off deferred verification in the background.
             // The Marshaled verifier will:

@@ -7,7 +7,7 @@ use crate::{
         core::{BlockBuffer, Variant},
     },
     types::CodingCommitment,
-    Block, Scheme,
+    CertifiableBlock, Scheme,
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Digestible, PublicKey};
@@ -19,9 +19,11 @@ use std::sync::Arc;
 /// This variant distributes blocks as erasure-coded shards, allowing reconstruction
 /// from a subset of shards. This reduces bandwidth requirements for block propagation.
 #[derive(Default, Clone, Copy)]
-pub struct Coding<B: Block, C: CodingScheme, P: PublicKey>(std::marker::PhantomData<(B, C, P)>);
+pub struct Coding<B: CertifiableBlock, C: CodingScheme, P: PublicKey>(
+    std::marker::PhantomData<(B, C, P)>,
+);
 
-impl<B: Block, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
+impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
     type ApplicationBlock = B;
     type Block = CodedBlock<B, C>;
     type StoredBlock = StoredCodedBlock<B, C>;
@@ -39,7 +41,7 @@ impl<B: Block, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
 
 impl<B, S, C, P> BlockBuffer<Coding<B, C, P>> for shards::Mailbox<B, S, C, P>
 where
-    B: Block,
+    B: CertifiableBlock,
     S: Scheme,
     C: CodingScheme,
     P: PublicKey,
