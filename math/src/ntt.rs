@@ -5,6 +5,7 @@ use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
+use std::num::NonZeroU32;
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
@@ -619,6 +620,36 @@ impl<F: FieldNTT> NTTPolynomial<F> {
         0
     }
 
+    /// Compute the derivative of this polynomial.
+    ///
+    /// For a polynomial `f(X) = a0 + a1 X + a2 X^2 + ... + an X^n`,
+    /// the derivative is `f'(X) = a1 + 2*a2 X + ... + n*an X^(n-1)`.
+    fn derivative(&self) -> Self {
+        let rows = self.coefficients.len();
+        let lg_rows = rows.ilog2();
+        let mut result = vec![F::zero(); rows];
+        for i in 1..rows {
+            let src_idx = reverse_bits(lg_rows, i as u64) as usize;
+            let dst_idx = reverse_bits(lg_rows, (i - 1) as u64) as usize;
+            result[dst_idx] = self.coefficients[src_idx].scale(&[i as u64]);
+        }
+        Self {
+            coefficients: result,
+        }
+    }
+
+    /// Convert this polynomial into a PolynomialVector with a single column.
+    fn into_polynomial_vector(self) -> PolynomialVector<F> {
+        let rows = self.coefficients.len();
+        PolynomialVector {
+            data: Matrix {
+                rows,
+                cols: 1,
+                data: self.coefficients,
+            },
+        }
+    }
+
     /// Divide the roots of each polynomial by some factor.
     ///
     /// If f(x) = 0, then after this transformation, f(x / z) = 0 instead.
@@ -947,6 +978,84 @@ impl<F> EvaluationVector<F> {
     pub fn filled_rows(&self) -> usize {
         self.active_rows.count_ones() as usize
     }
+}
+
+/// Compute Lagrange coefficients for interpolating a polynomial at 0 from evaluations
+/// at roots of unity.
+///
+/// Given a subset T of indices where we have evaluations, this computes the Lagrange
+/// coefficients needed to interpolate to 0. For each index `j` in T, the coefficient
+/// is `L_j(0)` where `L_j` is the Lagrange basis polynomial.
+///
+/// This uses the fast O(n log n) algorithm from:
+/// <https://alinush.github.io/threshold-bls>
+///
+/// The key formula is: `L_j(0) = V_T(0) / (-w^j * V_T'(w^j))`
+///
+/// where `V_T(X) = prod_{k in T}(X - w^k)` is the vanishing polynomial over points we
+/// have, and `V_T'` is its derivative. Using FFT, we evaluate `V_T'` at all roots of
+/// unity in O(n log n) time.
+///
+/// # Arguments
+/// * `total` - The total number of points in the domain (rounded up to power of 2)
+/// * `iter` - Iterator of indices where we have evaluations (duplicates ignored, indices >= total ignored)
+///
+/// # Returns
+/// A vector of `(index, coefficient)` pairs for each unique index in the input set.
+pub fn lagrange_coefficients<F: FieldNTT>(
+    total: NonZeroU32,
+    iter: impl IntoIterator<Item = u32>,
+) -> Vec<(u32, F)> {
+    let total_u64 = u64::from(total.get());
+    let size = total_u64.next_power_of_two();
+    let size_usize: usize = size.try_into().expect("domain too large (usize overflow)");
+    let lg_size = size.ilog2() as u8;
+
+    let mut present: BitMap = BitMap::zeroes(size);
+    for i in iter {
+        let i_u64 = u64::from(i);
+        if i_u64 < total_u64 {
+            present.set(i_u64, true);
+        }
+    }
+
+    let num_present = present.count_ones() as usize;
+
+    if num_present == 0 {
+        return Vec::new();
+    }
+
+    if num_present == size_usize {
+        let n_inv = F::one().scale(&[size]).inv();
+        return (0..size as u32).map(|i| (i, n_inv.clone())).collect();
+    }
+
+    let mut complement: BitMap = BitMap::zeroes(size);
+    for i in 0..size {
+        if !present.get(i) {
+            complement.set(i, true);
+        }
+    }
+
+    let vp: NTTPolynomial<F> = NTTPolynomial::vanishing(&complement);
+    let vp_at_zero = vp.coefficients[0].clone();
+    let vp_derivative = vp.derivative();
+
+    let derivative_evals = vp_derivative.into_polynomial_vector().evaluate().data;
+
+    let w = F::root_of_unity(lg_size).expect("domain too large for NTT");
+
+    let mut out = Vec::with_capacity(num_present);
+    let mut neg_w_i = -F::one();
+    for i in 0..size as u32 {
+        if present.get(u64::from(i)) {
+            let vp_prime_at_w_i = derivative_evals[(i as usize, 0)].clone();
+            let denom = neg_w_i.clone() * &vp_prime_at_w_i;
+            out.push((i, vp_at_zero.clone() * &denom.inv()));
+        }
+        neg_w_i *= &w;
+    }
+    out
 }
 
 #[cfg(any(test, feature = "fuzz"))]
