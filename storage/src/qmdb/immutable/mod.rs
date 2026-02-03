@@ -113,6 +113,17 @@ impl<
         D: DurabilityState,
     > Immutable<E, K, V, H, T, M, D>
 {
+    /// Return the Location of the next operation appended to this db.
+    pub fn size(&self) -> Location {
+        self.bounds().end
+    }
+
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    pub fn bounds(&self) -> std::ops::Range<Location> {
+        self.journal.bounds()
+    }
+
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -147,12 +158,6 @@ impl<
         } else {
             Ok(Some(v))
         }
-    }
-
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
-    pub fn bounds(&self) -> std::ops::Range<Location> {
-        self.journal.bounds()
     }
 
     /// Get the metadata associated with the last commit.

@@ -197,7 +197,7 @@ where
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
-        assert!(*loc < self.bounds().end);
+        assert!(*loc < self.size());
 
         // Get the operation from the log at the specified position.
         // The journal will return ItemPruned if the location is pruned.
@@ -212,6 +212,11 @@ where
     pub const fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.bounds();
         Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
+    }
+
+    /// Return the Location of the next operation appended to this db.
+    pub const fn size(&self) -> Location {
+        self.bounds().end
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
@@ -247,7 +252,7 @@ where
         }
 
         debug!(
-            log_size = ?self.bounds().end,
+            log_size = ?self.size(),
             oldest_retained_loc = ?self.bounds().start,
             ?prune_loc,
             "pruned inactive ops"
@@ -357,7 +362,7 @@ where
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V) -> Result<(), Error> {
-        let new_loc = self.bounds().end;
+        let new_loc = self.size();
         if update_key(&mut self.snapshot, &self.log, &key, new_loc)
             .await?
             .is_some()
@@ -378,7 +383,7 @@ where
     /// be subject to rollback until the next successful `commit`. Returns true if the key was
     /// created, false if it already existed.
     pub async fn create(&mut self, key: K, value: V) -> Result<bool, Error> {
-        let new_loc = self.bounds().end;
+        let new_loc = self.size();
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
         }
@@ -428,7 +433,7 @@ where
         // Raise the inactivity floor by taking `self.state.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         if self.is_empty() {
-            self.inactivity_floor_loc = self.bounds().end;
+            self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.state.steps + 1;
@@ -445,7 +450,7 @@ where
                 .await?,
         );
 
-        let range = start_loc..self.bounds().end;
+        let range = start_loc..self.size();
 
         // Commit the log to ensure durability.
         self.log.commit().await?;

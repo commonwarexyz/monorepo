@@ -69,7 +69,7 @@ where
         Location::new_unchecked(inner.start)..Location::new_unchecked(inner.end)
     }
 
-    /// Returns the number of items in the journal.
+    /// Returns the Location of the next item appended to the journal.
     pub fn size(&self) -> Location {
         Location::new_unchecked(self.journal.bounds().end)
     }

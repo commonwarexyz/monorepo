@@ -187,8 +187,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<V>>), Error> {
-        self.historical_proof(self.bounds().end, start_loc, max_ops)
-            .await
+        self.historical_proof(self.size(), start_loc, max_ops).await
     }
 
     /// Analogous to proof, but with respect to the state of the MMR when it had `op_count`

@@ -57,6 +57,11 @@ pub trait LogStore: Send + Sync {
     /// retained operations respectively.
     fn bounds(&self) -> std::ops::Range<Location>;
 
+    /// Return the Location of the next operation appended to this db.
+    fn size(&self) -> Location {
+        self.bounds().end
+    }
+
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
     fn inactivity_floor_loc(&self) -> Location;
