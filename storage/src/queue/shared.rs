@@ -21,7 +21,7 @@ use tracing::debug;
 /// All clones share the same underlying queue and notification channel.
 pub struct QueueWriter<E: Clock + Storage + Metrics, V: CodecShared> {
     queue: Arc<Mutex<Queue<E, V>>>,
-    notify: Arc<Mutex<mpsc::Sender<()>>>,
+    notify: mpsc::Sender<()>,
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
@@ -46,7 +46,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
         let pos = self.queue.lock().await.enqueue(item).await?;
 
         // Notify reader (ignore errors: full means already notified, disconnected means reader dropped)
-        let _ = self.notify.lock().await.try_send(());
+        let _ = self.notify.try_send(());
 
         debug!(position = pos, "writer: enqueued item");
         Ok(pos)
@@ -204,7 +204,7 @@ pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
 
     let writer = QueueWriter {
         queue: queue.clone(),
-        notify: Arc::new(Mutex::new(notify_tx)),
+        notify: notify_tx,
     };
 
     let reader = QueueReader {

@@ -112,9 +112,6 @@ pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error),
-
     #[error("position out of range: {0} (queue size is {1})")]
     PositionOutOfRange(u64, u64),
 }
