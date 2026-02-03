@@ -1333,7 +1333,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
     fn test_multithreaded_alloc_freeze_return() {
         let page = page_size();
         let mut registry = test_registry();
@@ -1341,11 +1340,20 @@ mod tests {
 
         let mut handles = vec![];
 
+        // Reduce iterations under miri (atomics are slow)
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                let iterations = 100;
+            } else {
+                let iterations = 1000;
+            }
+        }
+
         // Spawn multiple threads that allocate, freeze, clone, and drop
         for _ in 0..10 {
             let pool = pool.clone();
             let handle = thread::spawn(move || {
-                for _ in 0..1000 {
+                for _ in 0..iterations {
                     let buf = pool.try_alloc(100).unwrap();
                     let iobuf = buf.freeze();
 
@@ -1753,8 +1761,25 @@ mod tests {
         let cache_line = cache_line_size();
         let mut registry = test_registry();
 
+        // Reduce max_per_class under miri (atomics are slow)
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+            } else {
+                let storage_config = BufferPoolConfig::for_storage();
+                let network_config = BufferPoolConfig::for_network();
+            }
+        }
+
         // Storage preset - page aligned
-        let storage_buffer_pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let storage_buffer_pool = BufferPool::new(storage_config, &mut registry);
         let mut buf = storage_buffer_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % page,
@@ -1763,7 +1788,7 @@ mod tests {
         );
 
         // Network preset - cache-line aligned
-        let network_buffer_pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let network_buffer_pool = BufferPool::new(network_config, &mut registry);
         let mut buf = network_buffer_pool.try_alloc(100).unwrap();
         assert_eq!(
             buf.as_mut_ptr() as usize % cache_line,

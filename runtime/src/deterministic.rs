@@ -66,6 +66,8 @@ use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
+#[cfg(miri)]
+use commonware_utils::NZUsize;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -856,12 +858,28 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+            } else {
+                let network_config = BufferPoolConfig::for_network();
+                let storage_config = BufferPoolConfig::for_storage();
+            }
+        }
         let network_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_network(),
+            network_config,
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_storage(),
+            storage_config,
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
@@ -925,12 +943,28 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under Miri
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+            } else {
+                let network_config = BufferPoolConfig::for_network();
+                let storage_config = BufferPoolConfig::for_storage();
+            }
+        }
         let network_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_network(),
+            network_config,
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_storage(),
+            storage_config,
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
