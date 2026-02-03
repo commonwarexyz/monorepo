@@ -46,8 +46,8 @@ mod tests {
                 ed25519, secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
-                Nullify, Proposal, Vote,
+                Activity, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -1676,5 +1676,271 @@ mod tests {
         latest_vote_metric_tracking(bls12381_multisig::fixture::<MinSig, _>);
         latest_vote_metric_tracking(ed25519::fixture);
         latest_vote_metric_tracking(secp256r1::fixture);
+    }
+
+    fn duplicate_vote_with_different_attestation_blocks_peer<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+
+            // Set up participant 1 as sender
+            let sender_pk = participants[1].clone();
+            let (mut sender, _receiver) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(sender_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            let active = batcher_mailbox.update(view, Participant::new(1), View::zero()).await;
+            assert!(active);
+
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+
+            // Send first valid vote from participant 1
+            let vote1 = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
+            sender
+                .send(Recipients::One(me.clone()), Vote::Notarize(vote1.clone()).encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Verify not blocked yet
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "No peers should be blocked after first vote");
+
+            // Send same vote again (exact duplicate) - should be ignored, not blocked
+            sender
+                .send(Recipients::One(me.clone()), Vote::Notarize(vote1.clone()).encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "Duplicate vote should be ignored, not blocked");
+
+            // Now send a vote with the SAME proposal but signed by a DIFFERENT key
+            // This simulates same proposal, different attestation (one signature must be wrong)
+            let vote_wrong_signer = Notarize::sign(&schemes[2], proposal.clone()).unwrap();
+            // But we send it as if it came from participant 1
+            sender
+                .send(Recipients::One(me.clone()), Vote::Notarize(vote_wrong_signer).encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Participant 1 should be blocked because they sent a vote with wrong signer
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.iter().any(|(_, blocked)| blocked == &sender_pk),
+                "Sender should be blocked for vote with mismatched signer"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_duplicate_vote_with_different_attestation_blocks_peer() {
+        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture);
+    }
+
+    fn conflicting_notarize_creates_evidence<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+
+            // Set up participant 1 as sender
+            let sender_pk = participants[1].clone();
+            let (mut sender, _receiver) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(sender_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            let active = batcher_mailbox.update(view, Participant::new(1), View::zero()).await;
+            assert!(active);
+
+            let round = Round::new(epoch, view);
+            let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(b"payload1"));
+            let proposal2 = Proposal::new(round, View::zero(), Sha256::hash(b"payload2"));
+
+            // Send first valid vote for proposal1
+            let vote1 = Notarize::sign(&schemes[1], proposal1).unwrap();
+            sender
+                .send(Recipients::One(me.clone()), Vote::Notarize(vote1).encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "No peers should be blocked after first vote");
+
+            // Send conflicting vote for proposal2 (different payload = different proposal)
+            let vote2 = Notarize::sign(&schemes[1], proposal2).unwrap();
+            sender
+                .send(Recipients::One(me.clone()), Vote::Notarize(vote2).encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Participant 1 should be blocked for sending conflicting votes
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.iter().any(|(_, blocked)| blocked == &sender_pk),
+                "Sender should be blocked for conflicting notarize"
+            );
+
+            // Verify ConflictingNotarize evidence was reported via faults
+            let faults = reporter.faults.lock().unwrap();
+            assert!(
+                faults.contains_key(&sender_pk),
+                "Should have fault reported for sender"
+            );
+            let sender_faults = faults.get(&sender_pk).unwrap();
+            assert!(
+                sender_faults.contains_key(&view),
+                "Should have fault for view 1"
+            );
+            let view_faults = sender_faults.get(&view).unwrap();
+            assert!(
+                view_faults.iter().any(|a| matches!(a, Activity::ConflictingNotarize(_))),
+                "Should have ConflictingNotarize activity"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_conflicting_notarize_creates_evidence() {
+        conflicting_notarize_creates_evidence(ed25519::fixture);
     }
 }
