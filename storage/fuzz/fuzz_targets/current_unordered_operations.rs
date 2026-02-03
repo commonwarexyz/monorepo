@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::Location,
     qmdb::{
         current::{unordered::fixed::Db as Current, FixedConfig as Config},
-        store::LogStore,
+        store::LogStore as _,
     },
     translator::TwoCap,
 };

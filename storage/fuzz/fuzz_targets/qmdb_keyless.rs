@@ -7,7 +7,7 @@ use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
         keyless::{Config, Keyless},
-        store::LogStore,
+        store::LogStore as _,
         verify_proof,
     },
 };
