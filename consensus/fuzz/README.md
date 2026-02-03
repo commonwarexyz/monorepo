@@ -6,7 +6,7 @@ designed to test protocol correctness under adversarial conditions.
 ## Data Structures Fuzzing
 
 Implemented using `cargo-fuzz`. The following fuzz targets are available:
-- `simplex_select_leader`
+- `simplex_elector`
 - `simplex_messages`
 - `attributable_map`
 
@@ -66,12 +66,21 @@ Run continuous fuzzing for a specific target:
 cargo fuzz run simplex_ed25519
 ```
 
-Available fuzz targets:
+Available fuzz targets (standard mode):
 - `simplex_ed25519`
+- `simplex_secp256r1`
 - `simplex_bls12381_multisig_minpk`
 - `simplex_bls12381_multisig_minsig`
 - `simplex_bls12381_threshold_minpk`
 - `simplex_bls12381_threshold_minsig`
+
+Available fuzz targets (twin mode with mutating adversary):
+- `simplex_ed25519_twin`
+- `simplex_secp256r1_twin`
+- `simplex_bls12381_multisig_minpk_twin`
+- `simplex_bls12381_multisig_minsig_twin`
+- `simplex_bls12381_threshold_minpk_twin`
+- `simplex_bls12381_threshold_minsig_twin`
 
 ### Debugging
 

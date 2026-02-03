@@ -55,7 +55,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
 const MIN_REQUIRED_CONTAINERS: u64 = 5;
-const MAX_REQUIRED_CONTINERS: u64 = 50;
+const MAX_REQUIRED_CONTAINERS: u64 = 50;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 // 4 nodes, 1 faulty, 3 correct
@@ -65,6 +65,39 @@ const N3C2F1: (u32, u32, u32) = (3, 1, 2);
 // 3 nodes, 2 faulty, 1 correct
 const N4C1F3: (u32, u32, u32) = (4, 3, 1);
 const MAX_RAW_BYTES: usize = 4096;
+
+async fn setup_degraded_network<P, E>(
+    oracle: &mut commonware_p2p::simulated::Oracle<P, E>,
+    participants: &[P],
+) where
+    P: commonware_cryptography::PublicKey,
+    E: Clock,
+{
+    let Some(victim) = participants.last() else {
+        return;
+    };
+    let victim_idx = participants.len() - 1;
+    let degraded = Link {
+        latency: Duration::from_millis(50),
+        jitter: Duration::from_millis(50),
+        success_rate: 0.6,
+    };
+    for (peer_idx, peer) in participants.iter().enumerate() {
+        if peer_idx == victim_idx {
+            continue;
+        }
+        oracle.remove_link(victim.clone(), peer.clone()).await.ok();
+        oracle.remove_link(peer.clone(), victim.clone()).await.ok();
+        oracle
+            .add_link(victim.clone(), peer.clone(), degraded.clone())
+            .await
+            .unwrap();
+        oracle
+            .add_link(peer.clone(), victim.clone(), degraded.clone())
+            .await
+            .unwrap();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
@@ -143,7 +176,7 @@ impl Arbitrary<'_> for FuzzInput {
             && u.int_in_range(0..=99)? == 1;
 
         let required_containers =
-            u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTINERS)?;
+            u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -234,29 +267,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             && input.configuration == N4C3F1
             && input.degraded_network
         {
-            if let Some(victim) = participants.last() {
-                let degraded = Link {
-                    latency: Duration::from_millis(50),
-                    jitter: Duration::from_millis(50),
-                    success_rate: 0.6,
-                };
-                for (peer_idx, peer) in participants.iter().enumerate() {
-                    if peer_idx == 3 {
-                        continue;
-                    }
-                    // Replace links to/from the degraded node with degraded connectivity.
-                    oracle.remove_link(victim.clone(), peer.clone()).await.ok();
-                    oracle.remove_link(peer.clone(), victim.clone()).await.ok();
-                    oracle
-                        .add_link(victim.clone(), peer.clone(), degraded.clone())
-                        .await
-                        .unwrap();
-                    oracle
-                        .add_link(peer.clone(), victim.clone(), degraded.clone())
-                        .await
-                        .unwrap();
-                }
-            }
+            setup_degraded_network(&mut oracle, &participants).await;
         }
 
         let relay = Arc::new(relay::Relay::new());
@@ -429,28 +440,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             && input.configuration == N4C3F1
             && input.degraded_network
         {
-            if let Some(victim) = participants.last() {
-                let degraded = Link {
-                    latency: Duration::from_millis(50),
-                    jitter: Duration::from_millis(50),
-                    success_rate: 0.6,
-                };
-                for (peer_idx, peer) in participants.iter().enumerate() {
-                    if peer_idx == 3 {
-                        continue;
-                    }
-                    oracle.remove_link(victim.clone(), peer.clone()).await.ok();
-                    oracle.remove_link(peer.clone(), victim.clone()).await.ok();
-                    oracle
-                        .add_link(victim.clone(), peer.clone(), degraded.clone())
-                        .await
-                        .unwrap();
-                    oracle
-                        .add_link(peer.clone(), victim.clone(), degraded.clone())
-                        .await
-                        .unwrap();
-                }
-            }
+            setup_degraded_network(&mut oracle, participants.as_ref()).await;
         }
 
         let strategy = Strategy::View;
