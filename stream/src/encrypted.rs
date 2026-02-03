@@ -60,7 +60,7 @@ use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
-        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, TAG_SIZE,
+        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
     },
     transcript::Transcript,
     Signer,
@@ -74,9 +74,9 @@ use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
-const CIPHERTEXT_OVERHEAD: u32 = {
-    assert!(handshake::CIPHERTEXT_OVERHEAD <= u32::MAX as usize);
-    handshake::CIPHERTEXT_OVERHEAD as u32
+const TAG_SIZE: u32 = {
+    assert!(handshake::TAG_SIZE <= u32::MAX as usize);
+    handshake::TAG_SIZE as u32
 };
 
 /// Errors that can occur when interacting with a stream.
@@ -307,7 +307,7 @@ impl<O: Sink> Sender<O> {
     /// and sends the ciphertext.
     pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
         let mut bufs = buf.into();
-        let ciphertext_len = bufs.remaining() + TAG_SIZE;
+        let ciphertext_len = bufs.remaining() + TAG_SIZE as usize;
 
         // Allocate buffer from pool for ciphertext (plaintext + tag).
         let mut encryption_buf = self.pool.alloc(ciphertext_len);
@@ -324,7 +324,7 @@ impl<O: Sink> Sender<O> {
         send_frame(
             &mut self.sink,
             encryption_buf.freeze(),
-            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
+            self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
         Ok(())
@@ -347,7 +347,7 @@ impl<I: Stream> Receiver<I> {
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
         let mut encrypted = recv_frame(
             &mut self.stream,
-            self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
+            self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
 

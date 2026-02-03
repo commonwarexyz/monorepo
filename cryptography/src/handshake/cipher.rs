@@ -7,10 +7,6 @@ use zeroize::Zeroizing;
 /// Size of the ChaCha20-Poly1305 authentication tag.
 pub const TAG_SIZE: usize = 16;
 
-/// The amount of overhead in a ciphertext, compared to the plain message.
-/// ChaCha20-Poly1305 uses a 128-bit (16 byte) authentication tag.
-pub const CIPHERTEXT_OVERHEAD: usize = TAG_SIZE;
-
 /// How many bytes are in a nonce.
 /// ChaCha20-Poly1305 uses a 96-bit (12 byte) nonce.
 const NONCE_SIZE_BYTES: usize = 12;
