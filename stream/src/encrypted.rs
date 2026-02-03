@@ -60,13 +60,15 @@ use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
-        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
+        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, TAG_SIZE,
     },
     transcript::Transcript,
     Signer,
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Error as RuntimeError, IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{
+    Buf, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, Sink, Stream,
+};
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
 use std::{future::Future, ops::Range, time::Duration};
@@ -162,13 +164,14 @@ impl<S> Config<S> {
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
-pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
+pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     mut ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
     mut stream: I,
     mut sink: O,
 ) -> Result<(Sender<O>, Receiver<I>), Error> {
+    let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
         send_frame(
@@ -202,11 +205,13 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
                 cipher: send,
                 sink,
                 max_message_size: config.max_message_size,
+                pool: pool.clone(),
             },
             Receiver {
                 cipher: recv,
                 stream,
                 max_message_size: config.max_message_size,
+                pool,
             },
         ))
     };
@@ -220,7 +225,7 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
 pub async fn listen<
-    R: CryptoRngCore + Clock,
+    R: BufferPooler + CryptoRngCore + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
@@ -233,6 +238,7 @@ pub async fn listen<
     mut stream: I,
     mut sink: O,
 ) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
+    let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
         let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
@@ -269,11 +275,13 @@ pub async fn listen<
                 cipher: send,
                 sink,
                 max_message_size: config.max_message_size,
+                pool: pool.clone(),
             },
             Receiver {
                 cipher: recv,
                 stream,
                 max_message_size: config.max_message_size,
+                pool,
             },
         ))
     };
@@ -289,19 +297,39 @@ pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
     max_message_size: u32,
+    pool: BufferPool,
 }
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
+    ///
+    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
+    /// and sends the ciphertext.
     pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
-        let bufs = buf.into();
-        // Ensure contiguous memory for encryption.
-        let msg = bufs.coalesce();
-        let c = self.cipher.send(msg.as_ref())?;
+        let mut bufs = buf.into();
+        let plaintext_len = bufs.remaining();
+        let ciphertext_len = plaintext_len + TAG_SIZE;
+
+        // Allocate buffer from pool for ciphertext (plaintext + tag).
+        let mut encryption_buf = self.pool.alloc(ciphertext_len);
+
+        // SAFETY: We will initialize exactly `ciphertext_len` bytes below.
+        unsafe { encryption_buf.set_len(ciphertext_len) };
+
+        // Copy plaintext into buffer.
+        bufs.copy_to_slice(&mut encryption_buf.as_mut()[..plaintext_len]);
+
+        // Encrypt in-place, get tag back.
+        let tag = self
+            .cipher
+            .send_in_place(&mut encryption_buf.as_mut()[..plaintext_len])?;
+
+        // Append tag to buffer.
+        encryption_buf.as_mut()[plaintext_len..].copy_from_slice(&tag);
 
         send_frame(
             &mut self.sink,
-            IoBuf::from(c),
+            encryption_buf.freeze(),
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
         .await?;
@@ -314,18 +342,39 @@ pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,
     max_message_size: u32,
+    pool: BufferPool,
 }
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
+    ///
+    /// Receives ciphertext, allocates a buffer from the pool, copies ciphertext,
+    /// and decrypts in-place.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        let encrypted = recv_frame(
+        let mut encrypted = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(CIPHERTEXT_OVERHEAD),
         )
-        .await?
-        .coalesce();
-        Ok(self.cipher.recv(encrypted.as_ref())?.into())
+        .await?;
+
+        let ciphertext_len = encrypted.remaining();
+
+        // Allocate buffer from pool for decryption.
+        let mut decryption_buf = self.pool.alloc(ciphertext_len);
+
+        // SAFETY: We will initialize exactly `ciphertext_len` bytes below.
+        unsafe { decryption_buf.set_len(ciphertext_len) };
+
+        // Copy ciphertext into buffer.
+        encrypted.copy_to_slice(decryption_buf.as_mut());
+
+        // Decrypt in-place, get plaintext length back.
+        let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
+
+        // Truncate to remove tag bytes, keeping only plaintext.
+        decryption_buf.truncate(plaintext_len);
+
+        Ok(decryption_buf.freeze().into())
     }
 }
 
