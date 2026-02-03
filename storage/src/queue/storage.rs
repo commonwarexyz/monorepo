@@ -222,7 +222,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// # Errors
     ///
     /// - Returns [Error::PositionOutOfRange] if position >= queue size.
-    pub async fn ack(&mut self, position: u64) -> Result<(), Error> {
+    pub fn ack(&mut self, position: u64) -> Result<(), Error> {
         let size = self.journal.size();
         if position >= size {
             return Err(Error::PositionOutOfRange(position, size));
@@ -277,7 +277,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// # Errors
     ///
     /// - Returns [Error::PositionOutOfRange] if `up_to > queue size`.
-    pub async fn ack_up_to(&mut self, up_to: u64) -> Result<(), Error> {
+    pub fn ack_up_to(&mut self, up_to: u64) -> Result<(), Error> {
         let size = self.journal.size();
         if up_to > size {
             return Err(Error::PositionOutOfRange(up_to, size));
@@ -518,7 +518,7 @@ mod tests {
             for i in 0..5 {
                 let (pos, _) = queue.dequeue().await.unwrap().unwrap();
                 assert_eq!(pos, i);
-                queue.ack(pos).await.unwrap();
+                queue.ack(pos).unwrap();
                 assert_eq!(queue.ack_floor(), i + 1);
             }
 
@@ -550,22 +550,22 @@ mod tests {
             }
 
             // Ack out of order: 2, 4, 1, 3, 0
-            queue.ack(2).await.unwrap();
+            queue.ack(2).unwrap();
             assert_eq!(queue.ack_floor(), 0); // Floor doesn't move
             assert!(queue.is_acked(2));
 
-            queue.ack(4).await.unwrap();
+            queue.ack(4).unwrap();
             assert_eq!(queue.ack_floor(), 0);
             assert!(queue.is_acked(4));
 
-            queue.ack(1).await.unwrap();
+            queue.ack(1).unwrap();
             assert_eq!(queue.ack_floor(), 0);
 
-            queue.ack(3).await.unwrap();
+            queue.ack(3).unwrap();
             assert_eq!(queue.ack_floor(), 0);
 
             // Ack 0 - floor should advance to 5 (consuming 1,2,3,4)
-            queue.ack(0).await.unwrap();
+            queue.ack(0).unwrap();
             assert_eq!(queue.ack_floor(), 5);
             assert!(queue.is_empty());
 
@@ -588,7 +588,7 @@ mod tests {
             }
 
             // Batch ack items 0-4
-            queue.ack_up_to(5).await.unwrap();
+            queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 5);
 
             // Items 0-4 should be acked
@@ -623,18 +623,18 @@ mod tests {
             }
 
             // Ack some items out of order first
-            queue.ack(7).await.unwrap();
-            queue.ack(8).await.unwrap();
+            queue.ack(7).unwrap();
+            queue.ack(8).unwrap();
             assert_eq!(queue.acked_above_count(), 2);
 
             // Batch ack up to 5
-            queue.ack_up_to(5).await.unwrap();
+            queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 5);
             // Items 7, 8 should still be tracked in acked_above
             assert_eq!(queue.acked_above_count(), 2);
 
             // Now batch ack up to 9 - should consume the acked_above entries
-            queue.ack_up_to(9).await.unwrap();
+            queue.ack_up_to(9).unwrap();
             assert_eq!(queue.ack_floor(), 9);
             assert_eq!(queue.acked_above_count(), 0);
 
@@ -657,13 +657,13 @@ mod tests {
             }
 
             // Ack items 5, 6, 7 first
-            queue.ack(5).await.unwrap();
-            queue.ack(6).await.unwrap();
-            queue.ack(7).await.unwrap();
+            queue.ack(5).unwrap();
+            queue.ack(6).unwrap();
+            queue.ack(7).unwrap();
             assert_eq!(queue.ack_floor(), 0);
 
             // Batch ack up to 5 - should coalesce with 5, 6, 7
-            queue.ack_up_to(5).await.unwrap();
+            queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 8); // Consumed 5, 6, 7
 
             queue.destroy().await.unwrap();
@@ -683,15 +683,15 @@ mod tests {
             queue.enqueue(b"item1".to_vec()).await.unwrap();
 
             // Can't ack_up_to beyond queue size
-            let err = queue.ack_up_to(5).await.unwrap_err();
+            let err = queue.ack_up_to(5).unwrap_err();
             assert!(matches!(err, Error::PositionOutOfRange(5, 2)));
 
             // Can ack_up_to at queue size
-            queue.ack_up_to(2).await.unwrap();
+            queue.ack_up_to(2).unwrap();
             assert_eq!(queue.ack_floor(), 2);
 
             // Acking up_to at or below floor is a no-op
-            queue.ack_up_to(1).await.unwrap();
+            queue.ack_up_to(1).unwrap();
             assert_eq!(queue.ack_floor(), 2);
 
             queue.destroy().await.unwrap();
@@ -713,8 +713,8 @@ mod tests {
             }
 
             // Ack items 1 and 3 before reading
-            queue.ack(1).await.unwrap();
-            queue.ack(3).await.unwrap();
+            queue.ack(1).unwrap();
+            queue.ack(3).unwrap();
 
             // Dequeue should skip 1 and 3
             let (p, item) = queue.dequeue().await.unwrap().unwrap();
@@ -780,15 +780,15 @@ mod tests {
             queue.enqueue(b"item1".to_vec()).await.unwrap();
 
             // Can't ack position beyond queue size
-            let err = queue.ack(5).await.unwrap_err();
+            let err = queue.ack(5).unwrap_err();
             assert!(matches!(err, Error::PositionOutOfRange(5, 2)));
 
             // Can ack unread items
-            queue.ack(1).await.unwrap();
+            queue.ack(1).unwrap();
             assert!(queue.is_acked(1));
 
             // Double ack is a no-op
-            queue.ack(1).await.unwrap();
+            queue.ack(1).unwrap();
 
             queue.destroy().await.unwrap();
         });
@@ -812,7 +812,7 @@ mod tests {
             // Read and ack some items
             for i in 0..15 {
                 queue.dequeue().await.unwrap();
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
             assert_eq!(queue.ack_floor(), 15);
 
@@ -843,7 +843,7 @@ mod tests {
             // First batch: ack items 0-14
             for i in 0..15 {
                 queue.dequeue().await.unwrap();
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
             assert_eq!(queue.ack_floor(), 15);
 
@@ -853,10 +853,10 @@ mod tests {
             assert_eq!(item, vec![15]);
 
             // Second batch: ack items 15-29
-            queue.ack(15).await.unwrap();
+            queue.ack(15).unwrap();
             for i in 16..30 {
                 queue.dequeue().await.unwrap();
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
             assert_eq!(queue.ack_floor(), 30);
 
@@ -866,10 +866,10 @@ mod tests {
             assert_eq!(item, vec![30]);
 
             // Third batch: ack remaining items
-            queue.ack(30).await.unwrap();
+            queue.ack(30).unwrap();
             for i in 31..50 {
                 queue.dequeue().await.unwrap();
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
             assert_eq!(queue.ack_floor(), 50);
 
@@ -899,9 +899,9 @@ mod tests {
                 }
 
                 // Ack items 0, 1, 2 - but items_per_section=10, so no pruning
-                queue.ack(0).await.unwrap();
-                queue.ack(1).await.unwrap();
-                queue.ack(2).await.unwrap();
+                queue.ack(0).unwrap();
+                queue.ack(1).unwrap();
+                queue.ack(2).unwrap();
                 assert_eq!(queue.ack_floor(), 3);
 
                 queue.sync().await.unwrap();
@@ -949,7 +949,7 @@ mod tests {
 
                 // Ack items 0-14 to advance floor past section 0
                 for i in 0..15 {
-                    queue.ack(i).await.unwrap();
+                    queue.ack(i).unwrap();
                 }
                 assert_eq!(queue.ack_floor(), 15);
 
@@ -1037,7 +1037,7 @@ mod tests {
             // Read and ack some
             for i in 0..5 {
                 queue.dequeue().await.unwrap();
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
             assert_eq!(queue.ack_floor(), 5);
             assert_eq!(queue.read_position(), 5);
@@ -1133,7 +1133,7 @@ mod tests {
 
             // Ack every 3rd item (sparse acking)
             for i in (0..100).step_by(3) {
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
 
             // Dequeue should skip acked items
@@ -1166,7 +1166,7 @@ mod tests {
 
             // Ack items 1-8 (not 0)
             for i in 1..9 {
-                queue.ack(i).await.unwrap();
+                queue.ack(i).unwrap();
             }
 
             // Acked_above should have items 1-8
@@ -1174,7 +1174,7 @@ mod tests {
             assert!(queue.acked_above_count() > 0);
 
             // Now ack 0 - floor should advance to 9, consuming all acked_above
-            queue.ack(0).await.unwrap();
+            queue.ack(0).unwrap();
             assert_eq!(queue.ack_floor(), 9);
             assert_eq!(queue.acked_above_count(), 0);
 
@@ -1216,8 +1216,8 @@ mod tests {
             );
 
             // Ack out of order - acked_above_ranges should increase
-            queue.ack(2).await.unwrap();
-            queue.ack(4).await.unwrap();
+            queue.ack(2).unwrap();
+            queue.ack(4).unwrap();
             let encoded = context.encode();
             assert!(
                 encoded.contains("test_metrics_ack_floor 0"),
@@ -1229,7 +1229,7 @@ mod tests {
             );
 
             // Ack 0 - floor advances to 1
-            queue.ack(0).await.unwrap();
+            queue.ack(0).unwrap();
             let encoded = context.encode();
             assert!(
                 encoded.contains("test_metrics_ack_floor 1"),
@@ -1237,7 +1237,7 @@ mod tests {
             );
 
             // Ack 1 - floor advances to 3 (consuming 2)
-            queue.ack(1).await.unwrap();
+            queue.ack(1).unwrap();
             let encoded = context.encode();
             assert!(
                 encoded.contains("test_metrics_ack_floor 3"),
@@ -1249,7 +1249,7 @@ mod tests {
             ); // Only 4 remains
 
             // Ack 3 - floor advances to 5 (consuming 4)
-            queue.ack(3).await.unwrap();
+            queue.ack(3).unwrap();
             let encoded = context.encode();
             assert!(
                 encoded.contains("test_metrics_ack_floor 5"),

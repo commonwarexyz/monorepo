@@ -91,7 +91,7 @@
 //!         println!("Processing item at position {}", position);
 //!
 //!         // Acknowledge after successful processing
-//!         queue.ack(position).await.unwrap();
+//!         queue.ack(position).unwrap();
 //!     }
 //!
 //!     queue.destroy().await.unwrap();

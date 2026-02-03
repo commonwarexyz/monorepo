@@ -122,7 +122,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the position is out of range or storage fails.
     pub async fn ack(&self, position: u64) -> Result<(), Error> {
-        self.queue.lock().await.ack(position).await
+        self.queue.lock().await.ack(position)
     }
 
     /// Acknowledge all items up to (but not including) the given position.
@@ -133,7 +133,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the position is out of range or storage fails.
     pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
-        self.queue.lock().await.ack_up_to(up_to).await
+        self.queue.lock().await.ack_up_to(up_to)
     }
 
     /// Peek at the next unacknowledged item without advancing the read position.

@@ -149,7 +149,9 @@ fn fuzz(input: FuzzInput) {
             write_buffer: NZUsize!(1024),
         };
 
-        let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg).await.unwrap();
+        let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+            .await
+            .unwrap();
         let mut reference = ReferenceQueue::new();
 
         for op in input.operations.iter() {
@@ -184,7 +186,7 @@ fn fuzz(input: FuzzInput) {
                     // Map offset to a valid position range
                     let pos = (*pos_offset as u64) % size;
 
-                    let result = queue.ack(pos).await;
+                    let result = queue.ack(pos);
                     let ref_result = reference.ack(pos);
 
                     assert_eq!(
@@ -199,7 +201,7 @@ fn fuzz(input: FuzzInput) {
                     // Map offset to valid range [0, size]
                     let up_to = (*pos_offset as u64) % (size + 1);
 
-                    let result = queue.ack_up_to(up_to).await;
+                    let result = queue.ack_up_to(up_to);
                     let ref_result = reference.ack_up_to(up_to);
 
                     assert_eq!(
@@ -236,11 +238,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Verify invariants after each operation
-            assert_eq!(
-                queue.size(),
-                reference.size(),
-                "size mismatch after {op:?}"
-            );
+            assert_eq!(queue.size(), reference.size(), "size mismatch after {op:?}");
             assert_eq!(
                 queue.ack_floor(),
                 reference.ack_floor(),
