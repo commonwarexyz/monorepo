@@ -12,7 +12,7 @@ use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::Error as CodecError;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -170,136 +170,128 @@ where
     async fn run(mut self) {
         let mut shard_validity_waiters =
             AbortablePool::<((CodingCommitment, usize), Shard<C, H>)>::default();
-        let mut shutdown = self.context.stopped();
 
-        loop {
-            // Prune any dropped subscribers.
-            self.shard_subscriptions.retain(|_, sub| {
-                sub.subscribers.retain(|tx| !tx.is_closed());
-                !sub.subscribers.is_empty()
-            });
+        select_loop! {
+            self.context,
+            on_start => {
+                // Prune any dropped subscribers.
+                self.shard_subscriptions.retain(|_, sub| {
+                    sub.subscribers.retain(|tx| !tx.is_closed());
+                    !sub.subscribers.is_empty()
+                });
+            },
+            // Check for the shutdown signal.
+            on_stopped => {
+                debug!("received shutdown signal, stopping shard engine");
+            },
+            // Always serve any outstanding subscriptions first to unblock the hotpath of proposals / notarizations.
+            Ok(((commitment, index), shard)) = shard_validity_waiters.next_completed() else continue => {
+                // Verify the shard and prepare it for broadcasting in a single operation.
+                // This avoids redundant SHA-256 hashing that would occur if we called
+                // verify() and then broadcast_shard() separately.
+                let reshard = shard.verify_into_reshard();
 
-            select! {
-                // Check for the shutdown signal.
-                _ = &mut shutdown => {
-                    debug!("received shutdown signal, stopping shard engine");
-                    break;
-                },
-                // Always serve any outstanding subscriptions first to unblock the hotpath of proposals / notarizations.
-                result = shard_validity_waiters.next_completed() => {
-                    let Ok(((commitment, index), shard)) = result else {
-                        // Aborted future
-                        continue;
-                    };
-
-                    // Verify the shard and prepare it for broadcasting in a single operation.
-                    // This avoids redundant SHA-256 hashing that would occur if we called
-                    // verify() and then broadcast_shard() separately.
-                    let reshard = shard.verify_into_reshard();
-
-                    // Notify all subscribers
-                    if let Some(mut sub) = self.shard_subscriptions.remove(&(commitment, index)) {
-                        let valid = reshard.is_some();
-                        for responder in sub.subscribers.drain(..) {
-                            responder.send_lossy(valid);
-                        }
+                // Notify all subscribers
+                if let Some(mut sub) = self.shard_subscriptions.remove(&(commitment, index)) {
+                    let valid = reshard.is_some();
+                    for responder in sub.subscribers.drain(..) {
+                        responder.send_lossy(valid);
                     }
+                }
 
-                    // Broadcast the reshard if valid
-                    if let Some(reshard) = reshard {
-                        self.broadcast_reshard(reshard).await;
+                // Broadcast the reshard if valid
+                if let Some(reshard) = reshard {
+                    self.broadcast_reshard(reshard).await;
+                }
+            },
+            Some(message) = self.mailbox.recv() else {
+                debug!("Shard mailbox closed, shutting down");
+                return;
+            } => {
+                match message {
+                    Message::Proposed { block, peers } => {
+                        self.broadcast_shards(block, peers).await;
                     }
-                },
-                message = self.mailbox.recv() => {
-                    let Some(message) = message else {
-                        debug!("Shard mailbox closed, shutting down");
-                        return;
-                    };
-                    match message {
-                        Message::Proposed { block, peers } => {
-                            self.broadcast_shards(block, peers).await;
-                        }
-                        Message::SubscribeShardValidity {
+                    Message::SubscribeShardValidity {
+                        commitment,
+                        index,
+                        response,
+                    } => {
+                        self.subscribe_shard_validity(
                             commitment,
                             index,
                             response,
-                        } => {
-                            self.subscribe_shard_validity(
-                                commitment,
-                                index,
-                                response,
-                                &mut shard_validity_waiters
-                            ).await;
-                        }
-                        Message::TryReconstruct {
-                            commitment,
-                            response,
-                        } => {
-                            let result = self.try_reconstruct(commitment).await;
+                            &mut shard_validity_waiters
+                        ).await;
+                    }
+                    Message::TryReconstruct {
+                        commitment,
+                        response,
+                    } => {
+                        let result = self.try_reconstruct(commitment).await;
 
-                            // Send the response; if the receiver has been dropped, we don't care.
-                            response.send_lossy(result);
-                        }
-                        Message::SubscribeBlockByDigest {
-                            digest,
-                            response,
-                        } => {
-                            self.subscribe_block_by_digest(digest, response).await;
-                        }
-                        Message::SubscribeBlockByCommitment {
-                            commitment,
-                            response,
-                        } => {
-                            self.subscribe_block_by_commitment(commitment, response).await;
-                        }
-                        Message::Finalized { commitment } => {
-                            // Evict the finalized block and any blocks at or below its height.
-                            // Blocks at lower heights can accumulate when views timeout before
-                            // finalization - these would otherwise remain in cache forever.
-                            let finalized_height = self
-                                .reconstructed_blocks
-                                .get(&commitment)
-                                .map(|b| b.height());
+                        // Send the response; if the receiver has been dropped, we don't care.
+                        response.send_lossy(result);
+                    }
+                    Message::SubscribeBlockByDigest {
+                        digest,
+                        response,
+                    } => {
+                        self.subscribe_block_by_digest(digest, response).await;
+                    }
+                    Message::SubscribeBlockByCommitment {
+                        commitment,
+                        response,
+                    } => {
+                        self.subscribe_block_by_commitment(commitment, response).await;
+                    }
+                    Message::Finalized { commitment } => {
+                        // Evict the finalized block and any blocks at or below its height.
+                        // Blocks at lower heights can accumulate when views timeout before
+                        // finalization - these would otherwise remain in cache forever.
+                        let finalized_height = self
+                            .reconstructed_blocks
+                            .get(&commitment)
+                            .map(|b| b.height());
 
-                            // Prune block subscriptions for commitments that will be evicted.
-                            // After finalization, blocks are persisted by marshal and queries
-                            // go through it rather than the shard engine.
-                            self.block_subscriptions.retain(|_, sub| {
-                                let Some(sub_commitment) = sub.commitment else {
-                                    return true;
-                                };
-                                !Self::should_prune_subscription(
-                                    &sub_commitment,
-                                    &commitment,
-                                    finalized_height,
-                                    &self.reconstructed_blocks,
-                                )
-                            });
+                        // Prune block subscriptions for commitments that will be evicted.
+                        // After finalization, blocks are persisted by marshal and queries
+                        // go through it rather than the shard engine.
+                        self.block_subscriptions.retain(|_, sub| {
+                            let Some(sub_commitment) = sub.commitment else {
+                                return true;
+                            };
+                            !Self::should_prune_subscription(
+                                &sub_commitment,
+                                &commitment,
+                                finalized_height,
+                                &self.reconstructed_blocks,
+                            )
+                        });
 
-                            // Prune shard subscriptions for commitments that will be evicted
-                            self.shard_subscriptions.retain(|(sub_commitment, _), _| {
-                                !Self::should_prune_subscription(
-                                    sub_commitment,
-                                    &commitment,
-                                    finalized_height,
-                                    &self.reconstructed_blocks,
-                                )
-                            });
+                        // Prune shard subscriptions for commitments that will be evicted
+                        self.shard_subscriptions.retain(|(sub_commitment, _), _| {
+                            !Self::should_prune_subscription(
+                                sub_commitment,
+                                &commitment,
+                                finalized_height,
+                                &self.reconstructed_blocks,
+                            )
+                        });
 
-                            // Prune reconstructed blocks at or below the finalized height
-                            self.reconstructed_blocks.remove(&commitment);
-                            if let Some(height) = finalized_height {
-                                self.reconstructed_blocks
-                                    .retain(|_, block| block.height() > height);
-                            }
-
-                            let _ = self
-                                .reconstructed_blocks_count
-                                .try_set(self.reconstructed_blocks.len() as i64);
+                        // Prune reconstructed blocks at or below the finalized height
+                        self.reconstructed_blocks.remove(&commitment);
+                        if let Some(height) = finalized_height {
+                            self.reconstructed_blocks
+                                .retain(|_, block| block.height() > height);
                         }
-                        Message::Notarize { notarization } => {
-                            let _ = self.try_reconstruct(notarization.proposal.payload).await;
-                        }
+
+                        let _ = self
+                            .reconstructed_blocks_count
+                            .try_set(self.reconstructed_blocks.len() as i64);
+                    }
+                    Message::Notarize { notarization } => {
+                        let _ = self.try_reconstruct(notarization.proposal.payload).await;
                     }
                 }
             }
