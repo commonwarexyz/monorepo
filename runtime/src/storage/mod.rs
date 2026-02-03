@@ -5,6 +5,7 @@ use commonware_macros::stability_scope;
 stability_scope!(ALPHA {
     pub mod audited;
     pub mod memory;
+    pub mod faulty;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
@@ -18,7 +19,6 @@ stability_scope!(BETA {
     use commonware_utils::hex;
     use std::ops::RangeInclusive;
 
-    pub mod faulty;
     pub mod metered;
 
     /// Errors that can occur when validating a blob header.
