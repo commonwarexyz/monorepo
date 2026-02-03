@@ -51,7 +51,7 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    marshal::{ancestry::AncestorStream, standard, Update},
+    marshal::{ancestry::AncestorStream, core::Mailbox, standard::Standard, Update},
     simplex::types::Context,
     types::{Epoch, Epocher, Height, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
@@ -103,12 +103,12 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: CertifiableBlock,
+    B: CertifiableBlock<Commitment = <B as Digestible>::Digest>,
     ES: Epocher,
 {
     context: E,
     application: A,
-    marshal: standard::Mailbox<S, B>,
+    marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_tasks: Arc<Mutex<TasksMap<B>>>,
@@ -126,11 +126,14 @@ where
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<
+        Context = <A as Application<E>>::Context,
+        Commitment = <B as Digestible>::Digest,
+    >,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
-    pub fn new(context: E, application: A, marshal: standard::Mailbox<S, B>, epocher: ES) -> Self {
+    pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let build_duration = Gauge::default();
         context.register(
             "build_duration",
@@ -262,7 +265,10 @@ where
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<
+        Context = <A as Application<E>>::Context,
+        Commitment = <B as Digestible>::Digest,
+    >,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -432,7 +438,7 @@ where
             .with_label("optimistic_verify")
             .with_attribute("round", context.round)
             .spawn(move |_| async move {
-                let block_request = marshal.subscribe(Some(context.round), digest).await;
+                let block_request = marshal.subscribe_by_digest(Some(context.round), digest).await;
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -551,7 +557,10 @@ where
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<
+        Context = <A as Application<E>>::Context,
+        Commitment = <B as Digestible>::Digest,
+    >,
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
@@ -575,7 +584,7 @@ where
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.subscribe(Some(round), digest).await;
+        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -637,7 +646,10 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<
+        Context = <A as Application<E>>::Context,
+        Commitment = <B as Digestible>::Digest,
+    >,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -668,7 +680,7 @@ where
             height = %block.height(),
             "requested broadcast of built block"
         );
-        self.marshal.proposed(round, block).await;
+        self.marshal.proposed(round, block, ()).await;
     }
 }
 
@@ -678,7 +690,10 @@ where
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<
+        Context = <A as Application<E>>::Context,
+        Commitment = <B as Digestible>::Digest,
+    >,
     ES: Epocher,
 {
     type Activity = A::Activity;
@@ -715,13 +730,13 @@ async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut standard::Mailbox<S, B>,
+    marshal: &mut Mailbox<S, Standard<B>>,
 ) -> oneshot::Receiver<B>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block,
+    B: Block<Commitment = <B as Digestible>::Digest>,
 {
     let genesis = application.genesis().await;
     if parent_digest == genesis.digest() {
@@ -729,6 +744,8 @@ where
         tx.send_lossy(genesis);
         rx
     } else {
-        marshal.subscribe(parent_round, parent_digest).await
+        marshal
+            .subscribe_by_digest(parent_round, parent_digest)
+            .await
     }
 }
