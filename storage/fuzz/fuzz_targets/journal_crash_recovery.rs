@@ -10,7 +10,10 @@ use commonware_storage::journal::contiguous::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::{
+    num::{NonZeroU16, NonZeroUsize},
+    ops::Range,
+};
 
 /// Item size for journal entries (32 bytes like a hash digest).
 const ITEM_SIZE: usize = 32;
@@ -158,7 +161,7 @@ trait FuzzJournal: Sized {
     ) -> impl std::future::Future<Output = Result<Self, commonware_storage::journal::Error>> + Send;
 
     fn size(&self) -> u64;
-    fn oldest_retained_pos(&self) -> Option<u64>;
+    fn bounds(&self) -> Range<u64>;
 
     fn append(
         &mut self,
@@ -230,8 +233,8 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::size(self)
     }
 
-    fn oldest_retained_pos(&self) -> Option<u64> {
-        FixedJournal::oldest_retained_pos(self)
+    fn bounds(&self) -> Range<u64> {
+        FixedJournal::bounds(self)
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
@@ -303,8 +306,8 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::size(self)
     }
 
-    fn oldest_retained_pos(&self) -> Option<u64> {
-        VariableJournal::oldest_retained_pos(self)
+    fn bounds(&self) -> Range<u64> {
+        VariableJournal::bounds(self)
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
@@ -352,7 +355,7 @@ async fn run_operations<J: FuzzJournal>(
     let mut min_expected_size = 0u64;
     let mut max_expected_size = journal.size();
     let mut min_expected_oldest = 0u64;
-    let mut max_expected_oldest = journal.oldest_retained_pos().unwrap_or(0);
+    let mut max_expected_oldest = journal.bounds().start;
 
     for op in operations.iter() {
         let step_result: Result<(), ()> = match op {
@@ -379,7 +382,7 @@ async fn run_operations<J: FuzzJournal>(
                     let size = journal.size();
                     min_expected_size = size;
                     max_expected_size = max_expected_size.max(size);
-                    let oldest = journal.oldest_retained_pos().unwrap_or(size);
+                    let oldest = journal.bounds().start;
                     min_expected_oldest = oldest;
                     max_expected_oldest = max_expected_oldest.max(oldest);
                     Ok(())
@@ -406,7 +409,7 @@ async fn run_operations<J: FuzzJournal>(
                 }
                 Ok(false) => Ok(()),
                 Ok(true) => {
-                    let new_oldest = journal.oldest_retained_pos().unwrap_or(journal.size());
+                    let new_oldest = journal.bounds().start;
                     min_expected_oldest = new_oldest;
                     max_expected_oldest = new_oldest;
                     Ok(())
@@ -429,7 +432,7 @@ async fn run_operations<J: FuzzJournal>(
                     let size = journal.size();
                     min_expected_size = size;
                     max_expected_size = size;
-                    let oldest = journal.oldest_retained_pos().unwrap_or(size);
+                    let oldest = journal.bounds().start;
                     min_expected_oldest = oldest;
                     max_expected_oldest = oldest;
                     Ok(())
@@ -458,8 +461,8 @@ async fn verify_recovery<J: FuzzJournal>(
     max_expected_oldest: u64,
 ) {
     let size = journal.size();
-    let oldest = journal.oldest_retained_pos();
-    assert!(size >= oldest.unwrap_or(0));
+    let oldest = journal.bounds().start;
+    assert!(size >= oldest);
 
     assert!(
         size <= max_expected_size,
@@ -474,10 +477,8 @@ async fn verify_recovery<J: FuzzJournal>(
         min_expected_size
     );
 
-    if let Some(oldest) = oldest {
-        assert!(oldest >= min_expected_oldest);
-        assert!(oldest <= max_expected_oldest);
-    }
+    assert!(oldest >= min_expected_oldest);
+    assert!(oldest <= max_expected_oldest);
 
     // Verify we can append new data after recovery
     let test_value = [0xABu8; ITEM_SIZE];
