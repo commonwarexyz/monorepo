@@ -8,8 +8,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
-    SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics,
+    Network, Quota, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -39,7 +39,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -57,7 +57,7 @@ pub struct Actor<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Sign
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
