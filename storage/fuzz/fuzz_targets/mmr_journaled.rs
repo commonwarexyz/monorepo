@@ -176,18 +176,18 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Pop { count } => {
-                    // Pop requires Clean MMR
+                    // Pop requires Dirty MMR
                     let mut mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Clean(m) => m.into_dirty(),
+                        MmrState::Dirty(m) => m,
                     };
 
                     if count as u64 <= mmr.leaves() {
-                        let _ = mmr.pop(&mut hasher, count as usize).await;
+                        let _ = mmr.pop(count as usize).await;
                         let new_len = mmr.leaves();
                         leaves.truncate(new_len.as_u64() as usize);
                     }
-                    MmrState::Clean(mmr)
+                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {
