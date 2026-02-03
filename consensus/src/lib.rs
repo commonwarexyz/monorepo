@@ -13,7 +13,6 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod aggregation;
     pub mod ordered_broadcast;
 });
-
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Codec, EncodeSize, Write};
     use commonware_cryptography::{Committable, Digestible};
