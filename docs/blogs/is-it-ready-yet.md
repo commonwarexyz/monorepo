@@ -26,7 +26,7 @@ We want to be explicit about what has been tested and what has not. So we're swi
 
 You might suggest Cargo features - gate unstable APIs behind an `unstable` feature flag, like Tokio does. But feature flags propagate through the dependency tree. If your crate depends on `commonware-consensus`, and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. With `cfg` flags set via `RUSTFLAGS`, you set your stability threshold once and it applies globally.
 
-## Using the Compiler to Enforce Stability
+## Using Config Flags to Enforce Stability
 
 Every public API in the Commonware Library is now annotated with a stability level. These annotations aren't just labels - they're `cfg` flags that Rust's compiler understands.
 
