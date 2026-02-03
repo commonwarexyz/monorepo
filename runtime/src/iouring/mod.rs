@@ -58,9 +58,9 @@
 //! 4. Cleans up and exits
 
 use crate::{IoBuf, IoBufMut};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt as _,
+use commonware_utils::channel::{
+    mpsc::{self, error::TryRecvError},
+    oneshot,
 };
 use io_uring::{
     cqueue::Entry as CqueueEntry,
@@ -296,7 +296,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             // Wait for more work
             let op = if waiters.is_empty() {
                 // Block until there is something to do
-                match receiver.next().await {
+                match receiver.recv().await {
                     // Got work
                     Some(work) => work,
                     // Channel closed, shut down
@@ -307,16 +307,16 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                 }
             } else {
                 // Handle incoming work
-                match receiver.try_next() {
+                match receiver.try_recv() {
                     // Got work without blocking
-                    Ok(Some(work_item)) => work_item,
+                    Ok(work_item) => work_item,
                     // Channel closed, shut down
-                    Ok(None) => {
+                    Err(TryRecvError::Disconnected) => {
                         drain(&mut ring, &mut waiters, &cfg);
                         return;
                     }
                     // No new work available, wait for a completion
-                    Err(_) => break,
+                    Err(TryRecvError::Empty) => break,
                 }
             };
             let Op {
@@ -469,14 +469,11 @@ pub const fn should_retry(return_value: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::iouring::{Config, IoBuf, IoBufMut, Op};
-    use futures::{
-        channel::{
-            mpsc::channel,
-            oneshot::{self, Canceled},
-        },
-        executor::block_on,
-        SinkExt as _,
+    use commonware_utils::channel::{
+        mpsc,
+        oneshot::{self, error::RecvError},
     };
+    use futures::executor::block_on;
     use io_uring::{
         opcode,
         types::{Fd, Timespec},
@@ -490,7 +487,7 @@ mod tests {
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
-        let (mut submitter, receiver) = channel(0);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics.clone(), receiver));
 
@@ -579,7 +576,7 @@ mod tests {
             op_timeout: Some(std::time::Duration::from_secs(1)),
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(1);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -615,7 +612,7 @@ mod tests {
             shutdown_timeout: None,
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(1);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -648,7 +645,7 @@ mod tests {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(1);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -672,9 +669,9 @@ mod tests {
         drop(submitter);
 
         // The event loop should shut down before the `timeout` fires,
-        // dropping `tx` and causing `rx` to return Canceled.
+        // dropping `tx` and causing `rx` to return RecvError.
         let err = rx.await.unwrap_err();
-        assert!(matches!(err, Canceled { .. }));
+        assert!(matches!(err, RecvError { .. }));
         handle.await.unwrap();
     }
 
@@ -689,7 +686,7 @@ mod tests {
             op_timeout: Some(Duration::from_millis(5)),
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(8);
+        let (submitter, receiver) = mpsc::channel(8);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -729,7 +726,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (mut sender, receiver) = channel(1);
+        let (sender, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
 
         // Run io_uring in a dedicated thread

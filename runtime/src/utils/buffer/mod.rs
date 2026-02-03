@@ -1,11 +1,10 @@
 //! Buffers for reading and writing to [crate::Blob]s.
 
-pub mod pool;
+pub mod paged;
 mod read;
 mod tip;
 mod write;
 
-pub use pool::PoolRef;
 pub use read::Read;
 pub use write::Write;
 

@@ -14,10 +14,12 @@ use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::{
-    channels::fallible::{AsyncFallibleExt, FallibleExt},
+    channel::{
+        fallible::{AsyncFallibleExt, FallibleExt},
+        mpsc,
+    },
     ordered::Set,
 };
-use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
@@ -114,16 +116,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    self.listener.0.send_lossy(self.directory.listenable()).await;
+                    self.listener
+                        .0
+                        .send_lossy(self.directory.listenable())
+                        .await;
                 }
             },
-            msg = self.receiver.next() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping tracker");
-                    break;
-                };
+            Some(msg) = self.receiver.recv() else {
+                debug!("mailbox closed, stopping tracker");
+                break;
+            } => {
                 self.handle_msg(msg).await;
-            }
+            },
         }
     }
 
@@ -159,7 +163,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded();
+                let (sender, receiver) = mpsc::unbounded_channel();
 
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
@@ -309,7 +313,7 @@ mod tests {
             // Connect as listener
             mailbox.connect(unauth_pk.clone(), peer_mailbox);
             assert!(
-                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
+                matches!(peer_receiver.recv().await, Some(peer::Message::Kill)),
                 "Unauthorized peer should be killed on Connect"
             );
         });
@@ -626,7 +630,7 @@ mod tests {
             oracle.block(peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                matches!(peer_rx.recv().await, Some(peer::Message::Kill)),
                 "connected peer must be killed on first Block"
             );
 
@@ -634,7 +638,7 @@ mod tests {
             oracle.block(peer_pk.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                peer_rx.next().await.is_none(),
+                peer_rx.recv().await.is_none(),
                 "no kill after handle has been cleared"
             );
         });
@@ -677,7 +681,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
+            let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&my_addr.ip()));
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
@@ -695,14 +699,14 @@ mod tests {
                 .await;
 
             // Wait for a listener update
-            let registered_ips = listener_receiver.next().await.unwrap();
+            let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&my_addr.ip()));
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
 
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)),)
         });
     }
 }

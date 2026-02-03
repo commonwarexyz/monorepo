@@ -15,8 +15,11 @@ use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{channels::fallible::FallibleExt, ordered::Set, union, SystemTimeExt};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{
+    channel::{fallible::FallibleExt, mpsc},
+    ordered::Set,
+    union, SystemTimeExt,
+};
 use rand::{seq::SliceRandom, Rng};
 use tracing::debug;
 
@@ -134,13 +137,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             _ = self.directory.wait_for_unblock() => {
                 self.directory.unblock_expired();
             },
-            msg = self.receiver.next() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping tracker");
-                    break;
-                };
+            Some(msg) = self.receiver.recv() else {
+                debug!("mailbox closed, stopping tracker");
+                break;
+            } => {
                 self.handle_msg(msg).await;
-            }
+            },
         }
     }
 
@@ -170,7 +172,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
-                let (sender, receiver) = mpsc::unbounded();
+                let (sender, receiver) = mpsc::unbounded_channel();
 
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
@@ -506,7 +508,7 @@ mod tests {
             new_mailbox.construct(boot_pk.clone(), peer_mailbox.clone());
 
             match futures::future::select(
-                Box::pin(peer_receiver.next()),
+                Box::pin(peer_receiver.recv()),
                 Box::pin(context.sleep(Duration::from_millis(50))),
             )
             .await
@@ -516,7 +518,7 @@ mod tests {
                 }
                 Either::Left((None, _)) => panic!("Peer mailbox closed unexpectedly"),
                 Either::Right(_) => { /* Timeout: Correctly no message sent */ }
-            }
+            };
         });
     }
 
@@ -550,7 +552,7 @@ mod tests {
             mailbox.bit_vec(bit_vec_unknown_idx, peer_mailbox_pk1.clone());
 
             // No message is sent back to the peer
-            assert!(peer_receiver_pk1.try_next().is_err());
+            assert!(peer_receiver_pk1.try_recv().is_err());
         });
     }
 
@@ -579,7 +581,7 @@ mod tests {
             mailbox.construct(pk1.clone(), peer_mailbox_pk1.clone());
 
             assert!(matches!(
-                peer_receiver_pk1.next().await,
+                peer_receiver_pk1.recv().await,
                 Some(peer::Message::Kill)
             ));
 
@@ -614,7 +616,7 @@ mod tests {
             let (peer_mailbox_pk1, mut peer_receiver_pk1) = Mailbox::new(1);
             mailbox.construct(pk1.clone(), peer_mailbox_pk1.clone());
             assert!(matches!(
-                peer_receiver_pk1.next().await,
+                peer_receiver_pk1.recv().await,
                 Some(peer::Message::Kill)
             ));
         });
@@ -689,7 +691,7 @@ mod tests {
                 types::BitVec { index: 1, bits: bv },
                 peer_mailbox_s1.clone(),
             );
-            match peer_receiver_s1.next().await {
+            match peer_receiver_s1.recv().await {
                 Some(peer::Message::Peers(received_peers_info)) => {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
@@ -769,7 +771,7 @@ mod tests {
             };
             mailbox.bit_vec(bit_vec_from_pk1, peer_mailbox_s1.clone());
 
-            match peer_receiver_s1.next().await {
+            match peer_receiver_s1.recv().await {
                 Some(peer::Message::Peers(received_peers_info)) => {
                     assert_eq!(received_peers_info.len(), 1);
                     let received_pk2_info = &received_peers_info[0];
@@ -934,7 +936,7 @@ mod tests {
             };
             mailbox.bit_vec(invalid_bit_vec, peer_mailbox.clone());
             assert!(matches!(
-                peer_receiver.next().await,
+                peer_receiver.recv().await,
                 Some(peer::Message::Kill)
             ));
         });
@@ -961,7 +963,7 @@ mod tests {
             let (peer_mailbox1, mut peer_receiver1) = Mailbox::new(1);
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             assert!(
-                matches!(peer_receiver1.next().await, Some(peer::Message::Kill)),
+                matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),
                 "Unauthorized peer killed on Construct"
             );
 
@@ -975,7 +977,7 @@ mod tests {
             let _r1 = connect_to_peer(&mut mailbox, &peer1_pk).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
-            let bit_vec0 = match peer_receiver1.next().await {
+            let bit_vec0 = match peer_receiver1.recv().await {
                 Some(peer::Message::BitVec(bv)) => bv,
                 _ => panic!("Expected BitVec for set 0"),
             };
@@ -1002,7 +1004,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
-            let bit_vec0_updated = match peer_receiver1.next().await {
+            let bit_vec0_updated = match peer_receiver1.recv().await {
                 Some(peer::Message::BitVec(bv)) => bv,
                 _ => panic!("Expected updated BitVec for set 0"),
             };
@@ -1025,7 +1027,7 @@ mod tests {
                 peer_mailbox1.clone(),
             );
 
-            match peer_receiver1.next().await {
+            match peer_receiver1.recv().await {
                 Some(peer::Message::Peers(infos)) => {
                     assert_eq!(infos.len(), 1, "Expected 1 Info (for peer1)");
                     assert_eq!(infos[0].public_key, peer1_pk);
@@ -1048,7 +1050,7 @@ mod tests {
             // Construct for peer1 should now result in Kill because it's not in any active tracked set.
             mailbox.construct(peer1_pk.clone(), peer_mailbox1.clone());
             assert!(
-                matches!(peer_receiver1.next().await, Some(peer::Message::Kill)),
+                matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),
                 "Peer1 should be killed after its only set was evicted"
             );
 
@@ -1060,7 +1062,7 @@ mod tests {
             let mut indices = HashSet::new();
             for _ in 0..100 {
                 mailbox.construct(peer2_pk.clone(), peer_mailbox2.clone());
-                let Some(peer::Message::BitVec(bv)) = peer_receiver2.next().await else {
+                let Some(peer::Message::BitVec(bv)) = peer_receiver2.recv().await else {
                     panic!("Unexpected message type");
                 };
                 indices.insert(bv.index);

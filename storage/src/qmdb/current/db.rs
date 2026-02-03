@@ -238,6 +238,42 @@ where
     }
 }
 
+// Functionality shared across Unmerkleized states.
+impl<E, K, V, U, C, I, H, const N: usize, D> Db<E, C, I, H, U, N, Unmerkleized, D>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Contiguous<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    D: DurabilityState,
+    Operation<K, V, U>: Codec,
+{
+    /// Merkleize the database and transition to the provable state.
+    pub async fn into_merkleized(self) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, D>, Error> {
+        // Merkleize the any db
+        let mut any = self.any.into_merkleized();
+
+        // Merkleize the bitmap using the clean MMR
+        let hasher = &mut any.log.hasher;
+        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
+
+        // Prune the bitmap of no-longer-necessary bits.
+        status.prune_to_bit(*any.inactivity_floor_loc)?;
+
+        // Compute and cache the root
+        let cached_root = Some(root(hasher, &status, &any.log.mmr).await?);
+
+        Ok(Db {
+            any,
+            status,
+            cached_root,
+        })
+    }
+}
+
 // Functionality specific to (Unmerkleized,Durable) state.
 impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, Durable>
 where
@@ -258,38 +294,6 @@ where
             cached_root: None,
         }
     }
-
-    /// Merkleize the database and transition to the provable state.
-    pub async fn into_merkleized(
-        self,
-    ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, Durable>, Error> {
-        // Merkleize the any db's log
-        let mut any = any::db::Db {
-            log: self.any.log.merkleize(),
-            inactivity_floor_loc: self.any.inactivity_floor_loc,
-            last_commit_loc: self.any.last_commit_loc,
-            snapshot: self.any.snapshot,
-            durable_state: self.any.durable_state,
-            active_keys: self.any.active_keys,
-            _update: core::marker::PhantomData,
-        };
-
-        // Merkleize the bitmap using the clean MMR
-        let hasher = &mut any.log.hasher;
-        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
-
-        // Prune the bitmap of no-longer-necessary bits.
-        status.prune_to_bit(*any.inactivity_floor_loc)?;
-
-        // Compute and cache the root
-        let cached_root = Some(root(hasher, &status, &any.log.mmr).await?);
-
-        Ok(Db {
-            any,
-            status,
-            cached_root,
-        })
-    }
 }
 
 // Functionality specific to (Unmerkleized,NonDurable) state.
@@ -304,39 +308,6 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    /// Merkleize the database and transition to the provable state without committing.
-    /// This enables proof generation while keeping the database in the non-durable state.
-    pub async fn into_merkleized(
-        self,
-    ) -> Result<Db<E, C, I, H, U, N, Merkleized<H>, NonDurable>, Error> {
-        // Merkleize the any db's log
-        let mut any = any::db::Db {
-            log: self.any.log.merkleize(),
-            inactivity_floor_loc: self.any.inactivity_floor_loc,
-            last_commit_loc: self.any.last_commit_loc,
-            snapshot: self.any.snapshot,
-            durable_state: self.any.durable_state,
-            active_keys: self.any.active_keys,
-            _update: core::marker::PhantomData,
-        };
-
-        // Merkleize the bitmap using the clean MMR
-        let hasher = &mut any.log.hasher;
-        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
-
-        // Prune the bitmap of no-longer-necessary bits.
-        status.prune_to_bit(*any.inactivity_floor_loc)?;
-
-        // Compute and cache the root
-        let cached_root = Some(root(hasher, &status, &any.log.mmr).await?);
-
-        Ok(Db {
-            any,
-            status,
-            cached_root,
-        })
-    }
-
     /// Raises the activity floor according to policy followed by appending a commit operation with
     /// the provided `metadata` and the new inactivity floor value. Returns the `[start_loc,
     /// end_loc)` location range of committed operations.

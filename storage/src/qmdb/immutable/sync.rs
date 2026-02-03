@@ -69,7 +69,7 @@ where
                     items_per_blob: db_config.mmr_items_per_blob,
                     write_buffer: db_config.mmr_write_buffer,
                     thread_pool: db_config.thread_pool.clone(),
-                    buffer_pool: db_config.buffer_pool.clone(),
+                    page_cache: db_config.page_cache.clone(),
                 },
                 range: Position::try_from(range.start)?
                     ..Position::try_from(range.end.saturating_add(1))?,
@@ -132,9 +132,10 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner as _, RwLock};
-    use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
-    use futures::{channel::mpsc, SinkExt as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Metrics, Runner as _, RwLock,
+    };
+    use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore as _;
     use rstest::rstest;
     use std::{
@@ -181,7 +182,7 @@ mod tests {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -486,7 +487,7 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
 
             // Create client with initial smaller target and very small batch size
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let client = {
                 let config = Config {
                     context: context.with_label("client"),
@@ -795,7 +796,7 @@ mod tests {
             let initial_root = target_db.root();
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
@@ -855,7 +856,7 @@ mod tests {
             let initial_root = target_db.root();
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
@@ -937,7 +938,7 @@ mod tests {
             assert_ne!(final_upper_bound, initial_upper_bound);
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
@@ -998,7 +999,7 @@ mod tests {
             let initial_root = target_db.root();
 
             // Create client with initial target
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
@@ -1056,7 +1057,7 @@ mod tests {
             let root = target_db.root();
 
             // Create client with target that will complete immediately
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),

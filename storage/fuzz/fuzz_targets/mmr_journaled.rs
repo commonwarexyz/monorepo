@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
@@ -89,7 +89,7 @@ fn test_config(partition_suffix: &str) -> Config {
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

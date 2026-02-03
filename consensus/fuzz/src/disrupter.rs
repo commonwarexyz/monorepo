@@ -229,17 +229,17 @@ where
             }
 
             select! {
-                result = vote_receiver.recv().fuse() => {
+                result = vote_receiver.recv() => {
                     if let Ok((_, msg)) = result {
                         self.handle_vote(&mut vote_sender, msg.into()).await;
                     }
                 },
-                result = cert_receiver.recv().fuse() => {
+                result = cert_receiver.recv() => {
                     if let Ok((_, msg)) = result {
                         self.handle_certificate(&mut cert_sender, msg.into()).await;
                     }
                 },
-                result = resolver_receiver.recv().fuse() => {
+                result = resolver_receiver.recv() => {
                     if let Ok((_, msg)) = result {
                         self.handle_resolver(&mut resolver_sender, msg.into()).await;
                     }

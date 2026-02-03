@@ -48,6 +48,7 @@ mod tests {
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, Error, Metrics, Quota, Runner,
     };
+    use commonware_utils::channel::oneshot::error::TryRecvError;
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender
@@ -554,7 +555,7 @@ mod tests {
             context.sleep(A_JIFFY).await;
 
             // Check that the receiver is still waiting
-            assert!(recv.try_recv().unwrap().is_none());
+            assert!(matches!(recv.try_recv(), Err(TryRecvError::Empty)));
 
             // Correct sender broadcasts and subscription fulfills.
             mb1.broadcast(Recipients::All, msg.clone())
@@ -763,7 +764,7 @@ mod tests {
                 .await
                 .unwrap();
             context.sleep(A_JIFFY).await;
-            assert!(recv.try_recv().unwrap().is_none());
+            assert!(matches!(recv.try_recv(), Err(TryRecvError::Empty)));
 
             // owner broadcasts a *different* digest with same commitment
             mb_owner
@@ -772,7 +773,7 @@ mod tests {
                 .await
                 .unwrap();
             context.sleep(A_JIFFY).await;
-            assert!(recv.try_recv().unwrap().is_none());
+            assert!(matches!(recv.try_recv(), Err(TryRecvError::Empty)));
 
             // owner finally broadcasts the exact match
             mb_owner

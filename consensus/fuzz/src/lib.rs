@@ -32,9 +32,9 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::PoolRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner};
-use commonware_utils::{NZUsize, NZU16};
-use futures::{channel::mpsc::Receiver, future::join_all, StreamExt};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner};
+use commonware_utils::{channel::mpsc::Receiver, NZUsize, NZU16};
+use futures::future::join_all;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -370,7 +370,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
             let engine = Engine::new(context.with_label("engine"), engine_cfg);
@@ -383,7 +383,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest.get() < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -588,7 +588,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
@@ -703,7 +703,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
             let engine = Engine::new(context.with_label("engine"), engine_cfg);
@@ -716,7 +716,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest.get() < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }

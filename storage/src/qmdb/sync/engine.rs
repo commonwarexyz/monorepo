@@ -17,8 +17,8 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Metrics as _;
-use commonware_utils::NZU64;
-use futures::{channel::mpsc, future::Either, StreamExt};
+use commonware_utils::{channel::mpsc, NZU64};
+use futures::{future::Either, StreamExt};
 use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
 
 /// Type alias for sync engine errors
@@ -61,13 +61,14 @@ async fn wait_for_event<Op, D: Digest, E>(
 ) -> Option<Event<Op, D, E>> {
     let target_update_fut = update_receiver.as_mut().map_or_else(
         || Either::Right(futures::future::pending()),
-        |update_rx| Either::Left(update_rx.next()),
+        |update_rx| Either::Left(update_rx.recv()),
     );
 
     select! {
-        target = target_update_fut => {
-            target.map_or_else(|| Some(Event::UpdateChannelClosed), |target| Some(Event::TargetUpdate(target)))
-        },
+        target = target_update_fut => target.map_or_else(
+            || Some(Event::UpdateChannelClosed),
+            |target| Some(Event::TargetUpdate(target))
+        ),
         result = outstanding_requests.futures_mut().next() => {
             result.map(|fetch_result| Event::BatchReceived(fetch_result))
         },
@@ -530,7 +531,7 @@ mod tests {
     use super::*;
     use crate::mmr::Proof;
     use commonware_cryptography::sha256;
-    use futures::channel::oneshot;
+    use commonware_utils::channel::oneshot;
 
     #[test]
     fn test_outstanding_requests() {

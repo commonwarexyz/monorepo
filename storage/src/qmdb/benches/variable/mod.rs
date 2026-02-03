@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::PoolRef, tokio::Context, RayonPoolSpawner};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, ThreadPooler};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -69,7 +69,7 @@ const THREADS: NonZeroUsize = NZUsize!(8);
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
-/// The number of pages to cache in the buffer pool.
+/// The number of pages to cache in the page cache.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Default delete frequency (1/10th of the updates will be deletes).
@@ -99,18 +99,18 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let any_cfg = any_cfg(pool);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
@@ -129,12 +129,12 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCf
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
@@ -142,7 +142,7 @@ async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
 }
 
 async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let current_cfg = current_cfg(pool);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await

@@ -23,10 +23,9 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
-    channels::fallible::OneshotExt,
+    channel::{fallible::OneshotExt, mpsc},
     ordered::{Quorum, Set},
 };
-use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
@@ -196,68 +195,51 @@ impl<
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
-            message = self.mailbox_receiver.next() => {
-                match message {
-                    Some(Message::Update {
-                        current: new_current,
-                        leader,
-                        finalized: new_finalized,
-                        active,
-                    }) => {
-                        current = new_current;
-                        finalized = new_finalized;
-                        work
-                            .entry(current)
-                            .or_insert_with(|| self.new_round())
-                            .set_leader(leader);
+            Some(message) = self.mailbox_receiver.recv() else break => match message {
+                Message::Update {
+                    current: new_current,
+                    leader,
+                    finalized: new_finalized,
+                    active,
+                } => {
+                    current = new_current;
+                    finalized = new_finalized;
+                    work.entry(current)
+                        .or_insert_with(|| self.new_round())
+                        .set_leader(leader);
 
-                        // Check if the leader has been active recently
-                        let skip_timeout = self.skip_timeout.get() as usize;
-                        let is_active =
-                            // Ensure we have enough data to judge activity (none of this
-                            // data may be in the last skip_timeout views if we jumped ahead
-                            // to a new view)
-                            work.len() < skip_timeout
-                            // Leader active in at least one recent round
-                            || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
-                        active.send_lossy(is_active);
+                    // Check if the leader has been active recently
+                    let skip_timeout = self.skip_timeout.get() as usize;
+                    let is_active =
+                        // Ensure we have enough data to judge activity (none of this
+                        // data may be in the last skip_timeout views if we jumped ahead
+                        // to a new view)
+                        work.len() < skip_timeout
+                        // Leader active in at least one recent round
+                        || work.iter().rev().take(skip_timeout).any(|(_, round)| round.is_active(leader));
+                    active.send_lossy(is_active);
 
-                        // Setting leader may enable batch verification
-                        updated_view = current;
+                    // Setting leader may enable batch verification
+                    updated_view = current;
+                }
+                Message::Constructed(message) => {
+                    // If the view isn't interesting, we can skip
+                    let view = message.view();
+                    if !interesting(self.activity_timeout, finalized, current, view, false) {
+                        continue;
                     }
-                    Some(Message::Constructed(message)) => {
-                        // If the view isn't interesting, we can skip
-                        let view = message.view();
-                        if !interesting(
-                            self.activity_timeout,
-                            finalized,
-                            current,
-                            view,
-                            false,
-                        ) {
-                            continue;
-                        }
 
-                        // Add the message to the verifier
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round())
-                            .add_constructed(message)
-                            .await;
-                        self.added.inc();
-                        updated_view = view;
-                    }
-                    None => {
-                        break;
-                    }
+                    // Add the message to the verifier
+                    work.entry(view)
+                        .or_insert_with(|| self.new_round())
+                        .add_constructed(message)
+                        .await;
+                    self.added.inc();
+                    updated_view = view;
                 }
             },
             // Handle certificates from the network
-            message = certificate_receiver.recv() => {
-                // If the channel is closed, we should exit
-                let Ok((sender, message)) = message else {
-                    break;
-                };
-
+            Ok((sender, message)) = certificate_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
                     warn!(?sender, "blocking peer for decoding error");
@@ -301,19 +283,14 @@ impl<
                         }
 
                         // Verify the certificate
-                        if !notarization.verify(
-                            &mut self.context,
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
+                        if !notarization.verify(&mut self.context, &self.scheme, &self.strategy) {
                             warn!(?sender, %view, "blocking peer for invalid notarization");
                             self.blocker.block(sender).await;
                             continue;
                         }
 
                         // Store and forward to voter
-                        work
-                            .entry(view)
+                        work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_notarization(notarization.clone());
                         voter
@@ -339,8 +316,7 @@ impl<
                         }
 
                         // Store and forward to voter
-                        work
-                            .entry(view)
+                        work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_nullification(nullification.clone());
                         voter
@@ -355,19 +331,14 @@ impl<
                         }
 
                         // Verify the certificate
-                        if !finalization.verify(
-                            &mut self.context,
-                            &self.scheme,
-                            &self.strategy,
-                        ) {
+                        if !finalization.verify(&mut self.context, &self.scheme, &self.strategy) {
                             warn!(?sender, %view, "blocking peer for invalid finalization");
                             self.blocker.block(sender).await;
                             continue;
                         }
 
                         // Store and forward to voter
-                        work
-                            .entry(view)
+                        work.entry(view)
                             .or_insert_with(|| self.new_round())
                             .set_finalization(finalization.clone());
                         voter
@@ -380,12 +351,7 @@ impl<
                 continue;
             },
             // Handle votes from the network
-            message = vote_receiver.recv() => {
-                // If the channel is closed, we should exit
-                let Ok((sender, message)) = message else {
-                    break;
-                };
-
+            Ok((sender, message)) = vote_receiver.recv() else break => {
                 // If there is a decoding error, block
                 let Ok(message) = message else {
                     warn!(?sender, "blocking peer for decoding error");
@@ -410,13 +376,7 @@ impl<
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(
-                    self.activity_timeout,
-                    finalized,
-                    current,
-                    view,
-                    false,
-                ) {
+                if !interesting(self.activity_timeout, finalized, current, view, false) {
                     continue;
                 }
 
@@ -426,15 +386,16 @@ impl<
                     .entry(view)
                     .or_insert_with(|| self.new_round())
                     .add_network(sender, message)
-                    .await {
-                        self.added.inc();
+                    .await
+                {
+                    self.added.inc();
 
-                        // Update per-peer latest vote metric (only if higher than current)
-                        let _ = self
-                            .latest_vote
-                            .get_or_create(&peer)
-                            .try_set_max(view.get());
-                    }
+                    // Update per-peer latest vote metric (only if higher than current)
+                    let _ = self
+                        .latest_vote
+                        .get_or_create(&peer)
+                        .try_set_max(view.get());
+                }
                 updated_view = view;
             },
             on_end => {

@@ -20,6 +20,7 @@ cfg-if.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
+commonware-macros.workspace = true
 commonware-math = { workspace = true, optional = true }
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
@@ -30,7 +31,7 @@ rand_core.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-commonware-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
 commonware-p2p.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true

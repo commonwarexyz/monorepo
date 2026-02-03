@@ -134,23 +134,70 @@ jobs:
     - name: Run subset doc tests
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
+  Stability:
+    name: "Stability (${{ matrix.level }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        level: [BETA, GAMMA, DELTA, EPSILON]
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Clear disk space
+      uses: ./.github/actions/disk
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-cache-key: stability-${{ matrix.level }}
+    - name: Install just
+      uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+      with:
+        tool: just@1.43.0
+    - name: Build with commonware_stability_${{ matrix.level }}
+      run: just check-stability ${{ matrix.level }}
+
+  Stability-Coverage:
+    name: "Stability Coverage"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        additional-cache-key: stability-coverage
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
+    - name: Check all public items have stability annotations
+      run: ./scripts/find_unstable_public.sh
+
   Tests-Gate:
     name: "Fast-Tests"
     runs-on: ubuntu-latest
-    needs: [Tests, Tests-Subset]
+    needs: [Tests, Tests-Subset, Stability, Stability-Coverage]
     if: always()
     steps:
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
-            echo "Tests failed or were cancelled"
+            echo "Tests failed"
             exit 1
           fi
           if [ "${{ needs.Tests-Subset.result }}" != "success" ]; then
-            echo "Tests-Subset failed or were cancelled"
+            echo "Tests-Subset failed"
             exit 1
           fi
-          echo "All tests passed successfully!"
+          if [ "${{ needs.Stability.result }}" != "success" ]; then
+            echo "Stability checks failed"
+            exit 1
+          fi
+          if [ "${{ needs.Stability-Coverage.result }}" != "success" ]; then
+            echo "Stability-Coverage check failed"
+            exit 1
+          fi
+          echo "All tests passed!"
 
   Dependencies:
     runs-on: ubuntu-latest
@@ -228,17 +275,19 @@ jobs:
     - name: Add WASM target
       run: rustup target add wasm32-unknown-unknown
     - name: Build cryptography
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
+    - name: Build math
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path math/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_math.wasm"
     - name: Build utils
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_utils.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_utils.wasm"
     - name: Build runtime
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_runtime.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path runtime/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_runtime.wasm"
     - name: Build consensus
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_consensus.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path consensus/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_consensus.wasm"
     - name: Build storage
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_storage.wasm
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_storage.wasm"
 
   no_std:
     runs-on: ubuntu-latest

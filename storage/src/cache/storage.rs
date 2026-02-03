@@ -92,7 +92,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
         )

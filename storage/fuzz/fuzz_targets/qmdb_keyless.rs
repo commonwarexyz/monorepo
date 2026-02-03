@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
@@ -135,7 +135,7 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

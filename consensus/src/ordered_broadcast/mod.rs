@@ -94,12 +94,15 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::PoolRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16, NZU64};
-    use futures::{channel::oneshot, future::join_all};
+    use commonware_utils::{
+        channel::{fallible::OneshotExt, oneshot},
+        NZUsize, NZU16, NZU64,
+    };
+    use futures::future::join_all;
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -259,7 +262,7 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
-                    journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             );
@@ -447,8 +450,8 @@ mod tests {
                 );
 
                 select! {
-                    _ = crash => { false },
-                    _ = run => { true },
+                    _ = crash => false,
+                    _ = run => true,
                 }
             };
 
@@ -785,7 +788,7 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         strategy: Sequential,
                     },
                 );
@@ -943,7 +946,7 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         strategy: Sequential,
                     },
                 );
@@ -997,7 +1000,7 @@ mod tests {
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
-                        journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         strategy: Sequential,
                     },
                 );

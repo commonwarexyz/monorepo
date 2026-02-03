@@ -24,7 +24,7 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{PoolRef, Replay},
+    buffer::paged::{CacheRef, Replay},
     Blob, Buf, IoBufMut, Metrics, Storage,
 };
 use futures::{
@@ -48,8 +48,8 @@ pub struct Config {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -87,7 +87,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             partition: cfg.partition,
             factory: AppendFactory {
                 write_buffer: cfg.write_buffer,
-                pool_ref: cfg.buffer_pool,
+                page_cache_ref: cfg.page_cache,
             },
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
@@ -374,7 +374,7 @@ mod tests {
     fn test_cfg() -> Config {
         Config {
             partition: "test_partition".into(),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1167,7 +1167,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear_test".into(),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 

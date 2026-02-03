@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event
-//! loop running in a separate thread. Operation results are returned via a [futures::channel::oneshot]
+//! Network operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event
+//! loop running in a separate thread. Operation results are returned via a [commonware_utils::channel::oneshot]
 //! channel. This implementation uses two separate io_uring instances: one for send operations and
 //! one for receive operations.
 //!
@@ -24,13 +24,10 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    IoBufMut, IoBufs,
+    BufferPool, IoBufMut, IoBufs,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    executor::block_on,
-    SinkExt as _,
-};
+use commonware_utils::channel::{mpsc, oneshot};
+use futures::executor::block_on;
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
@@ -68,7 +65,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.
 pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
@@ -80,6 +77,8 @@ pub struct Network {
     recv_submitter: mpsc::Sender<iouring::Op>,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
+    /// Buffer pool for recv allocations.
+    pool: BufferPool,
 }
 
 impl Network {
@@ -91,7 +90,11 @@ impl Network {
     /// large enough, given the number of connections that will be maintained.
     /// Each ongoing send/recv to/from each connection will consume a slot in the io_uring.
     /// The io_uring `size` should be a multiple of the number of expected connections.
-    pub(crate) fn start(mut cfg: Config, registry: &mut Registry) -> Result<Self, crate::Error> {
+    pub(crate) fn start(
+        mut cfg: Config,
+        registry: &mut Registry,
+        pool: BufferPool,
+    ) -> Result<Self, crate::Error> {
         // Create an io_uring instance to handle send operations.
         let (send_submitter, rx) = mpsc::channel(cfg.iouring_config.size as usize);
 
@@ -119,6 +122,7 @@ impl Network {
             send_submitter,
             recv_submitter,
             read_buffer_size: cfg.read_buffer_size,
+            pool,
         })
     }
 }
@@ -136,6 +140,7 @@ impl crate::Network for Network {
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
             read_buffer_size: self.read_buffer_size,
+            pool: self.pool.clone(),
         })
     }
 
@@ -164,7 +169,12 @@ impl crate::Network for Network {
         let fd = Arc::new(OwnedFd::from(stream));
         Ok((
             Sink::new(fd.clone(), self.send_submitter.clone()),
-            Stream::new(fd, self.recv_submitter.clone(), self.read_buffer_size),
+            Stream::new(
+                fd,
+                self.recv_submitter.clone(),
+                self.read_buffer_size,
+                self.pool.clone(),
+            ),
         ))
     }
 }
@@ -181,6 +191,8 @@ pub struct Listener {
     recv_submitter: mpsc::Sender<iouring::Op>,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
+    /// Buffer pool for recv allocations.
+    pool: BufferPool,
 }
 
 impl crate::Listener for Listener {
@@ -215,7 +227,12 @@ impl crate::Listener for Listener {
         Ok((
             remote_addr,
             Sink::new(fd.clone(), self.send_submitter.clone()),
-            Stream::new(fd, self.recv_submitter.clone(), self.read_buffer_size),
+            Stream::new(
+                fd,
+                self.recv_submitter.clone(),
+                self.read_buffer_size,
+                self.pool.clone(),
+            ),
         ))
     }
 
@@ -311,16 +328,24 @@ pub struct Stream {
     buffer_pos: usize,
     /// Number of valid bytes in the buffer.
     buffer_len: usize,
+    /// Buffer pool for recv allocations.
+    pool: BufferPool,
 }
 
 impl Stream {
-    fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, buffer_capacity: usize) -> Self {
+    fn new(
+        fd: Arc<OwnedFd>,
+        submitter: mpsc::Sender<iouring::Op>,
+        buffer_capacity: usize,
+        pool: BufferPool,
+    ) -> Self {
         Self {
             fd,
             submitter,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
             buffer_len: 0,
+            pool,
         }
     }
 
@@ -344,7 +369,7 @@ impl Stream {
         len: usize,
     ) -> (IoBufMut, Result<usize, crate::Error>) {
         loop {
-            // SAFETY: offset + len <= buffer.len() as guaranteed by callers.
+            // SAFETY: offset + len <= buffer.capacity() as guaranteed by callers.
             // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
             let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
             let op = io_uring::opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
@@ -412,7 +437,7 @@ impl Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
         let len = len as usize;
-        let mut owned_buf = IoBufMut::with_capacity(len);
+        let mut owned_buf = self.pool.alloc(len);
         // SAFETY: We will write exactly `len` bytes before returning
         // (loop continues until bytes_received == len). The buffer contents
         // are uninitialized but we only write to it, never read.
@@ -467,11 +492,15 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
     use prometheus_client::registry::Registry;
     use std::time::{Duration, Instant};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    }
 
     #[tokio::test]
     async fn test_trait() {
@@ -485,6 +514,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut Registry::default(),
+                test_pool(),
             )
             .expect("Failed to start io_uring")
         })
@@ -505,6 +535,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut Registry::default(),
+                test_pool(),
             )
             .expect("Failed to start io_uring")
         })
@@ -522,6 +553,7 @@ mod tests {
                 ..Default::default()
             },
             &mut Registry::default(),
+            test_pool(),
         )
         .expect("Failed to start io_uring");
 
@@ -563,6 +595,7 @@ mod tests {
                 ..Default::default()
             },
             &mut Registry::default(),
+            test_pool(),
         )
         .expect("Failed to start io_uring");
 
@@ -608,6 +641,7 @@ mod tests {
                 ..Default::default()
             },
             &mut Registry::default(),
+            test_pool(),
         )
         .expect("Failed to start io_uring");
 
@@ -659,6 +693,7 @@ mod tests {
                 ..Default::default()
             },
             &mut Registry::default(),
+            test_pool(),
         )
         .expect("Failed to start io_uring");
 

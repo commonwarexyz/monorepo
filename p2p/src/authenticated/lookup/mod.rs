@@ -184,11 +184,11 @@ mod tests {
         Resolver, Runner, Spawner,
     };
     use commonware_utils::{
+        channel::mpsc,
         hostname,
         ordered::{Map, Set},
         Hostname, TryCollect, NZU32,
     };
-    use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
         collections::HashSet,
@@ -270,7 +270,7 @@ mod tests {
 
             // Send/Receive messages
             context.with_label("agent").spawn({
-                let mut complete_sender = complete_sender.clone();
+                let complete_sender = complete_sender.clone();
                 let peers = peers.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
@@ -380,7 +380,7 @@ mod tests {
 
         // Wait for all peers to finish
         for _ in 0..n {
-            complete_receiver.next().await.unwrap();
+            complete_receiver.recv().await.unwrap();
         }
 
         // Ensure no message rate limiting occurred
@@ -707,7 +707,7 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.update(10, set10.clone()).await;
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 10);
             assert_eq!(&new, set10.keys());
             assert_eq!(&all, set10.keys());
@@ -729,7 +729,7 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.update(11, set11.clone()).await;
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(&new, set11.keys());
             let all_keys: Set<_> = set10
@@ -779,7 +779,7 @@ mod tests {
                 network.start();
 
                 peer_context.with_label("agent").spawn({
-                    let mut complete_sender = complete_sender.clone();
+                    let complete_sender = complete_sender.clone();
                     let pk = pk.clone();
                     move |context| async move {
                         // Wait to connect to at least one other peer
@@ -812,7 +812,7 @@ mod tests {
                                 _ = context.stopped() => {
                                     // Graceful shutdown signal received
                                     break;
-                                }
+                                },
                             }
                         }
                     }
@@ -821,7 +821,7 @@ mod tests {
 
             // Wait for all peers to establish connectivity
             for _ in 0..n {
-                complete_receiver.next().await.unwrap();
+                complete_receiver.recv().await.unwrap();
             }
 
             // Verify that network actors started for all peers
@@ -939,7 +939,7 @@ mod tests {
             oracle.update(1, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             assert_eq!(new.len(), 1);
             assert_eq!(all.len(), 1);
@@ -974,7 +974,7 @@ mod tests {
             oracle.update(2, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             assert_eq!(new.len(), 2);
             assert_eq!(all.len(), 2);
@@ -1062,7 +1062,7 @@ mod tests {
                 // Send/Receive messages
                 let pk = public_key.clone();
                 context.with_label("agent").spawn({
-                    let mut complete_sender = complete_sender.clone();
+                    let complete_sender = complete_sender.clone();
                     let peers = peers.clone();
                     move |context| async move {
                         // Wait for messages from other peers
@@ -1112,8 +1112,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender_task => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender_task => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1121,7 +1125,7 @@ mod tests {
 
             // Wait for all peers to exchange messages
             for _ in 0..n {
-                complete_receiver.next().await.unwrap();
+                complete_receiver.recv().await.unwrap();
             }
 
             assert_no_rate_limiting(&context);
@@ -1192,7 +1196,7 @@ mod tests {
                 // Send/Receive messages
                 let pk = public_key.clone();
                 context.with_label("agent").spawn({
-                    let mut complete_sender = complete_sender.clone();
+                    let complete_sender = complete_sender.clone();
                     let peers = peers.clone();
                     move |context| async move {
                         // Wait for messages from other peers
@@ -1242,8 +1246,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender_task => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender_task => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1251,7 +1259,7 @@ mod tests {
 
             // Wait for all peers to exchange messages
             for _ in 0..n {
-                complete_receiver.next().await.unwrap();
+                complete_receiver.recv().await.unwrap();
             }
 
             assert_no_rate_limiting(&context);
@@ -1335,7 +1343,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     // Expected: timeout with no message
-                }
+                },
             }
         });
     }

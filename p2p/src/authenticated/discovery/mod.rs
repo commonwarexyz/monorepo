@@ -245,8 +245,7 @@ mod tests {
         count_running_tasks, deterministic, tokio, Clock, Handle, IoBuf, Metrics,
         Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
-    use commonware_utils::{hostname, ordered::Set, TryCollect, NZU32};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32};
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
         collections::HashSet,
@@ -340,7 +339,7 @@ mod tests {
 
             // Send/Receive messages
             context.with_label("agent").spawn({
-                let mut complete_sender = complete_sender.clone();
+                let complete_sender = complete_sender.clone();
                 let addresses = addresses.clone();
                 move |context| async move {
                     // Wait for all peers to send their identity
@@ -447,7 +446,7 @@ mod tests {
 
         // Wait for all peers to finish
         for _ in 0..n {
-            complete_receiver.next().await.unwrap();
+            complete_receiver.recv().await.unwrap();
         }
 
         // Ensure no message rate limiting occurred
@@ -797,7 +796,7 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.update(10, set10.clone()).await;
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 10);
             assert_eq!(new, set10);
             assert_eq!(all, set10);
@@ -819,7 +818,7 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.update(11, set11.clone()).await;
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(new, set11);
             let all_keys: Set<_> = set10
@@ -880,7 +879,7 @@ mod tests {
                 network.start();
 
                 peer_context.with_label("agent").spawn({
-                    let mut complete_sender = complete_sender.clone();
+                    let complete_sender = complete_sender.clone();
                     move |context| async move {
                         // Wait to connect to at least one other peer (except for peer 0 which is the bootstrapper)
                         let expected_connections = if i == 0 { n - 1 } else { 1 };
@@ -905,12 +904,7 @@ mod tests {
                         select_loop! {
                             context,
                             on_stopped => {},
-                            result = receiver.recv() => {
-                                if result.is_err() {
-                                    // Channel closed due to shutdown
-                                    break;
-                                }
-                            }
+                            Ok(_) = receiver.recv() else break => {},
                         }
                     }
                 });
@@ -918,7 +912,7 @@ mod tests {
 
             // Wait for all peers to establish connectivity
             for _ in 0..n {
-                complete_receiver.next().await.unwrap();
+                complete_receiver.recv().await.unwrap();
             }
 
             // Verify that network actors started for all peers
@@ -1041,7 +1035,7 @@ mod tests {
             oracle.update(1, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             assert_eq!(new.len(), 1);
             assert_eq!(all.len(), 1);
@@ -1071,7 +1065,7 @@ mod tests {
             oracle.update(2, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.next().await.unwrap();
+            let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             assert_eq!(new.len(), 2);
             assert_eq!(all.len(), 2);
@@ -1158,7 +1152,7 @@ mod tests {
 
                 // Send/Receive messages
                 context.with_label("agent").spawn({
-                    let mut complete_sender = complete_sender.clone();
+                    let complete_sender = complete_sender.clone();
                     let addresses = addresses.clone();
                     move |context| async move {
                         // Wait for messages from other peers
@@ -1206,8 +1200,12 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
@@ -1215,7 +1213,7 @@ mod tests {
 
             // Wait for all peers to exchange messages
             for _ in 0..n {
-                complete_receiver.next().await.unwrap();
+                complete_receiver.recv().await.unwrap();
             }
 
             assert_no_rate_limiting(&context);
@@ -1290,7 +1288,7 @@ mod tests {
 
             // Spawn receiver tasks
             let (done_sender, mut done_receiver) = mpsc::channel::<()>(2);
-            let mut done0 = done_sender.clone();
+            let done0 = done_sender.clone();
             let pk1_clone = pk1.clone();
             context.with_label("recv0").spawn(move |_| async move {
                 let (sender, message) = receiver0.recv().await.unwrap();
@@ -1298,7 +1296,7 @@ mod tests {
                 assert_eq!(message, msg1.as_slice());
                 done0.send(()).await.unwrap();
             });
-            let mut done1 = done_sender.clone();
+            let done1 = done_sender.clone();
             let pk0_clone = pk0.clone();
             context.with_label("recv1").spawn(move |_| async move {
                 let (sender, message) = receiver1.recv().await.unwrap();
@@ -1330,8 +1328,8 @@ mod tests {
             });
 
             // Wait for both receivers to get messages
-            done_receiver.next().await.unwrap();
-            done_receiver.next().await.unwrap();
+            done_receiver.recv().await.unwrap();
+            done_receiver.recv().await.unwrap();
         });
     }
 
@@ -1388,7 +1386,7 @@ mod tests {
                 network.start();
 
                 context.with_label("agent").spawn({
-                    let mut complete_sender = complete_sender.clone();
+                    let complete_sender = complete_sender.clone();
                     let addresses = addresses.clone();
                     move |context| async move {
                         let receiver = context.with_label("receiver").spawn(move |_| async move {
@@ -1433,15 +1431,19 @@ mod tests {
                                 });
 
                         select! {
-                            receiver = receiver => { panic!("receiver exited: {receiver:?}") },
-                            sender = sender => { panic!("sender exited: {sender:?}") },
+                            receiver = receiver => {
+                                panic!("receiver exited: {receiver:?}")
+                            },
+                            sender = sender => {
+                                panic!("sender exited: {sender:?}")
+                            },
                         }
                     }
                 });
             }
 
             for _ in 0..n {
-                complete_receiver.next().await.unwrap();
+                complete_receiver.recv().await.unwrap();
             }
 
             context.auditor().state()
@@ -1523,7 +1525,7 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     // Expected: timeout with no message
-                }
+                },
             }
         });
     }
@@ -2349,7 +2351,7 @@ mod tests {
 
             // Verify fast_peer received all 11 messages
             for _ in 0..11 {
-                assert!(fast_receiver.try_next().is_ok());
+                assert!(fast_receiver.try_recv().is_ok());
             }
         });
     }

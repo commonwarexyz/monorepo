@@ -30,9 +30,11 @@
 //! authenticated, evidence can be used locally (as it must be sent by said participant)
 //! but can't be used by an external observer.
 
+#[commonware_macros::stability(ALPHA)]
+use crate::simplex::scheme::seed_namespace;
 use crate::{
     simplex::{
-        scheme::{seed_namespace, Namespace},
+        scheme::Namespace,
         types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Participant, Round, View},
@@ -42,19 +44,19 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     types::lazy::Lazy, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
 };
+#[commonware_macros::stability(ALPHA)]
+use commonware_cryptography::bls12381::tle;
 use commonware_cryptography::{
-    bls12381::{
-        primitives::{
-            group::Share,
-            ops::{self, batch, threshold},
-            sharing::Sharing,
-            variant::{PartialSignature, Variant},
-        },
-        tle,
+    bls12381::primitives::{
+        group::Share,
+        ops::{self, batch, threshold},
+        sharing::Sharing,
+        variant::{PartialSignature, Variant},
     },
     certificate::{self, Attestation, Subject as CertificateSubject, Verification},
     Digest, PublicKey,
 };
+use commonware_macros::stability;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults};
 use rand::{rngs::StdRng, SeedableRng};
@@ -243,6 +245,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The encrypted message can only be decrypted using the seed signature
     /// from a certificate of the target round (i.e. notarization, finalization,
     /// or nullification).
+    #[stability(ALPHA)]
     pub fn encrypt<R: CryptoRngCore>(
         &self,
         rng: &mut R,
@@ -265,6 +268,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// The encrypted message can only be decrypted using the seed signature
 /// from a certificate of the target round (i.e. notarization, finalization,
 /// or nullification).
+#[stability(ALPHA)]
 pub fn encrypt<R: CryptoRngCore, V: Variant>(
     rng: &mut R,
     identity: V::Public,
@@ -444,6 +448,7 @@ impl<V: Variant> Seed<V> {
     ///
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
+    #[stability(ALPHA)]
     pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
         decrypt(self, ciphertext)
     }
@@ -454,6 +459,7 @@ impl<V: Variant> Seed<V> {
 ///
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
+#[stability(ALPHA)]
 pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }

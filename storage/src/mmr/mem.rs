@@ -18,7 +18,9 @@ cfg_if::cfg_if! {
         use commonware_parallel::ThreadPool;
         use rayon::prelude::*;
     } else {
-        struct ThreadPool;
+        /// Placeholder for no_std builds where parallelism is unavailable.
+        // TODO(#3001): Migrate to commonware-parallel
+        pub struct ThreadPool;
     }
 }
 
@@ -548,7 +550,7 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn merkleize(
         mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: Option<ThreadPool>,
+        #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
     ) -> CleanMmr<D> {
         #[cfg(feature = "std")]
         match (pool, self.state.dirty_nodes.len() >= MIN_TO_PARALLELIZE) {
@@ -576,7 +578,7 @@ impl<D: Digest> DirtyMmr<D> {
     fn merkleize_serial(&mut self, hasher: &mut impl Hasher<Digest = D>) {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        nodes.sort_by_key(|a| a.1);
 
         for (pos, height) in nodes {
             let left = pos - (1 << height);
@@ -608,7 +610,7 @@ impl<D: Digest> DirtyMmr<D> {
         let mut nodes: Vec<(Position, u32)> = self.state.dirty_nodes.iter().copied().collect();
         self.state.dirty_nodes.clear();
         // Sort by increasing height.
-        nodes.sort_by(|a, b| a.1.cmp(&b.1));
+        nodes.sort_by_key(|a| a.1);
 
         let mut same_height = Vec::new();
         let mut current_height = 1;
@@ -723,7 +725,7 @@ impl<D: Digest> DirtyMmr<D> {
     pub fn update_leaf_batched<T: AsRef<[u8]> + Sync>(
         &mut self,
         hasher: &mut impl Hasher<Digest = D>,
-        pool: Option<ThreadPool>,
+        #[cfg_attr(not(feature = "std"), allow(unused_variables))] pool: Option<ThreadPool>,
         updates: &[(Location, T)],
     ) -> Result<(), Error> {
         if updates.is_empty() {
@@ -801,7 +803,7 @@ mod tests {
         hasher::{Hasher as _, Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
-    use commonware_runtime::{deterministic, tokio, RayonPoolSpawner, Runner};
+    use commonware_runtime::{deterministic, tokio, Runner, ThreadPooler};
     use commonware_utils::NZUsize;
 
     /// Test empty MMR behavior.
@@ -1064,7 +1066,7 @@ mod tests {
             let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let pool = context.create_pool(NZUsize!(4)).unwrap();
+            let pool = context.create_thread_pool(NZUsize!(4)).unwrap();
             let mut hasher: Standard<Sha256> = Standard::new();
 
             let mut mmr = Mmr::init(
@@ -1256,7 +1258,7 @@ mod tests {
             )
             .unwrap();
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
-            let pool = ctx.create_pool(NZUsize!(4)).unwrap();
+            let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
             do_batch_update(&mut hasher, mmr, Some(pool));
         });
     }

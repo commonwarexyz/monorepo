@@ -1012,7 +1012,6 @@ dependencies = [
  "commonware-storage",
  "commonware-stream",
  "commonware-utils",
- "futures",
  "prometheus-client",
  "rand 0.8.5",
  "rand_core 0.6.4",
@@ -1030,7 +1029,6 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
- "futures",
  "prometheus-client",
  "thiserror 2.0.17",
  "tracing",
@@ -1080,6 +1078,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "commonware-conformance",
+ "commonware-macros",
  "paste",
  "proptest",
  "rand 0.8.5",
@@ -1108,12 +1107,12 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-macros",
  "commonware-math",
  "commonware-parallel",
  "commonware-storage",
  "commonware-utils",
  "criterion",
- "futures",
  "num-rational",
  "proptest",
  "rand 0.8.5",
@@ -1148,7 +1147,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
- "futures",
  "prometheus-client",
  "rand 0.8.5",
  "thiserror 2.0.17",
@@ -1166,6 +1164,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
  "libfuzzer-sys",
  "rand 0.8.5",
@@ -1263,6 +1262,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-math",
  "commonware-parallel",
  "commonware-utils",
@@ -1320,6 +1320,7 @@ dependencies = [
  "chrono",
  "clap",
  "commonware-cryptography",
+ "commonware-macros",
  "futures",
  "reqwest",
  "serde",
@@ -1390,7 +1391,6 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "crossterm 0.29.0",
- "futures",
  "prometheus-client",
  "rand 0.8.5",
  "ratatui",
@@ -1403,15 +1403,24 @@ dependencies = [
 name = "commonware-macros"
 version = "0.0.65"
 dependencies = [
+ "commonware-macros-impl",
+ "commonware-utils",
  "futures",
  "futures-timer",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-macros-impl"
+version = "0.0.65"
+dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn",
  "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1422,6 +1431,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-conformance",
+ "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
  "proptest",
@@ -1479,6 +1489,7 @@ name = "commonware-parallel"
 version = "0.0.65"
 dependencies = [
  "cfg-if",
+ "commonware-macros",
  "proptest",
  "rayon",
 ]
@@ -1552,6 +1563,7 @@ dependencies = [
  "commonware-utils",
  "console-subscriber",
  "criterion",
+ "crossbeam-queue",
  "futures",
  "getrandom 0.2.16",
  "governor",
@@ -1709,6 +1721,7 @@ dependencies = [
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.17",
+ "tokio",
  "zeroize",
 ]
 
@@ -1938,6 +1951,15 @@ name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
 dependencies = [
  "crossbeam-utils",
 ]
