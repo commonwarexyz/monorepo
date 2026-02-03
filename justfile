@@ -140,14 +140,15 @@ check-stability *args='':
             extra_args="$all_args"
         fi
     fi
+    export RUSTC_WORKSPACE_WRAPPER="scripts/rustc_stability_wrapper.sh"
     if [ -z "$level" ]; then
         for l in 1 2 3 4; do
             echo "Checking commonware_stability_${LEVEL_NAMES[$l]}..."
-            RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$l]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+            COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$l]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
         done
         echo "All stability levels pass!"
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$level]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
     fi
 
