@@ -23,7 +23,7 @@ pre-pr: lint test-docs test check-stability
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    @find "{{source_dir()}}" -not \( -path '{{source_dir()}}/target/*' -prune \) -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2021 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2021 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
