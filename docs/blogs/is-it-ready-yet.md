@@ -28,7 +28,7 @@ You might suggest Cargo features - gate unstable APIs behind an `unstable` featu
 
 ## Supporting Non-Uniform (and Tiered) Stability
 
-Balancing development velocity and with programmatic stability.
+Balancing development velocity and with programmatic stability (docs are not enough).
 
 Crates may have components of different maturity, even when broken down into smaller components.
 
