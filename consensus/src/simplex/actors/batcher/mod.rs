@@ -1832,7 +1832,14 @@ mod tests {
 
     #[test_traced]
     fn test_duplicate_vote_with_different_attestation_blocks_peer() {
+        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_std::fixture::<MinPk, _>);
+        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_std::fixture::<MinSig, _>);
+        duplicate_vote_with_different_attestation_blocks_peer(bls12381_multisig::fixture::<MinPk, _>);
+        duplicate_vote_with_different_attestation_blocks_peer(bls12381_multisig::fixture::<MinSig, _>);
         duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture);
+        duplicate_vote_with_different_attestation_blocks_peer(secp256r1::fixture);
     }
 
     fn conflicting_notarize_creates_evidence<S, F>(mut fixture: F)
@@ -1968,26 +1975,26 @@ mod tests {
             // Verify ConflictingNotarize evidence was reported via faults
             let faults = reporter.faults.lock().unwrap();
             assert!(
-                faults.contains_key(&sender_pk),
-                "Should have fault reported for sender"
-            );
-            let sender_faults = faults.get(&sender_pk).unwrap();
-            assert!(
-                sender_faults.contains_key(&view),
-                "Should have fault for view 1"
-            );
-            let view_faults = sender_faults.get(&view).unwrap();
-            assert!(
-                view_faults
-                    .iter()
-                    .any(|a| matches!(a, Activity::ConflictingNotarize(_))),
-                "Should have ConflictingNotarize activity"
+                faults
+                    .get(&sender_pk)
+                    .and_then(|sf| sf.get(&view))
+                    .is_some_and(|vf| vf
+                        .iter()
+                        .any(|a| matches!(a, Activity::ConflictingNotarize(_)))),
+                "Should have ConflictingNotarize fault reported for sender at view 1"
             );
         });
     }
 
     #[test_traced]
     fn test_conflicting_notarize_creates_evidence() {
+        conflicting_notarize_creates_evidence(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        conflicting_notarize_creates_evidence(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        conflicting_notarize_creates_evidence(bls12381_threshold_std::fixture::<MinPk, _>);
+        conflicting_notarize_creates_evidence(bls12381_threshold_std::fixture::<MinSig, _>);
+        conflicting_notarize_creates_evidence(bls12381_multisig::fixture::<MinPk, _>);
+        conflicting_notarize_creates_evidence(bls12381_multisig::fixture::<MinSig, _>);
         conflicting_notarize_creates_evidence(ed25519::fixture);
+        conflicting_notarize_creates_evidence(secp256r1::fixture);
     }
 }
