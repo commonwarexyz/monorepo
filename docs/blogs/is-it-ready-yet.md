@@ -16,7 +16,7 @@ The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over
 
 How do you communicate what's ready without documentation that rots the moment you publish it?
 
-## Obvious Compatibility
+## Obvious Compatibility (Testing Across Library)
 
 The obvious answer is semantic versioning. Slap a version number on each primitive, publish them as separate crates, and let Cargo sort it out. `1.0` means stable. `0.x` means experimental. It just works.
 
@@ -27,6 +27,8 @@ We want to be explicit about what has been tested and what has not. So we're swi
 You might suggest Cargo features - gate unstable APIs behind an `unstable` feature flag, like Tokio does. But feature flags propagate through the dependency tree. If your crate depends on `commonware-consensus`, and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. With `cfg` flags set via `RUSTFLAGS`, you set your stability threshold once and it applies globally.
 
 ## Supporting Non-Uniform (and Tiered) Stability
+
+Balancing development velocity and with programmatic stability.
 
 Crates may have components of different maturity, even when broken down into smaller components.
 
