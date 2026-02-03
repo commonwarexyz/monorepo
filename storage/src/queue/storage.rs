@@ -136,8 +136,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         })
     }
 
-    /// Check if a position is acknowledged.
-    fn is_acked(&self, position: u64) -> bool {
+    /// Returns whether a specific position has been acknowledged.
+    pub fn is_acked(&self, position: u64) -> bool {
         position < self.ack_floor || self.acked_above.get(&position).is_some()
     }
 
@@ -359,11 +359,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.ack_floor >= self.journal.size()
     }
 
-    /// Returns whether a specific position has been acknowledged.
-    pub fn is_position_acked(&self, position: u64) -> bool {
-        self.is_acked(position)
-    }
-
     /// Manually prune acknowledged items from storage.
     ///
     /// Note: Pruning happens automatically during [Persistable::sync] and
@@ -557,11 +552,11 @@ mod tests {
             // Ack out of order: 2, 4, 1, 3, 0
             queue.ack(2).await.unwrap();
             assert_eq!(queue.ack_floor(), 0); // Floor doesn't move
-            assert!(queue.is_position_acked(2));
+            assert!(queue.is_acked(2));
 
             queue.ack(4).await.unwrap();
             assert_eq!(queue.ack_floor(), 0);
-            assert!(queue.is_position_acked(4));
+            assert!(queue.is_acked(4));
 
             queue.ack(1).await.unwrap();
             assert_eq!(queue.ack_floor(), 0);
@@ -598,11 +593,11 @@ mod tests {
 
             // Items 0-4 should be acked
             for i in 0..5 {
-                assert!(queue.is_position_acked(i));
+                assert!(queue.is_acked(i));
             }
             // Items 5-9 should not be acked
             for i in 5..10 {
-                assert!(!queue.is_position_acked(i));
+                assert!(!queue.is_acked(i));
             }
 
             // Dequeue should start at 5
@@ -790,7 +785,7 @@ mod tests {
 
             // Can ack unread items
             queue.ack(1).await.unwrap();
-            assert!(queue.is_position_acked(1));
+            assert!(queue.is_acked(1));
 
             // Double ack is a no-op
             queue.ack(1).await.unwrap();
