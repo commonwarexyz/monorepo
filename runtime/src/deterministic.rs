@@ -213,8 +213,8 @@ pub struct Config {
     catch_panics: bool,
 
     /// Configuration for deterministic storage fault injection.
-    /// If `None`, no faults will be injected.
-    storage_faults: Option<FaultConfig>,
+    /// Defaults to no faults being injected.
+    storage_faults: FaultConfig,
 }
 
 impl Config {
@@ -225,7 +225,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
-            storage_faults: None,
+            storage_faults: FaultConfig::default(),
         }
     }
 
@@ -267,7 +267,7 @@ impl Config {
     /// the provided configuration. Faults are drawn from the shared RNG, ensuring
     /// reproducible failure patterns for a given seed.
     pub const fn with_storage_faults(mut self, faults: FaultConfig) -> Self {
-        self.storage_faults = Some(faults);
+        self.storage_faults = faults;
         self
     }
 
@@ -865,7 +865,7 @@ impl Context {
         let rng = Arc::new(Mutex::new(cfg.rng));
 
         // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults.unwrap_or_default()));
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
         let storage = MeteredStorage::new(
             AuditedStorage::new(
                 FaultyStorage::new(MemStorage::default(), rng.clone(), storage_fault_config),

@@ -1,9 +1,8 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{Error, IoBufs, IoBufsMut};
+use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut};
 use bytes::Buf;
 use rand::Rng;
-use rand_core::CryptoRngCore;
 use std::{
     io::Error as IoError,
     sync::{
@@ -11,9 +10,6 @@ use std::{
         Arc, Mutex, RwLock,
     },
 };
-
-/// Type alias for a boxed dynamic RNG.
-pub type BoxDynRng = Box<dyn CryptoRngCore + Send + 'static>;
 
 /// Operation types for fault injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
