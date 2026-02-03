@@ -46,6 +46,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 stability_scope!(BETA {
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    use iobuf::PoolError;
     use prometheus_client::registry::Metric;
     use rayon::ThreadPoolBuildError;
     use std::{
@@ -66,7 +67,7 @@ stability_scope!(BETA {
     pub use governor::Quota;
 
     pub mod iobuf;
-    pub use iobuf::{IoBuf, IoBufMut, IoBufs, IoBufsMut};
+    pub use iobuf::{BufferPool, BufferPoolConfig, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
     pub mod utils;
     pub use utils::*;
@@ -132,6 +133,8 @@ stability_scope!(BETA {
         ImmutableBlob,
         #[error("io error: {0}")]
         Io(#[from] IoError),
+        #[error("buffer pool: {0}")]
+        Pool(#[from] PoolError),
     }
 
     /// Interface that any task scheduler must implement to start
@@ -253,7 +256,7 @@ stability_scope!(BETA {
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
     /// placed on dedicated threads via [Spawner].
-    pub trait RayonPoolSpawner: Spawner + Metrics {
+    pub trait ThreadPooler: Spawner + Metrics {
         /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
         ///
         /// # Arguments
@@ -262,7 +265,7 @@ stability_scope!(BETA {
         /// # Returns
         /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
         /// be built.
-        fn create_pool(
+        fn create_thread_pool(
             &self,
             concurrency: NonZeroUsize,
         ) -> Result<ThreadPool, ThreadPoolBuildError>;
@@ -279,7 +282,7 @@ stability_scope!(BETA {
             &self,
             concurrency: NonZeroUsize,
         ) -> Result<Rayon, ThreadPoolBuildError> {
-            self.create_pool(concurrency).map(Rayon::with_pool)
+            self.create_thread_pool(concurrency).map(Rayon::with_pool)
         }
     }
 
@@ -714,6 +717,15 @@ stability_scope!(BETA {
 
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+
+    /// Interface that any runtime must implement to provide buffer pools.
+    pub trait BufferPooler: Clone + Send + Sync + 'static {
+        /// Returns the network [BufferPool].
+        fn network_buffer_pool(&self) -> &BufferPool;
+
+        /// Returns the storage [BufferPool].
+        fn storage_buffer_pool(&self) -> &BufferPool;
     }
 });
 stability_scope!(ALPHA, cfg(feature = "external") {
@@ -3431,11 +3443,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_tokio() {
+    fn test_create_thread_pool_tokio() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .create_thread_pool(NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3448,11 +3463,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_deterministic() {
+    fn test_create_thread_pool_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .create_thread_pool(NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3462,5 +3480,42 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
+    }
+
+    fn test_buffer_pooler<R: Runner>(runner: R)
+    where
+        R::Context: BufferPooler,
+    {
+        runner.start(|context| async move {
+            // Verify network pool is accessible and works (cache-line aligned)
+            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
+            assert!(net_buf.capacity() >= 1024);
+
+            // Verify storage pool is accessible and works (page-aligned)
+            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
+            assert!(storage_buf.capacity() >= 4096);
+
+            // Verify pools have expected configurations
+            assert_eq!(
+                context.network_buffer_pool().config().max_per_class.get(),
+                4096
+            );
+            assert_eq!(
+                context.storage_buffer_pool().config().max_per_class.get(),
+                32
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_buffer_pooler() {
+        let runner = deterministic::Runner::default();
+        test_buffer_pooler(runner);
+    }
+
+    #[test]
+    fn test_tokio_buffer_pooler() {
+        let runner = tokio::Runner::default();
+        test_buffer_pooler(runner);
     }
 }

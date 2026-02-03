@@ -3,7 +3,7 @@ use commonware_math::algebra::Random as _;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
-    RayonPoolSpawner,
+    ThreadPooler,
 };
 use commonware_storage::mmr::{mem::CleanMmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
@@ -54,7 +54,7 @@ fn bench_update(c: &mut Criterion) {
                             let pool = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
-                                    let pool = ctx.create_pool(THREADS).unwrap();
+                                    let pool = ctx.create_thread_pool(THREADS).unwrap();
                                     Some(pool)
                                 }
                                 _ => None,
