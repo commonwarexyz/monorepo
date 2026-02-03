@@ -1,6 +1,7 @@
 use super::{
     cache,
     mailbox::{Mailbox, Message},
+    BlockBuffer, IntoBlock, Variant,
 };
 use crate::{
     marshal::{
@@ -13,16 +14,14 @@ use crate::{
         types::{Finalization, Notarization},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Reporter,
+    Block, Heightable, Reporter,
 };
-use commonware_broadcast::{buffered, Broadcaster};
-use commonware_codec::{Decode, Encode, EncodeSize, Read, Write};
+use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    Committable, Digestible, PublicKey,
+    Committable, Digestible,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
@@ -55,16 +54,16 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
-/// A pending acknowledgement from the application for processing a block at the contained height/digest.
+/// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
-struct PendingAck<B: Block, A: Acknowledgement> {
+struct PendingAck<V: Variant, A: Acknowledgement> {
     height: Height,
-    digest: B::Digest,
+    commitment: V::Commitment,
     #[pin]
     receiver: A::Waiter,
 }
 
-impl<B: Block, A: Acknowledgement> Future for PendingAck<B, A> {
+impl<V: Variant, A: Acknowledgement> Future for PendingAck<V, A> {
     type Output = <A::Waiter as Future>::Output;
 
     fn poll(
@@ -76,9 +75,9 @@ impl<B: Block, A: Acknowledgement> Future for PendingAck<B, A> {
 }
 
 /// A struct that holds multiple subscriptions for a block.
-struct BlockSubscription<B: Block> {
+struct BlockSubscription<V: Variant> {
     // The subscribers that are waiting for the block
-    subscribers: Vec<oneshot::Sender<B>>,
+    subscribers: Vec<oneshot::Sender<V::Block>>,
     // Aborter that aborts the waiter future when dropped
     _aborter: Aborter,
 }
@@ -95,13 +94,17 @@ struct BlockSubscription<B: Block> {
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
 /// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
 /// behind.
-pub struct Actor<E, B, P, FC, FB, ES, T, A = Exact>
+pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
-    B: Block,
-    P: Provider<Scope = Epoch, Scheme: Scheme<B::Digest>>,
-    FC: Certificates<BlockDigest = B::Digest, Commitment = B::Digest, Scheme = P::Scheme>,
-    FB: Blocks<Block = B>,
+    V: Variant,
+    P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
+    FC: Certificates<
+        BlockDigest = <V::Block as Digestible>::Digest,
+        Commitment = V::Commitment,
+        Scheme = P::Scheme,
+    >,
+    FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
     A: Acknowledgement,
@@ -111,7 +114,7 @@ where
 
     // ---------- Message Passing ----------
     // Mailbox
-    mailbox: mpsc::Receiver<Message<P::Scheme, B>>,
+    mailbox: mpsc::Receiver<Message<P::Scheme, V>>,
 
     // ---------- Configuration ----------
     // Provider for epoch-specific signing schemes
@@ -123,7 +126,7 @@ where
     // Maximum number of blocks to repair at once
     max_repair: NonZeroUsize,
     // Codec configuration for block type
-    block_codec_config: B::Cfg,
+    block_codec_config: <V::Block as Read>::Cfg,
     // Strategy for parallel operations
     strategy: T,
 
@@ -133,15 +136,15 @@ where
     // Last height processed by the application
     last_processed_height: Height,
     // Pending application acknowledgement, if any
-    pending_ack: OptionFuture<PendingAck<B, A>>,
+    pending_ack: OptionFuture<PendingAck<V, A>>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
-    block_subscriptions: BTreeMap<B::Digest, BlockSubscription<B>>,
+    block_subscriptions: BTreeMap<<V::Block as Digestible>::Digest, BlockSubscription<V>>,
 
     // ---------- Storage ----------
     // Prunable cache
-    cache: cache::Manager<E, B, P::Scheme>,
+    cache: cache::Manager<E, V, P::Scheme>,
     // Metadata tracking application progress
     application_metadata: Metadata<E, U64, Height>,
     // Finalizations stored by height
@@ -156,13 +159,17 @@ where
     processed_height: Gauge,
 }
 
-impl<E, B, P, FC, FB, ES, T, A> Actor<E, B, P, FC, FB, ES, T, A>
+impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
     E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
-    B: Block,
-    P: Provider<Scope = Epoch, Scheme: Scheme<B::Digest>>,
-    FC: Certificates<BlockDigest = B::Digest, Commitment = B::Digest, Scheme = P::Scheme>,
-    FB: Blocks<Block = B>,
+    V: Variant,
+    P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
+    FC: Certificates<
+        BlockDigest = <V::Block as Digestible>::Digest,
+        Commitment = V::Commitment,
+        Scheme = P::Scheme,
+    >,
+    FB: Blocks<Block = V::StoredBlock>,
     ES: Epocher,
     T: Strategy,
     A: Acknowledgement,
@@ -172,8 +179,8 @@ where
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
-        config: Config<B, P, ES, T>,
-    ) -> (Self, Mailbox<P::Scheme, B>, Height) {
+        config: Config<V::Block, P, ES, T>,
+    ) -> (Self, Mailbox<P::Scheme, V>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
             partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
@@ -250,37 +257,37 @@ where
     }
 
     /// Start the actor.
-    pub fn start<R, K>(
+    pub fn start<R, Buf>(
         mut self,
-        application: impl Reporter<Activity = Update<B, A>>,
-        buffer: buffered::Mailbox<K, BroadcastBlock<B>>,
-        resolver: (mpsc::Receiver<handler::Message<B>>, R),
+        application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        buffer: Buf,
+        resolver: (mpsc::Receiver<handler::Message<V::Block>>, R),
     ) -> Handle<()>
     where
         R: Resolver<
-            Key = handler::Request<B>,
+            Key = handler::Request<V::Block>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        K: PublicKey,
+        Buf: BlockBuffer<V>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, K>(
+    async fn run<R, Buf>(
         mut self,
-        mut application: impl Reporter<Activity = Update<B, A>>,
-        mut buffer: buffered::Mailbox<K, BroadcastBlock<B>>,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
+        mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        mut buffer: Buf,
+        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Block>>, R),
     ) where
         R: Resolver<
-            Key = handler::Request<B>,
+            Key = handler::Request<V::Block>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        K: PublicKey,
+        Buf: BlockBuffer<V>,
     {
         // Create a local pool for waiter futures.
-        let mut waiters = AbortablePool::<(B::Digest, B)>::default();
+        let mut waiters = AbortablePool::<V::Block>::default();
 
         // Get tip and send to application
         let tip = self.get_latest().await;
@@ -310,17 +317,17 @@ where
                 debug!("actor stopped");
             },
             // Handle waiter completions first
-            Ok((digest, block)) = waiters.next_completed() else continue => {
-                self.notify_subscribers(digest, &block).await;
+            Ok(block) = waiters.next_completed() else continue => {
+                self.notify_subscribers(&block).await;
             },
             // Handle application acknowledgements next
             ack = &mut self.pending_ack => {
-                let PendingAck { height, digest, .. } = self.pending_ack.take().expect("ack state must be present");
+                let PendingAck { height, commitment, .. } = self.pending_ack.take().expect("ack state must be present");
 
                 match ack {
                     Ok(()) => {
                         if let Err(e) = self
-                            .handle_block_processed(height, digest, &mut resolver)
+                            .handle_block_processed(height, commitment, &mut resolver, &mut buffer)
                             .await
                         {
                             error!(?e, %height, "failed to update application progress");
@@ -358,42 +365,52 @@ where
                                 .await
                                 .ok()
                                 .flatten()
-                                .map(|f| (height, f.proposal.payload)),
+                                .map(|f| (height, V::commitment_to_digest(f.proposal.payload))),
                             BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                         };
                         response.send_lossy(info);
                     }
-                    Message::Proposed { round, block } => {
+                    Message::Proposed { round, block, recipients } => {
                         self.cache_verified(round, block.digest(), block.clone()).await;
-                        let _peers = buffer.broadcast(Recipients::All, BroadcastBlock(block)).await;
+                        buffer.broadcast(block, recipients).await;
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.digest(), block).await;
                     }
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
-                        let digest = notarization.proposal.payload;
+                        let commitment = notarization.proposal.payload;
+                        let digest = V::commitment_to_digest(commitment);
 
                         // Store notarization by view
-                        self.cache.put_notarization(round, digest, notarization.clone()).await;
+                        self.cache.put_notarization(
+                            round,
+                            digest,
+                            notarization.clone()
+                        ).await;
 
-                        // Search for block locally, otherwise fetch it remotely
-                        if let Some(block) = self.find_block(&mut buffer, digest).await {
+                        // Search for block locally, otherwise fetch it remotely.
+                        if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             // If found, persist the block
                             self.cache_block(round, digest, block).await;
                         } else {
                             debug!(?round, "notarized block missing");
-                            resolver.fetch(Request::<B>::Notarized { round }).await;
+                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
                         }
                     }
                     Message::Finalization { finalization } => {
                         // Cache finalization by round
                         let round = finalization.round();
-                        let digest = finalization.proposal.payload;
-                        self.cache.put_finalization(round, digest, finalization.clone()).await;
+                        let commitment = finalization.proposal.payload;
+                        let digest = V::commitment_to_digest(commitment);
+                        self.cache.put_finalization(
+                            round,
+                            digest,
+                            finalization.clone()
+                        ).await;
 
-                        // Search for block locally, otherwise fetch it remotely
-                        if let Some(block) = self.find_block(&mut buffer, digest).await {
+                        // Search for block locally, otherwise fetch it remotely.
+                        if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
                             self.finalize(
@@ -409,14 +426,14 @@ where
                             debug!(?round, %height, "finalized block stored");
                         } else {
                             // Otherwise, fetch the block from the network.
-                            debug!(?round, ?digest, "finalized block missing");
-                            resolver.fetch(Request::<B>::Block(digest)).await;
+                            debug!(?round, ?commitment, "finalized block missing");
+                            resolver.fetch(Request::<V::Block>::Block(digest)).await;
                         }
                     }
                     Message::GetBlock { identifier, response } => {
                         match identifier {
                             BlockID::Digest(digest) => {
-                                let result = self.find_block(&mut buffer, digest).await;
+                                let result = self.find_block_by_digest(&mut buffer, digest).await;
                                 response.send_lossy(result);
                             }
                             BlockID::Height(height) => {
@@ -425,7 +442,9 @@ where
                             }
                             BlockID::Latest => {
                                 let block = match self.get_latest().await {
-                                    Some((_, digest, _)) => self.find_block(&mut buffer, digest).await,
+                                    Some((_, digest, _)) => {
+                                        self.find_block_by_digest(&mut buffer, digest).await
+                                    }
                                     None => None,
                                 };
                                 response.send_lossy(block);
@@ -448,12 +467,12 @@ where
                         }
 
                         // Trigger a targeted fetch via the resolver
-                        let request = Request::<B>::Finalized { height };
+                        let request = Request::<V::Block>::Finalized { height };
                         resolver.fetch_targeted(request, targets).await;
                     }
-                    Message::Subscribe { round, commitment, response } => {
+                    Message::SubscribeByDigest { round, digest, response } => {
                         // Check for block locally
-                        if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                        if let Some(block) = self.find_block_by_digest(&mut buffer, digest).await {
                             response.send_lossy(block);
                             continue;
                         }
@@ -474,21 +493,66 @@ where
                             // Attempt to fetch the block (with notarization) from the resolver.
                             // If this is a valid view, this request should be fine to keep open
                             // until resolution or pruning (even if the oneshot is canceled).
-                            debug!(?round, ?commitment, "requested block missing");
-                            resolver.fetch(Request::<B>::Notarized { round }).await;
+                            debug!(?round, ?digest, "requested block missing");
+                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
                         }
 
                         // Register subscriber
-                        debug!(?round, ?commitment, "registering subscriber");
-                        match self.block_subscriptions.entry(commitment) {
+                        debug!(?round, ?digest, "registering subscriber");
+                        match self.block_subscriptions.entry(digest) {
                             Entry::Occupied(mut entry) => {
                                 entry.get_mut().subscribers.push(response);
                             }
                             Entry::Vacant(entry) => {
-                                let (tx, rx) = oneshot::channel();
-                                buffer.subscribe_prepared(None, commitment, None, tx).await;
+                                let rx = buffer.subscribe_by_digest(digest).await;
                                 let aborter = waiters.push(async move {
-                                    (commitment, rx.await.expect("buffer subscriber closed").take())
+                                    rx.await.expect("buffer subscriber closed").into_block()
+                                });
+                                entry.insert(BlockSubscription {
+                                    subscribers: vec![response],
+                                    _aborter: aborter,
+                                });
+                            }
+                        }
+                    }
+                    Message::SubscribeByCommitment { round, commitment, response } => {
+                        // Check for block locally
+                        if let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await {
+                            response.send_lossy(block);
+                            continue;
+                        }
+
+                        // Extract the digest from the commitment for subscription tracking
+                        let digest = V::commitment_to_digest(commitment);
+
+                        // We don't have the block locally, so fetch the block from the network
+                        // if we have an associated view.
+                        if let Some(round) = round {
+                            if round < self.last_processed_round {
+                                // At this point, we have failed to find the block locally, and
+                                // we know that its round is less than the last processed round.
+                                // This means that something else was finalized in that round,
+                                // so we drop the response to indicate that the block may never
+                                // be available.
+                                continue;
+                            }
+                            // Attempt to fetch the block (with notarization) from the resolver.
+                            // If this is a valid view, this request should be fine to keep open
+                            // until resolution or pruning (even if the oneshot is canceled).
+                            debug!(?round, ?digest, "requested block missing");
+                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
+                        }
+
+                        // Register subscriber
+                        debug!(?round, ?digest, "registering subscriber");
+                        match self.block_subscriptions.entry(digest) {
+                            Entry::Occupied(mut entry) => {
+                                entry.get_mut().subscribers.push(response);
+                            }
+                            Entry::Vacant(entry) => {
+                                let rx = buffer.subscribe_by_commitment(commitment).await;
+                                let aborter = waiters.push(async move {
+                                    rx.await.expect("buffer subscriber closed").into_block()
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
@@ -548,7 +612,7 @@ where
                         match key {
                             Request::Block(digest) => {
                                 // Check for block locally
-                                let Some(block) = self.find_block(&mut buffer, digest).await else {
+                                let Some(block) = self.find_block_by_digest(&mut buffer, digest).await else {
                                     debug!(?digest, "block missing on request");
                                     continue;
                                 };
@@ -578,8 +642,9 @@ where
                                 };
 
                                 // Get block
-                                let digest = notarization.proposal.payload;
-                                let Some(block) = self.find_block(&mut buffer, digest).await else {
+                                let commitment = notarization.proposal.payload;
+                                let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await else {
+                                    let digest = V::commitment_to_digest(commitment);
                                     debug!(?digest, "block missing on request");
                                     continue;
                                 };
@@ -591,7 +656,7 @@ where
                         match key {
                             Request::Block(digest) => {
                                 // Parse block
-                                let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
+                                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config) else {
                                     response.send_lossy(false);
                                     continue;
                                 };
@@ -630,7 +695,7 @@ where
 
                                 // Parse finalization
                                 let Ok((finalization, block)) =
-                                    <(Finalization<P::Scheme, B::Digest>, B)>::decode_cfg(
+                                    <(Finalization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
                                         value,
                                         &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                     )
@@ -640,8 +705,10 @@ where
                                 };
 
                                 // Validation
+                                let commitment = finalization.proposal.payload;
+                                let digest = V::commitment_to_digest(commitment);
                                 if block.height() != height
-                                    || finalization.proposal.payload != block.digest()
+                                    || block.commitment() != commitment
                                     || !finalization.verify(&mut self.context, &scheme, &self.strategy)
                                 {
                                     response.send_lossy(false);
@@ -653,7 +720,7 @@ where
                                 response.send_lossy(true);
                                 self.finalize(
                                     height,
-                                    block.digest(),
+                                    digest,
                                     block,
                                     Some(finalization),
                                     &mut application,
@@ -670,7 +737,7 @@ where
 
                                 // Parse notarization
                                 let Ok((notarization, block)) =
-                                    <(Notarization<P::Scheme, B::Digest>, B)>::decode_cfg(
+                                    <(Notarization<P::Scheme, V::Commitment>, V::Block)>::decode_cfg(
                                         value,
                                         &(scheme.certificate_codec_config(), self.block_codec_config.clone()),
                                     )
@@ -680,8 +747,10 @@ where
                                 };
 
                                 // Validation
+                                let commitment = notarization.proposal.payload;
+                                let digest = V::commitment_to_digest(commitment);
                                 if notarization.round() != round
-                                    || notarization.proposal.payload != block.digest()
+                                    || block.commitment() != commitment
                                     || !notarization.verify(&mut self.context, &scheme, &self.strategy)
                                 {
                                     response.send_lossy(false);
@@ -690,7 +759,6 @@ where
 
                                 // Valid notarization received
                                 response.send_lossy(true);
-                                let digest = block.digest();
                                 debug!(?round, ?digest, "received notarization");
 
                                 // If there exists a finalization certificate for this block, we
@@ -735,8 +803,8 @@ where
     // -------------------- Waiters --------------------
 
     /// Notify any subscribers for the given digest with the provided block.
-    async fn notify_subscribers(&mut self, digest: B::Digest, block: &B) {
-        if let Some(mut bs) = self.block_subscriptions.remove(&digest) {
+    async fn notify_subscribers(&mut self, block: &V::Block) {
+        if let Some(mut bs) = self.block_subscriptions.remove(&block.digest()) {
             for subscriber in bs.subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
             }
@@ -748,7 +816,7 @@ where
     /// Attempt to dispatch the next finalized block to the application if ready.
     async fn try_dispatch_block(
         &mut self,
-        application: &mut impl Reporter<Activity = Update<B, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
         if self.pending_ack.is_some() {
             return;
@@ -764,28 +832,35 @@ where
             "finalized block height mismatch"
         );
 
-        let (height, digest) = (block.height(), block.digest());
+        let (height, commitment) = (block.height(), block.commitment());
         let (ack, ack_waiter) = A::handle();
-        application.report(Update::Block(block, ack)).await;
+        application
+            .report(Update::Block(V::into_application_block(block), ack))
+            .await;
         self.pending_ack.replace(PendingAck {
             height,
-            digest,
+            commitment,
             receiver: ack_waiter,
         });
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
-    async fn handle_block_processed(
+    async fn handle_block_processed<Buf: BlockBuffer<V>>(
         &mut self,
         height: Height,
-        digest: B::Digest,
-        resolver: &mut impl Resolver<Key = Request<B>>,
+        commitment: V::Commitment,
+        resolver: &mut impl Resolver<Key = Request<V::Block>>,
+        buffer: &mut Buf,
     ) -> Result<(), metadata::Error> {
         // Update the processed height
         self.set_processed_height(height, resolver).await?;
 
         // Cancel any useless requests
-        resolver.cancel(Request::<B>::Block(digest)).await;
+        let digest = V::commitment_to_digest(commitment);
+        resolver.cancel(Request::<V::Block>::Block(digest)).await;
+
+        // Notify buffer that finalization occurred (for cleanup)
+        buffer.finalized(commitment).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -804,7 +879,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(Request::<B>::Notarized { round }.predicate())
+                .retain(Request::<V::Block>::Notarized { round }.predicate())
                 .await;
         }
 
@@ -814,27 +889,38 @@ where
     // -------------------- Prunable Storage --------------------
 
     /// Add a verified block to the prunable archive.
-    async fn cache_verified(&mut self, round: Round, digest: B::Digest, block: B) {
-        self.notify_subscribers(digest, &block).await;
-        self.cache.put_verified(round, digest, block).await;
+    async fn cache_verified(
+        &mut self,
+        round: Round,
+        digest: <V::Block as Digestible>::Digest,
+        block: V::Block,
+    ) {
+        self.notify_subscribers(&block).await;
+        self.cache.put_verified(round, digest, block.into()).await;
     }
 
     /// Add a notarized block to the prunable archive.
-    async fn cache_block(&mut self, round: Round, digest: B::Digest, block: B) {
-        self.notify_subscribers(digest, &block).await;
-        self.cache.put_block(round, digest, block).await;
+    async fn cache_block(
+        &mut self,
+        round: Round,
+        digest: <V::Block as Digestible>::Digest,
+        block: V::Block,
+    ) {
+        self.notify_subscribers(&block).await;
+        self.cache.put_block(round, digest, block.into()).await;
     }
 
     // -------------------- Immutable Storage --------------------
 
     /// Get a finalized block from the immutable archive.
-    async fn get_finalized_block(&self, height: Height) -> Option<B> {
+    async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {
         match self
             .finalized_blocks
             .get(ArchiveID::Index(height.get()))
             .await
         {
-            Ok(block) => block,
+            Ok(Some(stored)) => Some(stored.into()),
+            Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
     }
@@ -843,7 +929,7 @@ where
     async fn get_finalization_by_height(
         &self,
         height: Height,
-    ) -> Option<Finalization<P::Scheme, B::Digest>> {
+    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
         match self
             .finalizations_by_height
             .get(ArchiveID::Index(height.get()))
@@ -857,15 +943,15 @@ where
     /// Add a finalized block, and optionally a finalization, to the archive, and
     /// attempt to identify + repair any gaps in the archive.
     #[allow(clippy::too_many_arguments)]
-    async fn finalize(
+    async fn finalize<Buf: BlockBuffer<V>>(
         &mut self,
         height: Height,
-        digest: B::Digest,
-        block: B,
-        finalization: Option<Finalization<P::Scheme, B::Digest>>,
-        application: &mut impl Reporter<Activity = Update<B, A>>,
-        buffer: &mut buffered::Mailbox<impl PublicKey, BroadcastBlock<B>>,
-        resolver: &mut impl Resolver<Key = Request<B>>,
+        digest: <V::Block as Digestible>::Digest,
+        block: V::Block,
+        finalization: Option<Finalization<P::Scheme, V::Commitment>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        buffer: &mut Buf,
+        resolver: &mut impl Resolver<Key = Request<V::Block>>,
     ) {
         self.store_finalization(height, digest, block, finalization, application)
             .await;
@@ -880,18 +966,21 @@ where
     async fn store_finalization(
         &mut self,
         height: Height,
-        digest: B::Digest,
-        block: B,
-        finalization: Option<Finalization<P::Scheme, B::Digest>>,
-        application: &mut impl Reporter<Activity = Update<B, A>>,
+        digest: <V::Block as Digestible>::Digest,
+        block: V::Block,
+        finalization: Option<Finalization<P::Scheme, V::Commitment>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
-        self.notify_subscribers(digest, &block).await;
+        self.notify_subscribers(&block).await;
+
+        // Convert block to storage format
+        let stored: V::StoredBlock = block.into();
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
             // Update the finalized blocks archive
             async {
-                self.finalized_blocks.put(block).await.map_err(Box::new)?;
+                self.finalized_blocks.put(stored).await.map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
             },
             // Update the finalizations archive (if provided)
@@ -931,11 +1020,11 @@ where
     ///
     /// We return the height and digest using the highest known finalization that we know the
     /// block height for. While it's possible that we have a later finalization, if we do not have
-    /// the full block for that finalization, we do not know it's height and therefore it would not
+    /// the full block for that finalization, we do not know its height and therefore it would not
     /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
     /// should have the associated block (in the `finalized_blocks` archive) for the information
     /// returned.
-    async fn get_latest(&mut self) -> Option<(Height, B::Digest, Round)> {
+    async fn get_latest(&mut self) -> Option<(Height, <V::Block as Digestible>::Digest, Round)> {
         let height = self.finalizations_by_height.last_index()?;
         let finalization = self
             .get_finalization_by_height(height)
@@ -943,42 +1032,69 @@ where
             .expect("finalization missing");
         Some((
             height,
-            finalization.proposal.payload,
+            V::commitment_to_digest(finalization.proposal.payload),
             finalization.proposal.round,
         ))
     }
 
     // -------------------- Mixed Storage --------------------
 
-    /// Looks for a block anywhere in local storage.
-    async fn find_block<K: PublicKey>(
-        &mut self,
-        buffer: &mut buffered::Mailbox<K, BroadcastBlock<B>>,
-        digest: B::Digest,
-    ) -> Option<B> {
-        // Check buffer.
-        if let Some(block) = buffer.get(None, digest, None).await.into_iter().next() {
-            return Some(block.take());
-        }
+    /// Looks for a block in cache and finalized storage by digest.
+    async fn find_block_in_storage(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<V::Block> {
         // Check verified / notarized blocks via cache manager.
         if let Some(block) = self.cache.find_block(digest).await {
-            return Some(block);
+            return Some(block.into());
         }
         // Check finalized blocks.
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(block) => block, // may be None
+            Ok(Some(stored)) => Some(stored.into()),
+            Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
+    }
+
+    /// Looks for a block anywhere in local storage using only the digest.
+    ///
+    /// This is used when we only have a digest (e.g., during gap repair following
+    /// parent links).
+    async fn find_block_by_digest<Buf: BlockBuffer<V>>(
+        &self,
+        buffer: &mut Buf,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<V::Block> {
+        if let Some(block) = buffer.find_by_digest(digest).await {
+            return Some(block.into_block());
+        }
+        self.find_block_in_storage(digest).await
+    }
+
+    /// Looks for a block anywhere in local storage using the full commitment.
+    ///
+    /// This is used when we have a full commitment (e.g., from notarizations/finalizations).
+    /// Having the full commitment may enable additional retrieval mechanisms.
+    async fn find_block_by_commitment<Buf: BlockBuffer<V>>(
+        &self,
+        buffer: &mut Buf,
+        commitment: V::Commitment,
+    ) -> Option<V::Block> {
+        if let Some(block) = buffer.find_by_commitment(commitment).await {
+            return Some(block.into_block());
+        }
+        self.find_block_in_storage(V::commitment_to_digest(commitment))
+            .await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
-    async fn try_repair_gaps<K: PublicKey>(
+    async fn try_repair_gaps<Buf: BlockBuffer<V>>(
         &mut self,
-        buffer: &mut buffered::Mailbox<K, BroadcastBlock<B>>,
-        resolver: &mut impl Resolver<Key = Request<B>>,
-        application: &mut impl Reporter<Activity = Update<B, A>>,
+        buffer: &mut Buf,
+        resolver: &mut impl Resolver<Key = Request<V::Block>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
         let start = self.last_processed_height.next();
         'cache_repair: loop {
@@ -1000,12 +1116,12 @@ where
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
-                let commitment = cursor.parent();
-                if let Some(block) = self.find_block(buffer, commitment).await {
-                    let finalization = self.cache.get_finalization_for(commitment).await;
+                let parent_digest = cursor.parent();
+                if let Some(block) = self.find_block_by_digest(buffer, parent_digest).await {
+                    let finalization = self.cache.get_finalization_for(parent_digest).await;
                     self.store_finalization(
                         block.height(),
-                        commitment,
+                        parent_digest,
                         block.clone(),
                         finalization,
                         application,
@@ -1015,7 +1131,9 @@ where
                     cursor = block;
                 } else {
                     // Request the next missing block digest
-                    resolver.fetch(Request::<B>::Block(commitment)).await;
+                    resolver
+                        .fetch(Request::<V::Block>::Block(parent_digest))
+                        .await;
                     break 'cache_repair;
                 }
             }
@@ -1031,7 +1149,7 @@ where
             .missing_items(start, self.max_repair.get());
         let requests = missing_items
             .into_iter()
-            .map(|height| Request::<B>::Finalized { height })
+            .map(|height| Request::<V::Block>::Finalized { height })
             .collect::<Vec<_>>();
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
@@ -1043,7 +1161,7 @@ where
     async fn set_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = Request<B>>,
+        resolver: &mut impl Resolver<Key = Request<V::Block>>,
     ) -> Result<(), metadata::Error> {
         self.application_metadata
             .put_sync(LATEST_KEY.clone(), height)
@@ -1055,7 +1173,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(Request::<B>::Finalized { height }.predicate())
+            .retain(Request::<V::Block>::Finalized { height }.predicate())
             .await;
 
         Ok(())
@@ -1080,55 +1198,5 @@ where
             }
         )?;
         Ok(())
-    }
-}
-
-/// A wrapper around a [Block] that can be used in the [buffered::Mailbox].
-#[derive(Clone)]
-pub struct BroadcastBlock<B>(B);
-
-impl<B> BroadcastBlock<B> {
-    /// Take the inner [Block], consuming the wrapper.
-    pub fn take(self) -> B {
-        self.0
-    }
-}
-
-impl<B: Block> Digestible for BroadcastBlock<B> {
-    type Digest = B::Digest;
-
-    fn digest(&self) -> Self::Digest {
-        self.0.digest()
-    }
-}
-
-impl<B: Block> Committable for BroadcastBlock<B> {
-    type Commitment = B::Digest;
-
-    fn commitment(&self) -> Self::Commitment {
-        self.0.digest()
-    }
-}
-
-impl<B: Block> Write for BroadcastBlock<B> {
-    fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.0.write(buf)
-    }
-}
-
-impl<B: Block> EncodeSize for BroadcastBlock<B> {
-    fn encode_size(&self) -> usize {
-        self.0.encode_size()
-    }
-}
-
-impl<B: Block> Read for BroadcastBlock<B> {
-    type Cfg = B::Cfg;
-
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        B::read_cfg(buf, cfg).map(BroadcastBlock)
     }
 }

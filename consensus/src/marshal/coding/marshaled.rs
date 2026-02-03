@@ -53,10 +53,11 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         coding::{
-            self, shards,
-            types::{coding_config_for_participants, CodedBlock, DigestOrCommitment},
+            shards,
+            types::{coding_config_for_participants, CodedBlock},
+            Coding,
         },
-        Update,
+        core, Update,
     },
     simplex::{scheme::Scheme, types::Context},
     types::{CodingCommitment, Epoch, Epocher, Round},
@@ -106,6 +107,7 @@ type VerificationContexts<E, B, Z> = Metadata<
 >;
 
 /// Configuration for initializing [`Marshaled`].
+#[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, Z, S, ES>
 where
     B: CertifiableBlock,
@@ -117,7 +119,8 @@ where
     /// The underlying application to wrap.
     pub application: A,
     /// Mailbox for communicating with the marshal engine.
-    pub marshal: coding::Mailbox<Z::Scheme, B, C>,
+    pub marshal:
+        core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
     pub shards: shards::Mailbox<B, Z::Scheme, C, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
@@ -136,6 +139,7 @@ where
 /// blocks from being produced outside their valid epoch and handles the special case of
 /// re-proposing boundary blocks during epoch transitions.
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 pub struct Marshaled<E, A, B, C, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
@@ -148,7 +152,7 @@ where
 {
     context: E,
     application: A,
-    marshal: coding::Mailbox<Z::Scheme, B, C>,
+    marshal: core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
     shards: shards::Mailbox<B, Z::Scheme, C, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
@@ -338,7 +342,7 @@ where
                 } else {
                     // No prefetched block, fetch both parent and block
                     let block_request = marshal
-                        .subscribe(Some(round), DigestOrCommitment::Commitment(commitment))
+                        .subscribe_by_commitment(Some(round), commitment)
                         .await;
                     let block_requests = try_join(parent_request, block_request);
 
@@ -783,7 +787,7 @@ where
         );
         let block_rx = self
             .marshal
-            .subscribe(Some(round), DigestOrCommitment::Commitment(payload))
+            .subscribe_by_commitment(Some(round), payload)
             .await;
         let mut marshaled = self.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -929,7 +933,7 @@ async fn fetch_parent<E, S, A, B, C>(
     parent_commitment: CodingCommitment,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut coding::Mailbox<S, B, C>,
+    marshal: &mut core::Mailbox<S, Coding<B, C, S::PublicKey>>,
 ) -> Either<
     Ready<Result<CodedBlock<B, C>, oneshot::error::RecvError>>,
     oneshot::Receiver<CodedBlock<B, C>>,
@@ -950,10 +954,7 @@ where
     } else {
         Either::Right(
             marshal
-                .subscribe(
-                    parent_round,
-                    DigestOrCommitment::Commitment(parent_commitment),
-                )
+                .subscribe_by_commitment(parent_round, parent_commitment)
                 .await,
         )
     }
