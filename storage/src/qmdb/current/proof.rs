@@ -54,15 +54,14 @@ impl<D: Digest> RangeProof<D> {
         let proof = verification::range_proof(&grafted_mmr, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest =
-            if next_bit != MerkleizedBitMap::<E, D, N>::CHUNK_SIZE_BITS {
-                // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
-                // in the proof.
-                hasher.update(last_chunk);
-                Some(hasher.finalize())
-            } else {
-                None
-            };
+        let partial_chunk_digest = if next_bit != MerkleizedBitMap::<E, D, N>::CHUNK_SIZE_BITS {
+            // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
+            // in the proof.
+            hasher.update(last_chunk);
+            Some(hasher.finalize())
+        } else {
+            None
+        };
 
         Ok(Self {
             proof,

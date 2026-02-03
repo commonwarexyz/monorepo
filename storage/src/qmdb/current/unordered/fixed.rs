@@ -305,9 +305,7 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.loc);
             assert_eq!(
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
-                    *active_loc
-                ),
+                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
                 MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
                     *proof_inactive.loc
                 )
