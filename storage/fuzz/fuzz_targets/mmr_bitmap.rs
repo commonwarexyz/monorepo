@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
-use commonware_storage::{MerkleizedAuthenticatedBitMap, UnmerkleizedAuthenticatedBitMap};
+use commonware_storage::{MerkleizedBitMap, UnmerkleizedBitMap};
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
@@ -11,8 +11,8 @@ const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
 enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
-    Merkleized(MerkleizedAuthenticatedBitMap<E, D, N>),
-    Unmerkleized(UnmerkleizedAuthenticatedBitMap<E, D, N>),
+    Merkleized(MerkleizedBitMap<E, D, N>),
+    Unmerkleized(UnmerkleizedBitMap<E, D, N>),
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -59,7 +59,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let init_bitmap = MerkleizedAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+        let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
             context.with_label("bitmap"),
             PARTITION,
             None,
@@ -225,7 +225,7 @@ fn fuzz(input: FuzzInput) {
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
                             let root = bitmap.root();
                             assert!(
-                                MerkleizedAuthenticatedBitMap::<
+                                MerkleizedBitMap::<
                                     deterministic::Context,
                                     sha256::Digest,
                                     CHUNK_SIZE,
@@ -244,7 +244,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
-                    let bitmap = MerkleizedAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+                    let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
                         context
                             .with_label("bitmap")
                             .with_attribute("instance", restarts),

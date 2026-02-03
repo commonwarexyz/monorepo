@@ -538,7 +538,7 @@ where
 /// Return the root of the current QMDB represented by the provided mmr and bitmap.
 pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: &bitmap::MerkleizedAuthenticatedBitMap<E, H::Digest, N>,
+    status: &bitmap::MerkleizedBitMap<E, H::Digest, N>,
     mmr: &Mmr<E, H::Digest, mmr::mem::Clean<DigestOf<H>>>,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height::<N>());
@@ -574,9 +574,9 @@ pub(super) async fn root<E: Storage + Clock + Metrics, H: Hasher, const N: usize
 /// * `mmr` - The MMR storage used for grafting.
 pub(super) async fn merkleize_grafted_bitmap<E, H, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    status: bitmap::UnmerkleizedAuthenticatedBitMap<E, H::Digest, N>,
+    status: bitmap::UnmerkleizedBitMap<E, H::Digest, N>,
     mmr: &impl mmr::storage::Storage<H::Digest>,
-) -> Result<bitmap::MerkleizedAuthenticatedBitMap<E, H::Digest, N>, Error>
+) -> Result<bitmap::MerkleizedBitMap<E, H::Digest, N>, Error>
 where
     E: Storage + Clock + Metrics,
     H: Hasher,
