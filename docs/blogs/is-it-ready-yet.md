@@ -24,7 +24,9 @@ How do you communicate what's ready without documentation that rots the moment y
 
 [1] It just works. [2] Its obviously compatible (and well-tested).
 
-Exponential blowup in versions. It compiles doesn't mean its tested. And while it "should" work, we want to be clear about what has been tested and what has not.
+Exponential blowup in combinations. It compiles doesn't mean its tested. And while it "should" work, we want to be clear about what has been tested and what has not.
+
+Switching to calendar versioning (YYYY.M.patch).
 
 ## Using the Compiler to Enforce Stability
 
@@ -82,12 +84,6 @@ The core building blocks are ready:
 - **parallel** - parallel execution helpers
 
 This isn't a collection of experiments. These primitives power [Alto](https://github.com/commonwarexyz/alto), our reference blockchain implementation. They've been tested under adversarial conditions, fuzzed extensively, and optimized for performance.
-
-## Date Versioning
-
-We're also moving to date-based versions: `v2026.1.30`.
-
-Primitives evolve at their own pace. We add new ones when they're ready. We stabilize existing ones when they've proven themselves. The stability level tells you what's ready - the version just tells you when it was released.
 
 ## What's Next
 
