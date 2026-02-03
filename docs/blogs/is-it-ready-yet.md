@@ -16,7 +16,7 @@ The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over
 
 How do you communicate what's ready without documentation that rots the moment you publish it?
 
-## Avoiding the Temptation to use Semantic Versioning
+## Obvious Compatibility
 
 The obvious answer is semantic versioning. Slap a version number on each primitive, publish them as separate crates, and let Cargo sort it out. `1.0` means stable. `0.x` means experimental. It just works.
 
