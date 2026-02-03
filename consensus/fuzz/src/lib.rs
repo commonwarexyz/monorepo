@@ -646,7 +646,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 (certificate_sender_primary, certificate_receiver_primary),
                 (resolver_sender_primary, resolver_receiver_primary),
             );
-            reporters.push(reporter);
 
             // Secondary: Disrupter
             let mutator_label = format!("twin_{idx}_secondary");
