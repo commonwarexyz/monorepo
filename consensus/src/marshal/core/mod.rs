@@ -37,12 +37,10 @@
 //! `buffered::Mailbox` as the buffer. For coding mode, use
 //! [`crate::marshal::coding::Coding`] as the variant and `shards::Mailbox` as the buffer.
 
-#![allow(dead_code)]
-
 mod actor;
 pub use actor::Actor;
 
-mod cache;
+pub(crate) mod cache;
 
 mod mailbox;
 pub use mailbox::Mailbox;

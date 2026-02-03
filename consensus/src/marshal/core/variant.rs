@@ -6,8 +6,6 @@
 //! - [`Variant`]: Describes the types used by a marshal variant (standard vs coding)
 //! - [`BlockBuffer`]: Abstracts over block dissemination strategies (whole blocks vs shards)
 
-#![allow(dead_code)]
-
 use crate::Block;
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Committable, Digest, Digestible};
