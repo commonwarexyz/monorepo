@@ -49,7 +49,7 @@ mod key_exchange;
 use key_exchange::{EphemeralPublicKey, SecretKey};
 
 mod cipher;
-pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
+pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD, TAG_SIZE};
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
