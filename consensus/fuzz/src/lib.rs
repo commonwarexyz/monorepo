@@ -8,7 +8,7 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
-    utils::{link_peers, max_faults, register, Action, Partition},
+    utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
@@ -24,18 +24,19 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     certificate::{mocks::Fixture, Scheme},
+    ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
     Sha256,
 };
 use commonware_p2p::{
-    simulated::{Config as NetworkConfig, Link, Network, SplitOrigin, SplitTarget},
+    simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
     Recipients,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, Faults, N3f1, NZUsize, NZU16};
 use futures::future::join_all;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
@@ -44,6 +45,7 @@ pub use simplex::{
 };
 use std::{
     cell::RefCell,
+    collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,
@@ -60,21 +62,39 @@ const MIN_REQUIRED_CONTAINERS: u64 = 5;
 const MAX_REQUIRED_CONTAINERS: u64 = 50;
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
-// 4 nodes, 1 faulty, 3 correct
-const N4C3F1: (u32, u32, u32) = (4, 1, 3);
-// 3 nodes, 1 faulty, 2 correct
-const N3C2F1: (u32, u32, u32) = (3, 1, 2);
-// 3 nodes, 2 faulty, 1 correct
-const N4C1F3: (u32, u32, u32) = (4, 3, 1);
 const MAX_RAW_BYTES: usize = 4096;
 
-async fn setup_degraded_network<P, E>(
-    oracle: &mut commonware_p2p::simulated::Oracle<P, E>,
-    participants: &[P],
-) where
-    P: commonware_cryptography::PublicKey,
-    E: Clock,
-{
+/// Network configuration for fuzz testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Configuration {
+    /// Total number of nodes.
+    pub n: u32,
+    /// Number of faulty (Byzantine) nodes.
+    pub faults: u32,
+    /// Number of correct (honest) nodes.
+    pub correct: u32,
+}
+
+impl Configuration {
+    pub const fn new(n: u32, faults: u32, correct: u32) -> Self {
+        Self { n, faults, correct }
+    }
+
+    /// Returns true if this configuration can make progress (liveness).
+    pub fn can_finalize(&self) -> bool {
+        N3f1::max_faults(self.n) == self.faults
+    }
+}
+
+/// 4 nodes, 1 faulty, 3 correct (standard BFT config)
+pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
+/// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
+pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
+
+async fn setup_degraded_network<E: Clock>(
+    oracle: &mut Oracle<Ed25519PublicKey, E>,
+    participants: &[Ed25519PublicKey],
+) {
     let Some(victim) = participants.last() else {
         return;
     };
@@ -109,7 +129,7 @@ pub struct FuzzInput {
     pub degraded_network: bool,
     offset: RefCell<usize>,
     rng: RefCell<StdRng>,
-    pub configuration: (u32, u32, u32),
+    pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
 }
@@ -167,14 +187,13 @@ impl Arbitrary<'_> for FuzzInput {
         };
 
         let configuration = match u.int_in_range(1..=100)? {
-            1..=90 => N4C3F1,  // 90%
-            91..=95 => N3C2F1, // 5%
-            _ => N4C1F3,       // 5%
+            1..=95 => N4F1C3, // 95%
+            _ => N4F3C1,      // 5%
         };
 
         // Bias degraded networking - 1%
         let degraded_network_node = partition == Partition::Connected
-            && configuration == N4C3F1
+            && configuration == N4F1C3
             && u.int_in_range(0..=99)? == 1;
 
         let required_containers =
@@ -226,162 +245,224 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
+type NetworkChannels = (
+    (
+        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
+    ),
+    (
+        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
+    ),
+    (
+        commonware_p2p::simulated::Sender<Ed25519PublicKey, deterministic::Context>,
+        commonware_p2p::simulated::Receiver<Ed25519PublicKey>,
+    ),
+);
+
+/// Common setup for fuzz tests: network, participants, links.
+async fn setup_network<P: simplex::Simplex>(
+    context: &mut deterministic::Context,
+    input: &FuzzInput,
+) -> (
+    Oracle<Ed25519PublicKey, deterministic::Context>,
+    Vec<Ed25519PublicKey>,
+    Vec<P::Scheme>,
+    HashMap<Ed25519PublicKey, NetworkChannels>,
+) {
+    let (network, mut oracle) = Network::new(
+        context.with_label("network"),
+        NetworkConfig {
+            max_size: 1024 * 1024,
+            disconnect_on_block: false,
+            tracked_peer_sets: None,
+        },
+    );
+    network.start();
+
+    let Fixture {
+        participants,
+        schemes,
+        verifier: _,
+        ..
+    } = P::fixture(context, NAMESPACE, input.configuration.n);
+
+    let registrations = register(&mut oracle, &participants).await;
+
+    let link = Link {
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(1),
+        success_rate: 1.0,
+    };
+    link_peers(
+        &mut oracle,
+        &participants,
+        Action::Link(link),
+        input.partition.filter(),
+    )
+    .await;
+
+    if input.partition == Partition::Connected
+        && input.configuration == N4F1C3
+        && input.degraded_network
+    {
+        setup_degraded_network(&mut oracle, &participants).await;
+    }
+
+    (oracle, participants, schemes, registrations)
+}
+
+/// Spawn a Disrupter for a Byzantine node.
+fn spawn_disrupter<P: simplex::Simplex>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    input: &FuzzInput,
+    channels: NetworkChannels,
+) {
+    let (vote_network, certificate_network, resolver_network) = channels;
+    let disrupter_context = context.with_label("disrupter");
+    match input.strategy {
+        StrategyChoice::SmallScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => {
+            let disrupter = Disrupter::new(
+                disrupter_context,
+                scheme,
+                input.clone(),
+                SmallScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                },
+            );
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+        StrategyChoice::AnyScope => {
+            let disrupter = Disrupter::new(disrupter_context, scheme, input.clone(), AnyScope);
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+        StrategyChoice::FutureScope {
+            fault_rounds,
+            fault_rounds_bound,
+        } => {
+            let disrupter = Disrupter::new(
+                disrupter_context,
+                scheme,
+                input.clone(),
+                FutureScope {
+                    fault_rounds,
+                    fault_rounds_bound,
+                },
+            );
+            disrupter.start(vote_network, certificate_network, resolver_network);
+        }
+    }
+}
+
+/// Spawn an honest validator with application, reporter, and engine.
+fn spawn_honest_validator<P: simplex::Simplex>(
+    context: deterministic::Context,
+    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
+    participants: &[Ed25519PublicKey],
+    scheme: P::Scheme,
+    validator: Ed25519PublicKey,
+    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
+    channels: NetworkChannels,
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    let elector = P::Elector::default();
+    let reporter_cfg = reporter::Config {
+        participants: participants.try_into().expect("public keys are unique"),
+        scheme: scheme.clone(),
+        elector: elector.clone(),
+    };
+    let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+    let (pending, recovered, resolver) = channels;
+
+    let app_cfg = application::Config {
+        hasher: Sha256::default(),
+        relay,
+        me: validator.clone(),
+        propose_latency: (10.0, 5.0),
+        verify_latency: (10.0, 5.0),
+        certify_latency: (10.0, 5.0),
+        should_certify: application::Certifier::Sometimes,
+    };
+    let (actor, application) =
+        application::Application::new(context.with_label("application"), app_cfg);
+    actor.start();
+
+    let blocker = oracle.control(validator.clone());
+    let engine_cfg = config::Config {
+        blocker,
+        scheme,
+        elector,
+        automaton: application.clone(),
+        relay: application.clone(),
+        reporter: reporter.clone(),
+        partition: validator.to_string(),
+        mailbox_size: 1024,
+        epoch: Epoch::new(EPOCH),
+        leader_timeout: Duration::from_secs(1),
+        notarization_timeout: Duration::from_secs(2),
+        nullify_retry: Duration::from_secs(10),
+        fetch_timeout: Duration::from_secs(1),
+        activity_timeout: Delta::new(10),
+        skip_timeout: Delta::new(5),
+        fetch_concurrent: 1,
+        replay_buffer: NZUsize!(1024 * 1024),
+        write_buffer: NZUsize!(1024 * 1024),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        strategy: Sequential,
+    };
+    let engine = Engine::new(context.with_label("engine"), engine_cfg);
+    engine.start(pending, recovered, resolver);
+
+    reporter
+}
+
 fn run<P: simplex::Simplex>(input: FuzzInput) {
-    let (n, f, _) = input.configuration;
-    let required_containers = input.required_containers;
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (network, mut oracle) = Network::new(
-            context.with_label("network"),
-            NetworkConfig {
-                max_size: 1024 * 1024,
-                disconnect_on_block: false,
-                tracked_peer_sets: None,
-            },
-        );
-        network.start();
-
-        let Fixture {
-            participants,
-            schemes,
-            verifier: _,
-            ..
-        } = P::fixture(&mut context, NAMESPACE, n);
-
-        let mut registrations = register(&mut oracle, &participants).await;
-
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        link_peers(
-            &mut oracle,
-            &participants,
-            Action::Link(link),
-            input.partition.filter(),
-        )
-        .await;
-
-        if input.partition == Partition::Connected
-            && input.configuration == N4C3F1
-            && input.degraded_network
-        {
-            setup_degraded_network(&mut oracle, &participants).await;
-        }
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
 
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
+        let config = input.configuration;
 
-        for i in 0..f as usize {
-            let scheme = schemes[i].clone();
+        // Spawn Byzantine nodes (Disrupters only)
+        for i in 0..config.faults as usize {
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator_{validator}"));
-
-            let (vote_network, certificate_network, resolver_network) =
-                registrations.remove(&validator).unwrap();
-            let disrupter_context = context.with_label("disrupter");
-            match input.strategy {
-                StrategyChoice::SmallScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                } => {
-                    let disrupter = Disrupter::new(
-                        disrupter_context,
-                        scheme,
-                        input.clone(),
-                        SmallScope {
-                            fault_rounds,
-                            fault_rounds_bound,
-                        },
-                    );
-                    disrupter.start(vote_network, certificate_network, resolver_network);
-                }
-                StrategyChoice::AnyScope => {
-                    let disrupter =
-                        Disrupter::new(disrupter_context, scheme, input.clone(), AnyScope);
-                    disrupter.start(vote_network, certificate_network, resolver_network);
-                }
-                StrategyChoice::FutureScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                } => {
-                    let disrupter = Disrupter::new(
-                        disrupter_context,
-                        scheme,
-                        input.clone(),
-                        FutureScope {
-                            fault_rounds,
-                            fault_rounds_bound,
-                        },
-                    );
-                    disrupter.start(vote_network, certificate_network, resolver_network);
-                }
-            }
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
         }
 
-        for i in (f as usize)..(n as usize) {
+        // Spawn honest validators
+        for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
-            let context = context.with_label(&format!("validator_{validator}"));
-            let elector = P::Elector::default();
-            let reporter_cfg = reporter::Config {
-                participants: participants
-                    .clone()
-                    .try_into()
-                    .expect("public keys are unique"),
-                scheme: schemes[i].clone(),
-                elector: elector.clone(),
-            };
-            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            reporters.push(reporter.clone());
-
-            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
-
-            let app_cfg = application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: validator.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-                certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                application::Application::new(context.with_label("application"), app_cfg);
-            actor.start();
-
-            let blocker = oracle.control(validator.clone());
-            let engine_cfg = config::Config {
-                blocker,
-                scheme: schemes[i].clone(),
-                elector,
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: validator.to_string(),
-                mailbox_size: 1024,
-                epoch: Epoch::new(EPOCH),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: Delta::new(10),
-                skip_timeout: Delta::new(5),
-                fetch_concurrent: 1,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
-            };
-            let engine = Engine::new(context.with_label("engine"), engine_cfg);
-            engine.start(pending, recovered, resolver);
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            let reporter = spawn_honest_validator::<P>(
+                ctx,
+                &oracle,
+                &participants,
+                schemes[i].clone(),
+                validator,
+                relay.clone(),
+                channels,
+            );
+            reporters.push(reporter);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        // Wait for finalization or timeout
+        if input.partition == Partition::Connected && config.can_finalize() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
+                let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest.get() < required_containers {
@@ -395,61 +476,26 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters);
-        invariants::check::<P>(n, states);
+        invariants::check::<P>(config.n, states);
     });
 }
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
-    let (n, f, _) = input.configuration;
-    let required_containers = input.required_containers;
     let cfg = deterministic::Config::new().with_seed(input.seed);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (network, mut oracle) = Network::new(
-            context.with_label("network"),
-            NetworkConfig {
-                max_size: 1024 * 1024,
-                disconnect_on_block: false,
-                tracked_peer_sets: None,
-            },
-        );
-        network.start();
-
-        let Fixture {
-            participants,
-            schemes,
-            verifier: _,
-            ..
-        } = P::fixture(&mut context, NAMESPACE, n);
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
-        let mut registrations = register(&mut oracle, participants.as_ref()).await;
-
-        let link = Link {
-            latency: Duration::from_millis(10),
-            jitter: Duration::from_millis(1),
-            success_rate: 1.0,
-        };
-        link_peers(
-            &mut oracle,
-            participants.as_ref(),
-            Action::Link(link),
-            input.partition.filter(),
-        )
-        .await;
-
-        if input.partition == Partition::Connected
-            && input.configuration == N4C3F1
-            && input.degraded_network
-        {
-            setup_degraded_network(&mut oracle, participants.as_ref()).await;
-        }
 
         let strategy = Strategy::View;
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
+        let config = input.configuration;
 
-        for (idx, validator) in participants.iter().enumerate().take(f as usize) {
+        // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
+        for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
             let context = context.with_label(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
@@ -543,6 +589,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     make_resolver_router(),
                 );
 
+            // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
             let primary_context = context.with_label(&primary_label);
             let primary_elector = P::Elector::default();
@@ -600,6 +647,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 (resolver_sender_primary, resolver_receiver_primary),
             );
 
+            // Secondary: Disrupter
             let mutator_label = format!("twin_{idx}_secondary");
             let mutator_context = context.with_label(&mutator_label);
             let disrupter_context = mutator_context.with_label("disrupter");
@@ -654,67 +702,29 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             }
         }
 
-        for (idx, validator) in participants.iter().enumerate().skip(f as usize) {
-            let context = context.with_label(&format!("honest_{idx}"));
-            let elector = P::Elector::default();
-            let reporter_cfg = reporter::Config {
-                participants: participants
-                    .as_ref()
-                    .try_into()
-                    .expect("public keys are unique"),
-                scheme: schemes[idx].clone(),
-                elector: elector.clone(),
-            };
-            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-            reporters.push(reporter.clone());
-
-            let (pending, recovered, resolver) = registrations
+        // Spawn honest validators
+        for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
+            let ctx = context.with_label(&format!("honest_{idx}"));
+            let channels = registrations
                 .remove(validator)
                 .expect("validator should be registered");
-
-            let app_cfg = application::Config {
-                hasher: Sha256::default(),
-                relay: relay.clone(),
-                me: validator.clone(),
-                propose_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-                certify_latency: (10.0, 5.0),
-                should_certify: application::Certifier::Sometimes,
-            };
-            let (actor, application) =
-                application::Application::new(context.with_label("application"), app_cfg);
-            actor.start();
-
-            let blocker = oracle.control(validator.clone());
-            let engine_cfg = config::Config {
-                blocker,
-                scheme: schemes[idx].clone(),
-                elector,
-                automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
-                partition: validator.to_string(),
-                mailbox_size: 1024,
-                epoch: Epoch::new(EPOCH),
-                leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
-                activity_timeout: Delta::new(10),
-                skip_timeout: Delta::new(5),
-                fetch_concurrent: 1,
-                replay_buffer: NZUsize!(1024 * 1024),
-                write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                strategy: Sequential,
-            };
-            let engine = Engine::new(context.with_label("engine"), engine_cfg);
-            engine.start(pending, recovered, resolver);
+            let reporter = spawn_honest_validator::<P>(
+                ctx,
+                &oracle,
+                participants.as_ref(),
+                schemes[idx].clone(),
+                validator.clone(),
+                relay.clone(),
+                channels,
+            );
+            reporters.push(reporter);
         }
 
-        if input.partition == Partition::Connected && max_faults(n) == f {
+        // Wait for finalization or timeout
+        if input.partition == Partition::Connected && config.can_finalize() {
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut() {
+                let required_containers = input.required_containers;
                 let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest.get() < required_containers {
@@ -728,7 +738,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         }
 
         let states = invariants::extract(reporters);
-        invariants::check::<P>(n, states);
+        invariants::check::<P>(config.n, states);
     });
 }
 
