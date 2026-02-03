@@ -144,9 +144,9 @@ check-stability *args='':
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
     if [ -z "$level" ]; then
-        for l in 1 2 3 4; do
-            echo "Checking commonware_stability_${LEVEL_NAMES[$l]}..."
-            COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$l]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$l]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+        for name in "${LEVEL_NAMES[@]:1}"; do
+            echo "Checking commonware_stability_${name}..."
+            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
         done
         echo "All stability levels pass!"
     else
