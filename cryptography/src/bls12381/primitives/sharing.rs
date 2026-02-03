@@ -3,7 +3,10 @@ use crate::bls12381::primitives::{group::Scalar, variant::Variant, Error};
 use alloc::sync::Arc;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_math::poly::{Interpolator, Poly};
+use commonware_math::{
+    algebra::{FieldNTT, Ring},
+    poly::{Interpolator, Poly},
+};
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 #[cfg(feature = "std")]
@@ -19,9 +22,16 @@ use std::sync::{Arc, OnceLock};
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Mode {
-    // TODO (https://github.com/commonware-xyz/monorepo/issues/1836): Add a mode for sub O(N^2) interpolation
     #[default]
     NonZeroCounter = 0,
+
+    /// Assigns participants to powers of a root of unity, enabling O(n log n) interpolation.
+    ///
+    /// Participant i is assigned to w^i where w is a primitive n-th root of unity
+    /// (with n being the smallest power of 2 >= total).
+    ///
+    /// This mode enables sub-quadratic interpolation using NTT-based algorithms.
+    RootsOfUnity = 1,
 }
 
 impl Mode {
@@ -36,6 +46,15 @@ impl Mode {
             Self::NonZeroCounter => {
                 // Adding 1 is critical, because f(0) will contain the secret.
                 Some(Scalar::from_u64(i.get() as u64 + 1))
+            }
+            Self::RootsOfUnity => {
+                // We use the coset w^1, w^2, ..., w^n (avoiding w^0 = 1 where the secret lives).
+                // Participant i gets w^(i+1).
+                let size = (total.get() as u64).next_power_of_two();
+                let lg_size = size.ilog2() as u8;
+                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
+                // w^(i+1) = w * w^i
+                Some(w.exp(&[i.get() as u64 + 1]))
             }
         }
     }
@@ -62,22 +81,53 @@ impl Mode {
         indices: &Set<I>,
         to_index: impl Fn(&I) -> Option<Participant>,
     ) -> Option<Interpolator<I, Scalar>> {
-        let mut count = 0;
-        let iter = indices
-            .iter()
-            .filter_map(|i| {
-                let scalar = self.scalar(total, to_index(i)?)?;
-                Some((i.clone(), scalar))
-            })
-            .inspect(|_| {
-                count += 1;
-            });
-        let out = Interpolator::new(iter);
-        // If any indices failed to produce a scalar, reject.
-        if count != indices.len() {
-            return None;
+        match self {
+            Self::NonZeroCounter => {
+                let mut count = 0;
+                let iter = indices
+                    .iter()
+                    .filter_map(|i| {
+                        let scalar = self.scalar(total, to_index(i)?)?;
+                        Some((i.clone(), scalar))
+                    })
+                    .inspect(|_| {
+                        count += 1;
+                    });
+                let out = Interpolator::new(iter);
+                if count != indices.len() {
+                    return None;
+                }
+                Some(out)
+            }
+            Self::RootsOfUnity => {
+                // For roots of unity mode, we use the fast O(n log n) interpolation.
+                // We need to map each index I to the exponent k such that the evaluation
+                // point is w^(k+1) (since participant i maps to w^(i+1)).
+                let size = (total.get() as u64).next_power_of_two();
+                let ntt_total = NZU32!(size as u32);
+
+                let mut count = 0;
+                let points: Vec<(I, u32)> = indices
+                    .iter()
+                    .filter_map(|i| {
+                        let participant = to_index(i)?;
+                        if participant.get() >= total.get() {
+                            return None;
+                        }
+                        count += 1;
+                        // Map participant i to exponent (i+1) mod size.
+                        // The evaluation point is w^(i+1).
+                        Some((i.clone(), participant.get() + 1))
+                    })
+                    .collect();
+
+                if count != indices.len() {
+                    return None;
+                }
+
+                Some(Interpolator::roots_of_unity(ntt_total, points))
+            }
         }
-        Some(out)
     }
 
     /// Create an interpolator for this mode, given a set, and a subset.
@@ -122,6 +172,7 @@ impl Read for Mode {
         let tag: u8 = ReadExt::read(buf)?;
         match tag {
             0 => Ok(Self::NonZeroCounter),
+            1 => Ok(Self::RootsOfUnity),
             o => Err(commonware_codec::Error::InvalidEnum(o)),
         }
     }
@@ -294,8 +345,9 @@ mod fuzz {
 
     impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            match u.int_in_range(0u8..=0)? {
+            match u.int_in_range(0u8..=1)? {
                 0 => Ok(Self::NonZeroCounter),
+                1 => Ok(Self::RootsOfUnity),
                 _ => Err(arbitrary::Error::IncorrectFormat),
             }
         }
