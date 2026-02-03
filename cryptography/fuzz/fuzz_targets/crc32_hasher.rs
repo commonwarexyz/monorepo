@@ -20,10 +20,14 @@ enum Operation {
     ResetFunctionality(Vec<Vec<u8>>),
     /// Chunked hashing matches all-at-once.
     ChunkedVsWhole(Vec<Vec<u8>>),
+    /// Static hash method matches reference.
+    DiffHash(Vec<u8>),
     /// Codec roundtrip.
     EncodeDecode(Vec<u8>),
     /// u32 conversion roundtrip.
     DigestU32Roundtrip(Vec<u8>),
+    /// Determinism and Debug/Display formatting.
+    Determinism(Vec<Vec<u8>>),
 }
 
 fn fuzz_basic_hashing(chunks: &[Vec<u8>]) {
@@ -105,18 +109,39 @@ fn fuzz_digest_u32_roundtrip(data: &[u8]) {
     assert_eq!(digest.as_u32(), ref_checksum);
 }
 
-fn fuzz(operations: Vec<Operation>) {
-    for op in operations {
-        match op {
-            Operation::BasicHashing(chunks) => fuzz_basic_hashing(&chunks),
-            Operation::ResetFunctionality(chunks) => fuzz_reset_functionality(&chunks),
-            Operation::ChunkedVsWhole(chunks) => fuzz_chunked_vs_whole(&chunks),
-            Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
-            Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
-        }
-    }
+fn fuzz_diff_hash(data: &[u8]) {
+    let our_hash_result = OurCrc32::hash(data);
+    let ref_result = CRC32C_REF.checksum(data);
+    assert_eq!(our_hash_result.as_u32(), ref_result);
 }
 
-fuzz_target!(|operations: Vec<Operation>| {
-    fuzz(operations);
+fn fuzz_determinism(chunks: &[Vec<u8>]) {
+    // Two fresh hashers with same input produce identical output
+    let mut hasher1 = OurCrc32::default();
+    let mut hasher2 = OurCrc32::default();
+    for chunk in chunks {
+        hasher1.update(chunk);
+        hasher2.update(chunk);
+    }
+    let digest1 = hasher1.finalize();
+    let digest2 = hasher2.finalize();
+    assert_eq!(digest1, digest2);
+
+    // Debug and Display produce identical hex output
+    let debug_str = format!("{digest1:?}");
+    let display_str = format!("{digest1}");
+    assert_eq!(debug_str, display_str);
+    assert_eq!(debug_str.len(), 8); // 4 bytes * 2 hex chars
+}
+
+fuzz_target!(|op: Operation| {
+    match op {
+        Operation::BasicHashing(chunks) => fuzz_basic_hashing(&chunks),
+        Operation::ResetFunctionality(chunks) => fuzz_reset_functionality(&chunks),
+        Operation::ChunkedVsWhole(chunks) => fuzz_chunked_vs_whole(&chunks),
+        Operation::DiffHash(data) => fuzz_diff_hash(&data),
+        Operation::EncodeDecode(data) => fuzz_encode_decode(&data),
+        Operation::DigestU32Roundtrip(data) => fuzz_digest_u32_roundtrip(&data),
+        Operation::Determinism(chunks) => fuzz_determinism(&chunks),
+    }
 });
