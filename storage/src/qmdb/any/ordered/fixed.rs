@@ -55,8 +55,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+            let mut dirty_log = log.into_dirty();
+            dirty_log
+                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await?;
+            log = dirty_log.merkleize();
             log.sync().await?;
         }
 

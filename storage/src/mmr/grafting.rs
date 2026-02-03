@@ -529,7 +529,9 @@ impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> Stora
 mod tests {
     use super::*;
     use crate::mmr::{
-        conformance::build_test_mmr, mem::CleanMmr, verification, Position, StandardHasher,
+        conformance::build_test_mmr,
+        mem::{CleanMmr, DirtyMmr},
+        verification, Position, StandardHasher,
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
@@ -697,19 +699,19 @@ mod tests {
             let mut standard: StandardHasher<Sha256> = StandardHasher::new();
 
             // Make a base MMR with 4 leaves.
-            let mut base_mmr = CleanMmr::new(&mut standard);
+            let mut base_mmr = DirtyMmr::new();
             base_mmr.add(&mut standard, &b1);
             base_mmr.add(&mut standard, &b2);
             base_mmr.add(&mut standard, &b3);
             base_mmr.add(&mut standard, &b4);
+            let base_mmr = base_mmr.merkleize(&mut standard, None);
 
             let p1 = Sha256::fill(0xF1);
             let p2 = Sha256::fill(0xF2);
 
             // Since we are using grafting height of 1, peak tree must have half the leaves of the
             // base (2).
-            let mut peak_tree = CleanMmr::new(&mut standard);
-            {
+            let peak_tree = {
                 let mut grafter = Hasher::new(&mut standard, GRAFTING_HEIGHT);
                 grafter
                     .load_grafted_digests(
@@ -718,9 +720,11 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                let mut peak_tree = DirtyMmr::new();
                 peak_tree.add(&mut grafter, &p1);
                 peak_tree.add(&mut grafter, &p2);
-            }
+                peak_tree.merkleize(&mut grafter, None)
+            };
 
             let peak_root = *peak_tree.root();
             let base_root = *base_mmr.root();
@@ -903,7 +907,9 @@ mod tests {
             // Add one more leaf to our base MMR, which will not have any corresponding peak tree
             // leaf since it will have no ancestors at or above the grafting height.
             let b5 = Sha256::fill(0x05);
+            let mut base_mmr = base_mmr.into_dirty();
             base_mmr.add(&mut standard, &b5);
+            let base_mmr = base_mmr.merkleize(&mut standard, None);
 
             let grafted_mmr = Storage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
             assert_eq!(grafted_mmr.size(), base_mmr.size());

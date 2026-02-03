@@ -689,7 +689,10 @@ where
 mod tests {
     use super::*;
     use crate::mmr::{
-        hasher::Standard, location::LocationRangeExt as _, mem::CleanMmr, MAX_LOCATION,
+        hasher::Standard,
+        location::LocationRangeExt as _,
+        mem::{CleanMmr, DirtyMmr},
+        MAX_LOCATION,
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -744,10 +747,11 @@ mod tests {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let element = Digest::from(*b"01234567012345670123456701234567");
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
         for _ in 0..11 {
             mmr.add(&mut hasher, &element);
         }
+        let mmr = mmr.merkleize(&mut hasher, None);
         let root = mmr.root();
 
         // confirm the proof of inclusion for each leaf successfully verifies
@@ -833,12 +837,13 @@ mod tests {
     fn test_proving_verify_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
         let mut elements = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
         }
+        let mmr = mmr.merkleize(&mut hasher, None);
         // test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root();
 
@@ -958,12 +963,13 @@ mod tests {
     fn test_proving_retained_nodes_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
         let mut elements = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
         }
+        let mut mmr = mmr.merkleize(&mut hasher, None);
 
         // Confirm we can successfully prove all retained elements in the MMR after pruning.
         let root = *mmr.root();
@@ -992,12 +998,13 @@ mod tests {
     fn test_proving_ranges_provable_after_pruning() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
         let mut elements = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
         }
+        let mut mmr = mmr.merkleize(&mut hasher, None);
 
         // prune up to the first peak
         const PRUNE_POS: Position = Position::new(62);
@@ -1027,10 +1034,12 @@ mod tests {
 
         // Add a few more nodes, prune again, and test again to make sure repeated pruning doesn't
         // break proof verification.
+        let mut mmr = mmr.into_dirty();
         for i in 0..37 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
         }
+        let mut mmr = mmr.merkleize(&mut hasher, None);
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
         assert_eq!(mmr.bounds().start, 130);
 
@@ -1053,12 +1062,13 @@ mod tests {
     fn test_proving_proof_serialization() {
         // create a new MMR and add a non-trivial amount of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
         let mut elements = Vec::new();
         for i in 0..25 {
             elements.push(test_digest(i));
             mmr.add(&mut hasher, elements.last().unwrap());
         }
+        let mmr = mmr.merkleize(&mut hasher, None);
 
         // Generate proofs over all possible ranges of elements and confirm each
         // serializes=>deserializes correctly.
@@ -1125,12 +1135,13 @@ mod tests {
         for num_elements in 1u64..255 {
             // Build MMR with the specified number of elements
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mut mmr = DirtyMmr::new();
 
             for i in 0..num_elements {
                 let digest = test_digest(i as u8);
                 mmr.add(&mut hasher, &digest);
             }
+            let mmr = mmr.merkleize(&mut hasher, None);
 
             // Test pruning to each leaf.
             for leaf in 0..num_elements {
@@ -1204,13 +1215,14 @@ mod tests {
     fn test_proving_extract_pinned_nodes_invalid_size() {
         // Test that extract_pinned_nodes returns an error for invalid MMR size
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
 
         // Build MMR with 10 elements
         for i in 0..10 {
             let digest = test_digest(i);
             mmr.add(&mut hasher, &digest);
         }
+        let mmr = mmr.merkleize(&mut hasher, None);
 
         // Generate a valid proof
         let range = Location::new_unchecked(5)..Location::new_unchecked(8);
@@ -1229,13 +1241,14 @@ mod tests {
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut mmr = DirtyMmr::new();
         let mut elements = Vec::new();
         let mut element_positions = Vec::new();
         for i in 0..49 {
             elements.push(test_digest(i));
             element_positions.push(mmr.add(&mut hasher, elements.last().unwrap()));
         }
+        let mmr = mmr.merkleize(&mut hasher, None);
         let root = mmr.root();
 
         // Test 1: compute_digests over the entire range should contain a digest for every node
@@ -1348,13 +1361,14 @@ mod tests {
     fn test_proving_multi_proof_generation_and_verify() {
         // Create an MMR with multiple elements
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut dirty_mmr = DirtyMmr::new();
         let mut elements = Vec::new();
 
         for i in 0..20 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, &elements[i as usize]);
+            dirty_mmr.add(&mut hasher, &elements[i as usize]);
         }
+        let mmr = dirty_mmr.merkleize(&mut hasher, None);
 
         let root = mmr.root();
 
@@ -1494,14 +1508,15 @@ mod tests {
     #[test]
     fn test_proving_multi_proof_deduplication() {
         let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = CleanMmr::new(&mut hasher);
+        let mut dirty_mmr = DirtyMmr::new();
         let mut elements = Vec::new();
 
         // Create an MMR with enough elements to have shared digests
         for i in 0..30 {
             elements.push(test_digest(i));
-            mmr.add(&mut hasher, &elements[i as usize]);
+            dirty_mmr.add(&mut hasher, &elements[i as usize]);
         }
+        let mmr = dirty_mmr.merkleize(&mut hasher, None);
 
         // Get individual proofs that will share some digests (elements in same subtree)
         let proof1 = mmr.proof(Location::new_unchecked(0)).unwrap();

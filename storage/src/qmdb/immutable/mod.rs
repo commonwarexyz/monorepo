@@ -278,7 +278,9 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            journal.append(Operation::Commit(None)).await?;
+            let mut dirty_journal = journal.into_dirty();
+            dirty_journal.append(Operation::Commit(None)).await?;
+            journal = dirty_journal.merkleize();
             journal.sync().await?;
         }
 

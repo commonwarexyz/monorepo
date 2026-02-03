@@ -51,8 +51,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+            let mut dirty_log = log.into_dirty();
+            dirty_log
+                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await?;
+            log = dirty_log.merkleize();
             log.sync().await?;
         }
 
@@ -446,7 +449,9 @@ pub(crate) mod test {
             assert_eq!(min_ops, ops[0..3]);
 
             // Can't destroy the db unless it's durable, so we need to commit first.
+            let single_db = single_db.into_mutable();
             let (single_db, _) = single_db.commit(None).await.unwrap();
+            let single_db = single_db.into_merkleized();
             single_db.destroy().await.unwrap();
 
             db.destroy().await.unwrap();
@@ -505,7 +510,9 @@ pub(crate) mod test {
                     &ref_root
                 ));
 
+                let ref_db = ref_db.into_mutable();
                 let (ref_db, _) = ref_db.commit(None).await.unwrap();
+                let ref_db = ref_db.into_merkleized();
                 ref_db.destroy().await.unwrap();
             }
 
