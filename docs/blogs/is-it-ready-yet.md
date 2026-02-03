@@ -1,6 +1,6 @@
 ---
 title: "Is it ready yet?"
-description: "TBD"
+description: "How compiler-enforced stability levels help you know what's production-ready in the Commonware Library."
 date: "February 3rd, 2026"
 published-time: "2026-02-03T00:00:00Z"
 modified-time: "2026-02-03T00:00:00Z"
@@ -12,21 +12,19 @@ image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 
 As we've added more and more primitives to the Commonware Library, it's become increasingly difficult to keep track of what is "ready" and what is not (especially when you consider primitive dependencies).
 
-TODO: how to anticipate the "why didn't you just break it into more crates" argument?
-* Even if you broke every primitive into its own crate, you may still have features at different stability levels in a single crate.
-* Have a singular `commonware` that linked to all versions that was published?
-
 The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives (and primitive dialects). Some have been battle-tested for over a year. Others landed last week. More will be added next month.
 
 How do you communicate what's ready without documentation that rots the moment you publish it?
 
 ## Avoiding the Temptation to use Semantic Versioning
 
-[1] It just works. [2] Its obviously compatible (and well-tested).
+The obvious answer is semantic versioning. Slap a version number on each primitive, publish them as separate crates, and let Cargo sort it out. `1.0` means stable. `0.x` means experimental. It just works.
 
-Exponential blowup in combinations. It compiles doesn't mean its tested. And while it "should" work, we want to be clear about what has been tested and what has not.
+Except it doesn't. Even if we broke every primitive into its own crate, features within a single crate can be at different stability levels. And publishing separate crates creates an exponential blowup in version combinations. Just because `cryptography@2.3` compiles with `consensus@1.5` doesn't mean that combination has been tested together. "It compiles" is not the same as "it works."
 
-Switching to calendar versioning (YYYY.M.patch).
+We want to be explicit about what has been tested and what has not. So we're switching to calendar versioning (YYYY.M.patch) for the library as a whole, and using a different mechanism entirely for stability.
+
+You might suggest Cargo features - gate unstable APIs behind an `unstable` feature flag, like Tokio does. But feature flags propagate through the dependency tree. If your crate depends on `commonware-consensus`, and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. With `cfg` flags set via `RUSTFLAGS`, you set your stability threshold once and it applies globally.
 
 ## Using the Compiler to Enforce Stability
 
@@ -52,7 +50,9 @@ Verify stability annotations are internally consistent:
 just check-stability
 ```
 
-This works transitively. If a BETA function internally calls an ALPHA function, that's our problem to fix - not yours to discover in production.
+This works transitively. When CI builds with `--cfg commonware_stability_BETA`, any BETA function that calls an ALPHA function fails to compile - the ALPHA function simply doesn't exist at that stability level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
+
+Cargo features provide the same transitive guarantee, but with the propagation problem mentioned above. Every crate in the dependency chain needs to expose and forward the feature flag. With `cfg` flags via `RUSTFLAGS`, you set your stability threshold once and get uniform enforcement - both within our workspace and when you compile your own code against the library.
 
 ## The Levels
 
