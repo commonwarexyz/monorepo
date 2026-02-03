@@ -32,7 +32,9 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
+};
 use commonware_utils::{channel::mpsc::Receiver, NZUsize, NZU16};
 use futures::future::join_all;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
