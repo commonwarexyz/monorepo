@@ -13,7 +13,7 @@ use std::{
 
 /// Operation types for fault injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FaultOp {
+enum Op {
     Open,
     Read,
     Write,
@@ -27,7 +27,7 @@ enum FaultOp {
 ///
 /// Each rate is a probability from 0.0 (never fail) to 1.0 (always fail).
 #[derive(Clone, Debug, Default)]
-pub struct FaultConfig {
+pub struct Config {
     /// Failure rate for `open_versioned` operations.
     pub open_rate: Option<f64>,
 
@@ -62,17 +62,17 @@ pub struct FaultConfig {
     pub scan_rate: Option<f64>,
 }
 
-impl FaultConfig {
+impl Config {
     /// Get the failure rate for an operation type.
-    fn rate_for(&self, op: FaultOp) -> f64 {
+    fn rate_for(&self, op: Op) -> f64 {
         match op {
-            FaultOp::Open => self.open_rate,
-            FaultOp::Read => self.read_rate,
-            FaultOp::Write => self.write_rate,
-            FaultOp::Sync => self.sync_rate,
-            FaultOp::Resize => self.resize_rate,
-            FaultOp::Remove => self.remove_rate,
-            FaultOp::Scan => self.scan_rate,
+            Op::Open => self.open_rate,
+            Op::Read => self.read_rate,
+            Op::Write => self.write_rate,
+            Op::Sync => self.sync_rate,
+            Op::Resize => self.resize_rate,
+            Op::Remove => self.remove_rate,
+            Op::Scan => self.scan_rate,
         }
         .unwrap_or(0.0)
     }
@@ -134,14 +134,14 @@ impl FaultConfig {
 
 /// Shared fault injection context.
 #[derive(Clone)]
-struct FaultCtx {
+struct Oracle {
     rng: Arc<Mutex<BoxDynRng>>,
-    config: Arc<RwLock<FaultConfig>>,
+    config: Arc<RwLock<Config>>,
 }
 
-impl FaultCtx {
+impl Oracle {
     /// Check if a fault should be injected for the given operation.
-    fn should_fail(&self, op: FaultOp) -> bool {
+    fn should_fail(&self, op: Op) -> bool {
         self.roll(Some(self.config.read().unwrap().rate_for(op)))
     }
 
@@ -149,7 +149,7 @@ impl FaultCtx {
     /// Reads config once to avoid nested lock acquisition.
     fn check_write_fault(&self) -> (bool, Option<f64>) {
         let config = self.config.read().unwrap();
-        let fail = self.roll(Some(config.rate_for(FaultOp::Write)));
+        let fail = self.roll(Some(config.rate_for(Op::Write)));
         (fail, config.partial_write_rate)
     }
 
@@ -157,7 +157,7 @@ impl FaultCtx {
     /// Reads config once to avoid nested lock acquisition.
     fn check_resize_fault(&self) -> (bool, Option<f64>) {
         let config = self.config.read().unwrap();
-        let fail = self.roll(Some(config.rate_for(FaultOp::Resize)));
+        let fail = self.roll(Some(config.rate_for(Op::Resize)));
         (fail, config.partial_resize_rate)
     }
 
@@ -202,15 +202,15 @@ impl FaultCtx {
 #[derive(Clone)]
 pub struct Storage<S: crate::Storage> {
     inner: S,
-    ctx: FaultCtx,
+    ctx: Oracle,
 }
 
 impl<S: crate::Storage> Storage<S> {
     /// Create a new faulty storage wrapper.
-    pub fn new(inner: S, rng: Arc<Mutex<BoxDynRng>>, config: Arc<RwLock<FaultConfig>>) -> Self {
+    pub fn new(inner: S, rng: Arc<Mutex<BoxDynRng>>, config: Arc<RwLock<Config>>) -> Self {
         Self {
             inner,
-            ctx: FaultCtx { rng, config },
+            ctx: Oracle { rng, config },
         }
     }
 
@@ -220,7 +220,7 @@ impl<S: crate::Storage> Storage<S> {
     }
 
     /// Get access to the fault configuration for dynamic modification.
-    pub fn config(&self) -> Arc<RwLock<FaultConfig>> {
+    pub fn config(&self) -> Arc<RwLock<Config>> {
         self.ctx.config.clone()
     }
 }
@@ -239,7 +239,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         name: &[u8],
         versions: std::ops::RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        if self.ctx.should_fail(FaultOp::Open) {
+        if self.ctx.should_fail(Op::Open) {
             return Err(Error::Io(injected_io_error()));
         }
         self.inner
@@ -251,14 +251,14 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        if self.ctx.should_fail(FaultOp::Remove) {
+        if self.ctx.should_fail(Op::Remove) {
             return Err(Error::Io(injected_io_error()));
         }
         self.inner.remove(partition, name).await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        if self.ctx.should_fail(FaultOp::Scan) {
+        if self.ctx.should_fail(Op::Scan) {
             return Err(Error::Io(injected_io_error()));
         }
         self.inner.scan(partition).await
@@ -269,13 +269,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 #[derive(Clone)]
 pub struct Blob<B: crate::Blob> {
     inner: B,
-    ctx: FaultCtx,
+    ctx: Oracle,
     /// Tracked size for partial resize support.
     size: Arc<AtomicU64>,
 }
 
 impl<B: crate::Blob> Blob<B> {
-    fn new(ctx: FaultCtx, inner: B, size: u64) -> Self {
+    fn new(ctx: Oracle, inner: B, size: u64) -> Self {
         Self {
             inner,
             ctx,
@@ -290,7 +290,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        if self.ctx.should_fail(FaultOp::Read) {
+        if self.ctx.should_fail(Op::Read) {
             return Err(Error::Io(injected_io_error()));
         }
         self.inner.read_at(offset, buf.into()).await
@@ -340,7 +340,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if self.ctx.should_fail(FaultOp::Sync) {
+        if self.ctx.should_fail(Op::Sync) {
             return Err(Error::Io(injected_io_error()));
         }
         self.inner.sync().await
@@ -360,15 +360,15 @@ mod tests {
     struct Harness {
         inner: MemStorage,
         storage: Storage<MemStorage>,
-        config: Arc<RwLock<FaultConfig>>,
+        config: Arc<RwLock<Config>>,
     }
 
     impl Harness {
-        fn new(config: FaultConfig) -> Self {
+        fn new(config: Config) -> Self {
             Self::with_seed(42, config)
         }
 
-        fn with_seed(seed: u64, config: FaultConfig) -> Self {
+        fn with_seed(seed: u64, config: Config) -> Self {
             let inner = MemStorage::default();
             let rng = Arc::new(Mutex::new(
                 Box::new(StdRng::seed_from_u64(seed)) as BoxDynRng
@@ -385,13 +385,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_no_faults() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
         run_storage_tests(h.storage).await;
     }
 
     #[tokio::test]
     async fn test_faulty_storage_sync_always_fails() {
-        let h = Harness::new(FaultConfig::default().sync(1.0));
+        let h = Harness::new(Config::default().sync(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec()).await.unwrap();
@@ -401,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_write_always_fails() {
-        let h = Harness::new(FaultConfig::default().write(1.0));
+        let h = Harness::new(Config::default().write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
 
@@ -413,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_read_always_fails() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
 
         // Write some data first (no faults)
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -431,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_open_always_fails() {
-        let h = Harness::new(FaultConfig::default().open(1.0));
+        let h = Harness::new(Config::default().open(1.0));
 
         assert!(matches!(
             h.storage.open("partition", b"test").await,
@@ -441,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_remove_always_fails() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
 
         // Create a blob first
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
@@ -460,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_scan_always_fails() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
 
         // Create some blobs first
         for i in 0..3 {
@@ -482,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn test_faulty_storage_determinism() {
         async fn run_ops(seed: u64, rate: f64) -> Vec<bool> {
-            let h = Harness::with_seed(seed, FaultConfig::default().open(rate));
+            let h = Harness::with_seed(seed, Config::default().open(rate));
             let mut results = Vec::new();
             for i in 0..20 {
                 let name = format!("blob{i}");
@@ -504,16 +504,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_rate_for() {
-        let config = FaultConfig::default().open(0.1).sync(0.9);
+        let config = Config::default().open(0.1).sync(0.9);
 
-        assert!((config.rate_for(FaultOp::Open) - 0.1).abs() < f64::EPSILON);
-        assert!((config.rate_for(FaultOp::Sync) - 0.9).abs() < f64::EPSILON);
-        assert!(config.rate_for(FaultOp::Write).abs() < f64::EPSILON);
+        assert!((config.rate_for(Op::Open) - 0.1).abs() < f64::EPSILON);
+        assert!((config.rate_for(Op::Sync) - 0.9).abs() < f64::EPSILON);
+        assert!(config.rate_for(Op::Write).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
     async fn test_faulty_storage_dynamic_config() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.sync().await.unwrap();
@@ -527,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_write() {
-        let h = Harness::new(FaultConfig::default().write(1.0).partial_write(1.0));
+        let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let data = b"hello world".to_vec();
@@ -550,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_write_disabled() {
-        let h = Harness::new(FaultConfig::default().write(1.0).partial_write(0.0));
+        let h = Harness::new(Config::default().write(1.0).partial_write(0.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.write_at(0, b"hello world".to_vec()).await;
@@ -566,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_write_single_byte() {
-        let h = Harness::new(FaultConfig::default().write(1.0).partial_write(1.0));
+        let h = Harness::new(Config::default().write(1.0).partial_write(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.write_at(0, b"x".to_vec()).await;
@@ -579,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_grow() {
-        let h = Harness::new(FaultConfig::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
 
         let (blob, initial_size) = h.storage.open("partition", b"test").await.unwrap();
         assert_eq!(initial_size, 0);
@@ -598,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_shrink() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.resize(100).await.unwrap();
@@ -624,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_disabled() {
-        let h = Harness::new(FaultConfig::default().resize(1.0).partial_resize(0.0));
+        let h = Harness::new(Config::default().resize(1.0).partial_resize(0.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(100).await;
@@ -637,7 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_same_size() {
-        let h = Harness::new(FaultConfig::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(0).await;
@@ -650,7 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_after_write_extends() {
-        let h = Harness::new(FaultConfig::default());
+        let h = Harness::new(Config::default());
 
         let (blob, initial_size) = h.storage.open("partition", b"test").await.unwrap();
         assert_eq!(initial_size, 0);
@@ -681,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_storage_partial_resize_one_byte_difference() {
-        let h = Harness::new(FaultConfig::default().resize(1.0).partial_resize(1.0));
+        let h = Harness::new(Config::default().resize(1.0).partial_resize(1.0));
 
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         let result = blob.resize(1).await;

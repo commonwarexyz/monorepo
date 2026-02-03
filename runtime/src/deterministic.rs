@@ -42,7 +42,7 @@
 //! });
 //! ```
 
-pub use crate::storage::faulty::FaultConfig;
+pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
