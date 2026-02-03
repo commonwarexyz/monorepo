@@ -360,33 +360,38 @@ where
         // `Scheme::reshard` verifies the shard against the commitment, and if it doesn't check out,
         // it will be ignored.
         //
-        // We extract the first valid strong shard by swapping it to the end and popping, avoiding
-        // a clone. The resulting checked shard is prepended to the checked_shards list.
-        let strong_shard_pos = shards
-            .iter()
-            .position(|s| matches!(s.deref(), DistributionShard::Strong(_)));
-        let Some(strong_pos) = strong_shard_pos else {
-            debug!(%commitment, "no strong shards present to form checking data");
-            return Ok(None);
-        };
+        // We extract the first *valid* strong shard by swapping it to the end and popping,
+        // avoiding a clone. If a strong shard fails verification, we try the next one.
+        let (checking_data, first_checked_shard) = loop {
+            let strong_shard_pos = shards
+                .iter()
+                .position(|s| matches!(s.deref(), DistributionShard::Strong(_)));
+            let Some(strong_pos) = strong_shard_pos else {
+                debug!(%commitment, "no valid strong shards present to form checking data");
+                return Ok(None);
+            };
 
-        // Swap-remove the strong shard to take ownership without shifting elements
-        let strong_shard = shards.swap_remove(strong_pos);
-        let strong_index = strong_shard.index() as u16;
-        let DistributionShard::Strong(shard_data) = strong_shard.into_inner() else {
-            unreachable!("we just verified this is a strong shard");
-        };
+            // Swap-remove the strong shard to take ownership without shifting elements
+            let strong_shard = shards.swap_remove(strong_pos);
+            let strong_index = strong_shard.index() as u16;
+            let DistributionShard::Strong(shard_data) = strong_shard.into_inner() else {
+                unreachable!("we just verified this is a strong shard");
+            };
 
-        let Some((checking_data, first_checked_shard)) = C::reshard(
-            &config,
-            &commitment.coding_digest(),
-            strong_index,
-            shard_data,
-        )
-        .map(|(checking_data, checked, _)| (checking_data, checked))
-        .ok() else {
-            debug!(%commitment, "strong shard failed verification");
-            return Ok(None);
+            if let Ok((checking_data, checked, _)) = C::reshard(
+                &config,
+                &commitment.coding_digest(),
+                strong_index,
+                shard_data,
+            ) {
+                break (checking_data, checked);
+            }
+
+            debug!(
+                %commitment,
+                index = strong_index,
+                "strong shard failed verification"
+            );
         };
 
         // Process remaining shards in parallel
@@ -665,7 +670,11 @@ mod test {
         simplex::scheme::bls12381_threshold::vrf::Scheme,
         types::Height,
     };
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
+    use bytes::Buf;
+    use commonware_codec::{Encode, RangeCfg, Read};
+    use commonware_coding::{
+        CodecConfig, Config as CodingConfig, ReedSolomon, Scheme as CodingScheme,
+    };
     use commonware_cryptography::{
         bls12381::primitives::variant::MinSig,
         ed25519::{PrivateKey, PublicKey},
@@ -673,7 +682,7 @@ mod test {
         Digest, Sha256, Signer,
     };
     use commonware_macros::{test_collect_traces, test_traced};
-    use commonware_p2p::simulated::Link;
+    use commonware_p2p::{simulated::Link, Recipients};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Metrics, Quota, Runner,
@@ -954,6 +963,155 @@ mod test {
                 );
                 assert_eq!(result.unwrap().commitment(), coded_block.commitment());
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_reconstruct_skips_invalid_strong_shard() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) =
+                commonware_p2p::simulated::Network::<deterministic::Context, P>::new(
+                    context.with_label("network"),
+                    commonware_p2p::simulated::Config {
+                        max_size: 1024 * 1024,
+                        disconnect_on_block: true,
+                        tracked_peer_sets: None,
+                    },
+                );
+            network.start();
+
+            let mut schemes = (0..2)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<P> = schemes.iter().map(|c| c.public_key()).collect();
+
+            let mut registrations = BTreeMap::new();
+            for peer in peers.iter() {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                registrations.insert(peer.clone(), (sender, receiver));
+            }
+
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(p1.clone(), p2.clone(), DEFAULT_LINK)
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let mut buffered_mailboxes = BTreeMap::new();
+            let mut shard_mailboxes = BTreeMap::new();
+            while let Some((peer, network)) = registrations.pop_first() {
+                let context = context.with_label(&format!("peer_{peer}"));
+                let config = buffered::Config {
+                    public_key: peer.clone(),
+                    mailbox_size: 1024,
+                    deque_size: CACHE_SIZE,
+                    priority: false,
+                    codec_config: CodecConfig {
+                        maximum_shard_size: MAX_SHARD_SIZE,
+                    },
+                };
+                let (engine, engine_mailbox) =
+                    buffered::Engine::<_, P, Shard<C, H>>::new(context.clone(), config);
+                let buffered_mailbox = engine_mailbox.clone();
+                let (shard_engine, shard_mailbox) = ShardEngine::new(
+                    context.with_label("shard_mailbox"),
+                    engine_mailbox,
+                    (),
+                    10,
+                    STRATEGY,
+                );
+                buffered_mailboxes.insert(peer.clone(), buffered_mailbox);
+                shard_mailboxes.insert(peer.clone(), shard_mailbox);
+
+                engine.start(network);
+                shard_engine.start();
+            }
+
+            let sender = peers.first().cloned().unwrap();
+            let receiver = peers.get(1).cloned().unwrap();
+
+            let coding_config = coding_config_for_participants(4);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 2);
+            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+
+            let total_shards = coding_config.total_shards() as usize;
+            let mut shards = (0..total_shards)
+                .map(|i| coded_block.shard::<H>(i).expect("missing shard"))
+                .collect::<Vec<_>>();
+
+            let (min_index, _) = shards
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, shard)| shard.digest())
+                .expect("no shards present");
+
+            let invalid_shard = shards[min_index].clone();
+            let commitment = invalid_shard.commitment();
+            let index = invalid_shard.index();
+            let DistributionShard::Strong(inner) = invalid_shard.into_inner() else {
+                panic!("expected strong shard");
+            };
+
+            let shard_cfg = CodecConfig {
+                maximum_shard_size: MAX_SHARD_SIZE,
+            };
+            let mut encoded = inner.encode().to_vec();
+            let mut cursor = encoded.as_slice();
+            let shard_len = usize::read_cfg(
+                &mut cursor,
+                &RangeCfg::from(..=shard_cfg.maximum_shard_size),
+            )
+            .expect("failed to read shard length");
+            let len_prefix_len = encoded.len() - cursor.remaining();
+            assert!(shard_len > 0, "shard length must be non-zero");
+            encoded[len_prefix_len] ^= 0xFF;
+
+            let invalid_inner =
+                <C as CodingScheme>::Shard::read_cfg(&mut encoded.as_slice(), &shard_cfg)
+                    .expect("failed to decode invalid shard");
+            let invalid_shard =
+                Shard::<C, H>::new(commitment, index, DistributionShard::Strong(invalid_inner));
+            assert!(
+                invalid_shard.clone().verify_into_reshard().is_none(),
+                "invalid shard should fail verification"
+            );
+            shards[min_index] = invalid_shard;
+
+            let mut sender_buffered = buffered_mailboxes
+                .get(&sender)
+                .expect("missing sender mailbox")
+                .clone();
+            for shard in shards {
+                let _ = sender_buffered
+                    .broadcast(Recipients::One(receiver.clone()), shard)
+                    .await;
+            }
+
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            let receiver_mailbox = shard_mailboxes
+                .get_mut(&receiver)
+                .expect("missing receiver mailbox");
+            let result = receiver_mailbox
+                .try_reconstruct(commitment)
+                .await
+                .expect("reconstruction failed");
+            assert!(
+                result.is_some(),
+                "reconstruction should succeed despite invalid strong shard"
+            );
         });
     }
 
