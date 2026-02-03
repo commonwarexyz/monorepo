@@ -8,8 +8,9 @@ pub mod utils;
 use crate::{
     disrupter::Disrupter,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
-    utils::{link_peers, max_faults, register, Action, Partition},
+    utils::{link_peers, register, Action, Partition},
 };
+use commonware_utils::{Faults, N3f1};
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -82,7 +83,7 @@ impl Configuration {
 
     /// Returns true if this configuration can make progress (liveness).
     pub fn can_finalize(&self) -> bool {
-        max_faults(self.n) == self.faults
+        N3f1::max_faults(self.n) == self.faults
     }
 }
 
