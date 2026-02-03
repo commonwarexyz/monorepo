@@ -34,8 +34,9 @@ mod tests {
         marshal::{
             mocks::{
                 harness::{
-                    default_leader, make_raw_block, setup_network, Ctx, StandardHarness,
-                    TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                    self, default_leader, make_raw_block, setup_network, Ctx, StandardHarness,
+                    TestHarness, B, BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, S,
+                    UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -53,6 +54,122 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use std::time::Duration;
+
+    #[test_traced("WARN")]
+    fn test_standard_finalize_good_links() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<StandardHarness>(seed, LINK, false);
+            let r2 = harness::finalize::<StandardHarness>(seed, LINK, false);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalize_bad_links() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, false);
+            let r2 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, false);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalize_good_links_quorum_sees_finalization() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<StandardHarness>(seed, LINK, true);
+            let r2 = harness::finalize::<StandardHarness>(seed, LINK, true);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalize_bad_links_quorum_sees_finalization() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, true);
+            let r2 = harness::finalize::<StandardHarness>(seed, UNRELIABLE_LINK, true);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_sync_height_floor() {
+        harness::sync_height_floor::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_prune_finalized_archives() {
+        harness::prune_finalized_archives::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_subscribe_basic_block_delivery() {
+        harness::subscribe_basic_block_delivery::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_subscribe_multiple_subscriptions() {
+        harness::subscribe_multiple_subscriptions::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_subscribe_canceled_subscriptions() {
+        harness::subscribe_canceled_subscriptions::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_subscribe_blocks_from_different_sources() {
+        harness::subscribe_blocks_from_different_sources::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_get_info_basic_queries_present_and_missing() {
+        harness::get_info_basic_queries_present_and_missing::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_get_info_latest_progression_multiple_finalizations() {
+        harness::get_info_latest_progression_multiple_finalizations::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_get_block_by_height_and_latest() {
+        harness::get_block_by_height_and_latest::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_get_block_by_commitment_from_sources_and_missing() {
+        harness::get_block_by_commitment_from_sources_and_missing::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_get_finalization_by_height() {
+        harness::get_finalization_by_height::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_hint_finalized_triggers_fetch() {
+        harness::hint_finalized_triggers_fetch::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_ancestry_stream() {
+        harness::ancestry_stream::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalize_same_height_different_views() {
+        harness::finalize_same_height_different_views::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_init_processed_height() {
+        harness::init_processed_height::<StandardHarness>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_standard_broadcast_caches_block() {
+        harness::broadcast_caches_block::<StandardHarness>();
+    }
 
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {

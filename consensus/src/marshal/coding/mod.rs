@@ -70,9 +70,9 @@ mod tests {
             },
             mocks::{
                 harness::{
-                    default_leader, genesis_commitment, make_coding_block, setup_network, CodingB,
-                    CodingCtx, CodingHarness, TestHarness, BLOCKS_PER_EPOCH, NAMESPACE,
-                    NUM_VALIDATORS, S, V,
+                    self, default_leader, genesis_commitment, make_coding_block, setup_network,
+                    CodingB, CodingCtx, CodingHarness, TestHarness, BLOCKS_PER_EPOCH, LINK,
+                    NAMESPACE, NUM_VALIDATORS, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -90,6 +90,122 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use std::time::Duration;
+
+    #[test_traced("WARN")]
+    fn test_coding_finalize_good_links() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<CodingHarness>(seed, LINK, false);
+            let r2 = harness::finalize::<CodingHarness>(seed, LINK, false);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalize_bad_links() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<CodingHarness>(seed, UNRELIABLE_LINK, false);
+            let r2 = harness::finalize::<CodingHarness>(seed, UNRELIABLE_LINK, false);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalize_good_links_quorum_sees_finalization() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<CodingHarness>(seed, LINK, true);
+            let r2 = harness::finalize::<CodingHarness>(seed, LINK, true);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalize_bad_links_quorum_sees_finalization() {
+        for seed in 0..5 {
+            let r1 = harness::finalize::<CodingHarness>(seed, UNRELIABLE_LINK, true);
+            let r2 = harness::finalize::<CodingHarness>(seed, UNRELIABLE_LINK, true);
+            assert_eq!(r1, r2);
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_sync_height_floor() {
+        harness::sync_height_floor::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_prune_finalized_archives() {
+        harness::prune_finalized_archives::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_subscribe_basic_block_delivery() {
+        harness::subscribe_basic_block_delivery::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_subscribe_multiple_subscriptions() {
+        harness::subscribe_multiple_subscriptions::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_subscribe_canceled_subscriptions() {
+        harness::subscribe_canceled_subscriptions::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_subscribe_blocks_from_different_sources() {
+        harness::subscribe_blocks_from_different_sources::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_get_info_basic_queries_present_and_missing() {
+        harness::get_info_basic_queries_present_and_missing::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_get_info_latest_progression_multiple_finalizations() {
+        harness::get_info_latest_progression_multiple_finalizations::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_get_block_by_height_and_latest() {
+        harness::get_block_by_height_and_latest::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_get_block_by_commitment_from_sources_and_missing() {
+        harness::get_block_by_commitment_from_sources_and_missing::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_get_finalization_by_height() {
+        harness::get_finalization_by_height::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_hint_finalized_triggers_fetch() {
+        harness::hint_finalized_triggers_fetch::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_ancestry_stream() {
+        harness::ancestry_stream::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalize_same_height_different_views() {
+        harness::finalize_same_height_different_views::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_init_processed_height() {
+        harness::init_processed_height::<CodingHarness>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_coding_broadcast_caches_block() {
+        harness::broadcast_caches_block::<CodingHarness>();
+    }
 
     /// Test that certifying a lower-view block after a higher-view block succeeds.
     ///
