@@ -1297,6 +1297,7 @@ dependencies = [
  "commonware-math",
  "commonware-parallel",
  "commonware-utils",
+ "crc",
  "ed25519-zebra",
  "libfuzzer-sys",
  "num-rational",
