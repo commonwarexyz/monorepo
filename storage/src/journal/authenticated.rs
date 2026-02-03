@@ -11,7 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        journaled::{CleanMmr, Mmr},
+        journaled::{CleanMmr, DirtyMmr, Mmr},
         mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
@@ -129,7 +129,8 @@ where
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
+        let mut mmr =
+            Self::align(mmr.into_dirty(), &journal, &mut hasher, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
@@ -146,7 +147,7 @@ where
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: CleanMmr<E, H::Digest>,
+        mut mmr: DirtyMmr<E, H::Digest>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
@@ -158,7 +159,7 @@ where
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR items");
-            mmr.pop(hasher, *pop_count as usize).await?;
+            mmr.pop(*pop_count as usize).await?;
             mmr_size = Location::new_unchecked(journal_size);
         }
 
@@ -170,7 +171,6 @@ where
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
 
-            let mut mmr = mmr.into_dirty();
             let mut batch_size = 0;
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
@@ -188,7 +188,7 @@ where
         // At this point the MMR and journal should be consistent.
         assert_eq!(journal.size(), mmr.leaves());
 
-        Ok(mmr)
+        Ok(mmr.merkleize(hasher))
     }
 
     /// Prune both the MMR and journal to the given location.
@@ -407,7 +407,8 @@ where
         // Align the MMR and journal.
         let mut hasher = StandardHasher::<H>::new();
         let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr =
+            Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -447,7 +448,8 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr =
+            Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -517,49 +519,6 @@ where
         if leaves > size {
             self.mmr
                 .pop((leaves - size) as usize)
-                .await
-                .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<E, C, H> MutableContiguous for Journal<E, C, H, Clean<H::Digest>>
-where
-    E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: EncodeShared>,
-    H: Hasher,
-{
-    async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
-        let loc = self.append(item).await.map_err(|e| match e {
-            Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-        })?;
-
-        Ok(*loc)
-    }
-
-    async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
-        let old_boundary = self.bounds().start;
-        let new_boundary = self
-            .prune(Location::new_unchecked(min_position))
-            .await
-            .map_err(|e| match e {
-                Error::Journal(inner) => inner,
-                Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
-            })?;
-
-        Ok(old_boundary != new_boundary)
-    }
-
-    async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
-        self.journal.rewind(size).await?;
-
-        let leaves = *self.mmr.leaves();
-        if leaves > size {
-            self.mmr
-                .pop(&mut self.hasher, (leaves - size) as usize)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -752,7 +711,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
 
-            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -782,7 +741,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -812,7 +771,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -1044,7 +1003,8 @@ mod tests {
                     |op| op.is_commit(),
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
                 for i in 0..5 {
@@ -1084,7 +1044,7 @@ mod tests {
                 for i in 0..255 {
                     journal.append(create_operation(i)).await.unwrap();
                 }
-                MutableContiguous::prune(&mut journal, 100).await.unwrap();
+                journal.prune(100).await.unwrap();
                 assert_eq!(journal.bounds().start, Location::new_unchecked(98));
                 let res = journal.rewind(97).await;
                 assert!(matches!(res, Err(JournalError::InvalidRewind(97))));

@@ -14,10 +14,7 @@ use crate::{
         hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
         location::Location,
-        mem::{
-            Clean, CleanMmr as CleanMemMmr, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr,
-            Mmr as MemMmr, State,
-        },
+        mem::{Clean, Config as MemConfig, Dirty, DirtyMmr as DirtyMemMmr, Mmr as MemMmr, State},
         position::Position,
         storage::Storage,
         verification,
@@ -553,70 +550,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         Ok(())
     }
 
-    /// Pop the given number of elements from the tip of the MMR assuming they exist, and otherwise
-    /// return Empty or ElementPruned errors. The backing journal is synced to disk before
-    /// returning.
-    pub async fn pop(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        mut leaves_to_pop: usize,
-    ) -> Result<(), Error> {
-        // See if the elements are still cached in which case we can just pop them from the in-mem
-        // MMR.
-        while leaves_to_pop > 0 {
-            match self.mem_mmr.pop(hasher) {
-                Ok(_) => {
-                    leaves_to_pop -= 1;
-                }
-                Err(ElementPruned(_)) => break,
-                Err(Empty) => {
-                    return Err(Error::Empty);
-                }
-                _ => unreachable!(),
-            }
-        }
-        if leaves_to_pop == 0 {
-            return Ok(());
-        }
-
-        let mut new_size = self.size();
-        while leaves_to_pop > 0 {
-            if new_size == 0 {
-                return Err(Error::Empty);
-            }
-            new_size -= 1;
-            if new_size < self.pruned_to_pos {
-                return Err(Error::ElementPruned(new_size));
-            }
-            if new_size.is_mmr_size() {
-                leaves_to_pop -= 1;
-            }
-        }
-
-        self.journal.rewind(*new_size).await?;
-        self.journal.sync().await?;
-        self.journal_size = new_size;
-
-        // Reset the mem_mmr to one of the new_size in the "prune_all" state.
-        let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(new_size) {
-            let digest =
-                Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?;
-            pinned_nodes.push(digest);
-        }
-
-        self.mem_mmr = CleanMemMmr::from_components(hasher, vec![], new_size, pinned_nodes);
-        Self::add_extra_pinned_nodes(
-            &mut self.mem_mmr,
-            &self.metadata,
-            &self.journal,
-            self.pruned_to_pos,
-        )
-        .await?;
-
-        Ok(())
-    }
-
     /// Return the root of the MMR.
     pub const fn root(&self) -> D {
         *self.mem_mmr.root()
@@ -928,14 +861,18 @@ mod tests {
             assert_eq!(bounds.start, 0);
             assert!(mmr.prune_to_pos(Position::new(0)).await.is_ok());
             assert!(mmr.sync().await.is_ok());
-            assert!(matches!(mmr.pop(&mut hasher, 1).await, Err(Error::Empty)));
+            let mut mmr = mmr.into_dirty();
+            assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
 
             mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
             assert_eq!(mmr.size(), 1);
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
             assert!(mmr.get_node(Position::new(0)).await.is_ok());
-            assert!(mmr.pop(&mut hasher, 1).await.is_ok());
+            let mut mmr = mmr.into_dirty();
+            assert!(mmr.pop(1).await.is_ok());
             assert_eq!(mmr.size(), 0);
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
 
             let mut mmr = Mmr::init(context.with_label("second"), &mut hasher, test_config())
@@ -984,9 +921,10 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
+            let mut mmr = mmr.into_dirty();
 
             let mut c_hasher = Sha256::new();
             for i in 0u64..NUM_ELEMENTS {
@@ -997,8 +935,9 @@ mod tests {
 
             // Pop off one node at a time without syncing until empty, confirming the root matches.
             for i in (0..NUM_ELEMENTS).rev() {
-                assert!(mmr.pop(&mut hasher, 1).await.is_ok());
-                let root = mmr.root();
+                assert!(mmr.pop(1).await.is_ok());
+                let clean_mmr = mmr.merkleize(&mut hasher);
+                let root = clean_mmr.root();
                 let mut reference_mmr = mem::CleanMmr::new(&mut hasher);
                 for j in 0..i {
                     c_hasher.update(&j.to_be_bytes());
@@ -1010,9 +949,10 @@ mod tests {
                     *reference_mmr.root(),
                     "root mismatch after pop at {i}"
                 );
+                mmr = clean_mmr.into_dirty();
             }
-            assert!(matches!(mmr.pop(&mut hasher, 1).await, Err(Error::Empty)));
-            assert!(mmr.pop(&mut hasher, 0).await.is_ok());
+            assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
+            assert!(mmr.pop(0).await.is_ok());
 
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
             // cached to uncached leaves, and pop 2 at a time instead of just 1.
@@ -1021,12 +961,15 @@ mod tests {
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
                 if i == 101 {
-                    mmr.sync().await.unwrap();
+                    let mut clean_mmr = mmr.merkleize(&mut hasher);
+                    clean_mmr.sync().await.unwrap();
+                    mmr = clean_mmr.into_dirty();
                 }
             }
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
-                assert!(mmr.pop(&mut hasher, 2).await.is_ok(), "at position {i:?}");
-                let root = mmr.root();
+                assert!(mmr.pop(2).await.is_ok(), "at position {i:?}");
+                let clean_mmr = mmr.merkleize(&mut hasher);
+                let root = clean_mmr.root();
                 let reference_mmr = mem::CleanMmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
                 assert_eq!(
@@ -1034,8 +977,9 @@ mod tests {
                     *reference_mmr.root(),
                     "root mismatch at position {i:?}"
                 );
+                mmr = clean_mmr.into_dirty();
             }
-            assert!(matches!(mmr.pop(&mut hasher, 99).await, Err(Error::Empty)));
+            assert!(matches!(mmr.pop(99).await, Err(Error::Empty)));
 
             // Repeat one more time only after pruning the MMR first.
             for i in 0u64..NUM_ELEMENTS {
@@ -1043,27 +987,31 @@ mod tests {
                 let element = c_hasher.finalize();
                 mmr.add(&mut hasher, &element).await.unwrap();
                 if i == 101 {
-                    mmr.sync().await.unwrap();
+                    let mut clean_mmr = mmr.merkleize(&mut hasher);
+                    clean_mmr.sync().await.unwrap();
+                    mmr = clean_mmr.into_dirty();
                 }
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             let leaf_pos = Position::try_from(Location::new_unchecked(50)).unwrap();
             mmr.prune_to_pos(leaf_pos).await.unwrap();
             // Pop enough nodes to cause the mem-mmr to be completely emptied, and then some.
-            mmr.pop(&mut hasher, 80).await.unwrap();
+            let mut mmr = mmr.into_dirty();
+            mmr.pop(80).await.unwrap();
+            let mmr = mmr.merkleize(&mut hasher);
             // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
             mmr.proof(Location::try_from(leaf_pos).unwrap())
                 .await
                 .unwrap();
             // prune all remaining leaves 1 at a time.
+            let mut mmr = mmr.into_dirty();
             while mmr.size() > leaf_pos {
-                assert!(mmr.pop(&mut hasher, 1).await.is_ok());
+                assert!(mmr.pop(1).await.is_ok());
             }
-            assert!(matches!(
-                mmr.pop(&mut hasher, 1).await,
-                Err(Error::ElementPruned(_))
-            ));
+            assert!(matches!(mmr.pop(1).await, Err(Error::ElementPruned(_))));
 
             // Make sure pruning to an older location is a no-op.
+            let mut mmr = mmr.merkleize(&mut hasher);
             assert!(mmr.prune_to_pos(leaf_pos - 1).await.is_ok());
             assert_eq!(mmr.bounds().start, leaf_pos);
 
