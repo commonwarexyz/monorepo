@@ -2,7 +2,6 @@ use crate::{
     simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
-use commonware_utils::{Faults, N3f1};
 use commonware_codec::{Encode, Read};
 use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
@@ -11,6 +10,7 @@ use commonware_cryptography::{
     certificate::{Scheme as CertificateScheme, Signers},
     sha256::Digest as Sha256Digest,
 };
+use commonware_utils::{Faults, N3f1};
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 

@@ -10,7 +10,6 @@ use crate::{
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{link_peers, register, Action, Partition},
 };
-use commonware_utils::{Faults, N3f1};
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -37,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, Faults, N3f1, NZUsize, NZU16};
 use futures::future::join_all;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
@@ -496,11 +495,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         let config = input.configuration;
 
         // Spawn Byzantine twins: primary (legitimate engine) + secondary (Disrupter)
-        for (idx, validator) in participants
-            .iter()
-            .enumerate()
-            .take(config.faults as usize)
-        {
+        for (idx, validator) in participants.iter().enumerate().take(config.faults as usize) {
             let context = context.with_label(&format!("twin_{idx}"));
             let scheme = schemes[idx].clone();
             let (vote_network, certificate_network, resolver_network) = registrations
@@ -540,7 +535,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 }
             };
             let make_resolver_forwarder = || {
-                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| Some(recipients.clone())
+                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
+                    Some(recipients.clone())
+                }
             };
 
             let make_vote_router = || {
