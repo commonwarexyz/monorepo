@@ -140,15 +140,19 @@ check-stability *args='':
             extra_args="$all_args"
         fi
     fi
-    export RUSTC_WORKSPACE_WRAPPER="scripts/rustc_stability_wrapper.sh"
+    # Create level-specific wrapper symlinks so Cargo sees different fingerprints
+    mkdir -p target/stability-wrappers
+    for name in BETA GAMMA DELTA EPSILON; do
+        ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
+    done
     if [ -z "$level" ]; then
         for l in 1 2 3 4; do
             echo "Checking commonware_stability_${LEVEL_NAMES[$l]}..."
-            COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$l]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+            COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$l]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$l]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
         done
         echo "All stability levels pass!"
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
     fi
 
