@@ -1,4 +1,6 @@
-use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
+use crate::algebra::{
+    msm_naive, Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space,
+};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
@@ -473,6 +475,66 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     }
 }
 
+impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
+    /// Create an interpolator for evaluation points at roots of unity.
+    ///
+    /// This uses the fast O(n log n) algorithm from [`crate::ntt::lagrange_coefficients`].
+    ///
+    /// Each `(I, u32)` pair maps an index `I` to an evaluation point `w^k` where `w` is
+    /// a primitive root of unity of order `next_power_of_two(total)`.
+    ///
+    /// Indices `k >= total` are ignored. Duplicate `I` keys are deduped (last one wins).
+    pub fn roots_of_unity(total: NonZeroU32, points: impl IntoIterator<Item = (I, u32)>) -> Self {
+        let total_u32 = total.get();
+        let points: Map<I, u32> =
+            Map::from_iter_dedup(points.into_iter().filter(|(_, k)| *k < total_u32));
+        let coeffs: Map<u32, F> = Map::from_iter_dedup(crate::ntt::lagrange_coefficients(
+            total,
+            points.values().iter().copied(),
+        ));
+        let weights = Map::from_iter_dedup(points.into_iter().map(|(i, k)| {
+            debug_assert!(
+                coeffs.get_value(&k).is_some(),
+                "coefficient missing for index {k}"
+            );
+            let coeff = coeffs.get_value(&k).cloned().unwrap_or_else(F::zero);
+            (i, coeff)
+        }));
+        Self { weights }
+    }
+
+    /// Create an interpolator for evaluation points at roots of unity using naive O(n^2) algorithm.
+    ///
+    /// This computes the actual root of unity values and delegates to [`Interpolator::new`].
+    /// Useful for testing against [`Self::roots_of_unity`].
+    ///
+    /// Indices `k >= total` are ignored.
+    pub fn roots_of_unity_naive(
+        total: NonZeroU32,
+        points: impl IntoIterator<Item = (I, u32)>,
+    ) -> Self {
+        let total_u32 = total.get();
+        let size = (total_u32 as u64).next_power_of_two();
+        let lg_size = size.ilog2() as u8;
+        let w = F::root_of_unity(lg_size).expect("domain too large for NTT");
+
+        let points: Vec<(I, u32)> = points.into_iter().filter(|(_, k)| *k < total_u32).collect();
+        let max_k = points.iter().map(|(_, k)| *k).max().unwrap_or(0) as usize;
+
+        let mut powers = Vec::with_capacity(max_k + 1);
+        powers.push(F::one());
+        for _ in 0..max_k {
+            let next = powers.last().unwrap().clone() * &w;
+            powers.push(next);
+        }
+
+        let eval_points = points
+            .into_iter()
+            .map(|(i, k)| (i, powers[k as usize].clone()));
+        Self::new(eval_points)
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;
@@ -618,6 +680,23 @@ mod test {
         #[test]
         fn test_commit_eval(f: Poly<F>, x: F) {
             assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
+        }
+
+    }
+
+    mod roots_of_unity {
+        use super::*;
+        use crate::fields::goldilocks::F as GoldilocksF;
+
+        proptest! {
+            #[test]
+            fn test_roots_of_unity_eq_naive(n in 1u32..=256) {
+                let total = NonZeroU32::new(n).unwrap();
+                let points: Vec<(usize, u32)> = (0..n as usize).map(|i| (i, i as u32)).collect();
+                let fast = Interpolator::<usize, GoldilocksF>::roots_of_unity(total, points.clone());
+                let naive = Interpolator::<usize, GoldilocksF>::roots_of_unity_naive(total, points);
+                assert_eq!(fast.weights, naive.weights);
+            }
         }
     }
 
