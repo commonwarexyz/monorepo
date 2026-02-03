@@ -297,11 +297,10 @@ impl PoolMetrics {
 /// An aligned buffer.
 ///
 /// The buffer is allocated with the specified alignment for efficient I/O operations.
-/// Deallocates itself on drop using the stored alignment.
+/// Deallocates itself on drop using the stored layout.
 pub(crate) struct AlignedBuffer {
     ptr: NonNull<u8>,
-    capacity: usize,
-    alignment: usize,
+    layout: Layout,
 }
 
 // SAFETY: AlignedBuffer owns its memory and can be sent between threads.
@@ -322,17 +321,13 @@ impl AlignedBuffer {
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).expect("allocation failed");
 
-        Self {
-            ptr,
-            capacity,
-            alignment,
-        }
+        Self { ptr, layout }
     }
 
     /// Returns the capacity of the buffer.
     #[inline]
     const fn capacity(&self) -> usize {
-        self.capacity
+        self.layout.size()
     }
 
     /// Returns a raw pointer to the buffer.
@@ -344,10 +339,8 @@ impl AlignedBuffer {
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
-        let layout =
-            Layout::from_size_align(self.capacity, self.alignment).expect("invalid layout");
         // SAFETY: ptr was allocated with this layout.
-        unsafe { dealloc(self.ptr.as_ptr(), layout) };
+        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }
 }
 
@@ -708,7 +701,7 @@ impl PooledBufMut {
     ///
     /// Caller must ensure:
     /// - All bytes in the range `[cursor, cursor + len)` are initialized
-    /// - `len <= capacity()` (where capacity is also view-relative)
+    /// - `len <= capacity()` (where capacity is view-relative)
     #[inline]
     pub const unsafe fn set_len(&mut self, len: usize) {
         self.len = self.cursor + len;
