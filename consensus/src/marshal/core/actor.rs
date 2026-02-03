@@ -835,7 +835,7 @@ where
         let (height, commitment) = (block.height(), block.commitment());
         let (ack, ack_waiter) = A::handle();
         application
-            .report(Update::Block(V::unwrap_working(block), ack))
+            .report(Update::Block(V::into_application_block(block), ack))
             .await;
         self.pending_ack.replace(PendingAck {
             height,
@@ -896,9 +896,7 @@ where
         block: V::Block,
     ) {
         self.notify_subscribers(&block).await;
-        self.cache
-            .put_verified(round, digest, V::wrap_stored(block))
-            .await;
+        self.cache.put_verified(round, digest, block.into()).await;
     }
 
     /// Add a notarized block to the prunable archive.
@@ -909,9 +907,7 @@ where
         block: V::Block,
     ) {
         self.notify_subscribers(&block).await;
-        self.cache
-            .put_block(round, digest, V::wrap_stored(block))
-            .await;
+        self.cache.put_block(round, digest, block.into()).await;
     }
 
     // -------------------- Immutable Storage --------------------
@@ -923,7 +919,7 @@ where
             .get(ArchiveID::Index(height.get()))
             .await
         {
-            Ok(Some(stored)) => Some(V::unwrap_stored(stored)),
+            Ok(Some(stored)) => Some(stored.into()),
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }
@@ -978,7 +974,7 @@ where
         self.notify_subscribers(&block).await;
 
         // Convert block to storage format
-        let stored = V::wrap_stored(block);
+        let stored: V::StoredBlock = block.into();
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
@@ -1050,11 +1046,11 @@ where
     ) -> Option<V::Block> {
         // Check verified / notarized blocks via cache manager.
         if let Some(block) = self.cache.find_block(digest).await {
-            return Some(V::unwrap_stored(block));
+            return Some(block.into());
         }
         // Check finalized blocks.
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
-            Ok(Some(stored)) => Some(V::unwrap_stored(stored)),
+            Ok(Some(stored)) => Some(stored.into()),
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
         }

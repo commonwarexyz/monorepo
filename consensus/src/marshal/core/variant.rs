@@ -8,36 +8,9 @@
 
 use crate::Block;
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::{Committable, Digest, Digestible};
+use commonware_cryptography::{Digest, Digestible};
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
-
-/// A trait for cached block types that can be converted to the underlying block.
-///
-/// This trait allows buffer implementations to use efficient internal representations
-/// (e.g., `Arc<Block>`) while providing a uniform way to extract the block.
-pub trait IntoBlock<B>: Clone + Send {
-    /// Convert this cached block into the underlying block type.
-    fn into_block(self) -> B;
-}
-
-/// Blanket implementation for any cloneable block type.
-///
-/// This covers the standard variant where `CachedBlock = B`.
-impl<B: Clone + Send> IntoBlock<B> for B {
-    fn into_block(self) -> B {
-        self
-    }
-}
-
-/// Implementation for `Arc<B>` to support the coding variant.
-///
-/// Uses `Arc::unwrap_or_clone` to avoid cloning when the refcount is 1.
-impl<B: Clone + Send + Sync> IntoBlock<B> for Arc<B> {
-    fn into_block(self) -> B {
-        Self::unwrap_or_clone(self)
-    }
-}
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
@@ -45,12 +18,19 @@ pub trait Variant: Clone + Send + Sync + 'static {
     type ApplicationBlock: Block + Clone;
 
     /// The working block type of marshal, supporting the consensus commitment.
-    type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
-        + Committable<Commitment = Self::Commitment>
+    ///
+    /// Must be convertible to `StoredBlock` via `Into` for archival.
+    type Block: Block<
+            Digest = <Self::ApplicationBlock as Digestible>::Digest,
+            Commitment = Self::Commitment,
+        > + Into<Self::StoredBlock>
         + Clone;
 
     /// The type of block stored in the archive.
+    ///
+    /// Must be convertible back to the working block type via `Into`.
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
+        + Into<Self::Block>
         + Clone
         + Codec<Cfg = <Self::Block as Read>::Cfg>;
 
@@ -64,13 +44,10 @@ pub trait Variant: Clone + Send + Sync + 'static {
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Converts a working block to an application block.
-    fn unwrap_working(block: Self::Block) -> Self::ApplicationBlock;
-
-    /// Converts an application block to a storage block.
-    fn wrap_stored(stored: Self::Block) -> Self::StoredBlock;
-
-    /// Converts a stored block to the application block type.
-    fn unwrap_stored(stored: Self::StoredBlock) -> Self::Block;
+    ///
+    /// This conversion cannot use `Into` due to orphan rules when `Block` wraps
+    /// `ApplicationBlock` (e.g., `CodedBlock<B, C> -> B`).
+    fn into_application_block(block: Self::Block) -> Self::ApplicationBlock;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different
@@ -153,4 +130,31 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
         block: V::Block,
         recipients: V::Recipients,
     ) -> impl Future<Output = ()> + Send;
+}
+
+/// A trait for cached block types that can be converted to the underlying block.
+///
+/// This trait allows buffer implementations to use efficient internal representations
+/// (e.g., `Arc<Block>`) while providing a uniform way to extract the block.
+pub trait IntoBlock<B>: Clone + Send {
+    /// Convert this cached block into the underlying block type.
+    fn into_block(self) -> B;
+}
+
+/// Blanket implementation for any cloneable block type.
+///
+/// This covers the standard variant where `CachedBlock = B`.
+impl<B: Clone + Send> IntoBlock<B> for B {
+    fn into_block(self) -> B {
+        self
+    }
+}
+
+/// Implementation for `Arc<B>` to support the coding variant.
+///
+/// Uses `Arc::unwrap_or_clone` to avoid cloning when the refcount is 1.
+impl<B: Clone + Send + Sync> IntoBlock<B> for Arc<B> {
+    fn into_block(self) -> B {
+        Self::unwrap_or_clone(self)
+    }
 }

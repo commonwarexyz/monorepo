@@ -86,10 +86,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The block to broadcast.
         block: V::Block,
-        /// The recipients for the broadcast.
-        ///
-        /// - Standard: `()` (broadcasts to all peers)
-        /// - Coding: `Vec<P>` (specific peers for shard distribution)
+        /// The recipients for the broadcast (variant-specific).
         recipients: V::Recipients,
     },
     /// A notification that a block has been verified by the application.
@@ -242,9 +239,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// be notified when the block is available. If the block is not finalized, it's possible that
     /// it may never become available.
     ///
-    /// For variants where commitment differs from digest (e.g., coding), this may enable
-    /// additional retrieval mechanisms such as shard reconstruction.
-    ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub async fn subscribe_by_commitment(
         &mut self,
@@ -273,13 +267,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             .await
             .await
             .ok()
-            .map(|block| AncestorStream::new(self.clone(), [V::unwrap_working(block)]))
+            .map(|block| AncestorStream::new(self.clone(), [V::into_application_block(block)]))
     }
 
-    /// Proposed requests that a proposed block is sent to peers.
-    ///
-    /// For standard marshal, `recipients` is `()` (broadcasts to all peers).
-    /// For coding marshal, `recipients` is the list of peers for shard distribution.
+    /// Requests that a proposed block is sent to peers.
     pub async fn proposed(&mut self, round: Round, block: V::Block, recipients: V::Recipients) {
         self.sender
             .send_lossy(Message::Proposed {
@@ -328,7 +319,7 @@ impl<S: Scheme, V: Variant> AncestryProvider for Mailbox<S, V> {
         let block = subscription
             .await
             .expect("marshal actor dropped before fulfilling subscription");
-        V::unwrap_working(block)
+        V::into_application_block(block)
     }
 }
 

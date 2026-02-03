@@ -32,16 +32,8 @@ impl<B: Block, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
         commitment.block_digest()
     }
 
-    fn unwrap_working(block: Self::Block) -> Self::ApplicationBlock {
+    fn into_application_block(block: Self::Block) -> Self::ApplicationBlock {
         block.into_inner()
-    }
-
-    fn wrap_stored(stored: Self::Block) -> Self::StoredBlock {
-        StoredCodedBlock::new(stored)
-    }
-
-    fn unwrap_stored(stored: Self::StoredBlock) -> Self::Block {
-        stored.into_coded_block()
     }
 }
 
@@ -84,9 +76,8 @@ where
         self.subscribe_block_by_commitment(commitment).await
     }
 
-    #[allow(clippy::use_self)] // Need to call inherent method, not trait method
     async fn finalized(&mut self, commitment: CodingCommitment) {
-        shards::Mailbox::finalized(self, commitment).await;
+        self.finalized(commitment).await;
     }
 
     async fn broadcast(&mut self, block: CodedBlock<B, C>, recipients: Vec<P>) {

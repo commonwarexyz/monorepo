@@ -1,4 +1,4 @@
-//! Erasure coding engine used by the marshal [`core::Actor`](crate::marshal::core::Actor).
+//! Erasure coding engine used by the marshal [`Actor`](crate::marshal::core::Actor).
 //!
 //! # Overview
 //!
@@ -21,7 +21,7 @@
 //!
 //! # Interaction with Marshal
 //!
-//! The marshal [`core::Actor`](crate::marshal::core::Actor) drives the shard engine through [`Mailbox`]:
+//! The marshal [`Actor`](crate::marshal::core::Actor) drives the shard engine through [`Mailbox`]:
 //! - `broadcast` sends a freshly encoded block to a specific validator set (each entry maps to one
 //!   shard index).
 //! - `subscribe_shard_validity` asks the engine to watch for a shard, verify it, and rebroadcast it

@@ -362,6 +362,12 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     }
 }
 
+impl<B: Block, C: Scheme> From<CodedBlock<B, C>> for StoredCodedBlock<B, C> {
+    fn from(block: CodedBlock<B, C>) -> Self {
+        Self::new(block)
+    }
+}
+
 impl<B: Block + Clone, C: Scheme> Clone for CodedBlock<B, C> {
     fn clone(&self) -> Self {
         Self {
@@ -502,6 +508,13 @@ impl<B: Block, C: Scheme> StoredCodedBlock<B, C> {
     /// Returns a reference to the inner block.
     pub const fn inner(&self) -> &B {
         &self.inner
+    }
+}
+
+/// Converts a [`StoredCodedBlock`] back to a [`CodedBlock`].
+impl<B: Block, C: Scheme> From<StoredCodedBlock<B, C>> for CodedBlock<B, C> {
+    fn from(stored: StoredCodedBlock<B, C>) -> Self {
+        stored.into_coded_block()
     }
 }
 

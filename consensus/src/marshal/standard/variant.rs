@@ -1,34 +1,26 @@
 //! Standard variant implementation for Marshal.
 //!
-//! The standard variant broadcasts complete blocks to all peers without erasure coding.
-//! This is simpler but uses more bandwidth than the coding variant.
+//! The standard variant broadcasts complete blocks to all peers. Each validator
+//! receives the full block directly from the proposer or via gossip.
 
 use crate::{
     marshal::core::{BlockBuffer, Variant},
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
-/// This variant sends the entire block to all peers. It's simpler than
-/// the coding variant but uses more bandwidth.
-///
-/// Since [`Block`] now requires [`Committable`],
-/// the standard variant can use `B` directly without a wrapper type.
-///
-/// The `Standard` variant requires that `B::Commitment = B::Digest`, meaning
-/// the block's commitment is simply its digest. This is the common case for
-/// non-erasure-coded blocks.
+/// This variant sends the entire block to all peers.
 #[derive(Default, Clone, Copy)]
 pub struct Standard<B: Block>(std::marker::PhantomData<B>);
 
 impl<B> Variant for Standard<B>
 where
-    B: Block + Committable<Commitment = <B as Digestible>::Digest>,
+    B: Block<Commitment = <B as Digestible>::Digest>,
 {
     type ApplicationBlock = B;
     type Block = B;
@@ -40,22 +32,14 @@ where
         commitment
     }
 
-    fn unwrap_working(block: Self::Block) -> Self::ApplicationBlock {
+    fn into_application_block(block: Self::Block) -> Self::ApplicationBlock {
         block
-    }
-
-    fn wrap_stored(stored: Self::Block) -> Self::StoredBlock {
-        stored
-    }
-
-    fn unwrap_stored(stored: Self::StoredBlock) -> Self::Block {
-        stored
     }
 }
 
 impl<B, K> BlockBuffer<Standard<B>> for buffered::Mailbox<K, B>
 where
-    B: Block + Committable<Commitment = <B as Digestible>::Digest>,
+    B: Block<Commitment = <B as Digestible>::Digest>,
     K: PublicKey,
 {
     type CachedBlock = B;
