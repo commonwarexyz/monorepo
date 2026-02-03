@@ -32,64 +32,30 @@ pub use variant::Standard;
 mod tests {
     use crate::{
         marshal::{
-            ancestry::{AncestorStream, AncestryProvider},
-            mocks::harness::{
-                default_leader, make_raw_block, setup_network, StandardHarness, TestHarness,
-                BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, B, S, V,
+            mocks::{
+                harness::{
+                    default_leader, make_raw_block, setup_network, Ctx, StandardHarness,
+                    TestHarness, B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
+                },
+                verifying::MockVerifyingApp,
             },
             standard::Marshaled,
         },
-        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
+        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
-        Automaton, CertifiableAutomaton, VerifyingApplication,
+        Automaton, CertifiableAutomaton,
     };
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
-        sha256::{Digest as Sha256Digest, Sha256},
+        sha256::Sha256,
         Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use std::time::Duration;
 
-    type D = Sha256Digest;
-    type Ctx = Context<D, crate::marshal::mocks::harness::K>;
-
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {
-        #[derive(Clone)]
-        struct MockVerifyingApp {
-            genesis: B,
-        }
-
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
-            type Block = B;
-            type Context = Ctx;
-            type SigningScheme = S;
-
-            async fn genesis(&mut self) -> Self::Block {
-                self.genesis.clone()
-            }
-
-            async fn propose<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> Option<Self::Block> {
-                None
-            }
-        }
-
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
-            async fn verify<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> bool {
-                true
-            }
-        }
-
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -111,9 +77,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app = MockVerifyingApp {
-                genesis: genesis.clone(),
-            };
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut marshaled = Marshaled::new(
                 context.clone(),
@@ -125,11 +89,10 @@ mod tests {
             // Create parent block at height 1
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            marshal.clone().proposed(
-                Round::new(Epoch::new(0), View::new(1)),
-                parent.clone(),
-                (),
-            ).await;
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone(), ())
+                .await;
 
             // Block A at view 5 (height 2)
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -187,39 +150,6 @@ mod tests {
 
     #[test_traced("INFO")]
     fn test_marshaled_reproposal_validation() {
-        #[derive(Clone)]
-        struct MockVerifyingApp {
-            genesis: B,
-        }
-
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
-            type Block = B;
-            type Context = Ctx;
-            type SigningScheme = S;
-
-            async fn genesis(&mut self) -> Self::Block {
-                self.genesis.clone()
-            }
-
-            async fn propose<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> Option<Self::Block> {
-                None
-            }
-        }
-
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
-            async fn verify<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> bool {
-                true
-            }
-        }
-
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -241,9 +171,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app = MockVerifyingApp {
-                genesis: genesis.clone(),
-            };
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut marshaled = Marshaled::new(
                 context.clone(),
@@ -395,39 +323,6 @@ mod tests {
     #[test_traced("WARN")]
     fn test_marshaled_rejects_unsupported_epoch() {
         #[derive(Clone)]
-        struct MockVerifyingApp {
-            genesis: B,
-        }
-
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
-            type Block = B;
-            type Context = Ctx;
-            type SigningScheme = S;
-
-            async fn genesis(&mut self) -> Self::Block {
-                self.genesis.clone()
-            }
-
-            async fn propose<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> Option<Self::Block> {
-                None
-            }
-        }
-
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
-            async fn verify<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> bool {
-                true
-            }
-        }
-
-        #[derive(Clone)]
         struct LimitedEpocher {
             inner: FixedEpocher,
             max_epoch: u64,
@@ -481,20 +376,14 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app = MockVerifyingApp {
-                genesis: genesis.clone(),
-            };
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
             let limited_epocher = LimitedEpocher {
                 inner: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 max_epoch: 0,
             };
 
-            let mut marshaled = Marshaled::new(
-                context.clone(),
-                mock_app,
-                marshal.clone(),
-                limited_epocher,
-            );
+            let mut marshaled =
+                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent_ctx = Ctx {
@@ -502,13 +391,13 @@ mod tests {
                 leader: default_leader(),
                 parent: (View::zero(), genesis.digest()),
             };
-            let parent = B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
+            let parent =
+                B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
-            marshal.clone().proposed(
-                Round::new(Epoch::zero(), View::new(19)),
-                parent.clone(),
-                (),
-            ).await;
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone(), ())
+                .await;
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let unsupported_round = Round::new(Epoch::new(1), View::new(20));
@@ -517,19 +406,25 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::new(19), parent_digest),
             };
-            let block = B::new::<Sha256>(unsupported_context.clone(), parent_digest, Height::new(20), 2000);
+            let block = B::new::<Sha256>(
+                unsupported_context.clone(),
+                parent_digest,
+                Height::new(20),
+                2000,
+            );
             let block_commitment = block.digest();
-            marshal.clone().proposed(
-                unsupported_round,
-                block.clone(),
-                (),
-            ).await;
+            marshal
+                .clone()
+                .proposed(unsupported_round, block.clone(), ())
+                .await;
 
             context.sleep(Duration::from_millis(10)).await;
 
             // Call verify and wait for the result (verify returns optimistic result,
             // but also spawns deferred verification)
-            let verify_result = marshaled.verify(unsupported_context, block_commitment).await;
+            let verify_result = marshaled
+                .verify(unsupported_context, block_commitment)
+                .await;
             // Wait for optimistic verify to complete so the verification task is registered
             let optimistic_result = verify_result.await;
 
@@ -543,40 +438,6 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_marshaled_rejects_invalid_ancestry() {
-        #[derive(Clone)]
-        struct MockVerifyingApp {
-            genesis: B,
-        }
-
-        impl crate::Application<deterministic::Context> for MockVerifyingApp {
-            type Block = B;
-            type Context = Ctx;
-            type SigningScheme = S;
-
-            async fn genesis(&mut self) -> Self::Block {
-                self.genesis.clone()
-            }
-
-            async fn propose<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> Option<Self::Block> {
-                None
-            }
-        }
-
-        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
-            async fn verify<A: AncestryProvider<Block = Self::Block>>(
-                &mut self,
-                _context: (deterministic::Context, Self::Context),
-                _ancestry: AncestorStream<A, Self::Block>,
-            ) -> bool {
-                // Ancestry verification occurs entirely in `Marshaled`.
-                true
-            }
-        }
-
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), None);
@@ -598,9 +459,7 @@ mod tests {
             let marshal = setup.mailbox;
 
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
-            let mock_app = MockVerifyingApp {
-                genesis: genesis.clone(),
-            };
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
             let mut marshaled = Marshaled::new(
                 context.clone(),
