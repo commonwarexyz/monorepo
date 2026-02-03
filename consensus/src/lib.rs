@@ -15,7 +15,7 @@ commonware_macros::stability_scope!(ALPHA {
 });
 
 commonware_macros::stability_scope!(BETA {
-    use commonware_codec::Codec;
+    use commonware_codec::{Codec, EncodeSize, Write};
     use commonware_cryptography::{Committable, Digestible};
 
     pub mod simplex;
@@ -59,7 +59,7 @@ commonware_macros::stability_scope!(BETA {
     /// needs to participate in certification but never verified the block locally (necessary for liveness).
     pub trait CertifiableBlock: Block {
         /// The consensus context type stored in this block.
-        type Context: Clone;
+        type Context: Clone + EncodeSize + Write;
 
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;

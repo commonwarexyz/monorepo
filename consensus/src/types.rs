@@ -20,8 +20,8 @@
 //!
 //! - [`Epocher`]: Mechanism for determining epoch boundaries.
 //!
-//! - [`CodingCommitment`]: A unique identifier combining a block digest, coding digest, and
-//!   and encoded coding configuration. Used as the certificate payload for erasure-coded blocks.
+//! - [`CodingCommitment`]: A unique identifier combining a block digest, coding digest, context
+//!   hash, and encoded coding configuration. Used as the certificate payload for erasure-coded blocks.
 //!
 //! # Arithmetic Safety
 //!
@@ -702,14 +702,20 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_utils::{Array, Span};
     use commonware_math::algebra::Random;
 
-    /// A [Digest] containing a coding commitment and encoded [CodingConfig].
+    /// A [Digest] containing a coding commitment, encoded [CodingConfig], and context hash.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct CodingCommitment([u8; Self::SIZE]);
 
     impl CodingCommitment {
+        const DIGEST_BYTES: usize = 32;
+        const BLOCK_DIGEST_OFFSET: usize = 0;
+        const CODING_DIGEST_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + Self::DIGEST_BYTES;
+        const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_DIGEST_OFFSET + Self::DIGEST_BYTES;
+        const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + Self::DIGEST_BYTES;
+
         /// Extracts the [CodingConfig] from this [CodingCommitment].
         pub fn config(&self) -> CodingConfig {
-            let mut buf = &self.0[64..];
+            let mut buf = &self.0[Self::CONFIG_OFFSET..];
             CodingConfig::read(&mut buf).expect("CodingCommitment always contains a valid config")
         }
 
@@ -719,7 +725,7 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// Panics if the [Digest]'s [FixedSize::SIZE] is > 32 bytes.
         pub fn block_digest<D: Digest>(&self) -> D {
-            self.take_digest(0..D::SIZE)
+            self.take_digest(Self::BLOCK_DIGEST_OFFSET..Self::BLOCK_DIGEST_OFFSET + D::SIZE)
         }
 
         /// Returns the coding [Digest] from this [CodingCommitment].
@@ -728,7 +734,16 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// Panics if the [Digest]'s [FixedSize::SIZE] is > 32 bytes.
         pub fn coding_digest<D: Digest>(&self) -> D {
-            self.take_digest(32..32 + D::SIZE)
+            self.take_digest(Self::CODING_DIGEST_OFFSET..Self::CODING_DIGEST_OFFSET + D::SIZE)
+        }
+
+        /// Returns the context [Digest] from this [CodingCommitment].
+        ///
+        /// ## Panics
+        ///
+        /// Panics if the [Digest]'s [FixedSize::SIZE] is > 32 bytes.
+        pub fn context_digest<D: Digest>(&self) -> D {
+            self.take_digest(Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + D::SIZE)
         }
 
         /// Extracts the [Digest] from this [CodingCommitment].
@@ -768,7 +783,7 @@ commonware_macros::stability_scope!(ALPHA {
     }
 
     impl FixedSize for CodingCommitment {
-        const SIZE: usize = 32 + 32 + CodingConfig::SIZE;
+        const SIZE: usize = Self::CONFIG_OFFSET + CodingConfig::SIZE;
     }
 
     impl Read for CodingCommitment {
@@ -819,8 +834,10 @@ commonware_macros::stability_scope!(ALPHA {
         }
     }
 
-    impl<D1: Digest, D2: Digest> From<(D1, D2, CodingConfig)> for CodingCommitment {
-        fn from((digest, commitment, config): (D1, D2, CodingConfig)) -> Self {
+    impl<D1: Digest, D2: Digest, D3: Digest> From<(D1, D2, D3, CodingConfig)>
+        for CodingCommitment
+    {
+        fn from((digest, commitment, context_digest, config): (D1, D2, D3, CodingConfig)) -> Self {
             const {
                 assert!(
                     D1::SIZE <= 32,
@@ -830,12 +847,19 @@ commonware_macros::stability_scope!(ALPHA {
                     D2::SIZE <= 32,
                     "Cannot create CodingCommitment from Digest with size > 32"
                 );
+                assert!(
+                    D3::SIZE <= 32,
+                    "Cannot create CodingCommitment from Digest with size > 32"
+                );
             }
 
             let mut buf = [0u8; Self::SIZE];
             buf[..D1::SIZE].copy_from_slice(&digest);
-            buf[32..32 + D2::SIZE].copy_from_slice(&commitment);
-            buf[64..].copy_from_slice(&config.encode());
+            buf[Self::CODING_DIGEST_OFFSET..Self::CODING_DIGEST_OFFSET + D2::SIZE]
+                .copy_from_slice(&commitment);
+            buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + D3::SIZE]
+                .copy_from_slice(&context_digest);
+            buf[Self::CONFIG_OFFSET..].copy_from_slice(&config.encode());
             Self(buf)
         }
     }

@@ -690,4 +690,87 @@ mod tests {
             );
         })
     }
+
+    /// Test that marshaled rejects blocks when consensus context doesn't match block's embedded context.
+    ///
+    /// This tests that when verify() is called with a context that doesn't match what's embedded
+    /// in the block, the verification should fail. A Byzantine proposer could broadcast a block
+    /// with one embedded context but consensus could call verify() with a different context.
+    #[test_traced("WARN")]
+    fn test_marshaled_rejects_mismatched_context() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
+
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Create parent block at height 1 so the commitment is well-formed.
+            let parent_ctx = Ctx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_commitment = parent.digest();
+            marshal
+                .clone()
+                .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone(), ())
+                .await;
+
+            // Build a block with context A (embedded in the block).
+            let round_a = Round::new(Epoch::zero(), View::new(2));
+            let context_a = Ctx {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
+            let commitment_a = block_a.digest();
+            marshal.clone().proposed(round_a, block_a, ()).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Verify using a different consensus context B (hash mismatch).
+            let round_b = Round::new(Epoch::zero(), View::new(3));
+            let context_b = Ctx {
+                round: round_b,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+
+            let verify_rx = marshaled.verify(context_b, commitment_a).await;
+            select! {
+                result = verify_rx => {
+                    assert!(!result.unwrap(), "mismatched context hash should be rejected");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should reject mismatched context hash promptly");
+                },
+            }
+        })
+    }
 }

@@ -646,7 +646,12 @@ pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::
 
 /// Create a genesis CodingCommitment (all zeros for digests, genesis config).
 pub fn genesis_commitment() -> CodingCommitment {
-    CodingCommitment::from((D::EMPTY, D::EMPTY, GENESIS_CODING_CONFIG))
+    CodingCommitment::from((
+        D::EMPTY,
+        D::EMPTY,
+        Sha256Digest::EMPTY,
+        GENESIS_CODING_CONFIG,
+    ))
 }
 
 /// Create a test block with a CodingCommitment-based context.
@@ -831,6 +836,7 @@ impl TestHarness for CodingHarness {
         let parent_commitment = CodingCommitment::from((
             parent,
             parent,
+            Sha256Digest::EMPTY,
             coding_config_for_participants(num_participants),
         ));
         let context = CodingCtx {

@@ -17,13 +17,15 @@
 //!
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
-//! participants. When verifying a proposed block (the precondition for notarization), the wrapper subscribes
-//! to the shard validity for the shard received by the proposer. If the shard is valid, the local shard
-//! is relayed to all other participants to aid in block reconstruction.
+//! participants. When verifying a proposed block (the precondition for notarization), the wrapper
+//! ensures the commitment's context hash matches the consensus context and subscribes to shard validity
+//! for the shard received by the proposer. If the shard is valid, the local shard is relayed to all
+//! other participants to aid in block reconstruction.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
-//! block reconstruction and validates epoch boundaries, parent commitment, and height contiguity before
-//! allowing the block to be certified.
+//! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and
+//! that the block's embedded context matches the consensus context before allowing the block to be
+//! certified. If certification fails, the voter can still emit a nullify vote to advance the view.
 //!
 //! # Usage
 //!
@@ -38,9 +40,8 @@
 //!     scheme_provider,
 //!     epocher,
 //!     strategy,
-//!     partition_prefix,
 //! };
-//! let application = Marshaled::init(context, cfg).await;
+//! let application = Marshaled::new(context, cfg);
 //! ```
 //!
 //! # Implementation Notes
@@ -54,7 +55,7 @@ use crate::{
         ancestry::AncestorStream,
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock},
+            types::{coding_config_for_participants, context_hash, CodedBlock},
             Coding,
         },
         core, Update,
@@ -64,16 +65,15 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
 };
-use commonware_codec::RangeCfg;
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
+    sha256::Digest as Sha256Digest,
     Committable, Digestible,
 };
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
-use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::{
     future::{try_join, Either, Ready},
@@ -81,11 +81,7 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
@@ -96,15 +92,6 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
 };
 
 type TasksMap<B> = HashMap<(Round, <B as Digestible>::Digest), oneshot::Receiver<bool>>;
-
-type VerificationContexts<E, B, Z> = Metadata<
-    E,
-    <B as Digestible>::Digest,
-    BTreeMap<
-        Round,
-        Context<CodingCommitment, <<Z as Provider>::Scheme as CertificateScheme>::PublicKey>,
-    >,
->;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -129,8 +116,6 @@ where
     pub strategy: S,
     /// Strategy for determining epoch boundaries.
     pub epocher: ES,
-    /// Prefix for storage partitions.
-    pub partition_prefix: String,
 }
 
 /// An [`Application`] adapter that handles epoch transitions and erasure coded broadcast.
@@ -159,7 +144,6 @@ where
     strategy: S,
     #[allow(clippy::type_complexity)]
     last_built: Arc<Mutex<Option<(Round, CodedBlock<B, C>)>>>,
-    verification_contexts: Arc<Mutex<VerificationContexts<E, B, Z>>>,
     verification_tasks: Arc<Mutex<TasksMap<B>>>,
 
     build_duration: Gauge,
@@ -187,8 +171,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the verification contexts [`Metadata`] store cannot be initialized.
-    pub async fn init(context: E, cfg: MarshaledConfig<A, B, C, Z, S, ES>) -> Self {
+    /// Panics if the marshal metadata store cannot be initialized.
+    pub fn new(context: E, cfg: MarshaledConfig<A, B, C, Z, S, ES>) -> Self {
         let MarshaledConfig {
             application,
             marshal,
@@ -196,7 +180,6 @@ where
             scheme_provider,
             strategy,
             epocher,
-            partition_prefix,
         } = cfg;
 
         let build_duration = Gauge::default();
@@ -224,17 +207,6 @@ where
             erasure_encode_duration.clone(),
         );
 
-        let verification_contexts = Metadata::init(
-            context.with_label("verification_contexts_metadata"),
-            metadata::Config {
-                partition: format!("{partition_prefix}_verification_contexts"),
-                // BTreeMap codec config: (RangeCfg<usize> for length, (Round::Cfg, Context::Cfg))
-                codec_config: (RangeCfg::from(..), ((), ())),
-            },
-        )
-        .await
-        .expect("must initialize verification contexts metadata");
-
         Self {
             context,
             application,
@@ -244,7 +216,6 @@ where
             strategy,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
-            verification_contexts: Arc::new(Mutex::new(verification_contexts)),
             verification_tasks: Arc::new(Mutex::new(HashMap::new())),
 
             build_duration,
@@ -254,27 +225,6 @@ where
         }
     }
 
-    /// Store a verification context for later use in certification.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the verification context cannot be persisted.
-    #[inline]
-    async fn store_verification_context(
-        lock: &Arc<Mutex<VerificationContexts<E, B, Z>>>,
-        context: Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
-        block_digest: B::Digest,
-    ) {
-        let round = context.round;
-        let mut contexts_guard = lock.lock().await;
-        contexts_guard
-            .upsert_sync(block_digest, |map| {
-                map.insert(round, context);
-            })
-            .await
-            .expect("must persist verification context");
-    }
-
     /// Verifies a proposed block within epoch boundaries.
     ///
     /// This method validates that:
@@ -282,8 +232,9 @@ where
     /// 2. Re-proposals are only allowed for the last block in an epoch
     /// 3. The block's parent digest matches the consensus context's expected parent
     /// 4. The block's height is exactly one greater than the parent's height
-    /// 5. The block's embedded context matches the consensus context
-    /// 6. The underlying application's verification logic passes
+    /// 5. The block's embedded context hash matches the commitment
+    /// 6. The block's embedded context matches the consensus context
+    /// 7. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
@@ -412,13 +363,25 @@ where
                     return;
                 }
 
+                // Ensure the block's embedded context matches the commitment's context hash.
+                let expected_context_hash = commitment.context_digest::<Sha256Digest>();
+                let got_context_hash = context_hash(&block.context());
+                if expected_context_hash != got_context_hash {
+                    debug!(
+                        expected_context_hash = ?expected_context_hash,
+                        got_context_hash = ?got_context_hash,
+                        "block context hash does not match commitment"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+
                 // Ensure the block's embedded context matches the consensus context.
                 //
-                // This is a critical step - the notarize quorum is guaranteed to have at least
-                // f+1 honest validators who will verify against this context, preventing a Byzantine
-                // proposer from embedding a malicious context. The other f honest validators who did
-                // not vote will later use the block-embedded context to help finalize if Byzantine
-                // validators withhold their finalize votes.
+                // We already checked the commitment's context hash against the block's embedded
+                // context above (and `verify()` ties the commitment hash to the consensus context).
+                // This check enforces full context equality for certification, rejecting any
+                // reconstructed block whose context does not exactly match the consensus context.
                 if block.context() != context {
                     debug!(
                         ?context,
@@ -521,7 +484,6 @@ where
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let last_built = self.last_built.clone();
-        let verification_contexts = self.verification_contexts.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
 
@@ -587,13 +549,6 @@ where
                         *lock = Some((consensus_context.round, parent));
                     }
 
-                    Self::store_verification_context(
-                        &verification_contexts,
-                        consensus_context.clone(),
-                        commitment.block_digest(),
-                    )
-                    .await;
-
                     let success = tx.send_lossy(commitment);
                     debug!(
                         round = ?consensus_context.round,
@@ -643,13 +598,6 @@ where
                     *lock = Some((consensus_context.round, coded_block));
                 }
 
-                Self::store_verification_context(
-                    &verification_contexts,
-                    consensus_context.clone(),
-                    commitment.block_digest(),
-                )
-                .await;
-
                 let success = tx.send_lossy(commitment);
                 debug!(
                     round = ?consensus_context.round,
@@ -665,7 +613,8 @@ where
     ///
     /// This method validates that:
     /// 1. The coding configuration matches the expected configuration for the current scheme.
-    /// 2. The shard is contained within the consensus commitment.
+    /// 2. The commitment's context hash matches the consensus context (unless this is a re-proposal).
+    /// 3. The shard is contained within the consensus commitment.
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Additionally, this method kicks off deferred verification to
@@ -675,15 +624,6 @@ where
         context: Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        // Store context for later certification, keyed by the block digest
-        let block_digest: B::Digest = payload.block_digest();
-        Self::store_verification_context(
-            &self.verification_contexts,
-            context.clone(),
-            block_digest,
-        )
-        .await;
-
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
         let Some(scheme) = self.scheme_provider.scoped(context.epoch()) else {
@@ -710,10 +650,32 @@ where
             return rx;
         }
 
+        // Re-proposals skip context-hash validation because the consensus context will point
+        // at the prior epoch-boundary block while the embedded block context is from the
+        // original proposal view.
+        let is_reproposal = payload == context.parent.1;
+        if !is_reproposal {
+            let expected = context_hash(&context);
+            let got = payload.context_digest::<Sha256Digest>();
+            if expected != got {
+                warn!(
+                    round = %context.round,
+                    expected = ?expected,
+                    got = ?got,
+                    "rejected proposal with mismatched context hash"
+                );
+
+                let (tx, rx) = oneshot::channel();
+                tx.send_lossy(false);
+                return rx;
+            }
+        }
+
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = context.round;
         let task = self.deferred_verify(context, payload, None).await;
+        let block_digest: B::Digest = payload.block_digest();
         self.verification_tasks
             .lock()
             .await
@@ -760,20 +722,7 @@ where
             return task;
         }
 
-        // No in-progress task. Check if we have a cached context from `propose()` or `verify()`.
-        let mut contexts_guard = self.verification_contexts.lock().await;
-        let context = contexts_guard
-            .get_mut(&block_digest)
-            .and_then(|map| map.get(&round).cloned());
-        drop(contexts_guard);
-
-        if let Some(context) = context {
-            // We have a cached context but no in-progress task. This can happen if we crashed
-            // after storing the context but before the task completed.
-            return self.deferred_verify(context, payload, None).await;
-        }
-
-        // No in-progress task and no cached context means we never verified this proposal locally.
+        // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to help complete finalization when Byzantine
         // validators withhold their finalize votes. If a Byzantine proposer embedded a malicious
         // context, the f+1 honest validators from the notarizing quorum will verify against the
@@ -906,15 +855,6 @@ where
             let mut tasks_guard = self.verification_tasks.lock().await;
             tasks_guard.retain(|(task_round, _), _| task_round > round);
             drop(tasks_guard);
-
-            // Clean up persisted verification contexts by pruning rounds <= finalized
-            let mut contexts_guard = self.verification_contexts.lock().await;
-            contexts_guard.retain_mut(|_, map| {
-                map.retain(|ctx_round, _| ctx_round > round);
-                !map.is_empty()
-            });
-            // Sync is best-effort; failure just means stale data after crash
-            let _ = contexts_guard.sync().await;
         }
         self.application.report(update).await
     }
@@ -942,7 +882,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
     A: Application<E, Block = B, Context = Context<CodingCommitment, S::PublicKey>>,
-    B: Block,
+    B: CertifiableBlock,
     C: CodingScheme,
 {
     let genesis = application.genesis().await;
@@ -962,6 +902,11 @@ where
 
 /// Constructs the [`CodingCommitment`] for the genesis block.
 #[inline(always)]
-fn genesis_coding_commitment<B: Block>(block: &B) -> CodingCommitment {
-    CodingCommitment::from((block.digest(), block.digest(), GENESIS_CODING_CONFIG))
+fn genesis_coding_commitment<B: CertifiableBlock>(block: &B) -> CodingCommitment {
+    CodingCommitment::from((
+        block.digest(),
+        block.digest(),
+        context_hash(&block.context()),
+        GENESIS_CODING_CONFIG,
+    ))
 }

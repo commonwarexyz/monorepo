@@ -6,7 +6,9 @@ use crate::{
 };
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
-use commonware_cryptography::{Committable, Digestible, Hasher};
+use commonware_cryptography::{
+    sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
+};
 use commonware_parallel::{Sequential, Strategy};
 use std::{marker::PhantomData, ops::Deref};
 
@@ -343,7 +345,10 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     }
 
     /// Returns a [Shard] at the given index, if the index is valid.
-    pub fn shard<H: Hasher>(&self, index: usize) -> Option<Shard<C, H>> {
+    pub fn shard<H: Hasher>(&self, index: usize) -> Option<Shard<C, H>>
+    where
+        B: CertifiableBlock,
+    {
         Some(Shard::new(
             self.commitment(),
             index,
@@ -362,7 +367,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> From<CodedBlock<B, C>> for StoredCodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme> From<CodedBlock<B, C>> for StoredCodedBlock<B, C> {
     fn from(block: CodedBlock<B, C>) -> Self {
         Self::new(block)
     }
@@ -379,11 +384,16 @@ impl<B: Block + Clone, C: Scheme> Clone for CodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Committable for CodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme> Committable for CodedBlock<B, C> {
     type Commitment = CodingCommitment;
 
     fn commitment(&self) -> Self::Commitment {
-        CodingCommitment::from((self.digest(), self.commitment, self.config))
+        CodingCommitment::from((
+            self.digest(),
+            self.commitment,
+            context_hash(&self.inner.context()),
+            self.config,
+        ))
     }
 }
 
@@ -435,7 +445,7 @@ impl<B: Block, C: Scheme> Read for CodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Block for CodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme> Block for CodedBlock<B, C> {
     fn parent(&self) -> Self::Digest {
         self.inner.parent()
     }
@@ -453,6 +463,13 @@ impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for CodedBlock<B, C> {
     fn context(&self) -> Self::Context {
         self.inner.context()
     }
+}
+
+/// Hashes a consensus context for inclusion in a [`CodingCommitment`].
+pub fn context_hash<C: EncodeSize + Write>(context: &C) -> Sha256Digest {
+    let mut buf = Vec::with_capacity(context.encode_size());
+    context.write(&mut buf);
+    Sha256::hash(&buf)
 }
 
 impl<B: Block + PartialEq, C: Scheme> PartialEq for CodedBlock<B, C> {
@@ -484,7 +501,7 @@ pub struct StoredCodedBlock<B: Block, C: Scheme> {
     _scheme: PhantomData<C>,
 }
 
-impl<B: Block, C: Scheme> StoredCodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme> StoredCodedBlock<B, C> {
     /// Create a [StoredCodedBlock] from a verified [CodedBlock].
     ///
     /// The caller must ensure the [CodedBlock] has been properly verified
@@ -514,7 +531,7 @@ impl<B: Block, C: Scheme> StoredCodedBlock<B, C> {
 /// Converts a [`StoredCodedBlock`] back to a [`CodedBlock`].
 impl<B: Block, C: Scheme> From<StoredCodedBlock<B, C>> for CodedBlock<B, C> {
     fn from(stored: StoredCodedBlock<B, C>) -> Self {
-        stored.into_coded_block()
+        Self::new_trusted(stored.inner, stored.commitment)
     }
 }
 
@@ -673,7 +690,8 @@ mod test {
         let (commitment, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA, &Sequential).unwrap();
         let raw_shard = shards.first().cloned().unwrap();
 
-        let commitment = CodingCommitment::from((Sha256Digest::EMPTY, commitment, CONFIG));
+        let commitment =
+            CodingCommitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
         let shard = RShard::new(commitment, 0, DistributionShard::Strong(raw_shard.clone()));
         let encoded = shard.encode();
         let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
