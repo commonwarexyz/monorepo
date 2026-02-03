@@ -180,7 +180,9 @@ fn fuzz(input: FuzzInput) {
 
                 MmrOperation::Pop => {
                     let size_before = mmr.size();
-                    let mmr_result = mmr.pop(&mut hasher);
+                    let mut dirty_mmr = mmr.into_dirty();
+                    let mmr_result = dirty_mmr.pop();
+                    mmr = dirty_mmr.merkleize(&mut hasher, None);
                     let ref_result = reference.pop();
 
                     assert_eq!(

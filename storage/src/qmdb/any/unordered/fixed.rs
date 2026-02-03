@@ -446,8 +446,8 @@ pub(crate) mod test {
             assert_eq!(min_ops, ops[0..3]);
 
             // Can't destroy the db unless it's durable, so we need to commit first.
-            let (single_db, _) = single_db.commit(None).await.unwrap();
-            single_db.destroy().await.unwrap();
+            let (single_db, _) = single_db.into_mutable().commit(None).await.unwrap();
+            single_db.into_merkleized().destroy().await.unwrap();
 
             db.destroy().await.unwrap();
         });
@@ -505,8 +505,8 @@ pub(crate) mod test {
                     &ref_root
                 ));
 
-                let (ref_db, _) = ref_db.commit(None).await.unwrap();
-                ref_db.destroy().await.unwrap();
+                let (ref_db, _) = ref_db.into_mutable().commit(None).await.unwrap();
+                ref_db.into_merkleized().destroy().await.unwrap();
             }
 
             db.destroy().await.unwrap();
