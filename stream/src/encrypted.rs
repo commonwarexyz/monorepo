@@ -67,7 +67,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    Buf, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, Sink, Stream,
+    Buf, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, Sink, Stream,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
@@ -307,25 +307,19 @@ impl<O: Sink> Sender<O> {
     /// and sends the ciphertext.
     pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
         let mut bufs = buf.into();
-        let plaintext_len = bufs.remaining();
-        let ciphertext_len = plaintext_len + TAG_SIZE;
+        let ciphertext_len = bufs.remaining() + TAG_SIZE;
 
         // Allocate buffer from pool for ciphertext (plaintext + tag).
         let mut encryption_buf = self.pool.alloc(ciphertext_len);
 
-        // SAFETY: We will initialize exactly `ciphertext_len` bytes below.
-        unsafe { encryption_buf.set_len(ciphertext_len) };
-
         // Copy plaintext into buffer.
-        bufs.copy_to_slice(&mut encryption_buf.as_mut()[..plaintext_len]);
+        encryption_buf.put(&mut bufs);
 
         // Encrypt in-place, get tag back.
-        let tag = self
-            .cipher
-            .send_in_place(&mut encryption_buf.as_mut()[..plaintext_len])?;
+        let tag = self.cipher.send_in_place(encryption_buf.as_mut())?;
 
         // Append tag to buffer.
-        encryption_buf.as_mut()[plaintext_len..].copy_from_slice(&tag);
+        encryption_buf.put_slice(&tag);
 
         send_frame(
             &mut self.sink,
@@ -362,11 +356,8 @@ impl<I: Stream> Receiver<I> {
         // Allocate buffer from pool for decryption.
         let mut decryption_buf = self.pool.alloc(ciphertext_len);
 
-        // SAFETY: We will initialize exactly `ciphertext_len` bytes below.
-        unsafe { decryption_buf.set_len(ciphertext_len) };
-
         // Copy ciphertext into buffer.
-        encrypted.copy_to_slice(decryption_buf.as_mut());
+        decryption_buf.put(&mut encrypted);
 
         // Decrypt in-place, get plaintext length back.
         let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
