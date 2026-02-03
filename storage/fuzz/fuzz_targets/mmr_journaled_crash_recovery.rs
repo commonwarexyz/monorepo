@@ -122,7 +122,7 @@ async fn run_operations(
     let mut min_leaves = 0u64;
     let mut max_leaves = mmr.leaves().as_u64();
     let mut min_pruned = 0u64;
-    let mut max_pruned = mmr.pruned_to_pos().as_u64();
+    let mut max_pruned = mmr.bounds().start.as_u64();
 
     for op in operations.iter() {
         let step_result: Result<(), ()> = match op {
@@ -181,7 +181,7 @@ async fn run_operations(
                     // Sync commits state: update all bounds to current values
                     let size = mmr.size().as_u64();
                     let leaves = mmr.leaves().as_u64();
-                    let pruned = mmr.pruned_to_pos().as_u64();
+                    let pruned = mmr.bounds().start.as_u64();
                     min_size = size;
                     max_size = max_size.max(size);
                     min_leaves = leaves;
@@ -194,7 +194,7 @@ async fn run_operations(
 
             MmrOperation::PruneToPos { pos } => {
                 let size = mmr.size().as_u64();
-                let current_pruned = mmr.pruned_to_pos().as_u64();
+                let current_pruned = mmr.bounds().start.as_u64();
                 let safe_pos = (*pos).min(size);
 
                 if safe_pos <= current_pruned {
@@ -209,7 +209,7 @@ async fn run_operations(
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = mmr.pruned_to_pos().as_u64();
+                            let pruned = mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
                             Ok(())
@@ -220,7 +220,7 @@ async fn run_operations(
 
             MmrOperation::PruneAll => {
                 let size = mmr.size().as_u64();
-                let current_pruned = mmr.pruned_to_pos().as_u64();
+                let current_pruned = mmr.bounds().start.as_u64();
 
                 if size == 0 || current_pruned >= size {
                     // No-op: nothing to prune
@@ -234,7 +234,7 @@ async fn run_operations(
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = mmr.pruned_to_pos().as_u64();
+                            let pruned = mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
                             Ok(())
@@ -329,7 +329,7 @@ fn fuzz(input: FuzzInput) {
         // Verify recovered state is within expected bounds
         let size = mmr.size().as_u64();
         let leaves = mmr.leaves().as_u64();
-        let pruned = mmr.pruned_to_pos().as_u64();
+        let pruned = mmr.bounds().start.as_u64();
 
         assert!(
             size <= bounds.max_size,

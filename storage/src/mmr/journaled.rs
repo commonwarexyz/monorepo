@@ -192,19 +192,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
         Ok(self.mem_mmr.add(h, element))
     }
 
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    pub const fn pruned_to_pos(&self) -> Position {
-        self.pruned_to_pos
-    }
-
-    /// Return the position of the oldest retained node in the MMR, not including pinned nodes.
-    pub fn oldest_retained_pos(&self) -> Option<Position> {
-        if self.pruned_to_pos == self.size() {
-            return None;
-        }
-
-        Some(self.pruned_to_pos)
+    /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
+    /// retained nodes respectively.
+    pub fn bounds(&self) -> std::ops::Range<Position> {
+        self.pruned_to_pos..self.size()
     }
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
@@ -241,7 +232,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         };
         let mut journal =
             Journal::<E, D>::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let mut journal_size = Position::new(journal.size());
+        let mut journal_size = Position::new(journal.bounds().end);
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
@@ -282,37 +273,31 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                     .expect("metadata prune position is not 8 bytes"),
             )
         });
-        let oldest_retained_pos = journal
-            .oldest_retained_pos()
-            .unwrap_or_else(|| journal.pruning_boundary());
-        if metadata_prune_pos > oldest_retained_pos {
+        let journal_bounds_start = journal.bounds().start;
+        if metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
             journal.prune(metadata_prune_pos).await?;
-            if journal
-                .oldest_retained_pos()
-                .unwrap_or_else(|| journal.pruning_boundary())
-                != oldest_retained_pos
-            {
+            if journal.bounds().start != journal_bounds_start {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
-                    oldest_retained_pos,
+                    journal_bounds_start,
                     metadata_prune_pos, "journal pruned to match metadata"
                 );
             }
-        } else if metadata_prune_pos < oldest_retained_pos {
+        } else if metadata_prune_pos < journal_bounds_start {
             // Metadata is stale (e.g., missing/corrupted while journal has valid state).
             // Use the journal's state as authoritative.
             warn!(
                 metadata_prune_pos,
-                oldest_retained_pos, "metadata stale, using journal pruning boundary"
+                journal_bounds_start, "metadata stale, using journal pruning boundary"
             );
         }
 
         // Use the more restrictive (higher) pruning boundary between metadata and journal.
         // This handles both cases: metadata ahead (crash during prune) and metadata stale.
-        let effective_prune_pos = std::cmp::max(metadata_prune_pos, oldest_retained_pos);
+        let effective_prune_pos = std::cmp::max(metadata_prune_pos, journal_bounds_start);
 
         let last_valid_size = PeakIterator::to_nearest_size(journal_size);
         let mut orphaned_leaf: Option<D> = None;
@@ -366,7 +351,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             s.mem_mmr.add_leaf_digest(hasher, leaf);
             assert_eq!(pos, journal_size);
             s.sync().await?;
-            assert_eq!(s.size(), s.journal.size());
+            assert_eq!(s.size(), s.journal.bounds().end);
         }
 
         Ok(s)
@@ -526,7 +511,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         }
         self.journal_size = self.size();
         self.journal.sync().await?;
-        assert_eq!(self.journal_size, self.journal.size());
+        assert_eq!(self.journal_size, self.journal.bounds().end);
 
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
@@ -937,9 +922,10 @@ mod tests {
                 .unwrap();
             assert_eq!(mmr.size(), 0);
             assert!(mmr.get_node(Position::new(0)).await.is_err());
-            assert_eq!(mmr.oldest_retained_pos(), None);
+            let bounds = mmr.bounds();
+            assert!(bounds.is_empty());
             assert!(mmr.prune_all().await.is_ok());
-            assert_eq!(mmr.pruned_to_pos(), 0);
+            assert_eq!(bounds.start, 0);
             assert!(mmr.prune_to_pos(Position::new(0)).await.is_ok());
             assert!(mmr.sync().await.is_ok());
             assert!(matches!(mmr.pop(&mut hasher, 1).await, Err(Error::Empty)));
@@ -1079,7 +1065,7 @@ mod tests {
 
             // Make sure pruning to an older location is a no-op.
             assert!(mmr.prune_to_pos(leaf_pos - 1).await.is_ok());
-            assert_eq!(mmr.pruned_to_pos(), leaf_pos);
+            assert_eq!(mmr.bounds().start, leaf_pos);
 
             mmr.destroy().await.unwrap();
         });
@@ -1122,7 +1108,7 @@ mod tests {
             // Sync the MMR, make sure it flushes the in-mem MMR as expected.
             mmr.sync().await.unwrap();
             assert_eq!(mmr.journal_size, Position::new(502));
-            assert_eq!(mmr.mem_mmr.oldest_retained_pos(), None);
+            assert!(mmr.mem_mmr.bounds().is_empty());
 
             // Now that the element is flushed from the in-mem MMR, confirm its proof is still is
             // generated correctly.
@@ -1252,7 +1238,7 @@ mod tests {
                     .prune_to_pos(Position::new(prune_pos))
                     .await
                     .unwrap();
-                assert_eq!(prune_pos, pruned_mmr.pruned_to_pos());
+                assert_eq!(prune_pos, pruned_mmr.bounds().start);
 
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
@@ -1283,8 +1269,9 @@ mod tests {
             let size = pruned_mmr.size();
             pruned_mmr.prune_all().await.unwrap();
             assert_eq!(pruned_mmr.root(), mmr.root());
-            assert_eq!(pruned_mmr.oldest_retained_pos(), None);
-            assert_eq!(pruned_mmr.pruned_to_pos(), size);
+            let bounds = pruned_mmr.bounds();
+            assert!(bounds.is_empty());
+            assert_eq!(bounds.start, size);
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
@@ -1306,12 +1293,13 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(pruned_mmr.root(), mmr.root());
-            assert_eq!(pruned_mmr.oldest_retained_pos(), Some(size));
-            assert_eq!(pruned_mmr.pruned_to_pos(), size);
+            let bounds = pruned_mmr.bounds();
+            assert!(!bounds.is_empty());
+            assert_eq!(bounds.start, size);
 
             // Make sure pruning to older location is a no-op.
             assert!(pruned_mmr.prune_to_pos(size - 1).await.is_ok());
-            assert_eq!(pruned_mmr.pruned_to_pos(), size);
+            assert_eq!(pruned_mmr.bounds().start, size);
 
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
@@ -1322,7 +1310,7 @@ mod tests {
                     .unwrap();
             }
             pruned_mmr.prune_all().await.unwrap();
-            assert_eq!(pruned_mmr.oldest_retained_pos(), None);
+            assert!(pruned_mmr.bounds().is_empty());
 
             pruned_mmr.destroy().await.unwrap();
             mmr.destroy().await.unwrap();
@@ -1649,8 +1637,9 @@ mod tests {
 
             // Should be fresh MMR starting empty
             assert_eq!(sync_mmr.size(), 0);
-            assert_eq!(sync_mmr.pruned_to_pos(), 0);
-            assert_eq!(sync_mmr.oldest_retained_pos(), None);
+            let bounds = sync_mmr.bounds();
+            assert_eq!(bounds.start, 0);
+            assert!(bounds.is_empty());
 
             // Should be able to add new elements
             let mut sync_mmr = sync_mmr;
@@ -1684,7 +1673,7 @@ mod tests {
             let original_root = mmr.root();
 
             // Sync with range.start <= existing_size <= range.end should reuse data
-            let lower_bound_pos = mmr.pruned_to_pos();
+            let lower_bound_pos = mmr.bounds().start;
             let upper_bound_pos = mmr.size();
             let mut expected_nodes = BTreeMap::new();
             for i in *lower_bound_pos..*upper_bound_pos {
@@ -1709,8 +1698,9 @@ mod tests {
             // Should have existing data in the sync range.
             assert_eq!(sync_mmr.size(), original_size);
             assert_eq!(sync_mmr.leaves(), original_leaves);
-            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
-            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
+            let bounds = sync_mmr.bounds();
+            assert_eq!(bounds.start, lower_bound_pos);
+            assert!(!bounds.is_empty());
             assert_eq!(sync_mmr.root(), original_root);
             for pos in *lower_bound_pos..*upper_bound_pos {
                 let pos = Position::new(pos);
@@ -1743,7 +1733,7 @@ mod tests {
 
             let original_size = mmr.size();
             let original_root = mmr.root();
-            let original_pruned_to = mmr.pruned_to_pos();
+            let original_pruned_to = mmr.bounds().start;
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
             let lower_bound_pos = original_pruned_to;
@@ -1770,8 +1760,9 @@ mod tests {
 
             // Should have existing data in the overlapping range.
             assert_eq!(sync_mmr.size(), original_size);
-            assert_eq!(sync_mmr.pruned_to_pos(), lower_bound_pos);
-            assert_eq!(sync_mmr.oldest_retained_pos(), Some(lower_bound_pos));
+            let bounds = sync_mmr.bounds();
+            assert_eq!(bounds.start, lower_bound_pos);
+            assert!(!bounds.is_empty());
             assert_eq!(sync_mmr.root(), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
@@ -1880,7 +1871,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(mmr.pruned_to_pos(), prune_pos);
+            assert_eq!(mmr.bounds().start, prune_pos);
             assert_eq!(mmr.size(), expected_size);
             assert_eq!(mmr.root(), expected_root);
 
@@ -1941,7 +1932,7 @@ mod tests {
             // Verify the MMR state is correct.
             assert_eq!(sync_mmr.size(), original_size);
             assert_eq!(sync_mmr.root(), original_root);
-            assert_eq!(sync_mmr.pruned_to_pos(), prune_pos);
+            assert_eq!(sync_mmr.bounds().start, prune_pos);
 
             sync_mmr.destroy().await.unwrap();
         });

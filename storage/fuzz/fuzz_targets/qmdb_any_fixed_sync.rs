@@ -9,6 +9,7 @@ use commonware_storage::{
             unordered::fixed::{Db, Operation as FixedOperation},
             FixedConfig as Config,
         },
+        store::LogStore as _,
         sync,
     },
     translator::TwoCap,
@@ -201,7 +202,7 @@ fn fuzz(mut input: FuzzInput) {
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
-                    if db.op_count() == 0 {
+                    if db.bounds().end == 0 {
                         continue;
                     }
                     input.commit_counter += 1;
@@ -215,7 +216,7 @@ fn fuzz(mut input: FuzzInput) {
 
                     let target = sync::Target {
                         root: clean_db.root(),
-                        range: clean_db.inactivity_floor_loc()..clean_db.op_count(),
+                        range: clean_db.inactivity_floor_loc()..clean_db.bounds().end,
                     };
 
                     let wrapped_src = Arc::new(RwLock::new(clean_db));

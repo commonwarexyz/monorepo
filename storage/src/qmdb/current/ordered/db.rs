@@ -17,7 +17,8 @@ use crate::{
             db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
-        store, DurabilityState, Durable, Error, NonDurable,
+        store::{self, LogStore as _},
+        DurabilityState, Durable, Error, NonDurable,
     },
     translator::Translator,
 };
@@ -209,10 +210,7 @@ where
                 }
                 *loc
             }
-            None => self
-                .op_count()
-                .checked_sub(1)
-                .expect("db shouldn't be empty"),
+            None => self.size().checked_sub(1).expect("db shouldn't be empty"),
         };
 
         let op_proof =

@@ -156,16 +156,20 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound, upper_bound) = {
+    let (root, inactivity_floor, size) = {
         let db_opt = state.database.read().await;
         let database = db_opt.as_ref().expect("database should exist");
-        (database.root(), database.lower_bound(), database.op_count())
+        (
+            database.root(),
+            database.inactivity_floor(),
+            database.size(),
+        )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            range: lower_bound..upper_bound,
+            range: inactivity_floor..size,
         },
     };
 
@@ -188,7 +192,7 @@ where
     let database = db_opt.as_ref().expect("database should exist");
 
     // Check if we have enough operations
-    let db_size = database.op_count();
+    let db_size = database.size();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -387,7 +391,8 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = ?database.op_count(),
+        size = ?database.size(),
+        inactivity_floor = ?database.inactivity_floor(),
         root = %root_hex,
         "{} database ready",
         DB::name()

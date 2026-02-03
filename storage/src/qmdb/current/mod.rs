@@ -306,7 +306,7 @@ pub mod tests {
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
             let committed_root = db.root();
-            let committed_op_count = db.op_count();
+            let committed_op_count = db.bounds().end;
             let committed_inactivity_floor = db.inactivity_floor_loc();
             db.prune(committed_inactivity_floor).await.unwrap();
 
@@ -320,7 +320,7 @@ pub mod tests {
             drop(db);
             let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
             assert_eq!(db.root(), committed_root);
-            assert_eq!(db.op_count(), committed_op_count);
+            assert_eq!(db.bounds().end, committed_op_count);
 
             // Re-apply the exact same uncommitted operations.
             let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
@@ -332,7 +332,7 @@ pub mod tests {
             // into_merkleized is called). We do this by committing and then dropping the durable
             // db without calling close or into_merkleized.
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let committed_op_count = durable_db.op_count();
+            let committed_op_count = durable_db.bounds().end;
             drop(durable_db);
 
             // We should be able to recover, so the root should differ from the previous commit, and
@@ -355,7 +355,7 @@ pub mod tests {
             let mut db: C = db.into_merkleized().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
-            assert_eq!(db.op_count(), committed_op_count);
+            assert_eq!(db.bounds().end, committed_op_count);
             assert_eq!(db.root(), scenario_2_root);
 
             db.destroy().await.unwrap();
@@ -471,7 +471,7 @@ pub mod tests {
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
                 pruned_bits_before,
                 *db.inactivity_floor_loc(),
-                *db.op_count()
+                *db.bounds().end
             );
 
             // Verify we actually have some pruning (otherwise the test is meaningless).
@@ -574,7 +574,7 @@ pub mod tests {
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 
             // Verify expected state after prune.
-            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
                 db.inactivity_floor_loc(),
                 Location::new_unchecked(expected_inactivity_floor)
@@ -588,7 +588,7 @@ pub mod tests {
             // Reopen the db and verify it has exactly the same state.
             let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), Location::new_unchecked(expected_op_count));
+            assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
                 db.inactivity_floor_loc(),
                 Location::new_unchecked(expected_inactivity_floor)
