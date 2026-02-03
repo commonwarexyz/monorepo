@@ -1729,10 +1729,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Set up participant 1 as sender
             let sender_pk = participants[1].clone();
@@ -1754,7 +1760,9 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             let view = View::new(1);
-            let active = batcher_mailbox.update(view, Participant::new(1), View::zero()).await;
+            let active = batcher_mailbox
+                .update(view, Participant::new(1), View::zero())
+                .await;
             assert!(active);
 
             let round = Round::new(epoch, view);
@@ -1763,7 +1771,11 @@ mod tests {
             // Send first valid vote from participant 1
             let vote1 = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
             sender
-                .send(Recipients::One(me.clone()), Vote::Notarize(vote1.clone()).encode(), true)
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(vote1.clone()).encode(),
+                    true,
+                )
                 .await
                 .unwrap();
 
@@ -1771,25 +1783,39 @@ mod tests {
 
             // Verify not blocked yet
             let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.is_empty(), "No peers should be blocked after first vote");
+            assert!(
+                blocked.is_empty(),
+                "No peers should be blocked after first vote"
+            );
 
             // Send same vote again (exact duplicate) - should be ignored, not blocked
             sender
-                .send(Recipients::One(me.clone()), Vote::Notarize(vote1.clone()).encode(), true)
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(vote1.clone()).encode(),
+                    true,
+                )
                 .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
 
             let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.is_empty(), "Duplicate vote should be ignored, not blocked");
+            assert!(
+                blocked.is_empty(),
+                "Duplicate vote should be ignored, not blocked"
+            );
 
             // Now send a vote with the SAME proposal but signed by a DIFFERENT key
             // This simulates same proposal, different attestation (one signature must be wrong)
             let vote_wrong_signer = Notarize::sign(&schemes[2], proposal.clone()).unwrap();
             // But we send it as if it came from participant 1
             sender
-                .send(Recipients::One(me.clone()), Vote::Notarize(vote_wrong_signer).encode(), true)
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(vote_wrong_signer).encode(),
+                    true,
+                )
                 .await
                 .unwrap();
 
@@ -1860,10 +1886,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Set up participant 1 as sender
             let sender_pk = participants[1].clone();
@@ -1885,7 +1917,9 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             let view = View::new(1);
-            let active = batcher_mailbox.update(view, Participant::new(1), View::zero()).await;
+            let active = batcher_mailbox
+                .update(view, Participant::new(1), View::zero())
+                .await;
             assert!(active);
 
             let round = Round::new(epoch, view);
@@ -1895,19 +1929,30 @@ mod tests {
             // Send first valid vote for proposal1
             let vote1 = Notarize::sign(&schemes[1], proposal1).unwrap();
             sender
-                .send(Recipients::One(me.clone()), Vote::Notarize(vote1).encode(), true)
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(vote1).encode(),
+                    true,
+                )
                 .await
                 .unwrap();
 
             context.sleep(Duration::from_millis(50)).await;
 
             let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.is_empty(), "No peers should be blocked after first vote");
+            assert!(
+                blocked.is_empty(),
+                "No peers should be blocked after first vote"
+            );
 
             // Send conflicting vote for proposal2 (different payload = different proposal)
             let vote2 = Notarize::sign(&schemes[1], proposal2).unwrap();
             sender
-                .send(Recipients::One(me.clone()), Vote::Notarize(vote2).encode(), true)
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::Notarize(vote2).encode(),
+                    true,
+                )
                 .await
                 .unwrap();
 
@@ -1933,7 +1978,9 @@ mod tests {
             );
             let view_faults = sender_faults.get(&view).unwrap();
             assert!(
-                view_faults.iter().any(|a| matches!(a, Activity::ConflictingNotarize(_))),
+                view_faults
+                    .iter()
+                    .any(|a| matches!(a, Activity::ConflictingNotarize(_))),
                 "Should have ConflictingNotarize activity"
             );
         });
