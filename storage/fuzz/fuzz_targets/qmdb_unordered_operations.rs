@@ -7,6 +7,7 @@ use commonware_storage::{
     mmr::{Location, StandardHasher as Standard},
     qmdb::{
         any::{unordered::fixed::Db, FixedConfig as Config},
+        store::LogStore as _,
         verify_proof,
     },
     translator::EightCap,
@@ -92,7 +93,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::OpCount => {
-                    let actual_count = db.op_count();
+                    let actual_count = db.bounds().end;
                     // The count should have increased by the number of uncommitted operations
                     let expected_count = last_known_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
@@ -102,7 +103,7 @@ fn fuzz(data: FuzzInput) {
                 QmdbOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
-                    last_known_op_count = durable_db.op_count();
+                    last_known_op_count = durable_db.bounds().end;
                     uncommitted_ops = 0; // Reset uncommitted operations counter
                     db = durable_db.into_mutable();
                 }
@@ -115,7 +116,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
-                    let actual_op_count = db.op_count();
+                    let actual_op_count = db.bounds().end;
                     // Only generate proof if proof will have operations.
                     if actual_op_count == 0 || *max_ops == 0 {
                         continue;

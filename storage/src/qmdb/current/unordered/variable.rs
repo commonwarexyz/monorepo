@@ -123,6 +123,7 @@ mod test {
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore as _,
             },
             Durable, Error, Merkleized, NonDurable, Unmerkleized,
         },
@@ -389,7 +390,7 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.op_count();
+            let end_loc = db.size();
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {

@@ -62,21 +62,16 @@ where
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
 {
-    /// Returns the number of items in the journal.
+    /// Returns [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    pub fn bounds(&self) -> std::ops::Range<Location> {
+        let inner = self.journal.bounds();
+        Location::new_unchecked(inner.start)..Location::new_unchecked(inner.end)
+    }
+
+    /// Returns the Location of the next item appended to the journal.
     pub fn size(&self) -> Location {
-        Location::new_unchecked(self.journal.size())
-    }
-
-    /// Returns the oldest retained location in the journal.
-    pub fn oldest_retained_loc(&self) -> Option<Location> {
-        self.journal
-            .oldest_retained_pos()
-            .map(Location::new_unchecked)
-    }
-
-    /// Returns the pruning boundary for the journal.
-    pub fn pruning_boundary(&self) -> Location {
-        self.journal.pruning_boundary().into()
+        Location::new_unchecked(self.journal.bounds().end)
     }
 
     /// Read an item from the journal at the given location.
@@ -203,29 +198,28 @@ where
     pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
         if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
-            return Ok(self.pruning_boundary());
+            return Ok(self.bounds().start);
         }
 
-        // Sync the mmr before pruning the journal, otherwise the MMR tip could end up behind the
-        // journal's pruning boundary on restart from an unclean shutdown, and there would be no way
-        // to replay the items between the MMR tip and the journal pruning boundary.
+        // Sync the MMR before pruning the journal, otherwise the MMR's last element could end up
+        // behind the journal's first element after a crash, and there would be no way to replay
+        // the items between the MMR's last element and the journal's first element.
         self.mmr.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
-            return Ok(self.pruning_boundary());
+            return Ok(self.bounds().start);
         }
 
-        let pruning_boundary = self.pruning_boundary();
-        let size = self.size();
-        debug!(?size, ?prune_loc, ?pruning_boundary, "pruned inactive ops");
+        let bounds = self.bounds();
+        debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
 
         // Prune MMR to match the journal's actual boundary
         self.mmr
-            .prune_to_pos(Position::try_from(pruning_boundary)?)
+            .prune_to_pos(Position::try_from(bounds.start)?)
             .await?;
 
-        Ok(pruning_boundary)
+        Ok(bounds.start)
     }
 }
 
@@ -477,16 +471,8 @@ where
 {
     type Item = C::Item;
 
-    fn size(&self) -> u64 {
-        self.journal.size()
-    }
-
-    fn oldest_retained_pos(&self) -> Option<u64> {
-        self.journal.oldest_retained_pos()
-    }
-
-    fn pruning_boundary(&self) -> u64 {
-        self.journal.pruning_boundary()
+    fn bounds(&self) -> std::ops::Range<u64> {
+        self.journal.bounds()
     }
 
     async fn replay(
@@ -555,8 +541,8 @@ where
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
-        let old_pruning_boundary = self.pruning_boundary();
-        let pruning_boundary = self
+        let old_boundary = self.bounds().start;
+        let new_boundary = self
             .prune(Location::new_unchecked(min_position))
             .await
             .map_err(|e| match e {
@@ -564,7 +550,7 @@ where
                 Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
             })?;
 
-        Ok(old_pruning_boundary != pruning_boundary)
+        Ok(old_boundary != new_boundary)
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
@@ -752,9 +738,10 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_empty_journal(context, "new_empty").await;
 
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.pruning_boundary(), 0);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            let bounds = journal.bounds();
+            assert_eq!(bounds.end, Location::new_unchecked(0));
+            assert_eq!(bounds.start, Location::new_unchecked(0));
+            assert!(bounds.is_empty());
         });
     }
 
@@ -976,8 +963,7 @@ mod tests {
 
                 // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
                 journal.prune(8).await.unwrap();
-                let oldest = journal.oldest_retained_pos();
-                assert_eq!(oldest, Some(7));
+                assert_eq!(journal.bounds().start, Location::new_unchecked(7));
 
                 // Add more uncommitted operations
                 for i in 15..20 {
@@ -1018,8 +1004,7 @@ mod tests {
                 // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
                 // Pruning boundary will be at position 7 (start of section 1)
                 journal.prune(8).await.unwrap();
-                let oldest = journal.oldest_retained_pos();
-                assert_eq!(oldest, Some(7));
+                assert_eq!(journal.bounds().start, Location::new_unchecked(7));
 
                 // Add uncommitted operations with no commits (in section 1: 7-13)
                 for i in 10..14 {
@@ -1078,8 +1063,9 @@ mod tests {
                 assert_eq!(journal.size(), 2);
                 assert_eq!(journal.mmr.leaves(), 2);
                 assert_eq!(journal.mmr.size(), 3);
-                assert_eq!(journal.pruning_boundary(), 0);
-                assert_eq!(journal.oldest_retained_pos(), Some(0));
+                let bounds = journal.bounds();
+                assert_eq!(bounds.start, Location::new_unchecked(0));
+                assert!(!bounds.is_empty());
 
                 assert!(matches!(
                     journal.rewind(3).await,
@@ -1090,22 +1076,24 @@ mod tests {
                 assert_eq!(journal.size(), 0);
                 assert_eq!(journal.mmr.leaves(), 0);
                 assert_eq!(journal.mmr.size(), 0);
-                assert_eq!(journal.pruning_boundary(), 0);
-                assert_eq!(journal.oldest_retained_pos(), None);
+                let bounds = journal.bounds();
+                assert_eq!(bounds.start, Location::new_unchecked(0));
+                assert!(bounds.is_empty());
 
                 // Test rewinding after pruning.
                 for i in 0..255 {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 MutableContiguous::prune(&mut journal, 100).await.unwrap();
-                assert_eq!(journal.pruning_boundary(), 98);
+                assert_eq!(journal.bounds().start, Location::new_unchecked(98));
                 let res = journal.rewind(97).await;
                 assert!(matches!(res, Err(JournalError::InvalidRewind(97))));
                 journal.rewind(98).await.unwrap();
-                assert_eq!(journal.size(), 98);
+                let bounds = journal.bounds();
+                assert_eq!(bounds.end, Location::new_unchecked(98));
                 assert_eq!(journal.mmr.leaves(), 98);
-                assert_eq!(journal.pruning_boundary(), 98);
-                assert_eq!(journal.oldest_retained_pos(), None);
+                assert_eq!(bounds.start, Location::new_unchecked(98));
+                assert!(bounds.is_empty());
             }
         });
     }
@@ -1322,9 +1310,10 @@ mod tests {
             let requested = Location::new_unchecked(50);
             let actual = journal.prune(requested).await.unwrap();
 
-            // Actual boundary should match oldest_retained_loc
-            let oldest = journal.oldest_retained_loc().unwrap();
-            assert_eq!(actual, oldest);
+            // Actual boundary should match bounds.start
+            let bounds = journal.bounds();
+            assert!(!bounds.is_empty());
+            assert_eq!(actual, bounds.start);
 
             // Actual may be <= requested due to section alignment
             assert!(actual <= requested);
@@ -1352,21 +1341,21 @@ mod tests {
         });
     }
 
-    /// Verify oldest_retained_loc() for empty journal, no pruning, and after pruning.
+    /// Verify bounds() for empty journal, no pruning, and after pruning.
     #[test_traced("INFO")]
-    fn test_oldest_retained_loc() {
+    fn test_bounds_empty_and_pruned() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test empty journal
             let journal = create_empty_journal(context.with_label("empty"), "oldest").await;
-            let oldest = journal.oldest_retained_loc();
-            assert_eq!(oldest, None);
+            assert!(journal.bounds().is_empty());
 
             // Test no pruning
             let journal =
                 create_journal_with_ops(context.with_label("no_prune"), "oldest", 100).await;
-            let oldest = journal.oldest_retained_loc();
-            assert_eq!(oldest, Some(Location::new_unchecked(0)));
+            let bounds = journal.bounds();
+            assert!(!bounds.is_empty());
+            assert_eq!(bounds.start, Location::new_unchecked(0));
 
             // Test after pruning
             let mut journal =
@@ -1379,29 +1368,28 @@ mod tests {
 
             let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
-            let oldest_loc = journal.oldest_retained_loc().unwrap();
             // Should match the pruned boundary (may be <= 50 due to section alignment)
-            assert_eq!(oldest_loc, pruned_boundary);
+            let bounds = journal.bounds();
+            assert!(!bounds.is_empty());
+            assert_eq!(bounds.start, pruned_boundary);
             // Should be <= requested location (50)
-            assert!(oldest_loc <= Location::new_unchecked(50));
+            assert!(pruned_boundary <= Location::new_unchecked(50));
         });
     }
 
-    /// Verify pruning_boundary() for empty journal, no pruning, and after pruning.
+    /// Verify bounds().start for empty journal, no pruning, and after pruning.
     #[test_traced("INFO")]
-    fn test_pruning_boundary() {
+    fn test_bounds_start_after_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Test empty journal
             let journal = create_empty_journal(context.with_label("empty"), "boundary").await;
-            let boundary = journal.pruning_boundary();
-            assert_eq!(boundary, Location::new_unchecked(0));
+            assert_eq!(journal.bounds().start, Location::new_unchecked(0));
 
             // Test no pruning
             let journal =
                 create_journal_with_ops(context.with_label("no_prune"), "boundary", 100).await;
-            let boundary = journal.pruning_boundary();
-            assert_eq!(boundary, Location::new_unchecked(0));
+            assert_eq!(journal.bounds().start, Location::new_unchecked(0));
 
             // Test after pruning
             let mut journal =
@@ -1414,8 +1402,7 @@ mod tests {
 
             let pruned_boundary = journal.prune(Location::new_unchecked(50)).await.unwrap();
 
-            let boundary = journal.pruning_boundary();
-            assert_eq!(boundary, pruned_boundary);
+            assert_eq!(journal.bounds().start, pruned_boundary);
         });
     }
 
@@ -1435,8 +1422,8 @@ mod tests {
             let pruned_boundary = journal.prune(Location::new_unchecked(25)).await.unwrap();
 
             // Verify MMR and journal remain in sync
-            let oldest_retained = journal.oldest_retained_loc();
-            assert_eq!(Some(pruned_boundary), oldest_retained);
+            assert!(!journal.bounds().is_empty());
+            assert_eq!(pruned_boundary, journal.bounds().start);
 
             // Verify boundary is at or before requested (due to section alignment)
             assert!(pruned_boundary <= Location::new_unchecked(25));

@@ -1002,7 +1002,7 @@ mod tests {
         // prune up to the first peak
         const PRUNE_POS: Position = Position::new(62);
         mmr.prune_to_pos(PRUNE_POS);
-        assert_eq!(mmr.oldest_retained_pos().unwrap(), PRUNE_POS);
+        assert_eq!(mmr.bounds().start, PRUNE_POS);
 
         // Test range proofs over all possible ranges of at least 2 elements
         let root = mmr.root();
@@ -1032,7 +1032,7 @@ mod tests {
             mmr.add(&mut hasher, elements.last().unwrap());
         }
         mmr.prune_to_pos(Position::new(130)); // a bit after the new highest peak
-        assert_eq!(mmr.oldest_retained_pos().unwrap(), 130);
+        assert_eq!(mmr.bounds().start, 130);
 
         let updated_root = mmr.root();
         let range = Location::new_unchecked(elements.len() as u64 - 10)

@@ -5,7 +5,10 @@ use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
-    qmdb::current::{ordered::fixed::Db as Current, FixedConfig as Config},
+    qmdb::{
+        current::{ordered::fixed::Db as Current, FixedConfig as Config},
+        store::LogStore as _,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -123,7 +126,7 @@ fn fuzz(data: FuzzInput) {
                         // Account for the previous key update
                         uncommitted_ops += 1;
                     }
-                    let actual_count = db.op_count();
+                    let actual_count = db.bounds().end;
                     let expected_count = last_committed_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
                         "Operation count mismatch: expected {expected_count} (last_known={last_committed_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
@@ -172,7 +175,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual_count = db.op_count();
+                    let actual_count = db.bounds().end;
                     let expected_count = last_committed_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
                         "Operation count mismatch: expected {expected_count}, got {actual_count}");
@@ -181,7 +184,7 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.op_count();
+                    last_committed_op_count = clean_db.bounds().end;
                     uncommitted_ops = 0;
                     db = clean_db.into_mutable();
                 }
@@ -199,7 +202,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
-                    let current_op_count = db.op_count();
+                    let current_op_count = db.bounds().end;
 
                     if current_op_count > 0 {
                         let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
@@ -232,7 +235,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
-                    let current_op_count = db.op_count();
+                    let current_op_count = db.bounds().end;
                     if current_op_count == 0 {
                         continue;
                     }

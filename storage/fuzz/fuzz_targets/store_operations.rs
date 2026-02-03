@@ -155,7 +155,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    let _ = db.bounds().end;
                 }
 
                 Operation::InactivityFloorLoc => {

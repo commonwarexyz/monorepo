@@ -60,11 +60,11 @@ pub trait Syncable: Sized {
     /// Get the database's root digest.
     fn root(&self) -> Key;
 
-    /// Get the operation count of the database.
-    fn op_count(&self) -> Location;
+    /// Get the total number of operations in the database (including pruned operations).
+    fn size(&self) -> Location;
 
-    /// Get the lower bound for operations (inactivity floor or oldest retained location).
-    fn lower_bound(&self) -> Location;
+    /// Get the inactivity floor, the location below which all operations are inactive.
+    fn inactivity_floor(&self) -> Location;
 
     /// Get historical proof and operations.
     fn historical_proof(

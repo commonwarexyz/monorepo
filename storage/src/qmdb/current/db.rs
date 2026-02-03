@@ -76,12 +76,6 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    pub fn op_count(&self) -> Location {
-        self.any.op_count()
-    }
-
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
     pub const fn inactivity_floor_loc(&self) -> Location {
@@ -91,11 +85,6 @@ where
     /// Whether the snapshot currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.any.is_empty()
-    }
-
-    /// Returns the location of the oldest operation that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Location {
-        self.any.oldest_retained_loc()
     }
 
     /// Get the metadata associated with the last commit.
@@ -330,7 +319,7 @@ where
 
         self.any.apply_commit_op(commit_op).await?;
 
-        Ok(start_loc..self.op_count())
+        Ok(start_loc..self.any.log.bounds().end)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
@@ -465,8 +454,8 @@ where
 {
     type Value = V::Value;
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds()
     }
 
     fn inactivity_floor_loc(&self) -> Location {

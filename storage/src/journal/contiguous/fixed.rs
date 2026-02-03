@@ -384,13 +384,13 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// # Behavior
     /// - Clears any existing data in the partition
     /// - Creates an empty tail blob where the next append (at position `size`) will go
-    /// - `oldest_retained_pos()` returns `None` (fully pruned state)
+    /// - `bounds().is_empty()` returns `true` (fully pruned state)
     /// - The next `append()` will write to position `size`
     ///
     /// # Post-conditions
-    /// - `size()` returns `size`
-    /// - `oldest_retained_pos()` returns `None`
-    /// - `pruning_boundary` equals `size` (no data exists)
+    /// - `bounds().end` returns `size`
+    /// - `bounds().is_empty()` returns `true`
+    /// - `bounds.start` equals `size` (no data exists)
     ///
     /// # Crash Safety
     /// If a crash occurs during this operation, `init()` will recover to a consistent state
@@ -486,6 +486,12 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.size
     }
 
+    /// Returns [start, end) where `start` and `end - 1` are the indices of the oldest and newest
+    /// retained operations respectively.
+    pub const fn bounds(&self) -> std::ops::Range<u64> {
+        self.pruning_boundary..self.size
+    }
+
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&mut self, item: A) -> Result<u64, Error> {
@@ -539,24 +545,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(())
     }
 
-    /// Return the position of the oldest item in the journal that remains readable.
-    ///
-    /// Returns `None` if no data exists (fully pruned state or after `init_at_size`).
-    ///
-    /// Note that this value could be older than the `min_item_pos` last passed to prune.
-    pub const fn oldest_retained_pos(&self) -> Option<u64> {
-        if self.pruning_boundary >= self.size {
-            None
-        } else {
-            Some(self.pruning_boundary)
-        }
-    }
-
-    /// Return the location before which all items have been pruned.
-    pub const fn pruning_boundary(&self) -> u64 {
-        self.pruning_boundary
-    }
-
     /// Read the item at position `pos` in the journal.
     ///
     /// # Errors
@@ -564,10 +552,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///  - [Error::ItemPruned] if the item at position `pos` is pruned.
     ///  - [Error::ItemOutOfRange] if the item at position `pos` does not exist.
     pub async fn read(&self, pos: u64) -> Result<A, Error> {
-        if pos >= self.size {
+        let bounds = self.bounds();
+        if pos >= bounds.end {
             return Err(Error::ItemOutOfRange(pos));
         }
-        if pos < self.pruning_boundary {
+        if pos < bounds.start {
             return Err(Error::ItemPruned(pos));
         }
 
@@ -575,8 +564,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let section_start = section * self.items_per_blob;
 
         // Calculate position within the blob.
-        // This accounts for sections that begin mid-section (pruning_boundary > section_start).
-        let first_in_section = self.pruning_boundary.max(section_start);
+        // This accounts for sections that begin mid-section (bounds.start > section_start).
+        let first_in_section = bounds.start.max(section_start);
         let pos_in_section = pos - first_in_section;
 
         self.inner.get(section, pos_in_section).await.map_err(|e| {
@@ -604,10 +593,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + '_, Error> {
-        if start_pos > self.size {
+        let bounds = self.bounds();
+        if start_pos > bounds.end {
             return Err(Error::ItemOutOfRange(start_pos));
         }
-        if start_pos < self.pruning_boundary {
+        if start_pos < bounds.start {
             return Err(Error::ItemPruned(start_pos));
         }
 
@@ -615,11 +605,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let section_start = start_section * self.items_per_blob;
 
         // Calculate start position within the section
-        let first_in_section = self.pruning_boundary.max(section_start);
+        let first_in_section = bounds.start.max(section_start);
         let start_pos_in_section = start_pos - first_in_section;
 
         let items_per_blob = self.items_per_blob;
-        let pruning_boundary = self.pruning_boundary;
+        let pruning_boundary = bounds.start;
 
         // Check all middle sections (not oldest, not tail) in range are complete.
         // The oldest section may be partial due to mid-section pruning boundary.
@@ -741,16 +731,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
-    fn size(&self) -> u64 {
-        Self::size(self)
-    }
-
-    fn oldest_retained_pos(&self) -> Option<u64> {
-        Self::oldest_retained_pos(self)
-    }
-
-    fn pruning_boundary(&self) -> u64 {
-        Self::pruning_boundary(self)
+    fn bounds(&self) -> std::ops::Range<u64> {
+        Self::bounds(self)
     }
 
     async fn replay(
@@ -993,7 +975,7 @@ mod tests {
 
             // Pruning to 2 should allow the first blob to be pruned.
             journal.prune(2).await.expect("failed to prune journal 2");
-            assert_eq!(journal.oldest_retained_pos(), Some(2));
+            assert_eq!(journal.bounds().start, 2);
 
             // Reading from the first blob should fail since it's now pruned
             let result0 = journal.read(0).await;
@@ -1018,7 +1000,7 @@ mod tests {
             journal.prune(0).await.expect("no-op pruning failed");
             assert_eq!(journal.inner.oldest_section(), Some(1));
             assert_eq!(journal.inner.newest_section(), Some(5));
-            assert_eq!(journal.oldest_retained_pos(), Some(2));
+            assert_eq!(journal.bounds().start, 2);
 
             // Prune first 3 blobs (6 items)
             journal
@@ -1027,7 +1009,7 @@ mod tests {
                 .expect("failed to prune journal 2");
             assert_eq!(journal.inner.oldest_section(), Some(3));
             assert_eq!(journal.inner.newest_section(), Some(5));
-            assert_eq!(journal.oldest_retained_pos(), Some(6));
+            assert_eq!(journal.bounds().start, 6);
 
             // Try pruning (more than) everything in the journal.
             journal
@@ -1040,11 +1022,11 @@ mod tests {
             assert_eq!(journal.inner.newest_section(), Some(5));
             // Since the size of the journal is currently a multiple of items_per_blob, the newest blob
             // will be empty, and there will be no retained items.
-            assert_eq!(journal.oldest_retained_pos(), None);
-            // Pruning boundary should equal size when oldest_retained is None.
-            assert_eq!(journal.pruning_boundary(), size);
+            assert!(journal.bounds().is_empty());
+            // bounds.start should equal bounds.end when empty.
+            assert_eq!(journal.bounds().start, size);
 
-            // Replaying from 0 should fail since all items before pruning_boundary are pruned
+            // Replaying from 0 should fail since all items before bounds.start are pruned
             {
                 let result = journal.replay(NZUsize!(1024), 0).await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
@@ -1053,7 +1035,7 @@ mod tests {
             // Replaying from pruning_boundary should return empty stream
             {
                 let stream = journal
-                    .replay(NZUsize!(1024), journal.pruning_boundary())
+                    .replay(NZUsize!(1024), journal.bounds().start)
                     .await
                     .expect("failed to replay journal from pruning boundary");
                 pin_mut!(stream);
@@ -1559,8 +1541,8 @@ mod tests {
 
             // Since there was only a single item appended which we then corrupted, recovery should
             // leave us in the state of an empty journal.
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 0);
+            assert!(journal.bounds().is_empty());
             // Make sure journal still works for appending.
             journal
                 .append(test_digest(0))
@@ -1718,8 +1700,8 @@ mod tests {
             // Rewinding to the prune point should work.
             // always remain in the journal.
             assert!(matches!(journal.rewind(300).await, Ok(())));
-            assert_eq!(journal.size(), 300);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 300);
+            assert!(journal.bounds().is_empty());
 
             journal.destroy().await.unwrap();
         });
@@ -1830,8 +1812,8 @@ mod tests {
                 .expect("failed to initialize journal");
 
             // Verify empty state
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 0);
+            assert!(journal.bounds().is_empty());
 
             // Append 1 item
             let pos = journal
@@ -1882,8 +1864,8 @@ mod tests {
             // Size should still be 10
             assert_eq!(journal.size(), 10);
 
-            // oldest_retained_pos should be 5
-            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            // bounds.start should be 5
+            assert_eq!(journal.bounds().start, 5);
 
             // Reading from size() - 1 (position 9) should still work
             let value = journal
@@ -1929,8 +1911,8 @@ mod tests {
             // Verify size is preserved
             assert_eq!(journal.size(), 15);
 
-            // Verify oldest_retained_pos is preserved
-            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            // Verify bounds.start is preserved
+            assert_eq!(journal.bounds().start, 5);
 
             // Reading from size() - 1 should work after restart
             let value = journal
@@ -1959,8 +1941,8 @@ mod tests {
 
             // Prune to position 5 (removes positions 0-4)
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.size(), 10);
-            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.bounds().end, 10);
+            assert_eq!(journal.bounds().start, 5);
 
             // Sync and restart
             journal.sync().await.unwrap();
@@ -1972,8 +1954,8 @@ mod tests {
                 .expect("failed to re-initialize journal");
 
             // Verify state after restart
-            assert_eq!(journal.size(), 10);
-            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.bounds().end, 10);
+            assert_eq!(journal.bounds().start, 5);
 
             // Reading from size() - 1 (position 9) should work
             let value = journal.read(journal.size() - 1).await.unwrap();
@@ -1998,8 +1980,8 @@ mod tests {
 
             // Prune all items
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.size(), 5); // Size unchanged
-            assert_eq!(journal.oldest_retained_pos(), None); // All pruned
+            assert_eq!(journal.bounds().end, 5); // Size unchanged
+            assert!(journal.bounds().is_empty()); // All pruned
 
             // size() - 1 = 4, but position 4 is pruned
             let result = journal.read(journal.size() - 1).await;
@@ -2007,7 +1989,7 @@ mod tests {
 
             // After appending, reading works again
             journal.append(test_digest(205)).await.unwrap();
-            assert_eq!(journal.oldest_retained_pos(), Some(5));
+            assert_eq!(journal.bounds().start, 5);
             assert_eq!(
                 journal.read(journal.size() - 1).await.unwrap(),
                 test_digest(205)
@@ -2026,8 +2008,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 0);
+            assert!(journal.bounds().is_empty());
 
             // Next append should get position 0
             let pos = journal.append(test_digest(100)).await.unwrap();
@@ -2050,8 +2032,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.size(), 10);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 10);
+            assert!(journal.bounds().is_empty());
 
             // Next append should get position 10
             let pos = journal.append(test_digest(1000)).await.unwrap();
@@ -2080,11 +2062,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.size(), 7);
+            assert_eq!(journal.bounds().end, 7);
             // No data exists yet after init_at_size
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert!(journal.bounds().is_empty());
 
-            // Reading before pruning_boundary should return ItemPruned
+            // Reading before bounds.start should return ItemPruned
             assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(5))));
             assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
 
@@ -2093,8 +2075,8 @@ mod tests {
             assert_eq!(pos, 7);
             assert_eq!(journal.size(), 8);
             assert_eq!(journal.read(7).await.unwrap(), test_digest(700));
-            // Now oldest_retained_pos should be 7 (first data position)
-            assert_eq!(journal.oldest_retained_pos(), Some(7));
+            // Now bounds.start should be 7 (first data position)
+            assert_eq!(journal.bounds().start, 7);
 
             journal.destroy().await.unwrap();
         });
@@ -2129,8 +2111,8 @@ mod tests {
                 .unwrap();
 
             // Size and data should be preserved
-            assert_eq!(journal.size(), 20);
-            assert_eq!(journal.oldest_retained_pos(), Some(15));
+            assert_eq!(journal.bounds().end, 20);
+            assert_eq!(journal.bounds().start, 15);
 
             // Verify data
             for i in 0..5u64 {
@@ -2158,8 +2140,8 @@ mod tests {
                     .await
                     .unwrap();
 
-            assert_eq!(journal.size(), 15);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 15);
+            assert!(journal.bounds().is_empty());
 
             // Drop without writing any data
             drop(journal);
@@ -2169,8 +2151,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.size(), 15);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 15);
+            assert!(journal.bounds().is_empty());
 
             // Can append starting at position 15
             let pos = journal.append(test_digest(1500)).await.unwrap();
@@ -2193,8 +2175,8 @@ mod tests {
                     .await
                     .unwrap();
 
-            assert_eq!(journal.size(), 1000);
-            assert_eq!(journal.oldest_retained_pos(), None);
+            assert_eq!(journal.bounds().end, 1000);
+            assert!(journal.bounds().is_empty());
 
             // Next append should get position 1000
             let pos = journal.append(test_digest(100000)).await.unwrap();
@@ -2226,8 +2208,8 @@ mod tests {
             // Prune to position 25
             journal.prune(25).await.unwrap();
 
-            assert_eq!(journal.size(), 30);
-            assert_eq!(journal.oldest_retained_pos(), Some(25));
+            assert_eq!(journal.bounds().end, 30);
+            assert_eq!(journal.bounds().start, 25);
 
             // Verify remaining items are readable
             for i in 25..30u64 {
@@ -2324,8 +2306,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 0);
-            assert_eq!(journal.size(), 5);
+            assert_eq!(journal.bounds().start, 0);
+            assert_eq!(journal.bounds().end, 5);
             journal.destroy().await.unwrap();
         });
     }
@@ -2385,8 +2367,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 7);
-            assert_eq!(journal.size(), 10);
+            assert_eq!(journal.bounds().start, 7);
+            assert_eq!(journal.bounds().end, 10);
             journal.destroy().await.unwrap();
         });
     }
@@ -2413,8 +2395,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.pruning_boundary(), 10);
-            assert_eq!(journal.size(), 17);
+            assert_eq!(journal.bounds().start, 10);
+            assert_eq!(journal.bounds().end, 17);
             journal.destroy().await.unwrap();
         });
     }
@@ -2437,7 +2419,7 @@ mod tests {
             }
             // Prune to position 5 (section 1 start) should NOT move boundary back from 7 to 5
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.pruning_boundary(), 7);
+            assert_eq!(journal.bounds().start, 7);
             journal.destroy().await.unwrap();
         });
     }
@@ -2509,8 +2491,8 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewind_error_before_pruning_boundary() {
-        // Test that rewind returns error when trying to rewind before pruning_boundary
+    fn test_fixed_journal_rewind_error_before_bounds_start() {
+        // Test that rewind returns error when trying to rewind before bounds.start
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(5));
@@ -2567,8 +2549,8 @@ mod tests {
             let journal = Journal::<_, Digest>::init(context.with_label("crash1"), cfg.clone())
                 .await
                 .expect("init failed after clear crash");
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.pruning_boundary(), 0);
+            assert_eq!(journal.bounds().end, 0);
+            assert_eq!(journal.bounds().start, 0);
             drop(journal);
 
             // Restore metadata for next scenario (it might have been removed by init)
@@ -2606,9 +2588,9 @@ mod tests {
                 .expect("init failed after create crash");
 
             // Should recover to blob state (section 0 aligned)
-            assert_eq!(journal.pruning_boundary(), 0);
+            assert_eq!(journal.bounds().start, 0);
             // Size is 0 because blob is empty
-            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.bounds().end, 0);
             journal.destroy().await.unwrap();
         });
     }
@@ -2649,8 +2631,8 @@ mod tests {
                     .expect("init failed after clear_to_size crash");
 
             // Should fallback to blobs
-            assert_eq!(journal.pruning_boundary(), 0);
-            assert_eq!(journal.size(), 0);
+            assert_eq!(journal.bounds().start, 0);
+            assert_eq!(journal.bounds().end, 0);
             journal.destroy().await.unwrap();
         });
     }

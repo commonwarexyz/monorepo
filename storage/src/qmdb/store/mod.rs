@@ -53,9 +53,14 @@ pub trait LogStore: Send + Sync {
     /// Returns true if there are no active keys in the database.
     fn is_empty(&self) -> bool;
 
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    fn op_count(&self) -> Location;
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    fn bounds(&self) -> std::ops::Range<Location>;
+
+    /// Return the Location of the next operation appended to this db.
+    fn size(&self) -> Location {
+        self.bounds().end
+    }
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -100,7 +105,7 @@ pub trait MerkleizedStore: LogStore {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
     {
-        self.historical_proof(self.op_count(), start_loc, max_ops)
+        self.historical_proof(self.bounds().end, start_loc, max_ops)
     }
 
     /// Generate and return:

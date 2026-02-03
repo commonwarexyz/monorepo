@@ -180,20 +180,10 @@ impl<D: Digest, S: State<D>> Mmr<D, S> {
         Some(PeakIterator::last_leaf_pos(self.size()))
     }
 
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    pub const fn pruned_to_pos(&self) -> Position {
-        self.pruned_to_pos
-    }
-
-    /// Return the position of the oldest retained node in the MMR, not including those cached in
-    /// pinned_nodes.
-    pub fn oldest_retained_pos(&self) -> Option<Position> {
-        if self.pruned_to_pos == self.size() {
-            return None;
-        }
-
-        Some(self.pruned_to_pos)
+    /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
+    /// retained nodes respectively.
+    pub fn bounds(&self) -> Range<Position> {
+        self.pruned_to_pos..self.size()
     }
 
     /// Return a new iterator over the peaks of the MMR.
@@ -821,7 +811,7 @@ mod tests {
             assert_eq!(mmr.size(), 0);
             assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(mmr.last_leaf_pos(), None);
-            assert_eq!(mmr.oldest_retained_pos(), None);
+            assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
             assert!(matches!(mmr.pop(&mut hasher), Err(Empty)));
@@ -854,7 +844,7 @@ mod tests {
                 let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
                 assert!(nodes_needing_parents.len() <= peaks.len());
             }
-            assert_eq!(mmr.oldest_retained_pos().unwrap(), Position::new(0));
+            assert_eq!(mmr.bounds().start, Position::new(0));
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
@@ -922,7 +912,7 @@ mod tests {
 
             // pruning tests
             mmr.prune_to_pos(Position::new(14)); // prune up to the tallest peak
-            assert_eq!(mmr.oldest_retained_pos().unwrap(), Position::new(14));
+            assert_eq!(mmr.bounds().start, Position::new(14));
 
             // After pruning, we shouldn't be able to generate a proof for any elements before the
             // pruning boundary. (To be precise, due to the maintenance of pinned nodes, we may in
@@ -957,7 +947,7 @@ mod tests {
             );
 
             // Test that we can initialize a new MMR from another's elements.
-            let oldest_pos = mmr.oldest_retained_pos().unwrap();
+            let oldest_pos = mmr.bounds().start;
             let digests = mmr.node_digests_to_pin(oldest_pos);
             let mmr_copy = Mmr::init(
                 Config {
@@ -971,7 +961,7 @@ mod tests {
             assert_eq!(mmr_copy.size(), 19);
             assert_eq!(mmr_copy.leaves(), mmr.leaves());
             assert_eq!(mmr_copy.last_leaf_pos(), mmr.last_leaf_pos());
-            assert_eq!(mmr_copy.oldest_retained_pos(), mmr.oldest_retained_pos());
+            assert_eq!(mmr_copy.bounds().start, mmr.bounds().start);
             assert_eq!(*mmr_copy.root(), root);
         });
     }
@@ -1158,7 +1148,7 @@ mod tests {
             assert_eq!(*mmr.root(), *reference_mmr.root());
             let result = mmr.pop(&mut hasher);
             assert!(matches!(result, Err(ElementPruned(_))));
-            assert_eq!(mmr.oldest_retained_pos(), None);
+            assert!(mmr.bounds().is_empty());
         });
     }
 
