@@ -107,17 +107,15 @@ check-stability *args='':
     level=""
     extra_args=""
     # Level names in order (index 0-4)
-    declare -a LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
-    # Convert name to number (returns empty for ALPHA since it's the default)
+    LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
+    # Convert name to index by iterating the array
     name_to_num() {
-        case "$1" in
-            ALPHA) echo 0 ;;
-            BETA) echo 1 ;;
-            GAMMA) echo 2 ;;
-            DELTA) echo 3 ;;
-            EPSILON) echo 4 ;;
-            *) echo "" ;;
-        esac
+        for i in "${!LEVEL_NAMES[@]}"; do
+            if [ "${LEVEL_NAMES[$i]}" = "$1" ]; then
+                echo "$i"
+                return
+            fi
+        done
     }
     # Check if first arg is a level (number 1-4 or name)
     first_arg="${all_args%% *}"
@@ -142,7 +140,7 @@ check-stability *args='':
     fi
     # Create level-specific wrapper symlinks so Cargo sees different fingerprints
     mkdir -p target/stability-wrappers
-    for name in BETA GAMMA DELTA EPSILON; do
+    for name in "${LEVEL_NAMES[@]:1}"; do
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
     if [ -z "$level" ]; then
