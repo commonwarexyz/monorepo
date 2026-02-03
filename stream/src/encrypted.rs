@@ -212,8 +212,8 @@ pub async fn dial<R: CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
     };
 
     select! {
-        x = inner_routine => { x } ,
-        _ = timeout => { Err(Error::HandshakeTimeout) }
+        x = inner_routine => x,
+        _ = timeout => Err(Error::HandshakeTimeout),
     }
 }
 
@@ -279,8 +279,8 @@ pub async fn listen<
     };
 
     select! {
-        x = inner_routine => { x } ,
-        _ = timeout => { Err(Error::HandshakeTimeout) }
+        x = inner_routine => x,
+        _ = timeout => Err(Error::HandshakeTimeout),
     }
 }
 

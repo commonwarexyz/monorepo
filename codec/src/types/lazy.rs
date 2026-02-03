@@ -76,6 +76,7 @@ pub struct Lazy<T: Read> {
 #[derive(Clone)]
 struct Pending<T: Read> {
     bytes: Bytes,
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     cfg: T::Cfg,
 }
 

@@ -659,6 +659,17 @@ pub enum Error {
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
 - Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 
+### `lib.rs` Headers
+
+- For crates that allow `no_std`, enable `std` with an `std` feature flag or with `cfg(test)`. Example: `#![cfg_attr(not(any(feature = "std", test)), no_std)]`
+- Add the `commonware` logos with the doc attribute:
+```
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+```
+
 ### Naming Conventions
 
 - **Types**: `PascalCase` (e.g., `PublicKey`, `SignatureSet`)

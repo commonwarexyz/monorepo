@@ -24,8 +24,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{deterministic, Metrics, Runner as _, RwLock};
-use commonware_utils::NZU64;
-use futures::{channel::mpsc, SinkExt as _};
+use commonware_utils::{channel::mpsc, NZU64};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -512,7 +511,7 @@ where
         let initial_root = target_db.root();
 
         // Create client with initial target
-        let (mut update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(RwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
@@ -577,7 +576,7 @@ where
         let initial_root = target_db.root();
 
         // Create client with initial target
-        let (mut update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(RwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
@@ -653,7 +652,7 @@ where
             let new_root = target_db.root();
 
             // Create client with placeholder initial target (stale compared to final target)
-            let (mut update_sender, update_receiver) = mpsc::channel(1);
+            let (update_sender, update_receiver) = mpsc::channel(1);
 
             let target_db = Arc::new(RwLock::new(target_db));
             let config = Config {
@@ -723,7 +722,7 @@ where
         let initial_root = target_db.root();
 
         // Create client with initial target
-        let (mut update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(RwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
@@ -785,7 +784,7 @@ where
         let root = target_db.root();
 
         // Create client with target that will complete immediately
-        let (mut update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = mpsc::channel(1);
         let target_db = Arc::new(RwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
@@ -856,7 +855,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let target_db = Arc::new(RwLock::new(Some(target_db)));
 
         // Create client with initial target and small batch size
-        let (mut update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = mpsc::channel(1);
         // Step the client to process a batch
         let client = {
             let config = Config {

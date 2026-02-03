@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event
-//! loop running in a separate thread. Operation results are returned via a [futures::channel::oneshot]
+//! Network operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event
+//! loop running in a separate thread. Operation results are returned via a [commonware_utils::channel::oneshot]
 //! channel. This implementation uses two separate io_uring instances: one for send operations and
 //! one for receive operations.
 //!
@@ -26,11 +26,8 @@ use crate::{
     iouring::{self, should_retry, OpBuffer},
     IoBufMut, IoBufs,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    executor::block_on,
-    SinkExt as _,
-};
+use commonware_utils::channel::{mpsc, oneshot};
+use futures::executor::block_on;
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{

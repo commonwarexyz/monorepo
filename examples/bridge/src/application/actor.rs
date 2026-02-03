@@ -19,7 +19,7 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::channel::mpsc;
 use rand::Rng;
 use rand_core::CryptoRngCore;
 use tracing::{debug, info};
@@ -59,7 +59,7 @@ impl<R: CryptoRngCore + Spawner, H: Hasher, Si: Sink, St: Stream> Application<R,
     /// Run the application actor.
     pub async fn run(mut self) {
         let (mut indexer_sender, mut indexer_receiver) = self.indexer;
-        while let Some(message) = self.mailbox.next().await {
+        while let Some(message) = self.mailbox.recv().await {
             match message {
                 Message::Genesis { epoch, response } => {
                     // Sanity check. We don't support multiple epochs.

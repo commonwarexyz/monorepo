@@ -8,10 +8,7 @@ use crate::{
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use commonware_parallel::Sequential;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
-};
+use commonware_utils::channel::{mpsc, oneshot};
 use rand_core::CryptoRngCore;
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
@@ -85,7 +82,7 @@ where
         S: scheme::Scheme<C, D>,
     {
         let mut misses = 0;
-        while let Some(msg) = self.mailbox.next().await {
+        while let Some(msg) = self.mailbox.recv().await {
             match msg {
                 Message::Proposal(proposal) => {
                     // Verify properly constructed (not needed in production)

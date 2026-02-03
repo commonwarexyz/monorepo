@@ -43,16 +43,18 @@ check_crate() {
     
     # Generate rustdoc JSON at RESERVED stability level
     # Use both RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
+    # Allow broken intra-doc links since stability-gated types won't be available
     if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
-        RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG" \
+        RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG -Arustdoc::broken_intra_doc_links" \
         cargo +nightly doc -p "$crate" --no-deps 2>/dev/null; then
         echo "  Warning: Could not generate rustdoc for $crate" >&2
         return 1
     fi
     
-    # Find the JSON file
+    # Find the JSON file (respect CARGO_TARGET_DIR if set)
+    local target_dir="${CARGO_TARGET_DIR:-target}"
     local json_file
-    json_file=$(find target/doc -name "${crate_underscore}.json" 2>/dev/null | head -1)
+    json_file=$(find "$target_dir/doc" -name "${crate_underscore}.json" 2>/dev/null | head -1)
     
     if [[ -z "$json_file" || ! -f "$json_file" ]]; then
         echo "  Warning: No JSON output found for $crate" >&2

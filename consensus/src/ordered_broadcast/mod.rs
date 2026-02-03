@@ -98,8 +98,11 @@ mod tests {
         deterministic::{self, Context},
         Clock, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channels::fallible::OneshotExt, NZUsize, NZU16, NZU64};
-    use futures::{channel::oneshot, future::join_all};
+    use commonware_utils::{
+        channel::{fallible::OneshotExt, oneshot},
+        NZUsize, NZU16, NZU64,
+    };
+    use futures::future::join_all;
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},

@@ -63,9 +63,9 @@ use crate::{
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
-use commonware_macros::{stability, select};
 #[stability(BETA)]
 use commonware_codec::Encode;
+use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
@@ -1505,7 +1505,17 @@ mod tests {
     use crate::{
         deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
     };
-    use futures::stream::{FuturesUnordered, StreamExt as _};
+    use commonware_macros::test_traced;
+    #[cfg(feature = "external")]
+    use commonware_utils::channel::mpsc;
+    use commonware_utils::channel::oneshot;
+    #[cfg(not(feature = "external"))]
+    use futures::future::pending;
+    #[cfg(not(feature = "external"))]
+    use futures::stream::StreamExt as _;
+    #[cfg(feature = "external")]
+    use futures::StreamExt;
+    use futures::{stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1529,12 +1539,6 @@ mod tests {
             (context.auditor().state(), outputs)
         })
     }
-    use commonware_macros::test_traced;
-    #[cfg(not(feature = "external"))]
-    use futures::future::pending;
-    #[cfg(feature = "external")]
-    use futures::{channel::mpsc, SinkExt, StreamExt};
-    use futures::{channel::oneshot, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1836,7 +1840,7 @@ mod tests {
             let start_sim = context.current();
             let (first_tx, first_rx) = oneshot::channel();
             let (second_tx, second_rx) = oneshot::channel();
-            let (mut results_tx, mut results_rx) = mpsc::channel(2);
+            let (results_tx, mut results_rx) = mpsc::channel(2);
 
             // Create a thread that waits for 1 second
             let first_wait = Duration::from_secs(1);
@@ -1853,7 +1857,7 @@ mod tests {
 
             // Wait for a delay sampled before the external send occurs
             let first = context.clone().spawn({
-                let mut results_tx = results_tx.clone();
+                let results_tx = results_tx.clone();
                 move |context| async move {
                     first_rx.pace(&context, Duration::ZERO).await.unwrap();
                     let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
@@ -1881,7 +1885,7 @@ mod tests {
             // Ensure order is correct
             let mut results = Vec::new();
             for _ in 0..2 {
-                results.push(results_rx.next().await.unwrap());
+                results.push(results_rx.recv().await.unwrap());
             }
             assert_eq!(results, vec![1, 2]);
         });

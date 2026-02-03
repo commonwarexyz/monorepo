@@ -427,8 +427,6 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 mod tests {
     use super::*;
     use crate::{error::Error, DecodeExt, Encode};
-    #[cfg(not(feature = "std"))]
-    use alloc::vec::Vec;
     use bytes::Bytes;
 
     #[test]
