@@ -1,4 +1,4 @@
-use crate::{Error, IoBufMut, IoBufs};
+use crate::{network::proxy::ProxyConfig, Error, IoBufMut, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -74,7 +74,7 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         // Accept a new TCP stream
-        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
+        let (stream, tcp_addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
@@ -83,17 +83,30 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Return the sink and stream
-        let (stream, sink) = stream.into_split();
+        // Split the stream
+        let (read_half, write_half) = stream.into_split();
+        let mut buf_reader = BufReader::with_capacity(self.cfg.read_buffer_size, read_half);
+
+        // Parse PROXY header if configured and connection is from trusted proxy
+        let client_addr = if let Some(ref proxy_cfg) = self.cfg.proxy {
+            if proxy_cfg.is_trusted(tcp_addr.ip()) {
+                crate::network::proxy::parse(&mut buf_reader).await?
+            } else {
+                tcp_addr
+            }
+        } else {
+            tcp_addr
+        };
+
         Ok((
-            addr,
+            client_addr,
             Sink {
                 write_timeout: self.cfg.write_timeout,
-                sink,
+                sink: write_half,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                stream: buf_reader,
             },
         ))
     }
@@ -126,6 +139,11 @@ pub struct Config {
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     read_buffer_size: usize,
+    /// Optional [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) configuration.
+    ///
+    /// When set, connections from trusted proxy IPs will have PROXY headers
+    /// parsed to obtain the real client address.
+    proxy: Option<ProxyConfig>,
 }
 
 #[cfg_attr(feature = "iouring-network", allow(dead_code))]
@@ -151,6 +169,12 @@ impl Config {
         self.read_buffer_size = read_buffer_size;
         self
     }
+    /// Enable PROXY protocol support.
+    /// Only connections from trusted proxies will have headers parsed.
+    pub fn with_proxy(mut self, config: ProxyConfig) -> Self {
+        self.proxy = Some(config);
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -169,6 +193,10 @@ impl Config {
     pub const fn read_buffer_size(&self) -> usize {
         self.read_buffer_size
     }
+    /// See [Config]
+    pub const fn proxy(&self) -> Option<&ProxyConfig> {
+        self.proxy.as_ref()
+    }
 }
 
 impl Default for Config {
@@ -178,6 +206,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             read_buffer_size: 64 * 1024, // 64 KB
+            proxy: None,
         }
     }
 }
@@ -247,7 +276,7 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
-        network::{tests, tokio as TokioNetwork},
+        network::{proxy::ProxyConfig, tests, tokio as TokioNetwork},
         Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
@@ -451,5 +480,99 @@ mod tests {
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
+    }
+
+    // PROXY protocol integration tests
+    //
+    // We only test our wiring logic here. The proxy-header crate already has
+    // comprehensive tests for protocol parsing.
+
+    #[tokio::test]
+    async fn test_proxy_trusted_source_parses_header() {
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("127.0.0.0/8")
+            .unwrap();
+
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5))
+                .with_proxy(proxy_config),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Use a channel to coordinate send/recv ordering
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the proxied address, not 127.0.0.1
+            assert_eq!(client_addr.ip().to_string(), "192.168.1.100");
+            assert_eq!(client_addr.port(), 56789);
+
+            // Read first message
+            let data1 = stream.recv(5).await.unwrap();
+            assert_eq!(data1.coalesce(), b"hello");
+
+            // Signal that first read is done, second send can proceed
+            tx.send(()).unwrap();
+
+            // Read second message (sent after first read completed)
+            let data2 = stream.recv(5).await.unwrap();
+            assert_eq!(data2.coalesce(), b"world");
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+
+        // Send PROXY header in pieces to test partial read handling
+        sink.send(b"PROXY TCP4 ").await.unwrap();
+        sink.send(b"192.168.1.100 10.0.0.1 ").await.unwrap();
+        sink.send(b"56789 443\r\n").await.unwrap();
+        sink.send(b"hello").await.unwrap();
+
+        // Wait for server to read first message
+        rx.await.unwrap();
+
+        // Send second message
+        sink.send(b"world").await.unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_proxy_untrusted_source_ignores_header() {
+        // Only trust 10.0.0.0/8, not 127.0.0.0/8
+        let proxy_config = ProxyConfig::new()
+            .with_trusted_proxy_cidr("10.0.0.0/8")
+            .unwrap();
+
+        let network = TokioNetwork::Network::from(
+            TokioNetwork::Config::default()
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5))
+                .with_proxy(proxy_config),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (client_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            // Should get the TCP address since source is not trusted
+            assert!(client_addr.ip().is_loopback());
+
+            // PROXY header is NOT parsed, so it appears as data
+            let data = stream.recv(6).await.unwrap();
+            assert_eq!(data.coalesce(), b"PROXY ");
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(b"PROXY TCP4 192.168.1.100 10.0.0.1 56789 443\r\nhello")
+            .await
+            .unwrap();
+
+        server.await.unwrap();
     }
 }
