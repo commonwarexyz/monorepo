@@ -4,8 +4,8 @@
 //! Items are durably stored in a journal and will survive crashes. The reader must
 //! explicitly acknowledge each item after processing.
 //!
-//! On restart, the queue replays from the journal's pruning boundary. Items that were
-//! acknowledged but not yet pruned will be re-delivered.
+//! On restart, all unacknowledged items will be re-delivered. Items that were
+//! acknowledged but not yet pruned from disk may also be re-delivered.
 //!
 //! # Concurrent Access
 //!
