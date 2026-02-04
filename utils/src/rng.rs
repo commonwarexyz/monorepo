@@ -1,7 +1,6 @@
 //! Utilities for random number generation.
 
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use std::hash::{Hash, Hasher as _};
 
 /// Returns a seeded RNG for deterministic testing.
 ///
@@ -16,6 +15,22 @@ pub fn test_rng() -> StdRng {
 /// or when a helper function needs its own RNG that won't collide with the caller's.
 pub fn test_rng_seeded(seed: u64) -> StdRng {
     StdRng::seed_from_u64(seed)
+}
+
+/// FNV-1a hash for deterministic seed generation.
+///
+/// Uses FNV-1a instead of `DefaultHasher` because `DefaultHasher` is not
+/// guaranteed to be stable across Rust versions.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// An RNG that reads from a byte buffer, falling back to a seeded RNG when exhausted.
@@ -36,9 +51,7 @@ impl BytesRng {
     /// All bytes are consumed sequentially as output. When exhausted, a fallback
     /// RNG (seeded from a hash of the entire buffer) provides additional randomness.
     pub fn new(bytes: Vec<u8>) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        let fallback = StdRng::seed_from_u64(hasher.finish());
+        let fallback = StdRng::seed_from_u64(fnv1a_hash(&bytes));
         Self {
             bytes,
             offset: 0,
