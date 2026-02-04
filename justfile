@@ -107,17 +107,15 @@ check-stability *args='':
     level=""
     extra_args=""
     # Level names in order (index 0-4)
-    declare -a LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
-    # Convert name to number (returns empty for ALPHA since it's the default)
+    LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
+    # Convert name to index by iterating the array
     name_to_num() {
-        case "$1" in
-            ALPHA) echo 0 ;;
-            BETA) echo 1 ;;
-            GAMMA) echo 2 ;;
-            DELTA) echo 3 ;;
-            EPSILON) echo 4 ;;
-            *) echo "" ;;
-        esac
+        for i in "${!LEVEL_NAMES[@]}"; do
+            if [ "${LEVEL_NAMES[$i]}" = "$1" ]; then
+                echo "$i"
+                return
+            fi
+        done
     }
     # Check if first arg is a level (number 1-4 or name)
     first_arg="${all_args%% *}"
@@ -140,14 +138,19 @@ check-stability *args='':
             extra_args="$all_args"
         fi
     fi
+    # Create level-specific wrapper symlinks so Cargo sees different fingerprints
+    mkdir -p target/stability-wrappers
+    for name in "${LEVEL_NAMES[@]:1}"; do
+        ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
+    done
     if [ -z "$level" ]; then
-        for l in 1 2 3 4; do
-            echo "Checking commonware_stability_${LEVEL_NAMES[$l]}..."
-            RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$l]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+        for name in "${LEVEL_NAMES[@]:1}"; do
+            echo "Checking commonware_stability_${name}..."
+            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
         done
         echo "All stability levels pass!"
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        RUSTFLAGS="--cfg commonware_stability_${LEVEL_NAMES[$level]}" cargo build --workspace --lib {{ stability_excludes }} $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
     fi
 
