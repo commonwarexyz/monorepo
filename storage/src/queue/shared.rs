@@ -108,8 +108,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain any pending notifications to prevent unbounded channel growth
-        // if caller polls via try_recv without using recv.
+        // Drain any pending notifications to keep the channel state consistent
+        // with the queue state when polling via try_recv.
         while self.notify.try_recv().is_ok() {}
 
         self.queue.lock().await.dequeue().await
