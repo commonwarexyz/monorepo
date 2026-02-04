@@ -26,7 +26,7 @@ pub enum Partition {
     /// No connections between any validators.
     Isolated,
     /// Ring topology: node i connects to i-1 and i+1 (with wraparound).
-    Linear,
+    Ring,
 }
 
 impl Partition {
@@ -36,7 +36,7 @@ impl Partition {
             Partition::Isolated => Some(|_, i, j| i == j),
             Partition::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
             Partition::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            Partition::Linear => Some(linear),
+            Partition::Ring => Some(ring),
         }
     }
 }
@@ -58,7 +58,7 @@ fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
 }
 
 // Ring topology: node i connects to i-1 and i+1 (with wraparound).
-fn linear(n: usize, i: usize, j: usize) -> bool {
+fn ring(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 

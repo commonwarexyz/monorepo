@@ -132,12 +132,15 @@ impl<
                 // Try to reserve
                 match self.pending_votes.notarize(index) {
                     Some(previous) => {
-                        if previous != &notarize {
+                        if previous.proposal != notarize.proposal {
                             let activity = ConflictingNotarize::new(previous.clone(), notarize);
                             self.reporter
                                 .report(Activity::ConflictingNotarize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting notarize");
+                            self.blocker.block(sender).await;
+                        } else if previous != &notarize {
+                            warn!(?sender, "blocking peer for invalid signature");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -212,12 +215,15 @@ impl<
                 // Try to reserve
                 match self.pending_votes.finalize(index) {
                     Some(previous) => {
-                        if previous != &finalize {
+                        if previous.proposal != finalize.proposal {
                             let activity = ConflictingFinalize::new(previous.clone(), finalize);
                             self.reporter
                                 .report(Activity::ConflictingFinalize(activity))
                                 .await;
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting finalize");
+                            self.blocker.block(sender).await;
+                        } else if previous != &finalize {
+                            warn!(?sender, "blocking peer for invalid signature");
                             self.blocker.block(sender).await;
                         }
                         false

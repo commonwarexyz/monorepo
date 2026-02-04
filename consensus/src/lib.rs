@@ -136,6 +136,11 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// This is particularly useful for applications that employ erasure coding, which
         /// can override this method to delay or prevent finalization until they have
         /// reconstructed and validated the full block (e.g., after receiving enough shards).
+        ///
+        /// # Determinism Requirement
+        ///
+        /// The decision returned by `certify` must be deterministic and consistent across
+        /// all honest participants to ensure liveness.
         fn certify(
             &mut self,
             _round: Round,
