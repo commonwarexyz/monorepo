@@ -226,4 +226,32 @@ mod tests {
             u64::from_be_bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
         );
     }
+
+    mod conformance {
+        use super::*;
+        use commonware_conformance::Conformance;
+
+        /// Conformance wrapper for BytesRng that tests output stability.
+        ///
+        /// This ensures that the FNV-1a hash and fallback RNG behavior
+        /// remain stable across versions.
+        struct BytesRngConformance;
+
+        impl Conformance for BytesRngConformance {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let mut rng = BytesRng::new(seed.to_be_bytes().to_vec());
+
+                // Generate enough output to exercise both raw bytes and fallback
+                let mut output = Vec::with_capacity(64);
+                for _ in 0..8 {
+                    output.extend_from_slice(&rng.next_u64().to_be_bytes());
+                }
+                output
+            }
+        }
+
+        commonware_conformance::conformance_tests! {
+            BytesRngConformance => 1024,
+        }
+    }
 }
