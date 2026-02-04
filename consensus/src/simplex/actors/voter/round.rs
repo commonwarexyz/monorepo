@@ -492,6 +492,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
+        // If there doesn't exist a notarization certificate, return None.
+        self.notarization.as_ref()?;
+
         // If we haven't certified the proposal, return None.
         if !self.is_certified() {
             return None;
