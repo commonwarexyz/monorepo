@@ -1678,18 +1678,13 @@ mod tests {
         latest_vote_metric_tracking(secp256r1::fixture);
     }
 
-    #[derive(Clone, Copy)]
-    enum VoteKind {
-        Notarize,
-        Finalize,
-    }
-
-    fn duplicate_vote_with_different_attestation_blocks_peer<S, F>(
+    fn duplicate_vote_with_different_attestation_blocks_peer<S, F, V>(
         mut fixture: F,
-        kind: VoteKind,
+        sign_vote: V,
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -1776,13 +1771,6 @@ mod tests {
             let round = Round::new(epoch, view);
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
 
-            let sign_vote = |scheme: &S, p: Proposal<Sha256Digest>| -> Vote<S, Sha256Digest> {
-                match kind {
-                    VoteKind::Notarize => Vote::Notarize(Notarize::sign(scheme, p).unwrap()),
-                    VoteKind::Finalize => Vote::Finalize(Finalize::sign(scheme, p).unwrap()),
-                }
-            };
-
             // Send first valid vote from participant 1
             let vote1 = sign_vote(&schemes[1], proposal.clone());
             sender
@@ -1831,76 +1819,89 @@ mod tests {
         });
     }
 
+    fn sign_notarize<S: Scheme<Sha256Digest>>(
+        scheme: &S,
+        p: Proposal<Sha256Digest>,
+    ) -> Vote<S, Sha256Digest> {
+        Vote::Notarize(Notarize::sign(scheme, p).unwrap())
+    }
+
+    fn sign_finalize<S: Scheme<Sha256Digest>>(
+        scheme: &S,
+        p: Proposal<Sha256Digest>,
+    ) -> Vote<S, Sha256Digest> {
+        Vote::Finalize(Finalize::sign(scheme, p).unwrap())
+    }
+
     #[test_traced]
     fn test_duplicate_notarize_with_different_attestation_blocks_peer() {
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
-            VoteKind::Notarize,
+            sign_notarize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
-            VoteKind::Notarize,
+            sign_notarize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_std::fixture::<MinPk, _>,
-            VoteKind::Notarize,
+            sign_notarize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_std::fixture::<MinSig, _>,
-            VoteKind::Notarize,
+            sign_notarize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_multisig::fixture::<MinPk, _>,
-            VoteKind::Notarize,
+            sign_notarize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_multisig::fixture::<MinSig, _>,
-            VoteKind::Notarize,
+            sign_notarize,
         );
-        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture, VoteKind::Notarize);
-        duplicate_vote_with_different_attestation_blocks_peer(
-            secp256r1::fixture,
-            VoteKind::Notarize,
-        );
+        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture, sign_notarize);
+        duplicate_vote_with_different_attestation_blocks_peer(secp256r1::fixture, sign_notarize);
     }
 
     #[test_traced]
     fn test_duplicate_finalize_with_different_attestation_blocks_peer() {
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
-            VoteKind::Finalize,
+            sign_finalize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
-            VoteKind::Finalize,
+            sign_finalize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_std::fixture::<MinPk, _>,
-            VoteKind::Finalize,
+            sign_finalize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_threshold_std::fixture::<MinSig, _>,
-            VoteKind::Finalize,
+            sign_finalize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_multisig::fixture::<MinPk, _>,
-            VoteKind::Finalize,
+            sign_finalize,
         );
         duplicate_vote_with_different_attestation_blocks_peer(
             bls12381_multisig::fixture::<MinSig, _>,
-            VoteKind::Finalize,
+            sign_finalize,
         );
-        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture, VoteKind::Finalize);
-        duplicate_vote_with_different_attestation_blocks_peer(
-            secp256r1::fixture,
-            VoteKind::Finalize,
-        );
+        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture, sign_finalize);
+        duplicate_vote_with_different_attestation_blocks_peer(secp256r1::fixture, sign_finalize);
     }
 
-    fn conflicting_vote_creates_evidence<S, F>(mut fixture: F, kind: VoteKind)
-    where
+    fn conflicting_vote_creates_evidence<S, F, V, A>(
+        mut fixture: F,
+        sign_vote: V,
+        is_expected_activity: A,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
+        A: Fn(&Activity<S, Sha256Digest>) -> bool + Send + 'static,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -1988,13 +1989,6 @@ mod tests {
             let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(b"payload1"));
             let proposal2 = Proposal::new(round, View::zero(), Sha256::hash(b"payload2"));
 
-            let sign_vote = |scheme: &S, p: Proposal<Sha256Digest>| -> Vote<S, Sha256Digest> {
-                match kind {
-                    VoteKind::Notarize => Vote::Notarize(Notarize::sign(scheme, p).unwrap()),
-                    VoteKind::Finalize => Vote::Finalize(Finalize::sign(scheme, p).unwrap()),
-                }
-            };
-
             // Send first valid vote for proposal1
             let vote1 = sign_vote(&schemes[1], proposal1);
             sender
@@ -2031,73 +2025,96 @@ mod tests {
             let has_expected_fault = faults
                 .get(&sender_pk)
                 .and_then(|sf| sf.get(&view))
-                .is_some_and(|vf| {
-                    vf.iter().any(|a| match kind {
-                        VoteKind::Notarize => matches!(a, Activity::ConflictingNotarize(_)),
-                        VoteKind::Finalize => matches!(a, Activity::ConflictingFinalize(_)),
-                    })
-                });
+                .is_some_and(|vf| vf.iter().any(&is_expected_activity));
             assert!(has_expected_fault, "Should have conflicting fault reported");
         });
+    }
+
+    fn is_conflicting_notarize<S: Scheme<Sha256Digest>>(a: &Activity<S, Sha256Digest>) -> bool {
+        matches!(a, Activity::ConflictingNotarize(_))
+    }
+
+    fn is_conflicting_finalize<S: Scheme<Sha256Digest>>(a: &Activity<S, Sha256Digest>) -> bool {
+        matches!(a, Activity::ConflictingFinalize(_))
     }
 
     #[test_traced]
     fn test_conflicting_notarize_creates_evidence() {
         conflicting_vote_creates_evidence(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
-            VoteKind::Notarize,
+            sign_notarize,
+            is_conflicting_notarize,
         );
         conflicting_vote_creates_evidence(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
-            VoteKind::Notarize,
+            sign_notarize,
+            is_conflicting_notarize,
         );
         conflicting_vote_creates_evidence(
             bls12381_threshold_std::fixture::<MinPk, _>,
-            VoteKind::Notarize,
+            sign_notarize,
+            is_conflicting_notarize,
         );
         conflicting_vote_creates_evidence(
             bls12381_threshold_std::fixture::<MinSig, _>,
-            VoteKind::Notarize,
+            sign_notarize,
+            is_conflicting_notarize,
         );
         conflicting_vote_creates_evidence(
             bls12381_multisig::fixture::<MinPk, _>,
-            VoteKind::Notarize,
+            sign_notarize,
+            is_conflicting_notarize,
         );
         conflicting_vote_creates_evidence(
             bls12381_multisig::fixture::<MinSig, _>,
-            VoteKind::Notarize,
+            sign_notarize,
+            is_conflicting_notarize,
         );
-        conflicting_vote_creates_evidence(ed25519::fixture, VoteKind::Notarize);
-        conflicting_vote_creates_evidence(secp256r1::fixture, VoteKind::Notarize);
+        conflicting_vote_creates_evidence(ed25519::fixture, sign_notarize, is_conflicting_notarize);
+        conflicting_vote_creates_evidence(
+            secp256r1::fixture,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
     }
 
     #[test_traced]
     fn test_conflicting_finalize_creates_evidence() {
         conflicting_vote_creates_evidence(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
-            VoteKind::Finalize,
+            sign_finalize,
+            is_conflicting_finalize,
         );
         conflicting_vote_creates_evidence(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
-            VoteKind::Finalize,
+            sign_finalize,
+            is_conflicting_finalize,
         );
         conflicting_vote_creates_evidence(
             bls12381_threshold_std::fixture::<MinPk, _>,
-            VoteKind::Finalize,
+            sign_finalize,
+            is_conflicting_finalize,
         );
         conflicting_vote_creates_evidence(
             bls12381_threshold_std::fixture::<MinSig, _>,
-            VoteKind::Finalize,
+            sign_finalize,
+            is_conflicting_finalize,
         );
         conflicting_vote_creates_evidence(
             bls12381_multisig::fixture::<MinPk, _>,
-            VoteKind::Finalize,
+            sign_finalize,
+            is_conflicting_finalize,
         );
         conflicting_vote_creates_evidence(
             bls12381_multisig::fixture::<MinSig, _>,
-            VoteKind::Finalize,
+            sign_finalize,
+            is_conflicting_finalize,
         );
-        conflicting_vote_creates_evidence(ed25519::fixture, VoteKind::Finalize);
-        conflicting_vote_creates_evidence(secp256r1::fixture, VoteKind::Finalize);
+        conflicting_vote_creates_evidence(ed25519::fixture, sign_finalize, is_conflicting_finalize);
+        conflicting_vote_creates_evidence(
+            secp256r1::fixture,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
     }
 }
