@@ -48,13 +48,6 @@ Override the seed via environment variable:
 FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz test_
 ```
 
-#### Property-Based Tests
-
-Run proptest-based tests that explore many seeds:
-```bash
-cargo test -p commonware-consensus-fuzz property_test
-```
-
 #### Continuous Fuzzing
 
 Run continuous fuzzing for a specific target:

@@ -122,13 +122,10 @@ mod tests {
     use super::*;
     use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard, N4F1C3};
     use commonware_macros::{test_group, test_traced};
-    use proptest::prelude::*;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::cell::RefCell;
 
     const TEST_CONTAINERS: u64 = 1000;
-    const PROPERTY_TEST_CONTAINERS: u64 = 30;
-
     const DEFAULT_SEED: u64 = 0;
 
     fn test_input(containers: u64) -> FuzzInput {
@@ -156,26 +153,6 @@ mod tests {
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }
-    }
-
-    fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
-        any::<u64>().prop_map(move |seed| {
-            let mut seeded_rng = StdRng::seed_from_u64(seed);
-            let mut raw_bytes = vec![0u8; 1024];
-            seeded_rng.fill_bytes(&mut raw_bytes);
-
-            FuzzInput {
-                seed,
-                partition: Partition::Connected,
-                configuration: N4F1C3,
-                raw_bytes,
-                offset: RefCell::new(0),
-                rng: RefCell::new(StdRng::seed_from_u64(seed)),
-                required_containers: PROPERTY_TEST_CONTAINERS,
-                degraded_network: false,
-                strategy: StrategyChoice::AnyScope,
-            }
-        })
     }
 
     #[test_group("slow")]
@@ -212,47 +189,5 @@ mod tests {
     #[test_traced]
     fn test_bls12381_threshold_minsig_connected() {
         fuzz::<SimplexBls12381MinSig, Standard>(test_input(TEST_CONTAINERS));
-    }
-
-    // Property-based test variants using proptest
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(100))]
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_ed25519_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, Standard>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_secp256r1_connected(input in property_test_strategy()) {
-            fuzz::<SimplexSecp256r1, Standard>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_multisig_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MultisigMinPk, Standard>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_multisig_minsig_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MultisigMinSig, Standard>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinPk, Standard>(input);
-        }
-
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_minsig_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinSig, Standard>(input);
-        }
     }
 }

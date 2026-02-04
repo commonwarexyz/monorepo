@@ -27,7 +27,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 rand_core.workspace = true
 
 [[bin]]
