@@ -34,6 +34,7 @@
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
 //!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
@@ -77,6 +78,8 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
+//!   timeout to fire).
 //!
 //! ## Architecture
 //!
