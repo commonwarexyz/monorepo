@@ -64,9 +64,10 @@
 //!
 //! ### Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! This means that a new participant joining consensus will immediately jump ahead on the previous
+//! view's nullification or finalization and begin participating in consensus at the current view.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -228,9 +229,12 @@
 //! ## Certification
 //!
 //! After a payload is notarized, the application can optionally delay or prevent finalization via the
-//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. This is particularly useful for systems that employ
-//! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
-//! and validate the full block before voting to finalize.
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. By default, `certify`
+//! returns `true` for all payloads, meaning finalization proceeds immediately after notarization.
+//!
+//! Customizing `certify` is useful for systems that employ erasure coding, where participants may want
+//! to wait until they have received enough shards to reconstruct and validate the full block before
+//! voting to finalize.
 //!
 //! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
 //! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
@@ -238,7 +242,7 @@
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
-//! liveness._ By default, `certify` returns `true` for all payloads, meaning finalization proceeds immediately after notarization.
+//! liveness._
 //!
 //! ## Persistence
 //!
