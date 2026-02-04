@@ -81,8 +81,11 @@
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
 //!   timeout to fire).
-//! * Require broadcasting `notarize(c,v)` and `notarization(c,v)` before broadcasting `finalize(c,v)` to ensure
-//!   participants contribute to notarization before finalization.
+//! * Require broadcasting `notarize(c,v)` and `notarization(c,v)` before broadcasting `finalize(c,v)`. This ensures
+//!   all honest participants contribute to notarization before finalization. Without this requirement,
+//!   a slow but correct node that receives `2f+1` notarize votes before sending its own notarize vote
+//!   could skip directly to broadcasting its finalize vote. This has no impact on liveness since the
+//!   other `2f+1` participants can still achieve finalization, and the performance impact is minimal.
 //!
 //! ## Architecture
 //!
