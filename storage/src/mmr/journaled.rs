@@ -925,10 +925,10 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
-                .unwrap();
-            let mut mmr = mmr.into_dirty();
+                .unwrap()
+                .into_dirty();
 
             let mut c_hasher = Sha256::new();
             for i in 0u64..NUM_ELEMENTS {
@@ -1093,16 +1093,16 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::init(context.with_label("first"), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.with_label("first"), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             assert_eq!(mmr.size(), 0);
 
             // Build a test MMR with 252 leaves
             const LEAF_COUNT: usize = 252;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
-            let mut mmr = mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
@@ -1172,12 +1172,12 @@ mod tests {
                 thread_pool: None,
                 page_cache: cfg_pruned.page_cache.clone(),
             };
-            let mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
+            let mut mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
-            let mut mmr = mmr.into_dirty();
             let mut pruned_mmr = pruned_mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
@@ -1297,12 +1297,12 @@ mod tests {
             // Build MMR with 2000 leaves.
             let mut hasher: Standard<Sha256> = Standard::new();
             const LEAF_COUNT: usize = 2000;
-            let mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
-            let mut mmr = mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
@@ -1371,12 +1371,12 @@ mod tests {
         executor.start(|context| async move {
             // Create MMR with 10 elements
             let mut hasher = Standard::<Sha256>::new();
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             let mut elements = Vec::new();
             let mut positions = Vec::new();
-            let mut mmr = mmr.into_dirty();
             for i in 0..10 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
@@ -1579,12 +1579,12 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
 
             let element = test_digest(0);
-            let mut mmr = mmr.into_dirty();
             mmr.add(&mut hasher, &element).await.unwrap();
             let mmr = mmr.merkleize(&mut hasher);
 
@@ -1847,12 +1847,12 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Create an MMR with some data
-            let mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
 
             // Add 50 elements
-            let mut mmr = mmr.into_dirty();
             for i in 0..50 {
                 mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }

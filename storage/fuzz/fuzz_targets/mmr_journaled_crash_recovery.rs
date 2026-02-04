@@ -175,21 +175,21 @@ async fn run_operations(
             }
 
             MmrOperation::Sync => {
-                let mut mmr = mmr.merkleize(hasher);
-                if mmr.sync().await.is_err() {
+                let mut clean_mmr = mmr.merkleize(hasher);
+                if clean_mmr.sync().await.is_err() {
                     Err(())
                 } else {
                     // Sync commits state: update all bounds to current values
-                    let size = mmr.size().as_u64();
-                    let leaves = mmr.leaves().as_u64();
-                    let pruned = mmr.bounds().start.as_u64();
+                    let size = clean_mmr.size().as_u64();
+                    let leaves = clean_mmr.leaves().as_u64();
+                    let pruned = clean_mmr.bounds().start.as_u64();
                     min_size = size;
                     max_size = max_size.max(size);
                     min_leaves = leaves;
                     max_leaves = max_leaves.max(leaves);
                     min_pruned = pruned;
                     max_pruned = max_pruned.max(pruned);
-                    Ok(mmr.into_dirty())
+                    Ok(clean_mmr.into_dirty())
                 }
             }
 
@@ -202,8 +202,8 @@ async fn run_operations(
                     // No-op: already pruned past this point
                     Ok(mmr)
                 } else {
-                    let mut mmr = mmr.merkleize(hasher);
-                    match mmr.prune_to_pos(Position::new(safe_pos)).await {
+                    let mut clean_mmr = mmr.merkleize(hasher);
+                    match clean_mmr.prune_to_pos(Position::new(safe_pos)).await {
                         Err(_) => {
                             // Partial prune possible
                             max_pruned = max_pruned.max(safe_pos);
@@ -211,10 +211,10 @@ async fn run_operations(
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = mmr.bounds().start.as_u64();
+                            let pruned = clean_mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            Ok(mmr.into_dirty())
+                            Ok(clean_mmr.into_dirty())
                         }
                     }
                 }
@@ -228,8 +228,8 @@ async fn run_operations(
                     // No-op: nothing to prune
                     Ok(mmr)
                 } else {
-                    let mut mmr = mmr.merkleize(hasher);
-                    match mmr.prune_all().await {
+                    let mut clean_mmr = mmr.merkleize(hasher);
+                    match clean_mmr.prune_all().await {
                         Err(_) => {
                             // Partial prune possible
                             max_pruned = max_pruned.max(size);
@@ -237,10 +237,10 @@ async fn run_operations(
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = mmr.bounds().start.as_u64();
+                            let pruned = clean_mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            Ok(mmr.into_dirty())
+                            Ok(clean_mmr.into_dirty())
                         }
                     }
                 }

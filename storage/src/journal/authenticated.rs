@@ -635,9 +635,8 @@ mod tests {
         suffix: &str,
         count: usize,
     ) -> AuthenticatedJournal {
-        let journal = create_empty_journal(context, suffix).await;
+        let mut journal = create_empty_journal(context, suffix).await.into_dirty();
 
-        let mut journal = journal.into_dirty();
         for i in 0..count {
             let op = create_operation(i as u8);
             let loc = journal.append(op).await.unwrap();
@@ -781,10 +780,11 @@ mod tests {
     fn test_align_with_mismatched_committed_ops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_empty_journal(context.with_label("first"), "mismatched").await;
+            let mut journal = create_empty_journal(context.with_label("first"), "mismatched")
+                .await
+                .into_dirty();
 
             // Add 20 uncommitted operations
-            let mut journal = journal.into_dirty();
             for i in 0..20 {
                 let loc = journal.append(create_operation(i as u8)).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64));
@@ -1068,13 +1068,12 @@ mod tests {
     fn test_apply_op_and_read_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_empty_journal(context, "apply_op").await;
+            let mut journal = create_empty_journal(context, "apply_op").await.into_dirty();
 
             assert_eq!(journal.size(), 0);
 
             // Add 50 operations
             let expected_ops: Vec<_> = (0..50).map(|i| create_operation(i as u8)).collect();
-            let mut journal = journal.into_dirty();
             for (i, op) in expected_ops.iter().enumerate() {
                 let loc = journal.append(op.clone()).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64));
@@ -1128,10 +1127,11 @@ mod tests {
     fn test_read_pruned_operation_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_journal_with_ops(context, "read_pruned", 100).await;
+            let mut journal = create_journal_with_ops(context, "read_pruned", 100)
+                .await
+                .into_dirty();
 
             // Add commit and prune
-            let mut journal = journal.into_dirty();
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1190,11 +1190,12 @@ mod tests {
     fn test_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_empty_journal(context.with_label("first"), "close_pending").await;
+            let mut journal = create_empty_journal(context.with_label("first"), "close_pending")
+                .await
+                .into_dirty();
 
             // Add 20 operations
             let expected_ops: Vec<_> = (0..20).map(|i| create_operation(i as u8)).collect();
-            let mut journal = journal.into_dirty();
             for (i, op) in expected_ops.iter().enumerate() {
                 let loc = journal.append(op.clone()).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64),);
@@ -1247,10 +1248,11 @@ mod tests {
     fn test_prune_to_location() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_journal_with_ops(context, "prune_to", 100).await;
+            let mut journal = create_journal_with_ops(context, "prune_to", 100)
+                .await
+                .into_dirty();
 
             // Add commit at position 50
-            let mut journal = journal.into_dirty();
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1270,9 +1272,10 @@ mod tests {
     fn test_prune_returns_actual_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_journal_with_ops(context, "prune_boundary", 100).await;
+            let mut journal = create_journal_with_ops(context, "prune_boundary", 100)
+                .await
+                .into_dirty();
 
-            let mut journal = journal.into_dirty();
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1298,9 +1301,10 @@ mod tests {
     fn test_prune_preserves_operation_count() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_journal_with_ops(context, "prune_count", 100).await;
+            let mut journal = create_journal_with_ops(context, "prune_count", 100)
+                .await
+                .into_dirty();
 
-            let mut journal = journal.into_dirty();
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1324,6 +1328,7 @@ mod tests {
             // Test empty journal
             let journal = create_empty_journal(context.with_label("empty"), "oldest").await;
             assert!(journal.bounds().is_empty());
+            journal.destroy().await.unwrap();
 
             // Test no pruning
             let journal =
@@ -1331,6 +1336,7 @@ mod tests {
             let bounds = journal.bounds();
             assert!(!bounds.is_empty());
             assert_eq!(bounds.start, Location::new_unchecked(0));
+            journal.destroy().await.unwrap();
 
             // Test after pruning
             let journal =
@@ -1351,6 +1357,7 @@ mod tests {
             assert_eq!(bounds.start, pruned_boundary);
             // Should be <= requested location (50)
             assert!(pruned_boundary <= Location::new_unchecked(50));
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -1369,9 +1376,10 @@ mod tests {
             assert_eq!(journal.bounds().start, Location::new_unchecked(0));
 
             // Test after pruning
-            let journal =
-                create_journal_with_ops(context.with_label("pruned"), "boundary", 100).await;
-            let mut journal = journal.into_dirty();
+            let mut journal =
+                create_journal_with_ops(context.with_label("pruned"), "boundary", 100)
+                    .await
+                    .into_dirty();
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
                 .await
@@ -1390,9 +1398,10 @@ mod tests {
     fn test_mmr_prunes_to_journal_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_journal_with_ops(context, "mmr_boundary", 50).await;
+            let mut journal = create_journal_with_ops(context, "mmr_boundary", 50)
+                .await
+                .into_dirty();
 
-            let mut journal = journal.into_dirty();
             journal
                 .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
                 .await

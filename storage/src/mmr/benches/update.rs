@@ -77,7 +77,7 @@ fn bench_update(c: &mut Criterion) {
                             let start = Instant::now();
 
                             // Simulate leaf-batching being the responsibility of the caller.
-                            let mut leaf_map: HashMap<Location, sha256::Digest> = HashMap::new();
+                            let mut leaf_map = HashMap::new();
                             for _ in 0..updates {
                                 let rand_leaf_num = sampler.gen_range(0..leaves);
                                 let rand_leaf_loc = leaf_locations[rand_leaf_num];
