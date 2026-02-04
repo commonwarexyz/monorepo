@@ -241,6 +241,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod channel;
     pub mod concurrency;
     pub mod futures;
+    pub mod rng;
+    pub use rng::BytesRng;
 
     /// Returns a seeded RNG for deterministic testing.
     ///

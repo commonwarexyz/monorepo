@@ -36,10 +36,8 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, Faults, N3f1, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, BytesRng, Faults, N3f1, NZUsize, NZU16};
 use futures::future::join_all;
-use rand::{rngs::StdRng, SeedableRng};
-use rand_core::{CryptoRng, RngCore};
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
@@ -362,59 +360,6 @@ fn spawn_honest_validator<P: simplex::Simplex>(
 
     reporter
 }
-
-struct BytesRng {
-    bytes: Vec<u8>,
-    offset: usize,
-    fallback: StdRng,
-}
-
-impl BytesRng {
-    fn new(bytes: Vec<u8>) -> Self {
-        let mut seed = [0u8; 8];
-        let start = bytes.len().saturating_sub(8);
-        let len = bytes.len().min(8);
-        seed[..len].copy_from_slice(&bytes[start..]);
-        let fallback = StdRng::seed_from_u64(u64::from_le_bytes(seed));
-        Self {
-            bytes,
-            offset: 0,
-            fallback,
-        }
-    }
-}
-
-impl RngCore for BytesRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut buf = [0u8; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut buf = [0u8; 8];
-        self.fill_bytes(&mut buf);
-        u64::from_le_bytes(buf)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for byte in dest.iter_mut() {
-            if self.offset < self.bytes.len() {
-                *byte = self.bytes[self.offset];
-                self.offset += 1;
-            } else {
-                *byte = self.fallback.next_u32() as u8;
-            }
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl CryptoRng for BytesRng {}
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
     let rng = BytesRng::new(input.raw_bytes.clone());
