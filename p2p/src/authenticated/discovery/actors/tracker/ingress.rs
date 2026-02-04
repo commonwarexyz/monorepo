@@ -282,8 +282,15 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     /// Register a set of authorized peers at a given index.
     ///
-    /// The index should be strictly managed (ideally matching the epoch
-    /// of the consensus engine) and must be monotonically increasing.
+    /// These peer sets are used to construct a bit vector (sorted by public key)
+    /// to share knowledge about dialable IPs. If a peer does not yet have an index
+    /// associated with a bit vector, the discovery message will be dropped.
+    ///
+    /// # Parameters
+    ///
+    /// * `index` - Index of the set of authorized peers (like a blockchain height).
+    ///   Must be monotonically increasing, per the rules of [Set].
+    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     async fn update(&mut self, index: u64, peers: Set<Self::PublicKey>) {
         self.sender.0.send_lossy(Message::Register { index, peers });
     }
