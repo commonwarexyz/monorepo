@@ -123,34 +123,16 @@ mod tests {
     use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard, N4F1C3};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
-    use rand::{rngs::StdRng, RngCore, SeedableRng};
-    use std::cell::RefCell;
 
     const TEST_CONTAINERS: u64 = 1000;
     const PROPERTY_TEST_CONTAINERS: u64 = 30;
-    const DEFAULT_SEED: u64 = 0;
+    const SEED: u64 = 0;
 
-    fn test_input(containers: u64) -> FuzzInput {
-        use std::env;
-
-        // Use deterministic seed by default, allow override via environment variable
-        let seed = env::var("FUZZ_SEED")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_SEED);
-
-        // Get pseudo-random bytes
-        let mut seeded_rng = StdRng::seed_from_u64(seed);
-        let mut raw_bytes = vec![0u8; 1024];
-        seeded_rng.fill_bytes(&mut raw_bytes);
-
+    fn test_input(seed: u64, containers: u64) -> FuzzInput {
         FuzzInput {
-            seed,
+            rng: seed.to_be_bytes().to_vec(),
             partition: Partition::Connected,
             configuration: N4F1C3,
-            raw_bytes,
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::seed_from_u64(seed)),
             required_containers: containers,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
@@ -160,57 +142,41 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_ed25519_connected() {
-        fuzz::<SimplexEd25519, Standard>(test_input(TEST_CONTAINERS));
+        fuzz::<SimplexEd25519, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_secp256r1_connected() {
-        fuzz::<SimplexSecp256r1, Standard>(test_input(TEST_CONTAINERS));
+        fuzz::<SimplexSecp256r1, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_multisig_minpk_connected() {
-        fuzz::<SimplexBls12381MultisigMinPk, Standard>(test_input(TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MultisigMinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_multisig_minsig_connected() {
-        fuzz::<SimplexBls12381MultisigMinSig, Standard>(test_input(TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MultisigMinSig, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_threshold_minpk_connected() {
-        fuzz::<SimplexBls12381MinPk, Standard>(test_input(TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]
     #[test_traced]
     fn test_bls12381_threshold_minsig_connected() {
-        fuzz::<SimplexBls12381MinSig, Standard>(test_input(TEST_CONTAINERS));
+        fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
-        any::<u64>().prop_map(move |seed| {
-            let mut seeded_rng = StdRng::seed_from_u64(seed);
-            let mut raw_bytes = vec![0u8; 1024];
-            seeded_rng.fill_bytes(&mut raw_bytes);
-
-            FuzzInput {
-                seed,
-                partition: Partition::Connected,
-                configuration: N4F1C3,
-                raw_bytes,
-                offset: RefCell::new(0),
-                rng: RefCell::new(StdRng::seed_from_u64(seed)),
-                required_containers: PROPERTY_TEST_CONTAINERS,
-                degraded_network: false,
-                strategy: StrategyChoice::AnyScope,
-            }
-        })
+        any::<u64>().prop_map(move |seed| test_input(seed, PROPERTY_TEST_CONTAINERS))
     }
 
     proptest! {

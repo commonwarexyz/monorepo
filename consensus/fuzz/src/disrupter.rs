@@ -1,4 +1,4 @@
-use crate::{strategy::Strategy, types::Message, FuzzInput, EPOCH};
+use crate::{strategy::Strategy, types::Message, EPOCH};
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
@@ -12,6 +12,7 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
+use rand::Rng;
 use rand_core::CryptoRngCore;
 use std::{collections::VecDeque, time::Duration};
 
@@ -27,8 +28,8 @@ pub struct Disrupter<
 > {
     context: E,
     scheme: S,
-    fuzz_input: FuzzInput,
     strategy: St,
+    fault_offset: u64,
     last_vote_view: u64,
     last_finalized_view: u64,
     last_nullified_view: u64,
@@ -41,7 +42,8 @@ impl<E: Clock + Spawner + CryptoRngCore, S: Scheme<Sha256Digest>, St: Strategy +
 where
     <S::Certificate as Read>::Cfg: Default,
 {
-    pub fn new(context: E, scheme: S, fuzz_input: FuzzInput, strategy: St) -> Self {
+    pub fn new(mut context: E, scheme: S, strategy: St) -> Self {
+        let fault_offset = context.next_u64();
         Self {
             last_vote_view: 0,
             last_finalized_view: 0,
@@ -50,13 +52,13 @@ where
             latest_proposals: VecDeque::new(),
             context,
             scheme,
-            fuzz_input,
             strategy,
+            fault_offset,
         }
     }
 
     fn message(&mut self) -> Message {
-        match self.fuzz_input.random_byte() % 4 {
+        match (self.context.gen::<u8>()) % 4 {
             0 => Message::Notarize,
             1 => Message::Finalize,
             2 => Message::Nullify,
@@ -93,18 +95,19 @@ where
         if bound == 0 || faults == 0 {
             return false;
         }
-        let round_fault = self.fuzz_input.seed.wrapping_add(view) % bound;
+        let round_fault = self.fault_offset.wrapping_add(view) % bound;
         round_fault < faults
     }
 
     fn get_proposal(&mut self) -> Proposal<Sha256Digest> {
+        let proposals_len = self.latest_proposals.len();
         let payload_source = self
             .strategy
-            .repeated_proposal_index(&self.fuzz_input, self.latest_proposals.len())
+            .repeated_proposal_index(&mut self.context, proposals_len)
             .and_then(|idx| self.latest_proposals.get(idx).cloned())
             .unwrap_or_else(|| {
                 self.strategy.random_proposal(
-                    &self.fuzz_input,
+                    &mut self.context,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -113,7 +116,7 @@ where
             });
 
         let view = self.strategy.random_view_for_proposal(
-            &self.fuzz_input,
+            &mut self.context,
             self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
@@ -121,7 +124,7 @@ where
         );
 
         let parent_view = self.strategy.random_parent_view(
-            &self.fuzz_input,
+            &mut self.context,
             view,
             self.last_finalized_view,
             self.last_notarized_view,
@@ -139,8 +142,10 @@ where
     }
 
     fn bytes(&mut self) -> Vec<u8> {
-        let len = self.fuzz_input.random_byte();
-        self.fuzz_input.random(len as usize)
+        let len = self.context.gen::<u8>();
+        let mut bytes = vec![0u8; len as usize];
+        self.context.fill_bytes(&mut bytes);
+        bytes
     }
 
     fn mutate_bytes(&mut self, input: &[u8]) -> Vec<u8> {
@@ -149,9 +154,9 @@ where
         }
 
         let mut result = input.to_vec();
-        let pos = (self.fuzz_input.random_byte() as usize) % result.len();
+        let pos = self.context.gen_range(0..result.len());
 
-        match self.fuzz_input.random_byte() % 5 {
+        match (self.context.gen::<u8>()) % 5 {
             0 => result[pos] = result[pos].wrapping_add(1),
             1 => result[pos] = result[pos].wrapping_sub(1),
             2 => result[pos] ^= 0xFF,
@@ -202,7 +207,7 @@ where
 
         loop {
             // Send disruptive messages across all channels
-            match self.fuzz_input.random_byte() % 7 {
+            match (self.context.gen::<u8>()) % 7 {
                 0 => self.send_random_vote(&mut vote_sender).await,
                 1 => self.send_proposal(&mut vote_sender).await,
                 2 => {
@@ -269,14 +274,14 @@ where
         }
 
         // Optionally send mutated vote
-        if self.fuzz_input.random_bool() {
+        if self.context.gen_bool(0.5) {
             let mutated = self.mutate_bytes(&msg);
             let _ = sender.send(Recipients::All, mutated, true).await;
         }
         match vote {
             Vote::Notarize(notarize) => {
                 let proposal = self.strategy.mutate_proposal(
-                    &self.fuzz_input,
+                    &mut self.context,
                     &notarize.proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -290,7 +295,7 @@ where
             }
             Vote::Finalize(finalize) => {
                 let proposal = self.strategy.mutate_proposal(
-                    &self.fuzz_input,
+                    &mut self.context,
                     &finalize.proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -304,7 +309,7 @@ where
             }
             Vote::Nullify(_) => {
                 let v = self.strategy.mutate_nullify_view(
-                    &self.fuzz_input,
+                    &mut self.context,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -345,10 +350,10 @@ where
         }
 
         // Optionally send mutated certificate
-        if self.fuzz_input.random_bool() {
+        if self.context.gen_bool(0.5) {
             let cert = self
                 .strategy
-                .mutate_certificate_bytes(&self.fuzz_input, &msg);
+                .mutate_certificate_bytes(&mut self.context, &msg);
             let _ = sender.send(Recipients::All, &cert[..], true).await;
         }
     }
@@ -358,8 +363,8 @@ where
             return;
         }
         // Optionally send malformed resolver data
-        if self.fuzz_input.random_bool() {
-            let mutated = self.strategy.mutate_resolver_bytes(&self.fuzz_input, &msg);
+        if self.context.gen_bool(0.5) {
+            let mutated = self.strategy.mutate_resolver_bytes(&mut self.context, &msg);
             let _ = sender
                 .send(Recipients::All, IoBuf::from(mutated), true)
                 .await;
@@ -387,14 +392,14 @@ where
             return;
         }
 
-        let idx = (self.fuzz_input.random_u64() as usize) % participants.len();
+        let idx = self.context.gen_range(0..participants.len());
         let victim = participants[idx].clone();
 
         // Send 10 messages to victim
         for _ in 0..10 {
             let proposal = self.get_proposal();
             let proposal = self.strategy.mutate_proposal(
-                &self.fuzz_input,
+                &mut self.context,
                 &proposal,
                 self.last_vote_view,
                 self.last_finalized_view,
@@ -414,7 +419,7 @@ where
         }
         let proposal = self.get_proposal();
         let proposal = self.strategy.mutate_proposal(
-            &self.fuzz_input,
+            &mut self.context,
             &proposal,
             self.last_vote_view,
             self.last_finalized_view,
@@ -450,7 +455,7 @@ where
         match self.message() {
             Message::Notarize => {
                 let proposal = self.strategy.mutate_proposal(
-                    &self.fuzz_input,
+                    &mut self.context,
                     &proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -464,7 +469,7 @@ where
             }
             Message::Finalize => {
                 let proposal = self.strategy.mutate_proposal(
-                    &self.fuzz_input,
+                    &mut self.context,
                     &proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -478,7 +483,7 @@ where
             }
             Message::Nullify => {
                 let view = self.strategy.mutate_nullify_view(
-                    &self.fuzz_input,
+                    &mut self.context,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,

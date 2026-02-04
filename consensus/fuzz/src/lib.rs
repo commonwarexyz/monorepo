@@ -36,15 +36,13 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, Faults, N3f1, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, BytesRng, Faults, N3f1, NZUsize, NZU16};
 use futures::future::join_all;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
 };
 use std::{
-    cell::RefCell,
     collections::HashMap,
     num::{NonZeroU16, NonZeroUsize},
     panic,
@@ -123,60 +121,16 @@ async fn setup_degraded_network<E: Clock>(
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
-    pub raw_bytes: Vec<u8>,
-    pub seed: u64,
+    pub rng: Vec<u8>,
     pub required_containers: u64,
     pub degraded_network: bool,
-    offset: RefCell<usize>,
-    rng: RefCell<StdRng>,
     pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
 }
 
-impl FuzzInput {
-    pub fn random(&self, n: usize) -> Vec<u8> {
-        if n == 0 {
-            return Vec::new();
-        }
-
-        let mut offset = self.offset.borrow_mut();
-        let remaining = self.raw_bytes.len().saturating_sub(*offset);
-
-        if remaining >= n {
-            let result = self.raw_bytes[*offset..*offset + n].to_vec();
-            *offset += n;
-            result
-        } else {
-            let mut result = Vec::with_capacity(n);
-            if remaining > 0 {
-                result.extend_from_slice(&self.raw_bytes[*offset..]);
-                *offset = self.raw_bytes.len();
-            }
-            let mut extra = vec![0u8; n - result.len()];
-            self.rng.borrow_mut().fill_bytes(&mut extra);
-            result.extend(extra);
-            result
-        }
-    }
-
-    pub fn random_byte(&self) -> u8 {
-        self.random(1)[0]
-    }
-
-    pub fn random_bool(&self) -> bool {
-        self.random_byte() < 128
-    }
-
-    pub fn random_u64(&self) -> u64 {
-        u64::from_le_bytes(self.random(8).try_into().unwrap())
-    }
-}
-
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let seed = u.arbitrary()?;
-
         // Bias towards Connected partition
         let partition = match u.int_in_range(0..=99)? {
             0..=79 => Partition::Connected,                    // 80%
@@ -192,7 +146,7 @@ impl Arbitrary<'_> for FuzzInput {
         };
 
         // Bias degraded networking - 1%
-        let degraded_network_node = partition == Partition::Connected
+        let degraded_network = partition == Partition::Connected
             && configuration == N4F1C3
             && u.int_in_range(0..=99)? == 1;
 
@@ -218,28 +172,16 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
-        let mut raw_bytes = Vec::new();
-        for _ in 0..MAX_RAW_BYTES {
-            match u.arbitrary::<u8>() {
-                Ok(byte) => raw_bytes.push(byte),
-                Err(_) => break,
-            }
-        }
-
-        let mut prng_seed = [0u8; 32];
-        for (i, &b) in raw_bytes.iter().enumerate() {
-            prng_seed[i % 32] ^= b;
-        }
+        // Collect bytes for RNG
+        let remaining = u.len().min(MAX_RAW_BYTES);
+        let rng = u.bytes(remaining)?.to_vec();
 
         Ok(Self {
-            seed,
+            rng,
             partition,
             configuration,
-            degraded_network: degraded_network_node,
-            raw_bytes,
+            degraded_network,
             required_containers,
-            offset: RefCell::new(0),
-            rng: RefCell::new(StdRng::from_seed(prng_seed)),
             strategy,
         })
     }
@@ -329,7 +271,6 @@ fn spawn_disrupter<P: simplex::Simplex>(
             let disrupter = Disrupter::new(
                 disrupter_context,
                 scheme,
-                input.clone(),
                 SmallScope {
                     fault_rounds,
                     fault_rounds_bound,
@@ -338,7 +279,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter = Disrupter::new(disrupter_context, scheme, input.clone(), AnyScope);
+            let disrupter = Disrupter::new(disrupter_context, scheme, AnyScope);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
@@ -348,7 +289,6 @@ fn spawn_disrupter<P: simplex::Simplex>(
             let disrupter = Disrupter::new(
                 disrupter_context,
                 scheme,
-                input.clone(),
                 FutureScope {
                     fault_rounds,
                     fault_rounds_bound,
@@ -422,7 +362,8 @@ fn spawn_honest_validator<P: simplex::Simplex>(
 }
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_seed(input.seed);
+    let rng = BytesRng::new(input.rng.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
@@ -481,7 +422,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 }
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
-    let cfg = deterministic::Config::new().with_seed(input.seed);
+    let rng = BytesRng::new(input.rng.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
@@ -659,7 +601,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     let disrupter = Disrupter::new(
                         disrupter_context,
                         scheme.clone(),
-                        input.clone(),
                         SmallScope {
                             fault_rounds,
                             fault_rounds_bound,
@@ -672,8 +613,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     );
                 }
                 StrategyChoice::AnyScope => {
-                    let disrupter =
-                        Disrupter::new(disrupter_context, scheme.clone(), input.clone(), AnyScope);
+                    let disrupter = Disrupter::new(disrupter_context, scheme.clone(), AnyScope);
                     disrupter.start(
                         (vote_sender_secondary, vote_receiver_secondary),
                         (certificate_sender_secondary, certificate_receiver_secondary),
@@ -687,7 +627,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     let disrupter = Disrupter::new(
                         disrupter_context,
                         scheme.clone(),
-                        input.clone(),
                         FutureScope {
                             fault_rounds,
                             fault_rounds_bound,
@@ -759,7 +698,7 @@ impl FuzzMode for Twinable {
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
-    let seed = input.seed;
+    let rng = input.rng.clone();
     let run_result = if M::TWIN {
         panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
@@ -771,7 +710,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
     match run_result {
         Ok(()) => {}
         Err(payload) => {
-            println!("Panicked with seed: {}", seed);
+            println!("Panicked with rng: {:?}", rng);
             panic::resume_unwind(payload);
         }
     }

@@ -36,6 +36,13 @@ This ensures protocol safety properties are maintained despite a byzantine node.
 
 ### Running Tests
 
+#### Unit Tests
+
+Run deterministic tests with a fixed seed:
+```bash
+cargo test -p commonware-consensus-fuzz test_
+```
+
 #### Property-Based Tests
 
 Run proptest-based tests that explore many seeds:
