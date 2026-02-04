@@ -486,6 +486,9 @@ impl From<BytesMut> for IoBufMut {
 }
 
 impl From<Bytes> for IoBufMut {
+    /// Zero-copy if `bytes` is unique for the entire original buffer (refcount is 1),
+    /// copies otherwise. Always copies if the `Bytes` was constructed via `from_owner` or
+    /// `from_static`.
     fn from(bytes: Bytes) -> Self {
         Self {
             inner: IoBufMutInner::Owned(BytesMut::from(bytes)),
@@ -494,6 +497,8 @@ impl From<Bytes> for IoBufMut {
 }
 
 impl From<IoBuf> for IoBufMut {
+    /// Zero-copy if `buf` is unique for the entire original buffer (refcount is 1),
+    /// copies otherwise. Always copies for pooled buffers and static slices.
     fn from(buf: IoBuf) -> Self {
         Self::from(buf.inner)
     }
