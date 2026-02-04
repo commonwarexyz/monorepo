@@ -10,6 +10,10 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
+Today, a large number of Commonware Library primitives are now considered to be [BETA](https://github.com/commonwarexyz/monorepo#stability).
+
+As repositories grow in size, it becomes increasingly difficult to maintain velocity because the modification of "stable" crates requires ample testing and fuzzing.
+
 You've heard of "move fast and break things". But what about "move fast and break some things"?
 
 Why it doesn't work: obvious compatibility + testing coverage, documentation-based stability is not enough, there are multiple levels of stability in a single crate and we want to (optionally) make all available in a release for teams to experiment with.
