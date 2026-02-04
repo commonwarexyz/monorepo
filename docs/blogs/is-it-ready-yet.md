@@ -10,6 +10,10 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
+You've heard of "move fast and break things". But what about "move fast and break some things"?
+
+Why it doesn't work: obvious compatibility + testing coverage, documentation-based stability is not enough, there are multiple levels of stability in a single crate and we want to (optionally) make all available in a release for teams to experiment with.
+
 As we've added more and more primitives to the Commonware Library, it's become increasingly difficult to keep track of what is "ready" and what is not (especially when you consider primitive dependencies).
 
 The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives (and primitive dialects). Some have been battle-tested for over a year. Others landed last week. More will be added next month.
