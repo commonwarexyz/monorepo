@@ -9,6 +9,7 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
+    bitmap::MerkleizedBitMap,
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
     mmr::{Location, StandardHasher},
@@ -31,17 +32,18 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> = super::db::Db<
-    E,
-    Journal<E, Operation<K, V>>,
-    K,
-    FixedEncoding<V>,
-    Index<T, Location>,
-    H,
-    N,
-    S,
-    D,
->;
+pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
+    super::db::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        K,
+        FixedEncoding<V>,
+        Index<T, Location>,
+        H,
+        N,
+        S,
+        D,
+    >;
 
 // Functionality for the Merkleized state - init only.
 impl<
@@ -116,7 +118,7 @@ pub mod partitioned {
 
     pub use super::KeyValueProof;
     use crate::{
-        bitmap::CleanBitMap,
+        bitmap::MerkleizedBitMap,
         index::partitioned::ordered::Index,
         journal::contiguous::fixed::Journal,
         mmr::{Location, StandardHasher},
@@ -127,15 +129,15 @@ pub mod partitioned {
                 FixedValue,
             },
             current::{
-                db::{merkleize_grafted_bitmap, root},
+                db::{merkleize_grafted_bitmap, root, Merkleized},
                 FixedConfig as Config,
             },
-            Durable, Error, Merkleized,
+            Durable, Error,
         },
         translator::Translator,
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::Hasher;
+    use commonware_cryptography::{DigestOf, Hasher};
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
 
@@ -145,18 +147,27 @@ pub mod partitioned {
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<E, K, V, H, T, const P: usize, const N: usize, S = Merkleized<H>, D = Durable> =
-        crate::qmdb::current::ordered::db::Db<
-            E,
-            Journal<E, Operation<K, V>>,
-            K,
-            FixedEncoding<V>,
-            Index<T, Location, P>,
-            H,
-            N,
-            S,
-            D,
-        >;
+    pub type Db<
+        E,
+        K,
+        V,
+        H,
+        T,
+        const P: usize,
+        const N: usize,
+        S = Merkleized<DigestOf<H>>,
+        D = Durable,
+    > = crate::qmdb::current::ordered::db::Db<
+        E,
+        Journal<E, Operation<K, V>>,
+        K,
+        FixedEncoding<V>,
+        Index<T, Location, P>,
+        H,
+        N,
+        S,
+        D,
+    >;
 
     impl<
             E: RStorage + Clock + Metrics,
@@ -166,7 +177,7 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+        > Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
     {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
         /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -183,7 +194,7 @@ pub mod partitioned {
             let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
             let mut hasher = StandardHasher::<H>::new();
-            let mut status = CleanBitMap::init(
+            let mut status = MerkleizedBitMap::init(
                 context.with_label("bitmap"),
                 &bitmap_metadata_partition,
                 thread_pool,
@@ -210,12 +221,12 @@ pub mod partitioned {
             let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
 
             // Compute and cache the root
-            let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
+            let root = root(&mut hasher, &status, &any.log.mmr).await?;
 
             Ok(Self {
                 any,
                 status,
-                cached_root,
+                state: Merkleized { root },
             })
         }
     }

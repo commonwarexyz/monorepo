@@ -272,11 +272,11 @@ pub(crate) mod test {
         let mut db = db.into_merkleized().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         let root = db.root();
-        let op_count = db.op_count();
+        let op_count = db.size();
         let inactivity_floor_loc = db.inactivity_floor_loc();
 
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
@@ -287,7 +287,7 @@ pub(crate) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_eq!(db.root(), root);
 
@@ -298,7 +298,7 @@ pub(crate) mod test {
             dirty.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_mutable();
@@ -310,7 +310,7 @@ pub(crate) mod test {
             }
         }
         let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_mutable();
@@ -321,7 +321,7 @@ pub(crate) mod test {
         }
         let _ = db.commit(None).await.unwrap();
         let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.op_count() > op_count);
+        assert!(db.size() > op_count);
         assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
         assert_ne!(db.root(), root);
 
@@ -341,7 +341,7 @@ pub(crate) mod test {
         let root = db.root();
 
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_mutable();
@@ -351,7 +351,7 @@ pub(crate) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_mutable();
@@ -362,7 +362,7 @@ pub(crate) mod test {
         }
         drop(db);
         let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_mutable();
@@ -375,7 +375,7 @@ pub(crate) mod test {
         }
         drop(db);
         let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.size(), 1);
         assert_eq!(db.root(), root);
 
         let mut db = db.into_mutable();
@@ -388,7 +388,7 @@ pub(crate) mod test {
         let db = db.into_merkleized().await.unwrap();
         drop(db);
         let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.op_count() > 1);
+        assert!(db.size() > 1);
         assert_ne!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -453,7 +453,7 @@ pub(crate) mod test {
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
         let root_hash = db.root();
-        let original_op_count = db.op_count();
+        let original_op_count = db.size();
 
         // Historical proof should match "regular" proof when historical size == current database size
         let max_ops = NZU64!(10);

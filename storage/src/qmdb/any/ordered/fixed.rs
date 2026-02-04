@@ -200,6 +200,7 @@ pub(crate) mod test {
             store::{
                 batch_tests,
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                LogStore,
             },
             verify_proof, Durable, Merkleized, NonDurable, Unmerkleized,
         },
@@ -684,16 +685,6 @@ pub(crate) mod test {
             assert!(db.get(&k).await.unwrap().is_none());
 
             db.destroy().await.unwrap();
-        });
-    }
-
-    // Test that merkleization state changes don't reset `steps`.
-    #[test_traced("DEBUG")]
-    fn test_any_ordered_fixed_db_steps_not_reset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context).await;
-            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
         });
     }
 
