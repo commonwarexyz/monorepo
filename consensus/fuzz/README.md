@@ -12,13 +12,6 @@ Implemented using `cargo-fuzz`. The following fuzz targets are available:
 
 ## Simplex Fuzzing
 
-The fuzzer of the Simplex consensus protocol supports multiple execution modes:
-
-- **Cargo Fuzz Mode**: LibFuzzer-based fuzzing for continuous random input generation with coverage feedback 
-- **Cargo Test Mode**: Deterministic test execution with reproducible scenarios  
-- **Property-Based Test Mode**: Systematic exploration of protocol state space
-- **Gray-Box External Fuzzer**: Integration with the external deterministic runtime fuzzer
-
 ### Architecture
 
 The fuzzer operates by simulating a Byzantine environment:
@@ -43,23 +36,26 @@ This ensures protocol safety properties are maintained despite a byzantine node.
 
 ### Running Tests
 
-#### Standard Test Execution
+#### Unit Tests
 
-Run tests with random seed:
+Run deterministic tests with a fixed seed:
 ```bash
-cargo test -p commonware-consensus-fuzz
+cargo test -p commonware-consensus-fuzz test_
 ```
 
-#### Reproducible Test Execution
-
-Run tests with a specific seed for debugging:
+Override the seed via environment variable:
 ```bash
-FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz -- --nocapture
+FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz test_
 ```
 
-When a test fails, it will output the seed used. You can reproduce the exact failure by setting `FUZZ_SEED` to that value.
+#### Property-Based Tests
 
-#### Fuzzing with cargo-fuzz
+Run proptest-based tests that explore many seeds:
+```bash
+cargo test -p commonware-consensus-fuzz property_test
+```
+
+#### Continuous Fuzzing
 
 Run continuous fuzzing for a specific target:
 ```bash
@@ -84,7 +80,7 @@ Available fuzz targets (twin mode with mutating adversary):
 
 ### Debugging
 
-For verbose output during test execution:
+For verbose output:
 ```bash
-RUST_BACKTRACE=1 FUZZ_SEED=1 cargo test -p commonware-consensus-fuzz test_name -- --nocapture --show-output
+RUST_BACKTRACE=1 FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz test_name -- --show-output
 ```

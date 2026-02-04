@@ -129,15 +129,16 @@ mod tests {
     const TEST_CONTAINERS: u64 = 1000;
     const PROPERTY_TEST_CONTAINERS: u64 = 30;
 
+    const DEFAULT_SEED: u64 = 0;
+
     fn test_input(containers: u64) -> FuzzInput {
-        use rand::thread_rng;
         use std::env;
 
-        // Check for seed from environment variable, otherwise use random
+        // Use deterministic seed by default, allow override via environment variable
         let seed = env::var("FUZZ_SEED")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| thread_rng().next_u64());
+            .unwrap_or(DEFAULT_SEED);
 
         // Get pseudo-random bytes
         let mut seeded_rng = StdRng::seed_from_u64(seed);

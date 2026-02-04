@@ -1832,12 +1832,24 @@ mod tests {
 
     #[test_traced]
     fn test_duplicate_vote_with_different_attestation_blocks_peer() {
-        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_std::fixture::<MinPk, _>);
-        duplicate_vote_with_different_attestation_blocks_peer(bls12381_threshold_std::fixture::<MinSig, _>);
-        duplicate_vote_with_different_attestation_blocks_peer(bls12381_multisig::fixture::<MinPk, _>);
-        duplicate_vote_with_different_attestation_blocks_peer(bls12381_multisig::fixture::<MinSig, _>);
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture);
         duplicate_vote_with_different_attestation_blocks_peer(secp256r1::fixture);
     }
