@@ -40,8 +40,9 @@
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
-//! * Enter `v+1`
+//! * Request certification from application (see [Certification](#certification))
+//!     * If certification succeeds: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
+//!     * If certification fails: broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
@@ -228,10 +229,11 @@
 //! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
 //! and validate the full block before voting to finalize.
 //!
-//! If `certify` returns `false`, the participant will not broadcast a `finalize` vote for the payload.
-//! Because finalization requires `2f+1` `finalize` votes, a payload will only be finalized if a quorum
-//! of participants certify it. By default, `certify` returns `true` for all payloads, meaning finalization
-//! proceeds immediately after notarization.
+//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
+//! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
+//! it as an immediate timeout). Because finalization requires `2f+1` `finalize` votes, a payload will only be
+//! finalized if a quorum of participants certify it. By default, `certify` returns `true` for all payloads,
+//! meaning finalization proceeds immediately after notarization.
 //!
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
