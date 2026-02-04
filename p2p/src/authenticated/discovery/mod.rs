@@ -242,7 +242,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        count_running_tasks, deterministic, tokio, Clock, Handle, IoBuf, Metrics,
+        count_running_tasks, deterministic, tokio, BufferPooler, Clock, Handle, IoBuf, Metrics,
         Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
     use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32};
@@ -284,7 +284,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+        context: impl Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,

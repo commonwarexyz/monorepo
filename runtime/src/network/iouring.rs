@@ -168,7 +168,7 @@ impl crate::Network for Network {
 
         let fd = Arc::new(OwnedFd::from(stream));
         Ok((
-            Sink::new(fd.clone(), self.send_submitter.clone()),
+            Sink::new(fd.clone(), self.send_submitter.clone(), self.pool.clone()),
             Stream::new(
                 fd,
                 self.recv_submitter.clone(),
@@ -226,7 +226,7 @@ impl crate::Listener for Listener {
 
         Ok((
             remote_addr,
-            Sink::new(fd.clone(), self.send_submitter.clone()),
+            Sink::new(fd.clone(), self.send_submitter.clone(), self.pool.clone()),
             Stream::new(
                 fd,
                 self.recv_submitter.clone(),
@@ -246,11 +246,17 @@ pub struct Sink {
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
     submitter: mpsc::Sender<iouring::Op>,
+    /// Buffer pool for send allocations.
+    pool: BufferPool,
 }
 
 impl Sink {
-    const fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>) -> Self {
-        Self { fd, submitter }
+    const fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, pool: BufferPool) -> Self {
+        Self {
+            fd,
+            submitter,
+            pool,
+        }
     }
 
     fn as_raw_fd(&self) -> Fd {
@@ -263,7 +269,7 @@ impl crate::Sink for Sink {
         // Convert to contiguous IoBuf for io_uring send
         // (zero-copy if single buffer, copies if multiple)
         // TODO(#2705): Use writev to avoid this copy.
-        let mut buf = buf.into().coalesce();
+        let mut buf = buf.into().coalesce_with_pool(&self.pool);
         let mut bytes_sent = 0;
         let buf_len = buf.len();
 

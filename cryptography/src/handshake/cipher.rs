@@ -4,9 +4,11 @@ use rand_core::CryptoRngCore;
 use std::vec::Vec;
 use zeroize::Zeroizing;
 
-/// The amount of overhead in a ciphertext, compared to the plain message.
-/// ChaCha20-Poly1305 uses a 128-bit (16 byte) authentication tag.
-pub const CIPHERTEXT_OVERHEAD: usize = 16;
+/// Size of the ChaCha20-Poly1305 authentication tag.
+///
+/// This tag is the overhead added to each ciphertext and must be transmitted
+/// alongside it for the receiver to verify integrity and authenticity.
+pub const TAG_SIZE: usize = 16;
 
 /// How many bytes are in a nonce.
 /// ChaCha20-Poly1305 uses a 96-bit (12 byte) nonce.
@@ -55,36 +57,33 @@ cfg_if::cfg_if! {
                 Self(LessSafeKey::new(unbound_key))
             }
 
-            fn encrypt(
+            fn encrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
-                data: &[u8],
-            ) -> Result<Vec<u8>, Error> {
+                data: &mut [u8],
+            ) -> Result<[u8; TAG_SIZE], Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
-                let mut scratch = Vec::with_capacity(data.len() + CIPHERTEXT_OVERHEAD);
-                scratch.extend_from_slice(data);
-                self.0
-                    .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut scratch)
+                let tag = self
+                    .0
+                    .seal_in_place_separate_tag(nonce, aead::Aad::empty(), data)
                     .map_err(|_| Error::EncryptionFailed)?;
-                Ok(scratch)
+                Ok(tag.as_ref().try_into().expect("tag size mismatch"))
             }
 
-            fn decrypt(
+            fn decrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
-                data: &[u8],
-            ) -> Result<Vec<u8>, Error> {
+                data: &mut [u8],
+            ) -> Result<usize, Error> {
                 let nonce = aead::Nonce::assume_unique_for_key(*nonce);
-                let mut scratch = data.to_vec();
                 self.0
-                    .open_in_place(nonce, aead::Aad::empty(), &mut scratch)
+                    .open_in_place(nonce, aead::Aad::empty(), data)
                     .map_err(|_| Error::DecryptionFailed)?;
-                scratch.truncate(data.len() - CIPHERTEXT_OVERHEAD);
-                Ok(scratch)
+                Ok(data.len() - TAG_SIZE)
             }
         }
     } else {
-        use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit as _};
+        use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit as _};
 
         struct Cipher(ChaCha20Poly1305);
 
@@ -93,24 +92,36 @@ cfg_if::cfg_if! {
                 Self(ChaCha20Poly1305::new(key.into()))
             }
 
-            fn encrypt(
+            fn encrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
-                data: &[u8],
-            ) -> Result<Vec<u8>, Error> {
-                self.0
-                    .encrypt(nonce.into(), data)
-                    .map_err(|_| Error::EncryptionFailed)
+                data: &mut [u8],
+            ) -> Result<[u8; TAG_SIZE], Error> {
+                let tag = self
+                    .0
+                    .encrypt_in_place_detached(nonce.into(), &[], data)
+                    .map_err(|_| Error::EncryptionFailed)?;
+                Ok(tag.into())
             }
 
-            fn decrypt(
+            fn decrypt_in_place(
                 &self,
                 nonce: &[u8; NONCE_SIZE_BYTES],
-                data: &[u8],
-            ) -> Result<Vec<u8>, Error> {
+                data: &mut [u8],
+            ) -> Result<usize, Error> {
+                let plaintext_len = data.len() - TAG_SIZE;
+                let tag: [u8; TAG_SIZE] = data[plaintext_len..]
+                    .try_into()
+                    .map_err(|_| Error::DecryptionFailed)?;
                 self.0
-                    .decrypt(nonce.into(), data)
-                    .map_err(|_| Error::DecryptionFailed)
+                    .decrypt_in_place_detached(
+                        nonce.into(),
+                        &[],
+                        &mut data[..plaintext_len],
+                        &tag.into(),
+                    )
+                    .map_err(|_| Error::DecryptionFailed)?;
+                Ok(plaintext_len)
             }
         }
     }
@@ -133,10 +144,23 @@ impl SendCipher {
         }
     }
 
+    /// Encrypts `data` in-place and returns the authentication tag.
+    ///
+    /// The caller is responsible for appending the returned tag to the buffer.
+    #[inline]
+    pub fn send_in_place(&mut self, data: &mut [u8]) -> Result<[u8; TAG_SIZE], Error> {
+        let nonce = self.nonce.inc()?;
+        self.inner
+            .expose(|cipher| cipher.encrypt_in_place(&nonce, data))
+    }
+
     /// Encrypts data and returns the ciphertext.
     pub fn send(&mut self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let nonce = self.nonce.inc()?;
-        self.inner.expose(|cipher| cipher.encrypt(&nonce, data))
+        let mut buf = vec![0u8; data.len() + TAG_SIZE];
+        buf[..data.len()].copy_from_slice(data);
+        let tag = self.send_in_place(&mut buf[..data.len()])?;
+        buf[data.len()..].copy_from_slice(&tag);
+        Ok(buf)
     }
 }
 
@@ -157,6 +181,33 @@ impl RecvCipher {
         }
     }
 
+    /// Decrypts `encrypted_data` in-place and returns the plaintext length.
+    ///
+    /// The buffer must contain ciphertext with the authentication tag appended
+    /// (last `TAG_SIZE` bytes). After decryption, the plaintext is in
+    /// `encrypted_data[..returned_len]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `encrypted_data.len() < TAG_SIZE`
+    /// - Too many messages have been received with this cipher
+    /// - The ciphertext was corrupted or tampered with
+    ///
+    /// In the last two cases, the `RecvCipher` will no longer be able to return
+    /// valid ciphertexts, and will always return an error on subsequent calls
+    /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
+    /// is a simple (and safe) way to handle this scenario.
+    #[inline]
+    pub fn recv_in_place(&mut self, encrypted_data: &mut [u8]) -> Result<usize, Error> {
+        if encrypted_data.len() < TAG_SIZE {
+            return Err(Error::DecryptionFailed);
+        }
+        let nonce = self.nonce.inc()?;
+        self.inner
+            .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
+    }
+
     /// Decrypts ciphertext and returns the original data.
     ///
     /// # Errors
@@ -171,9 +222,10 @@ impl RecvCipher {
     /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
     /// is a simple (and safe) way to handle this scenario.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
-        let nonce = self.nonce.inc()?;
-        self.inner
-            .expose(|cipher| cipher.decrypt(&nonce, encrypted_data))
+        let mut buf = encrypted_data.to_vec();
+        let plaintext_len = self.recv_in_place(&mut buf)?;
+        buf.truncate(plaintext_len);
+        Ok(buf)
     }
 }
 
@@ -189,7 +241,7 @@ mod tests {
 
         let plaintext = b"hello world";
         let ciphertext = send.send(plaintext).unwrap();
-        assert_eq!(ciphertext.len(), plaintext.len() + CIPHERTEXT_OVERHEAD);
+        assert_eq!(ciphertext.len(), plaintext.len() + TAG_SIZE);
 
         let decrypted = recv.recv(&ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
@@ -211,7 +263,7 @@ mod tests {
     fn test_recv_ciphertext_too_short() {
         let mut rng = test_rng();
         let mut recv = RecvCipher::new(&mut rng);
-        let short_data = vec![0u8; CIPHERTEXT_OVERHEAD - 1];
+        let short_data = vec![0u8; TAG_SIZE - 1];
         assert!(matches!(
             recv.recv(&short_data),
             Err(Error::DecryptionFailed)
@@ -222,7 +274,70 @@ mod tests {
     fn test_recv_ciphertext_exactly_overhead() {
         let mut rng = test_rng();
         let mut recv = RecvCipher::new(&mut rng);
-        let tag_only = vec![0u8; CIPHERTEXT_OVERHEAD];
+        let tag_only = vec![0u8; TAG_SIZE];
         assert!(matches!(recv.recv(&tag_only), Err(Error::DecryptionFailed)));
+    }
+
+    #[test]
+    fn test_send_recv_in_place_roundtrip() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        let plaintext = b"hello world";
+        let mut buf = vec![0u8; plaintext.len() + TAG_SIZE];
+        buf[..plaintext.len()].copy_from_slice(plaintext);
+
+        // Encrypt plaintext in place, get tag back
+        let tag = send.send_in_place(&mut buf[..plaintext.len()]).unwrap();
+        // Append tag to buffer
+        buf[plaintext.len()..].copy_from_slice(&tag);
+
+        // Decrypt ciphertext+tag in place, get plaintext length back
+        let plaintext_len = recv.recv_in_place(&mut buf).unwrap();
+
+        assert_eq!(plaintext_len, plaintext.len());
+        assert_eq!(&buf[..plaintext_len], plaintext);
+    }
+
+    #[test]
+    fn test_recv_in_place_ciphertext_too_short() {
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        // Buffer smaller than tag size
+        let mut buf = vec![0u8; TAG_SIZE - 1];
+        assert!(matches!(
+            recv.recv_in_place(&mut buf),
+            Err(Error::DecryptionFailed)
+        ));
+    }
+
+    #[test]
+    fn test_send_in_place_recv_compatibility() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        let plaintext = b"cross-api test";
+        let mut buf = vec![0u8; plaintext.len() + TAG_SIZE];
+        buf[..plaintext.len()].copy_from_slice(plaintext);
+
+        let tag = send.send_in_place(&mut buf[..plaintext.len()]).unwrap();
+        buf[plaintext.len()..].copy_from_slice(&tag);
+
+        // Use allocating recv on in-place encrypted data
+        let decrypted = recv.recv(&buf).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_send_recv_in_place_compatibility() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        let plaintext = b"cross-api test";
+        let mut ciphertext = send.send(plaintext).unwrap();
+
+        // Use in-place recv on allocating send data
+        let plaintext_len = recv.recv_in_place(&mut ciphertext).unwrap();
+        assert_eq!(&ciphertext[..plaintext_len], plaintext);
     }
 }

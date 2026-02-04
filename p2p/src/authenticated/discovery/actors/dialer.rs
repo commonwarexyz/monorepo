@@ -14,7 +14,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
+    Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
@@ -64,7 +65,11 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<
+        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
+        C: Signer,
+    > Actor<E, C>
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
         context.register(
