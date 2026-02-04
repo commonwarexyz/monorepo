@@ -158,9 +158,9 @@ impl Arbitrary<'_> for FuzzInput {
         // AnyScope mutations - 10%,
         // FutureScope mutations with round-based injections - 10%
         let fault_rounds_bound = u.int_in_range(1..=required_containers)?;
-        let fault_rounds = u
-            .int_in_range(0..=fault_rounds_bound / FAULT_INJECTION_RATIO)?
-            .max(MIN_NUMBER_OF_FAULTS);
+        let max_faults = fault_rounds_bound / FAULT_INJECTION_RATIO;
+        let min_faults = MIN_NUMBER_OF_FAULTS.min(fault_rounds_bound);
+        let fault_rounds = u.int_in_range(0..=max_faults)?.max(min_faults);
         let strategy = match u.int_in_range(0..=9)? {
             0 => StrategyChoice::AnyScope,
             1 => StrategyChoice::FutureScope {

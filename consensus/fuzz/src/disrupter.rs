@@ -92,7 +92,11 @@ where
         let Some((faults, bound)) = self.strategy.fault_bounds() else {
             return true;
         };
-        if bound == 0 || faults == 0 {
+        if bound == 0 {
+            return false;
+        }
+        let faults = faults.min(bound);
+        if faults == 0 {
             return false;
         }
         let round_fault = self.fault_offset.wrapping_add(view) % bound;
@@ -332,16 +336,19 @@ where
 
         let view = match cert {
             Certificate::Notarization(n) => {
-                self.last_notarized_view = n.view().get();
-                self.last_notarized_view
+                let view = n.view().get();
+                self.last_notarized_view = self.last_notarized_view.max(view);
+                view
             }
             Certificate::Nullification(n) => {
-                self.last_nullified_view = n.view().get();
-                self.last_nullified_view
+                let view = n.view().get();
+                self.last_nullified_view = self.last_nullified_view.max(view);
+                view
             }
             Certificate::Finalization(f) => {
-                self.last_finalized_view = f.view().get();
-                self.last_finalized_view
+                let view = f.view().get();
+                self.last_finalized_view = self.last_finalized_view.max(view);
+                view
             }
         };
 
