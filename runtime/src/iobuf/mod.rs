@@ -1953,6 +1953,43 @@ mod tests {
         assert_eq!(bufs.coalesce(), b" world");
     }
 
+    #[test]
+    fn test_iobufsmut_coalesce_with_pool() {
+        let mut registry = prometheus_client::registry::Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+
+        // Single buffer: zero-copy (same pointer)
+        let mut buf = IoBufMut::from(b"hello");
+        let original_ptr = buf.as_mut_ptr();
+        let bufs = IoBufsMut::from(buf);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello");
+        assert_eq!(coalesced.as_ref().as_ptr(), original_ptr);
+
+        // Multiple buffers: merged using pool
+        let bufs = IoBufsMut::from(vec![IoBufMut::from(b"hello"), IoBufMut::from(b" world")]);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello world");
+        assert!(coalesced.is_pooled());
+
+        // With extra capacity: zero-copy if sufficient spare capacity
+        let mut buf = IoBufMut::with_capacity(100);
+        buf.put_slice(b"hello");
+        let original_ptr = buf.as_mut_ptr();
+        let bufs = IoBufsMut::from(buf);
+        let coalesced = bufs.coalesce_with_pool_extra(&pool, 10);
+        assert_eq!(coalesced, b"hello");
+        assert_eq!(coalesced.as_ref().as_ptr(), original_ptr);
+
+        // With extra capacity: reallocates if insufficient
+        let mut buf = IoBufMut::with_capacity(5);
+        buf.put_slice(b"hello");
+        let bufs = IoBufsMut::from(buf);
+        let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
+        assert_eq!(coalesced, b"hello");
+        assert!(coalesced.capacity() >= 105);
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::IoBuf;
