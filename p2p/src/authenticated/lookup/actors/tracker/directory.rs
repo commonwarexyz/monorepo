@@ -197,16 +197,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Update a tracked peer's address.
     ///
-    /// Returns `true` if the peer exists, is in at least one peer set, and the
-    /// address actually changed. Returns `false` if the peer is not tracked or
-    /// the new address is identical to the existing one.
+    /// Returns `true` if the peer exists and the address actually changed.
+    /// Returns `false` if the peer is not tracked, is ourselves, or the
+    /// new address is identical to the existing one.
     pub fn update_peer(&mut self, peer: &C, address: Address) -> bool {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
         };
-        if record.sets() == 0 {
-            return false;
-        }
         record.update(address)
     }
 

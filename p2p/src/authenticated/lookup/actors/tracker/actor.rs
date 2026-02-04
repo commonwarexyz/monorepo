@@ -162,20 +162,25 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 address,
                 responder,
             } => {
-                let success = self.directory.update_peer(&public_key, address);
-                if success {
-                    // Kill any existing connection (it's on the old IP)
-                    if let Some(mut peer) = self.mailboxes.remove(&public_key) {
-                        peer.kill().await;
-                    }
+                // Update the peer address
+                if !self.directory.update_peer(&public_key, address) {
+                    let _ = responder.send(false);
+                    return;
+                };
 
-                    // Send the updated listenable IPs to the listener.
-                    self.listener
-                        .0
-                        .send_lossy(self.directory.listenable())
-                        .await;
+                // Kill any existing connection (it's on the old IP)
+                if let Some(mut peer) = self.mailboxes.remove(&public_key) {
+                    peer.kill().await;
                 }
-                let _ = responder.send(success);
+
+                // Send the updated listenable IPs to the listener.
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
+
+                // Send the result to the caller
+                let _ = responder.send(true);
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
