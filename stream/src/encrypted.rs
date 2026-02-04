@@ -341,9 +341,6 @@ pub struct Receiver<I> {
 
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
-    ///
-    /// Decrypts in-place. Zero-copy if buffer is contiguous, otherwise
-    /// coalesces using the pool.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
         let encrypted = recv_frame(
             &mut self.stream,
@@ -352,7 +349,6 @@ impl<I: Stream> Receiver<I> {
         .await?;
 
         // Coalesce to get contiguous buffer for in-place decryption.
-        // Zero-copy if already single, uses pool if chunked.
         let mut buf = encrypted.coalesce_with_pool(&self.pool);
 
         // Decrypt in-place, get plaintext length back.
