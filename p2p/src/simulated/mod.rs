@@ -3262,7 +3262,7 @@ mod tests {
     }
 
     #[test]
-    fn test_socket_manager_update_peer() {
+    fn test_socket_manager_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create simulated network with peer set tracking
@@ -3283,9 +3283,9 @@ mod tests {
 
             let mut socket_manager = oracle.socket_manager();
 
-            // update_peer should return false for untracked peer
+            // overwrite should return false for untracked peer
             let addr: Address = "127.0.0.1:8000".parse::<SocketAddr>().unwrap().into();
-            assert!(!socket_manager.update_peer(pk1.clone(), addr.clone()).await);
+            assert!(!socket_manager.overwrite(pk1.clone(), addr.clone()).await);
 
             // Register a peer set
             let peers: Map<PublicKey, Address> = [
@@ -3302,12 +3302,12 @@ mod tests {
             .unwrap();
             socket_manager.update(0, peers).await;
 
-            // update_peer should return true for tracked peer
-            assert!(socket_manager.update_peer(pk1.clone(), addr.clone()).await);
-            assert!(socket_manager.update_peer(pk2.clone(), addr.clone()).await);
+            // overwrite should return true for tracked peer
+            assert!(socket_manager.overwrite(pk1.clone(), addr.clone()).await);
+            assert!(socket_manager.overwrite(pk2.clone(), addr.clone()).await);
 
-            // update_peer should return false for peer not in any set
-            assert!(!socket_manager.update_peer(pk3.clone(), addr.clone()).await);
+            // overwrite should return false for peer not in any set
+            assert!(!socket_manager.overwrite(pk3.clone(), addr.clone()).await);
         });
     }
 }

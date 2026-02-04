@@ -285,7 +285,7 @@ stability_scope!(BETA {
         /// Returns `false` if:
         /// - The peer is not tracked (not in any peer set)
         /// - The new address is identical to the existing one (no-op)
-        fn update_peer(
+        fn overwrite(
             &mut self,
             peer: Self::PublicKey,
             address: Address,

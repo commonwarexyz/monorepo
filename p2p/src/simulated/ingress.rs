@@ -323,7 +323,7 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
 ///
 /// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
-/// all addresses to be valid, and `update_peer` always succeeds for
+/// all addresses to be valid, and `overwrite` always succeeds for
 /// tracked peers.
 pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
@@ -364,7 +364,7 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
         self.oracle.update(id, peers.into_keys()).await;
     }
 
-    async fn update_peer(&mut self, peer: Self::PublicKey, _address: Address) -> bool {
+    async fn overwrite(&mut self, peer: Self::PublicKey, _address: Address) -> bool {
         // Check if peer is tracked (addresses themselves aren't used in simulated network)
         self.oracle
             .sender

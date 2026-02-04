@@ -23,7 +23,7 @@
 //!
 //! - [`AddressableManager::update`](crate::AddressableManager::update): Register a new peer set at a
 //!   monotonically increasing index. Use this when the peer set composition changes (peers added/removed).
-//! - [`AddressableManager::update_peer`](crate::AddressableManager::update_peer): Update a single
+//! - [`AddressableManager::overwrite`](crate::AddressableManager::overwrite): Update a single
 //!   peer's address in-place without creating a new peer set. Use this when only a peer's IP changes but
 //!   the peer set composition stays the same.
 //!
