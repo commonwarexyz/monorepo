@@ -254,22 +254,31 @@ async fn setup_network<P: simplex::Simplex>(
     (oracle, participants, schemes, registrations)
 }
 
-/// Spawn a Disrupter for a Byzantine node.
-fn spawn_disrupter<P: simplex::Simplex>(
+/// Start a Disrupter with the given strategy and network channels.
+fn start_disrupter<P: simplex::Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
-    input: &FuzzInput,
-    channels: NetworkChannels,
+    strategy: &StrategyChoice,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
 ) {
-    let (vote_network, certificate_network, resolver_network) = channels;
-    let disrupter_context = context.with_label("disrupter");
-    match input.strategy {
+    match *strategy {
         StrategyChoice::SmallScope {
             fault_rounds,
             fault_rounds_bound,
         } => {
             let disrupter = Disrupter::new(
-                disrupter_context,
+                context,
                 scheme,
                 SmallScope {
                     fault_rounds,
@@ -279,7 +288,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::AnyScope => {
-            let disrupter = Disrupter::new(disrupter_context, scheme, AnyScope);
+            let disrupter = Disrupter::new(context, scheme, AnyScope);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
         StrategyChoice::FutureScope {
@@ -287,7 +296,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
             fault_rounds_bound,
         } => {
             let disrupter = Disrupter::new(
-                disrupter_context,
+                context,
                 scheme,
                 FutureScope {
                     fault_rounds,
@@ -297,6 +306,24 @@ fn spawn_disrupter<P: simplex::Simplex>(
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
     }
+}
+
+/// Spawn a Disrupter for a Byzantine node.
+fn spawn_disrupter<P: simplex::Simplex>(
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    input: &FuzzInput,
+    channels: NetworkChannels,
+) {
+    let (vote_network, certificate_network, resolver_network) = channels;
+    start_disrupter::<P>(
+        context.with_label("disrupter"),
+        scheme,
+        &input.strategy,
+        vote_network,
+        certificate_network,
+        resolver_network,
+    );
 }
 
 /// Spawn an honest validator with application, reporter, and engine.
@@ -590,55 +617,14 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             );
 
             // Secondary: Disrupter
-            let mutator_label = format!("twin_{idx}_secondary");
-            let mutator_context = context.with_label(&mutator_label);
-            let disrupter_context = mutator_context.with_label("disrupter");
-            match input.strategy {
-                StrategyChoice::SmallScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                } => {
-                    let disrupter = Disrupter::new(
-                        disrupter_context,
-                        scheme.clone(),
-                        SmallScope {
-                            fault_rounds,
-                            fault_rounds_bound,
-                        },
-                    );
-                    disrupter.start(
-                        (vote_sender_secondary, vote_receiver_secondary),
-                        (certificate_sender_secondary, certificate_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
-                    );
-                }
-                StrategyChoice::AnyScope => {
-                    let disrupter = Disrupter::new(disrupter_context, scheme.clone(), AnyScope);
-                    disrupter.start(
-                        (vote_sender_secondary, vote_receiver_secondary),
-                        (certificate_sender_secondary, certificate_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
-                    );
-                }
-                StrategyChoice::FutureScope {
-                    fault_rounds,
-                    fault_rounds_bound,
-                } => {
-                    let disrupter = Disrupter::new(
-                        disrupter_context,
-                        scheme.clone(),
-                        FutureScope {
-                            fault_rounds,
-                            fault_rounds_bound,
-                        },
-                    );
-                    disrupter.start(
-                        (vote_sender_secondary, vote_receiver_secondary),
-                        (certificate_sender_secondary, certificate_receiver_secondary),
-                        (resolver_sender_secondary, resolver_receiver_secondary),
-                    );
-                }
-            }
+            start_disrupter::<P>(
+                context.with_label(&format!("twin_{idx}_secondary")),
+                scheme.clone(),
+                &input.strategy,
+                (vote_sender_secondary, vote_receiver_secondary),
+                (certificate_sender_secondary, certificate_receiver_secondary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
+            );
         }
 
         // Spawn honest validators

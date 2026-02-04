@@ -156,8 +156,8 @@ impl Strategy for SmallScope {
         match rng.gen::<u8>() % 5 {
             0 => proposal_with_view(proposal, view.saturating_add(1)),
             1 => proposal_with_view(proposal, view.saturating_sub(1)),
-            2 => proposal_with_parent(proposal, parent.saturating_add(1)),
-            3 => proposal_with_parent(proposal, parent.saturating_sub(1)),
+            2 => proposal_with_parent_view(proposal, parent.saturating_add(1)),
+            3 => proposal_with_parent_view(proposal, parent.saturating_sub(1)),
             _ => proposal_with_payload(proposal, tweak_payload(rng, proposal.payload)),
         }
     }
@@ -330,7 +330,7 @@ impl Strategy for AnyScope {
                     last_nullified_view,
                 ),
             ),
-            2 => proposal_with_parent(
+            2 => proposal_with_parent_view(
                 proposal,
                 random_parent_view(
                     rng,
@@ -522,7 +522,7 @@ impl Strategy for FutureScope {
         let bump = if rng.gen_bool(0.5) { 1 } else { 2 };
         match rng.gen::<u8>() % 3 {
             0 => proposal_with_view(proposal, view.saturating_add(bump)),
-            1 => proposal_with_parent(proposal, parent.saturating_add(bump)),
+            1 => proposal_with_parent_view(proposal, parent.saturating_add(bump)),
             _ => {
                 let view = view.saturating_add(bump);
                 let parent = parent.saturating_add(bump);
@@ -618,10 +618,6 @@ fn proposal_with_parent_view(
         View::new(parent),
         proposal.payload,
     )
-}
-
-fn proposal_with_parent(proposal: &Proposal<Sha256Digest>, parent: u64) -> Proposal<Sha256Digest> {
-    proposal_with_parent_view(proposal, parent)
 }
 
 fn proposal_with_payload(
