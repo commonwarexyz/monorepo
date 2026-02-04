@@ -583,12 +583,12 @@ stability_scope!(BETA {
     pub trait Stream: Sync + Send + 'static {
         /// Receive exactly `len` bytes from the stream.
         ///
-        /// The runtime allocates the buffer and returns it as `IoBufs`.
+        /// The runtime allocates the buffer and returns it as `IoBufsMut`.
         ///
         /// # Warning
         ///
         /// If the stream returns an error, partially read data may be discarded.
-        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Peek at buffered data without consuming.
         ///

@@ -3,7 +3,7 @@ use commonware_codec::{
     varint::{Decoder, UInt, MAX_U32_VARINT_SIZE},
     Encode,
 };
-use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{Buf, IoBuf, IoBufs, IoBufsMut, Sink, Stream};
 
 /// Sends data to the sink with a varint length prefix.
 /// Returns an error if the message is too large or the stream is closed.
@@ -29,7 +29,10 @@ pub async fn send_frame<S: Sink>(
 /// Receives data from the stream with a varint length prefix.
 /// Returns an error if the message is too large, the varint is invalid, or the
 /// stream is closed.
-pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Result<IoBufs, Error> {
+pub async fn recv_frame<T: Stream>(
+    stream: &mut T,
+    max_message_size: u32,
+) -> Result<IoBufsMut, Error> {
     let (len, skip) = recv_length(stream).await?;
     if len > max_message_size {
         return Err(Error::RecvTooLarge(len as usize));

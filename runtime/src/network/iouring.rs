@@ -24,7 +24,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    BufferPool, IoBufMut, IoBufs,
+    BufferPool, IoBufMut, IoBufsMut,
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use futures::executor::block_on;
@@ -435,7 +435,7 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
+    async fn recv(&mut self, len: u64) -> Result<IoBufsMut, crate::Error> {
         let len = len as usize;
         let mut owned_buf = self.pool.alloc(len);
         // SAFETY: We will write exactly `len` bytes before returning
@@ -473,7 +473,7 @@ impl crate::Stream for Stream {
             }
         }
 
-        Ok(IoBufs::from(owned_buf.freeze()))
+        Ok(IoBufsMut::from(owned_buf))
     }
 
     fn peek(&self, max_len: u64) -> &[u8] {

@@ -1169,7 +1169,7 @@ impl<P: PublicKey> Peer<P> {
 
                             // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                let data = data.coalesce();
+                                let data = data.coalesce().freeze();
                                 let channel = Channel::from_be_bytes(
                                     data.as_ref()[..Channel::SIZE].try_into().unwrap(),
                                 );

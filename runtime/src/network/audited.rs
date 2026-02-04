@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
+use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut, SinkOf, StreamOf};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -39,7 +39,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+    async fn recv(&mut self, len: u64) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });

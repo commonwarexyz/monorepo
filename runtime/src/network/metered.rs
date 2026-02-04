@@ -1,4 +1,4 @@
-use crate::{IoBufs, SinkOf, StreamOf};
+use crate::{IoBufs, IoBufsMut, SinkOf, StreamOf};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -70,7 +70,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
+    async fn recv(&mut self, len: u64) -> Result<IoBufsMut, crate::Error> {
         let bufs = self.inner.recv(len).await?;
         self.metrics.inbound_bandwidth.inc_by(len);
         Ok(bufs)

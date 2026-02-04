@@ -342,30 +342,26 @@ pub struct Receiver<I> {
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
     ///
-    /// Receives ciphertext, allocates a buffer from the pool, copies ciphertext,
-    /// and decrypts in-place.
+    /// Decrypts in-place. Zero-copy if buffer is contiguous, otherwise
+    /// coalesces using the pool.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        let mut encrypted = recv_frame(
+        let encrypted = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
 
-        let ciphertext_len = encrypted.remaining();
-
-        // Allocate buffer from pool for decryption.
-        let mut decryption_buf = self.pool.alloc(ciphertext_len);
-
-        // Copy ciphertext into buffer.
-        decryption_buf.put(&mut encrypted);
+        // Coalesce to get contiguous buffer for in-place decryption.
+        // Zero-copy if already single, uses pool if chunked.
+        let mut buf = encrypted.coalesce_with_pool(&self.pool);
 
         // Decrypt in-place, get plaintext length back.
-        let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
+        let plaintext_len = self.cipher.recv_in_place(buf.as_mut())?;
 
         // Truncate to remove tag bytes, keeping only plaintext.
-        decryption_buf.truncate(plaintext_len);
+        buf.truncate(plaintext_len);
 
-        Ok(decryption_buf.freeze().into())
+        Ok(buf.freeze().into())
     }
 }
 

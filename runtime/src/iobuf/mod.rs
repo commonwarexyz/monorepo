@@ -499,6 +499,12 @@ impl From<IoBuf> for IoBufMut {
     }
 }
 
+impl From<IoBufMut> for Vec<u8> {
+    fn from(buf: IoBufMut) -> Self {
+        Self::from(buf.freeze())
+    }
+}
+
 /// Container for one or more immutable buffers.
 #[derive(Debug)]
 pub enum IoBufs {
@@ -717,6 +723,12 @@ impl From<&'static [u8]> for IoBufs {
     }
 }
 
+impl From<IoBufsMut> for IoBufs {
+    fn from(bufs: IoBufsMut) -> Self {
+        bufs.freeze()
+    }
+}
+
 /// Container for one or more mutable buffers.
 #[derive(Debug)]
 pub enum IoBufsMut {
@@ -783,6 +795,24 @@ impl IoBufsMut {
             Self::Chunked(bufs) => {
                 let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
                 let mut result = IoBufMut::with_capacity(total_len);
+                for buf in bufs {
+                    result.put_slice(buf.as_ref());
+                }
+                result
+            }
+        }
+    }
+
+    /// Coalesce all buffers into a single contiguous `IoBufMut`, using the pool
+    /// for allocation if multiple buffers need to be merged.
+    ///
+    /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
+    pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBufMut {
+        match self {
+            Self::Single(buf) => buf,
+            Self::Chunked(bufs) => {
+                let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
+                let mut result = pool.alloc(total_len);
                 for buf in bufs {
                     result.put_slice(buf.as_ref());
                 }

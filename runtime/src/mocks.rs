@@ -1,6 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{BufMut, Error, IoBufMut, IoBufs, IoBufsMut, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::channel::oneshot;
 use std::sync::{Arc, Mutex};
@@ -117,7 +117,7 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+    async fn recv(&mut self, len: u64) -> Result<IoBufsMut, Error> {
         let len = len as usize;
 
         let os_recv = {
@@ -138,7 +138,7 @@ impl StreamTrait for Stream {
 
             // If we have enough, return immediately.
             if self.buffer.len() >= len {
-                return Ok(IoBufs::from(self.buffer.split_to(len).freeze()));
+                return Ok(IoBufsMut::from(IoBufMut::from(self.buffer.split_to(len))));
             }
 
             // If the sink is dead, we cannot receive any more messages.
@@ -159,7 +159,7 @@ impl StreamTrait for Stream {
         self.buffer.extend_from_slice(&data);
 
         assert!(self.buffer.len() >= len);
-        Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
+        Ok(IoBufsMut::from(IoBufMut::from(self.buffer.split_to(len))))
     }
 
     fn peek(&self, max_len: u64) -> &[u8] {

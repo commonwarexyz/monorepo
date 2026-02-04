@@ -1,4 +1,4 @@
-use crate::{mocks, Error, IoBufs};
+use crate::{mocks, Error, IoBufs, IoBufsMut};
 use commonware_utils::channel::mpsc;
 use std::{
     collections::HashMap,
@@ -27,7 +27,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+    async fn recv(&mut self, len: u64) -> Result<IoBufsMut, Error> {
         self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
     }
 
