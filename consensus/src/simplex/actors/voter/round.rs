@@ -467,6 +467,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
+
         self.broadcast_notarize = true;
         self.proposal.proposal()
     }
@@ -481,11 +482,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         // Even if we've already seen a finalization, we still broadcast our finalize vote
         // in case it is useful (in the worst case it lets others observe we are alive).
-
-        // If we haven't broadcast our notarize vote and notarization certificate, return None.
-        if !self.broadcast_notarize || !self.broadcast_notarization {
-            return None;
-        }
 
         // If we don't have a verified proposal, return None.
         //
