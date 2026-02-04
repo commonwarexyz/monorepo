@@ -24,7 +24,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    BufferPool, IoBufMut, IoBufsMut,
+    BufferPool, IoBufMut, IoBufs, IoBufsMut,
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use futures::executor::block_on;
