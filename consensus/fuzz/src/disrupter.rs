@@ -12,6 +12,7 @@ use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
+use rand::Rng;
 use rand_core::CryptoRngCore;
 use std::{collections::VecDeque, time::Duration};
 
@@ -28,7 +29,7 @@ pub struct Disrupter<
     context: E,
     scheme: S,
     strategy: St,
-    fault_seed: u64,
+    fault_offset: u64,
     last_vote_view: u64,
     last_finalized_view: u64,
     last_nullified_view: u64,
@@ -42,7 +43,7 @@ where
     <S::Certificate as Read>::Cfg: Default,
 {
     pub fn new(mut context: E, scheme: S, strategy: St) -> Self {
-        let fault_seed = context.next_u64();
+        let fault_offset = context.next_u64();
         Self {
             last_vote_view: 0,
             last_finalized_view: 0,
@@ -52,12 +53,12 @@ where
             context,
             scheme,
             strategy,
-            fault_seed,
+            fault_offset,
         }
     }
 
     fn message(&mut self) -> Message {
-        match (self.context.next_u32() as u8) % 4 {
+        match (self.context.gen::<u8>()) % 4 {
             0 => Message::Notarize,
             1 => Message::Finalize,
             2 => Message::Nullify,
@@ -94,7 +95,7 @@ where
         if bound == 0 || faults == 0 {
             return false;
         }
-        let round_fault = self.fault_seed.wrapping_add(view) % bound;
+        let round_fault = self.fault_offset.wrapping_add(view) % bound;
         round_fault < faults
     }
 
@@ -141,7 +142,7 @@ where
     }
 
     fn bytes(&mut self) -> Vec<u8> {
-        let len = self.context.next_u32() as u8;
+        let len = self.context.gen::<u8>();
         let mut bytes = vec![0u8; len as usize];
         self.context.fill_bytes(&mut bytes);
         bytes
@@ -153,9 +154,9 @@ where
         }
 
         let mut result = input.to_vec();
-        let pos = (self.context.next_u32() as usize) % result.len();
+        let pos = self.context.gen_range(0..result.len());
 
-        match (self.context.next_u32() as u8) % 5 {
+        match (self.context.gen::<u8>()) % 5 {
             0 => result[pos] = result[pos].wrapping_add(1),
             1 => result[pos] = result[pos].wrapping_sub(1),
             2 => result[pos] ^= 0xFF,
@@ -206,7 +207,7 @@ where
 
         loop {
             // Send disruptive messages across all channels
-            match (self.context.next_u32() as u8) % 7 {
+            match (self.context.gen::<u8>()) % 7 {
                 0 => self.send_random_vote(&mut vote_sender).await,
                 1 => self.send_proposal(&mut vote_sender).await,
                 2 => {
@@ -273,7 +274,7 @@ where
         }
 
         // Optionally send mutated vote
-        if (self.context.next_u32() & 1) == 1 {
+        if self.context.gen_bool(0.5) {
             let mutated = self.mutate_bytes(&msg);
             let _ = sender.send(Recipients::All, mutated, true).await;
         }
@@ -349,7 +350,7 @@ where
         }
 
         // Optionally send mutated certificate
-        if (self.context.next_u32() & 1) == 1 {
+        if self.context.gen_bool(0.5) {
             let cert = self
                 .strategy
                 .mutate_certificate_bytes(&mut self.context, &msg);
@@ -362,7 +363,7 @@ where
             return;
         }
         // Optionally send malformed resolver data
-        if (self.context.next_u32() & 1) == 1 {
+        if self.context.gen_bool(0.5) {
             let mutated = self.strategy.mutate_resolver_bytes(&mut self.context, &msg);
             let _ = sender
                 .send(Recipients::All, IoBuf::from(mutated), true)
@@ -391,7 +392,7 @@ where
             return;
         }
 
-        let idx = (self.context.next_u64() as usize) % participants.len();
+        let idx = self.context.gen_range(0..participants.len());
         let victim = participants[idx].clone();
 
         // Send 10 messages to victim

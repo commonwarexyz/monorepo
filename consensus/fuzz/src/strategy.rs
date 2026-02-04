@@ -447,7 +447,7 @@ impl Strategy for AnyScope {
         if rng.gen_bool(0.5) {
             return None;
         }
-        let idx = (rng.gen::<u64>() as usize) % proposals_len;
+        let idx = rng.gen_range(0..proposals_len);
         Some(idx)
     }
 
@@ -637,7 +637,7 @@ fn proposal_with_payload(
 
 fn tweak_payload(rng: &mut impl Rng, payload: Sha256Digest) -> Sha256Digest {
     let mut bytes = payload.0;
-    let idx = (rng.gen::<u64>() as usize) % bytes.len();
+    let idx = rng.gen_range(0..bytes.len());
     let bit = rng.gen::<u8>() % 8;
     bytes[idx] ^= 1 << bit;
     Sha256Digest(bytes)
@@ -648,7 +648,7 @@ fn tweak_bytes(rng: &mut impl Rng, bytes: &[u8]) -> Vec<u8> {
         return vec![0];
     }
     let mut out = bytes.to_vec();
-    let idx = (rng.gen::<u64>() as usize) % out.len();
+    let idx = rng.gen_range(0..out.len());
     let bit = rng.gen::<u8>() % 8;
     out[idx] ^= 1 << bit;
     out

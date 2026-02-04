@@ -1,6 +1,7 @@
 //! RNG utilities for testing and fuzzing.
 
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use std::hash::{Hash, Hasher as _};
 
 /// An RNG that reads from a byte buffer, falling back to a seeded RNG when exhausted.
 ///
@@ -17,14 +18,12 @@ pub struct BytesRng {
 impl BytesRng {
     /// Creates a new `BytesRng` from a byte buffer.
     ///
-    /// The fallback RNG is seeded from the last 8 bytes of the buffer (or fewer
-    /// if the buffer is shorter than 8 bytes, zero-padded on the right).
+    /// All bytes are consumed sequentially as output. When exhausted, a fallback
+    /// RNG (seeded from a hash of the entire buffer) provides additional randomness.
     pub fn new(bytes: Vec<u8>) -> Self {
-        let mut seed = [0u8; 8];
-        let start = bytes.len().saturating_sub(8);
-        let len = bytes.len().min(8);
-        seed[..len].copy_from_slice(&bytes[start..]);
-        let fallback = StdRng::seed_from_u64(u64::from_be_bytes(seed));
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let fallback = StdRng::seed_from_u64(hasher.finish());
         Self {
             bytes,
             offset: 0,
@@ -133,23 +132,21 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_seed_uses_last_8_bytes() {
-        // Two buffers with same last 8 bytes should have same fallback
-        let bytes1 = vec![99, 99, 1, 2, 3, 4, 5, 6, 7, 8];
-        let bytes2 = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    fn test_fallback_seed_from_hash() {
+        // Different buffers should have different fallbacks
+        let bytes1 = vec![1, 2, 3, 4];
+        let bytes2 = vec![1, 2, 3, 5];
 
         let mut rng1 = BytesRng::new(bytes1);
         let mut rng2 = BytesRng::new(bytes2);
 
         // Exhaust both
-        let mut buf = [0u8; 10];
+        let mut buf = [0u8; 4];
         rng1.fill_bytes(&mut buf);
-        let mut buf = [0u8; 8];
         rng2.fill_bytes(&mut buf);
 
-        // Fallback values should match
-        assert_eq!(rng1.next_u64(), rng2.next_u64());
-        assert_eq!(rng1.next_u64(), rng2.next_u64());
+        // Fallback values should differ (different input hashes)
+        assert_ne!(rng1.next_u64(), rng2.next_u64());
     }
 
     #[test]
