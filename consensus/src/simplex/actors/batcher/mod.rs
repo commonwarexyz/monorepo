@@ -1678,10 +1678,8 @@ mod tests {
         latest_vote_metric_tracking(secp256r1::fixture);
     }
 
-    fn duplicate_vote_with_different_attestation_blocks_peer<S, F, V>(
-        mut fixture: F,
-        sign_vote: V,
-    ) where
+    fn duplicate_vote_with_different_attestation_blocks_peer<S, F, V>(mut fixture: F, sign_vote: V)
+    where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
