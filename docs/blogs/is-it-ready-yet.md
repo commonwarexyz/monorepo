@@ -10,73 +10,61 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
-Today, a large number of Commonware Library primitives are now considered to be [BETA](https://github.com/commonwarexyz/monorepo#stability).
-
-As repositories grow in size, it becomes increasingly difficult to maintain velocity because the modification of "stable" crates requires ample testing and fuzzing.
-
-You've heard of "move fast and break things". But what about "move fast and break some things"?
-
-Why it doesn't work: obvious compatibility + testing coverage, documentation-based stability is not enough, there are multiple levels of stability in a single crate and we want to (optionally) make all available in a release for teams to experiment with.
-
-As we've added more and more primitives to the Commonware Library, it's become increasingly difficult to keep track of what is "ready" and what is not (especially when you consider primitive dependencies).
-
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives (and primitive dialects). Some have been battle-tested for over a year. Others landed last week. More will be added next month.
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives. Some have been running on [Alto](https://github.com/commonwarexyz/alto) for over a year. Others landed last week. More will be added next month.
 
 How do you communicate what's ready without documentation that rots the moment you publish it?
 
-## Obvious Compatibility (Testing Across Library)
+Today, we're announcing that a large number of primitives are now [BETA](https://github.com/commonwarexyz/monorepo#stability) and explaining the compiler-enforced stability system we built to track them.
 
-The obvious answer is semantic versioning. Slap a version number on each primitive, publish them as separate crates, and let Cargo sort it out. `1.0` means stable. `0.x` means experimental. It just works.
+## Obvious Compatibility
 
-Except it doesn't. Even if we broke every primitive into its own crate, features within a single crate can be at different stability levels. And publishing separate crates creates an exponential blowup in version combinations. Just because `cryptography@2.3` compiles with `consensus@1.5` doesn't mean that combination has been tested together. "It compiles" is not the same as "it works."
+The obvious answer: slap a version number on each primitive, publish them as separate crates, and let Cargo sort it out. `1.0` means stable. `0.x` means experimental.
 
-We want to be explicit about what has been tested and what has not. So we're switching to calendar versioning (YYYY.M.patch) for the library as a whole, and using a different mechanism entirely for stability.
+Except it doesn't work. Features within a single crate can be at different stability levels. And publishing separate crates creates an exponential blowup in version combinations. Just because `cryptography@2.3` compiles with `consensus@1.5` doesn't mean that combination has been tested together. "It compiles" is not the same as "it works."
 
-You might suggest Cargo features - gate unstable APIs behind an `unstable` feature flag, like Tokio does. But feature flags propagate through the dependency tree. If your crate depends on `commonware-consensus`, and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. With `cfg` flags set via `RUSTFLAGS`, you set your stability threshold once and it applies globally.
+We want to be explicit about what has been tested together. So we use calendar versioning (YYYY.M.patch) for the library as a whole and a different mechanism for stability.
 
-## Supporting Non-Uniform (and Tiered) Stability
+## Supporting Tiered Stability
 
-Balancing development velocity and with programmatic stability (docs are not enough).
+Cargo features seem like the natural choice. Gate unstable APIs behind an `unstable` feature flag, like Tokio does.
 
-Crates may have components of different maturity, even when broken down into smaller components.
+But feature flags propagate through the dependency tree. If your crate depends on `commonware-consensus` and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. This becomes unwieldy fast.
 
-Every public API in the Commonware Library is now annotated with a stability level. These annotations aren't just labels - they're `cfg` flags that Rust's compiler understands.
+## Compiler-Enforced Stability
 
-Filter rustdoc to show only APIs at your desired stability level:
+Every public API in the Commonware Library is annotated with a stability level using proc macros that expand to `cfg` attributes. These aren't just labels. They're compiler directives.
 
-```bash
-RUSTFLAGS="--cfg commonware_stability_BETA" \
-RUSTDOCFLAGS="--cfg commonware_stability_BETA -A rustdoc::broken_intra_doc_links" \
-cargo doc --open
-```
-
-Fail your build if you depend on an unstable API:
+Set your stability threshold once via `RUSTFLAGS` and it applies globally:
 
 ```bash
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
 
-Verify stability annotations are internally consistent:
+If your code depends on an ALPHA API, it won't compile. No runtime checks. No documentation to read. The compiler tells you.
+
+You can also filter rustdoc to show only APIs at your desired stability level:
 
 ```bash
-just check-stability
+RUSTFLAGS="--cfg commonware_stability_BETA" \
+RUSTDOCFLAGS="--cfg commonware_stability_BETA" \
+cargo doc --open
 ```
 
-## Transitive Stability
+## Enforcing Consistency
 
-This works transitively. When CI builds with `--cfg commonware_stability_BETA`, any BETA function that calls an ALPHA function fails to compile - the ALPHA function simply doesn't exist at that stability level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
+This works transitively. Any BETA function that calls an ALPHA function fails to compile because the ALPHA function simply doesn't exist at that stability level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
 
-Cargo features provide the same transitive guarantee, but with the propagation problem mentioned above. Every crate in the dependency chain needs to expose and forward the feature flag. With `cfg` flags via `RUSTFLAGS`, you set your stability threshold once and get uniform enforcement - both within our workspace and when you compile your own code against the library.
+Cargo features provide the same transitive guarantee, but with the propagation problem mentioned above. Every crate in the dependency chain needs to expose and forward the feature flag. With `cfg` flags via `RUSTFLAGS`, you set your stability threshold once and get uniform enforcement.
 
 ## The Levels
 
-| Level        | Index | What it Means |
-|--------------|-------|---------------|
-| **ALPHA**    | 0     | Expect breaking changes. No migration path. |
-| **BETA**     | 1     | Wire and storage formats stable. Breaking changes come with migrations. |
-| **GAMMA**    | 2     | API stable. Extensively tested and fuzzed. |
-| **DELTA**    | 3     | Battle-tested. Bug bounty eligible. |
-| **EPSILON**  | 4     | Feature-frozen. Bug fixes only. |
+| Level        | What it Means |
+|--------------|---------------|
+| **ALPHA**    | Expect breaking changes. No migration path. |
+| **BETA**     | Wire and storage formats stable. Breaking changes come with migrations. |
+| **GAMMA**    | API stable. Extensively tested and fuzzed. |
+| **DELTA**    | Battle-tested. Bug bounty eligible. |
+| **EPSILON**  | Feature-frozen. Bug fixes only. |
 
 **BETA is the threshold for serious use.** If you're building something real, you want BETA or higher. The wire format won't change out from under you. If we do make breaking changes, we'll provide a migration path.
 
@@ -97,7 +85,7 @@ The core building blocks are ready:
 - **math** - numerical primitives
 - **parallel** - parallel execution helpers
 
-This isn't a collection of experiments. These primitives power [Alto](https://github.com/commonwarexyz/alto), our reference blockchain implementation. They've been tested under adversarial conditions, fuzzed extensively, and optimized for performance.
+These aren't experiments. These primitives power [Alto](https://github.com/commonwarexyz/alto), our reference blockchain. They've been tested under adversarial conditions, fuzzed extensively, and optimized for performance.
 
 ## What's Next
 
