@@ -61,7 +61,7 @@ use crate::{
         core, Update,
     },
     simplex::{scheme::Scheme, types::Context},
-    types::{CodingCommitment, Epoch, Epocher, Round},
+    types::{CodingCommitment, Epoch, Epocher, Height, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
 };
@@ -317,15 +317,6 @@ where
                         },
                     }
                 };
-
-                // Re-proposal check: same block can only be re-proposed at epoch boundary
-                if parent.commitment() == block.commitment() {
-                    let last_in_epoch = epocher
-                        .last(context.epoch())
-                        .expect("current epoch should exist");
-                    tx.send_lossy(block.height() == last_in_epoch);
-                    return;
-                }
 
                 // Epoch boundary check
                 let Some(block_bounds) = epocher.containing(block.height()) else {
@@ -653,22 +644,93 @@ where
         // Re-proposals skip context-hash validation because the consensus context will point
         // at the prior epoch-boundary block while the embedded block context is from the
         // original proposal view.
+        //
+        // Re-proposals also skip shard-validity and deferred verification because:
+        // 1. The block was already verified when originally proposed
+        // 2. The parent-child height check would fail (parent IS the block)
+        // 3. Waiting for shards could stall if the leader doesn't rebroadcast
         let is_reproposal = payload == context.parent.1;
-        if !is_reproposal {
-            let expected = context_hash(&context);
-            let got = payload.context_digest::<Sha256Digest>();
-            if expected != got {
-                warn!(
-                    round = %context.round,
-                    expected = ?expected,
-                    got = ?got,
-                    "rejected proposal with mismatched context hash"
-                );
+        if is_reproposal {
+            // Validate that re-proposals only occur at epoch boundaries.
+            // We can infer block height from the commitment's block digest by checking
+            // if it matches the last height in the current epoch.
+            let last_in_epoch = self
+                .epocher
+                .last(context.epoch())
+                .expect("current epoch should exist");
 
-                let (tx, rx) = oneshot::channel();
-                tx.send_lossy(false);
-                return rx;
-            }
+            // Fetch the block to verify it's at the epoch boundary.
+            // This should be fast since the parent block is typically already cached.
+            let block_rx = self
+                .marshal
+                .subscribe_by_commitment(Some(context.round), payload)
+                .await;
+            let epocher = self.epocher.clone();
+            let round = context.round;
+            let block_digest: B::Digest = payload.block_digest();
+            let verification_tasks = Arc::clone(&self.verification_tasks);
+
+            let (mut tx, rx) = oneshot::channel();
+            self.context
+                .with_label("verify_reproposal")
+                .spawn(move |_| async move {
+                    let block = select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping re-proposal verification"
+                            );
+                            return;
+                        },
+                        block = block_rx => match block {
+                            Ok(block) => block,
+                            Err(_) => {
+                                debug!(
+                                    ?payload,
+                                    reason = "failed to fetch block for re-proposal verification",
+                                    "skipping re-proposal verification"
+                                );
+                                return;
+                            }
+                        },
+                    };
+
+                    if !is_at_epoch_boundary(&epocher, block.height(), round.epoch()) {
+                        debug!(
+                            height = %block.height(),
+                            %last_in_epoch,
+                            "re-proposal is not at epoch boundary"
+                        );
+                        tx.send_lossy(false);
+                        return;
+                    }
+
+                    // Valid re-proposal. Create a completed verification task for `certify`.
+                    let (task_tx, task_rx) = oneshot::channel();
+                    task_tx.send_lossy(true);
+                    verification_tasks
+                        .lock()
+                        .await
+                        .insert((round, block_digest), task_rx);
+
+                    tx.send_lossy(true);
+                });
+            return rx;
+        }
+
+        let expected = context_hash(&context);
+        let got = payload.context_digest::<Sha256Digest>();
+        if expected != got {
+            warn!(
+                round = %context.round,
+                expected = ?expected,
+                got = ?got,
+                "rejected proposal with mismatched context hash"
+            );
+
+            let (tx, rx) = oneshot::channel();
+            tx.send_lossy(false);
+            return rx;
         }
 
         // Kick off deferred verification early to hide verification latency behind
@@ -704,6 +766,14 @@ where
             }
         }
     }
+}
+
+/// Returns true if the block is at an epoch boundary (last block in its epoch).
+///
+/// This is used to validate re-proposals, which are only allowed for boundary blocks.
+#[inline]
+fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
+    epocher.last(epoch).is_some_and(|last| last == block_height)
 }
 
 impl<E, A, B, C, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, Z, S, ES>
