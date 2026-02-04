@@ -588,6 +588,27 @@ impl IoBufs {
             Self::Chunked(_) => self.copy_to_bytes(self.remaining()).into(),
         }
     }
+
+    /// Coalesce all remaining bytes into a single contiguous `IoBuf`, using the pool
+    /// for allocation if multiple buffers need to be merged.
+    ///
+    /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
+    pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBuf {
+        match self {
+            Self::Single(buf) => buf,
+            Self::Chunked(bufs) => {
+                let total_len: usize = bufs
+                    .iter()
+                    .map(|b| b.remaining())
+                    .fold(0, usize::saturating_add);
+                let mut result = pool.alloc(total_len);
+                for buf in bufs {
+                    result.put_slice(buf.as_ref());
+                }
+                result.freeze()
+            }
+        }
+    }
 }
 
 impl Buf for IoBufs {
@@ -1238,6 +1259,45 @@ mod tests {
         assert_eq!(bufs.len(), 8);
 
         assert_eq!(bufs.coalesce(), b"lo world");
+    }
+
+    #[test]
+    fn test_iobufs_coalesce_with_pool() {
+        let mut registry = prometheus_client::registry::Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+
+        // Single buffer: zero-copy (same pointer)
+        let buf = IoBuf::from(vec![1u8, 2, 3, 4, 5]);
+        let original_ptr = buf.as_ptr();
+        let bufs = IoBufs::from(buf);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, [1, 2, 3, 4, 5]);
+        assert_eq!(coalesced.as_ptr(), original_ptr);
+
+        // Multiple buffers: merged using pool
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::from(b" world"));
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello world");
+
+        // Multiple buffers after advance: only remaining data coalesced
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::from(b" world"));
+        bufs.advance(3);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"lo world");
+
+        // Empty buffers in the middle
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::default());
+        bufs.append(IoBuf::from(b" world"));
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello world");
+
+        // Empty IoBufs
+        let bufs = IoBufs::default();
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert!(coalesced.is_empty());
     }
 
     #[test]
