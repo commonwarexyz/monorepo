@@ -178,7 +178,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     }
 
     /// Returns the number of complete chunks (excludes partial chunk at end, if any).
-    /// The returned value is absolute (includes pruned chunks).
+    /// The returned index is absolute and includes pruned chunks.
     #[inline]
     fn complete_chunks(&self) -> usize {
         if self.bitmap.is_chunk_aligned() {

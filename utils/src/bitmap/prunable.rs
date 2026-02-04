@@ -91,7 +91,7 @@ impl<const N: usize> Prunable<N> {
         self.len().is_multiple_of(Self::CHUNK_SIZE_BITS)
     }
 
-    /// Return the total number of chunks, including pruned chunks.
+    /// Return the number of chunks, including pruned chunks.
     #[inline]
     pub fn chunks_len(&self) -> usize {
         self.pruned_chunks + self.bitmap.chunks_len()
