@@ -62,6 +62,8 @@ Verify stability annotations are internally consistent:
 just check-stability
 ```
 
+## Transitive Stability
+
 This works transitively. When CI builds with `--cfg commonware_stability_BETA`, any BETA function that calls an ALPHA function fails to compile - the ALPHA function simply doesn't exist at that stability level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
 
 Cargo features provide the same transitive guarantee, but with the propagation problem mentioned above. Every crate in the dependency chain needs to expose and forward the feature flag. With `cfg` flags via `RUSTFLAGS`, you set your stability threshold once and get uniform enforcement - both within our workspace and when you compile your own code against the library.
