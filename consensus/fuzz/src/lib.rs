@@ -121,7 +121,7 @@ async fn setup_degraded_network<E: Clock>(
 
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
-    pub raw_bytes: Vec<u8>,
+    pub rng: Vec<u8>,
     pub required_containers: u64,
     pub degraded_network: bool,
     pub configuration: Configuration,
@@ -172,12 +172,12 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
-        // Collect remaining bytes for RNG (up to MAX_RAW_BYTES)
+        // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
-        let raw_bytes = u.bytes(remaining)?.to_vec();
+        let rng = u.bytes(remaining)?.to_vec();
 
         Ok(Self {
-            raw_bytes,
+            rng,
             partition,
             configuration,
             degraded_network,
@@ -362,7 +362,7 @@ fn spawn_honest_validator<P: simplex::Simplex>(
 }
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
-    let rng = BytesRng::new(input.raw_bytes.clone());
+    let rng = BytesRng::new(input.rng.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
@@ -422,7 +422,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 }
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
-    let rng = BytesRng::new(input.raw_bytes.clone());
+    let rng = BytesRng::new(input.rng.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
@@ -698,7 +698,7 @@ impl FuzzMode for Twinable {
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
-    let raw_bytes_len = input.raw_bytes.len();
+    let rng = input.rng.clone();
     let run_result = if M::TWIN {
         panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
@@ -710,7 +710,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
     match run_result {
         Ok(()) => {}
         Err(payload) => {
-            println!("Panicked with raw_bytes length: {}", raw_bytes_len);
+            println!("Panicked with rng: {:?}", rng);
             panic::resume_unwind(payload);
         }
     }

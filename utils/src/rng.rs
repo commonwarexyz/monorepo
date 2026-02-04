@@ -24,7 +24,7 @@ impl BytesRng {
         let start = bytes.len().saturating_sub(8);
         let len = bytes.len().min(8);
         seed[..len].copy_from_slice(&bytes[start..]);
-        let fallback = StdRng::seed_from_u64(u64::from_le_bytes(seed));
+        let fallback = StdRng::seed_from_u64(u64::from_be_bytes(seed));
         Self {
             bytes,
             offset: 0,
@@ -47,13 +47,13 @@ impl RngCore for BytesRng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
         self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
+        u32::from_be_bytes(buf)
     }
 
     fn next_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
         self.fill_bytes(&mut buf);
-        u64::from_le_bytes(buf)
+        u64::from_be_bytes(buf)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
@@ -189,7 +189,7 @@ mod tests {
         let mut rng = BytesRng::new(bytes);
 
         let v = rng.next_u32();
-        assert_eq!(v, u32::from_le_bytes([0x01, 0x02, 0x03, 0x04]));
+        assert_eq!(v, u32::from_be_bytes([0x01, 0x02, 0x03, 0x04]));
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
         let v = rng.next_u64();
         assert_eq!(
             v,
-            u64::from_le_bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+            u64::from_be_bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
         );
     }
 }

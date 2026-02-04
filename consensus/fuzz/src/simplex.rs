@@ -130,7 +130,7 @@ mod tests {
 
     fn test_input(seed: u64, containers: u64) -> FuzzInput {
         FuzzInput {
-            raw_bytes: seed.to_le_bytes().to_vec(),
+            rng: seed.to_be_bytes().to_vec(),
             partition: Partition::Connected,
             configuration: N4F1C3,
             required_containers: containers,
