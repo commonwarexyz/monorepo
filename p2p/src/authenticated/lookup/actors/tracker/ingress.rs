@@ -22,6 +22,13 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register { index: u64, peers: Map<C, Address> },
 
+    /// Update a peer's address without creating a new peer set.
+    UpdateAddress {
+        public_key: C,
+        address: Address,
+        responder: oneshot::Sender<bool>,
+    },
+
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
     PeerSet {
@@ -243,5 +250,23 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
 
     async fn block(&mut self, public_key: Self::PublicKey) {
         self.sender.0.send_lossy(Message::Block { public_key });
+    }
+}
+
+impl<C: PublicKey> Oracle<C> {
+    /// Update a peer's address without creating a new peer set.
+    ///
+    /// Returns `true` if the peer is tracked and the address was updated,
+    /// `false` otherwise (peer not in any tracked peer set).
+    pub async fn update_address(&mut self, peer: C, address: Address) -> bool {
+        self.sender
+            .0
+            .request(|responder| Message::UpdateAddress {
+                public_key: peer,
+                address,
+                responder,
+            })
+            .await
+            .unwrap_or(false)
     }
 }

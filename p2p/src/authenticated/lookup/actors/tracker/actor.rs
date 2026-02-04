@@ -157,6 +157,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
                 });
             }
+            Message::UpdateAddress {
+                public_key,
+                address,
+                responder,
+            } => {
+                let success = self.directory.update_address(&public_key, address);
+                if success {
+                    self.listener
+                        .0
+                        .send_lossy(self.directory.listenable())
+                        .await;
+                }
+                let _ = responder.send(success);
+            }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
                 let _ = responder.send(self.directory.get_set(&index).cloned());
@@ -707,6 +721,139 @@ mod tests {
             // The first peer should be have received a kill message because its
             // peer set was removed because `tracked_peer_sets` is 1.
             assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)),)
+        });
+    }
+
+    #[test]
+    fn test_update_address_triggers_listener() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
+
+            let pk_1 = new_signer_and_pk(1).1;
+            let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
+
+            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+
+            oracle
+                .update(
+                    0,
+                    [
+                        (my_pk.clone(), my_addr.into()),
+                        (pk_1.clone(), addr_1.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
+
+            let success = oracle.update_address(pk_1.clone(), addr_2.into()).await;
+            assert!(success);
+
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(registered_ips.contains(&addr_2.ip()));
+        });
+    }
+
+    #[test]
+    fn test_update_address_via_oracle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let (_, pk) = new_signer_and_pk(1);
+            let addr_1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1002);
+
+            oracle
+                .update(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            let result = mailbox.dial(pk.clone()).await;
+            assert!(result.is_some());
+            let (_, ingress) = result.unwrap();
+            assert_eq!(ingress, Ingress::Socket(addr_1));
+
+            let success = oracle.update_address(pk.clone(), addr_2.into()).await;
+            assert!(success);
+
+            context.sleep(Duration::from_millis(1010)).await;
+
+            let result = mailbox.dial(pk.clone()).await;
+            assert!(result.is_some());
+            let (_, ingress) = result.unwrap();
+            assert_eq!(ingress, Ingress::Socket(addr_2));
+        });
+    }
+
+    #[test]
+    fn test_update_address_blocked_peer_not_in_listenable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
+
+            let pk_1 = new_signer_and_pk(1).1;
+            let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
+
+            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+
+            oracle
+                .update(
+                    0,
+                    [
+                        (my_pk.clone(), my_addr.into()),
+                        (pk_1.clone(), addr_1.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&addr_1.ip()));
+
+            oracle.block(pk_1.clone()).await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
+
+            let success = oracle.update_address(pk_1.clone(), addr_2.into()).await;
+            assert!(success);
+
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(!registered_ips.contains(&addr_1.ip()));
+            assert!(!registered_ips.contains(&addr_2.ip()));
+        });
+    }
+
+    #[test]
+    fn test_update_address_untracked_peer_returns_false() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+
+            let (_, pk) = new_signer_and_pk(1);
+            let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+
+            let success = oracle.update_address(pk, addr.into()).await;
+            assert!(!success);
         });
     }
 }

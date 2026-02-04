@@ -195,6 +195,21 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(deleted_peers)
     }
 
+    /// Update a tracked peer's address.
+    ///
+    /// Returns `true` if peer exists and is in at least one peer set.
+    /// Updates address even if peer is blocked (used after unblock).
+    pub fn update_address(&mut self, peer: &C, address: Address) -> bool {
+        let Some(record) = self.peers.get_mut(peer) else {
+            return false;
+        };
+        if record.sets() == 0 {
+            return false;
+        }
+        record.update(address);
+        true
+    }
+
     /// Gets a peer set by index.
     pub fn get_set(&self, index: &u64) -> Option<&Set<C>> {
         self.sets.get(index)
@@ -1641,6 +1656,171 @@ mod tests {
                 directory.eligible(&pk_1),
                 "Peer should be eligible after unblock"
             );
+        });
+    }
+
+    #[test]
+    fn test_update_address_basic() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_1))
+            );
+
+            let success = directory.update_address(&pk_1, addr(addr_2));
+            assert!(success);
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+        });
+    }
+
+    #[test]
+    fn test_update_address_untracked_peer() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            let success = directory.update_address(&pk_1, addr(addr_1));
+            assert!(!success);
+        });
+    }
+
+    #[test]
+    fn test_update_address_peer_not_in_set() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
+
+            let success = directory.update_address(&pk_1, addr(addr_3));
+            assert!(!success);
+        });
+    }
+
+    #[test]
+    fn test_update_address_blocked_peer() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(100);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration,
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.block(&pk_1);
+
+            let success = directory.update_address(&pk_1, addr(addr_2));
+            assert!(success);
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+            directory.unblock_expired();
+
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+            assert!(directory.dialable().contains(&pk_1));
+        });
+    }
+
+    #[test]
+    fn test_update_address_myself() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
+
+            let success = directory.update_address(&my_pk, addr(addr_1));
+            assert!(!success);
         });
     }
 }
