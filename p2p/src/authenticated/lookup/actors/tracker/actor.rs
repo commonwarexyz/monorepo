@@ -164,6 +164,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             } => {
                 let success = self.directory.update_address(&public_key, address);
                 if success {
+                    // Kill any existing connection (it's on the old IP)
+                    if let Some(mut peer) = self.mailboxes.remove(&public_key) {
+                        peer.kill().await;
+                    }
+
+                    // Send the updated listenable IPs to the listener.
                     self.listener
                         .0
                         .send_lossy(self.directory.listenable())
@@ -885,6 +891,42 @@ mod tests {
 
             assert!(!mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
             assert!(mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
+        });
+    }
+
+    #[test]
+    fn test_update_address_severs_existing_connection() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let (_, pk) = new_signer_and_pk(1);
+            let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
+
+            oracle
+                .update(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Establish connection
+            let reservation = mailbox.listen(pk.clone()).await;
+            assert!(reservation.is_some());
+
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(pk.clone(), peer_mailbox);
+
+            // Update address - should kill the connection
+            let success = oracle.update_address(pk.clone(), addr_2.into()).await;
+            assert!(success);
+
+            // Peer should receive kill message
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
         });
     }
 }

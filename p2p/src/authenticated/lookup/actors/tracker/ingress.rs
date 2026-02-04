@@ -259,9 +259,10 @@ impl<C: PublicKey> Oracle<C> {
     /// This is useful when a peer's IP changes but you don't want to create
     /// an entirely new peer set (which would require a monotonically increasing index).
     ///
-    /// On success, the listener's allowed IPs are automatically updated to reflect
-    /// the new address. Future incoming connections will be checked against the
-    /// new egress IP.
+    /// On success:
+    /// - Any existing connection to the peer is severed (it was on the old IP)
+    /// - The listener's allowed IPs are updated to reflect the new egress IP
+    /// - Future connections will use the new address
     ///
     /// # Returns
     ///
