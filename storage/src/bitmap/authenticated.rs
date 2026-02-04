@@ -242,13 +242,13 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         // The chunk index should always be < MAX_LOCATION so we can use new_unchecked.
         let chunked_leaves =
-            Location::new_unchecked(PrunableBitMap::<N>::unpruned_chunk(bit_len) as u64);
+            Location::new_unchecked(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
         let mut mmr_proof = Proof {
             leaves: chunked_leaves,
             digests: proof.digests.clone(),
         };
 
-        let loc = Location::new_unchecked(PrunableBitMap::<N>::unpruned_chunk(bit) as u64);
+        let loc = Location::new_unchecked(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
@@ -422,7 +422,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     /// If `bit` equals the bitmap length, this prunes all complete chunks while retaining
     /// the empty trailing chunk, preparing the bitmap for appending new data.
     pub fn prune_to_bit(&mut self, bit: u64) -> Result<(), Error> {
-        let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
+        let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
         if chunk < self.bitmap.pruned_chunks() {
             return Ok(());
         }
@@ -475,7 +475,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         }
 
         let chunk = *self.get_chunk_containing(bit);
-        let chunk_loc = Location::from(PrunableBitMap::<N>::unpruned_chunk(bit));
+        let chunk_loc = Location::from(PrunableBitMap::<N>::to_chunk_index(bit));
         let (last_chunk, next_bit) = self.bitmap.last_chunk();
 
         if chunk_loc == self.mmr.leaves() {
@@ -542,7 +542,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         self.bitmap.set_bit(bit, value);
 
         // If the updated chunk is already in the MMR, mark it as dirty.
-        let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
+        let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
         if chunk < self.authenticated_len {
             self.state.dirty_chunks.insert(chunk);
         }
@@ -642,7 +642,7 @@ mod tests {
     impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
         /// Convert a bit into the position of the Merkle tree leaf it belongs to.
         pub(crate) fn leaf_pos(bit: u64) -> Position {
-            let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
+            let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
             let chunk = Location::new_unchecked(chunk as u64);
             Position::try_from(chunk).expect("chunk should never overflow MAX_LOCATION")
         }
