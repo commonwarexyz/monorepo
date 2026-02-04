@@ -6,6 +6,10 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
+    pub mod rng;
+    pub use rng::{test_rng, test_rng_seeded, BytesRng};
+});
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
@@ -241,23 +245,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod channel;
     pub mod concurrency;
     pub mod futures;
-    pub mod rng;
-    pub use rng::BytesRng;
-
-    /// Returns a seeded RNG for deterministic testing.
-    ///
-    /// Uses seed 0 by default to ensure reproducible test results.
-    pub fn test_rng() -> rand::rngs::StdRng {
-        rand::SeedableRng::seed_from_u64(0)
-    }
-
-    /// Returns a seeded RNG with a custom seed for deterministic testing.
-    ///
-    /// Use this when you need multiple independent RNG streams in the same test,
-    /// or when a helper function needs its own RNG that won't collide with the caller's.
-    pub fn test_rng_seeded(seed: u64) -> rand::rngs::StdRng {
-        rand::SeedableRng::seed_from_u64(seed)
-    }
 });
 #[cfg(not(any(
     commonware_stability_GAMMA,

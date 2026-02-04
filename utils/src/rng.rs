@@ -1,13 +1,28 @@
-//! RNG utilities for testing and fuzzing.
+//! Utilities for random number generation.
 
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use std::hash::{Hash, Hasher as _};
+
+/// Returns a seeded RNG for deterministic testing.
+///
+/// Uses seed 0 by default to ensure reproducible test results.
+pub fn test_rng() -> StdRng {
+    StdRng::seed_from_u64(0)
+}
+
+/// Returns a seeded RNG with a custom seed for deterministic testing.
+///
+/// Use this when you need multiple independent RNG streams in the same test,
+/// or when a helper function needs its own RNG that won't collide with the caller's.
+pub fn test_rng_seeded(seed: u64) -> StdRng {
+    StdRng::seed_from_u64(seed)
+}
 
 /// An RNG that reads from a byte buffer, falling back to a seeded RNG when exhausted.
 ///
 /// This is useful for fuzzing where you want the fuzzer to control randomness
 /// through byte mutations. The raw bytes are consumed sequentially, and when
-/// exhausted, a fallback RNG (seeded from the last 8 bytes) provides additional
+/// exhausted, a fallback RNG (seeded from a hash of the buffer) provides additional
 /// randomness deterministically.
 pub struct BytesRng {
     bytes: Vec<u8>,
@@ -32,7 +47,7 @@ impl BytesRng {
     }
 
     /// Returns the number of raw bytes remaining before fallback.
-    pub fn remaining(&self) -> usize {
+    pub const fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.offset)
     }
 
