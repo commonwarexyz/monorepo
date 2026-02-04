@@ -29,7 +29,7 @@
 //!
 //! # Usage
 //!
-//! Wrap your [`VerifyingApplication`] implementation with [`Marshaled::init`] and provide it to your
+//! Wrap your [`VerifyingApplication`] implementation with [`Marshaled::new`] and provide it to your
 //! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
