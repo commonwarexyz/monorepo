@@ -142,8 +142,11 @@ fn branch_from_env() -> Option<Branch> {
         .and_then(|s| Branch::try_from_hex(&s))
 }
 
+use std::num::Saturating;
+
 const DIVISOR: usize = 1000;
-const ADD_BYTES_COEFFS: [usize; 3] = [100, 1000, 8000];
+const ADD_BYTES_COEFFS: [Saturating<usize>; 3] =
+    [Saturating(100), Saturating(1000), Saturating(8000)];
 const MODIFY_PREFIX_NUMERATOR: usize = 100;
 const MODIFY_PREFIX_MIN_BYTES: usize = 8;
 const COPY_PORTION_NUMERATOR: usize = 50;
@@ -188,8 +191,10 @@ impl Sampler {
             return;
         }
         let size = self.buf.len();
+        let size = Saturating(size);
         let num_bytes =
             (ADD_BYTES_COEFFS[0] * size * size + ADD_BYTES_COEFFS[1] * size + ADD_BYTES_COEFFS[2])
+                .0
                 / DIVISOR;
         let new_size = if force {
             self.buf.len() + num_bytes
