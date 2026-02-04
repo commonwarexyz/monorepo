@@ -222,6 +222,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.fail_verification = fail;
     }
 
+    #[cfg(not(feature = "fuzz"))]
     fn panic(&self, msg: &str) -> ! {
         panic!("[{:?}] {}", self.me, msg);
     }
@@ -275,15 +276,35 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
 
         // Verify contents
-        let (parsed_round, parent, _) =
-            <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
+        let Ok((parsed_round, parent, _)) = <(Round, H::Digest, u64)>::decode(&mut contents) else {
+            #[cfg(feature = "fuzz")]
+            {
+                // During fuzzing, return false for invalid payloads
+                return false;
+            }
+            #[cfg(not(feature = "fuzz"))]
+            panic!("[{:?}] invalid payload", self.me);
+        };
+
         if parsed_round != context.round {
+            #[cfg(feature = "fuzz")]
+            {
+                // During fuzzing, return false for round mismatches
+                return false;
+            }
+            #[cfg(not(feature = "fuzz"))]
             self.panic(&format!(
                 "invalid round (in payload): {} != {}",
                 parsed_round, context.round
             ));
         }
         if parent != context.parent.1 {
+            #[cfg(feature = "fuzz")]
+            {
+                // During fuzzing, return false for parent mismatches
+                return false;
+            }
+            #[cfg(not(feature = "fuzz"))]
             self.panic(&format!(
                 "invalid parent (in payload): {:?} != {:?}",
                 parent, context.parent.1
