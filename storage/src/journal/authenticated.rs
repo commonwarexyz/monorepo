@@ -11,7 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        journaled::{CleanMmr, Mmr},
+        journaled::{CleanMmr, DirtyMmr, Mmr},
         mem::{Clean, Dirty, State},
         Location, Position, Proof, StandardHasher,
     },
@@ -107,7 +107,8 @@ where
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, apply_batch_size).await?;
+        let mut mmr =
+            Self::align(mmr.into_dirty(), &journal, &mut hasher, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
@@ -124,7 +125,7 @@ where
     /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
     /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
     async fn align(
-        mut mmr: CleanMmr<E, H::Digest>,
+        mut mmr: DirtyMmr<E, H::Digest>,
         journal: &C,
         hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
@@ -136,7 +137,7 @@ where
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR items");
-            mmr.pop(hasher, *pop_count as usize).await?;
+            mmr.pop(*pop_count as usize).await?;
             mmr_size = Location::new_unchecked(journal_size);
         }
 
@@ -148,7 +149,6 @@ where
                 replay_count, "MMR lags behind journal, replaying journal to catch up"
             );
 
-            let mut mmr = mmr.into_dirty();
             let mut batch_size = 0;
             while mmr_size < journal_size {
                 let op = journal.read(*mmr_size).await?;
@@ -166,7 +166,7 @@ where
         // At this point the MMR and journal should be consistent.
         assert_eq!(journal.size(), mmr.leaves());
 
-        Ok(mmr)
+        Ok(mmr.merkleize(hasher))
     }
 
     /// Prune both the MMR and journal to the given location.
@@ -399,7 +399,8 @@ where
         // Align the MMR and journal.
         let mut hasher = StandardHasher::<H>::new();
         let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr =
+            Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -439,7 +440,8 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mut mmr = Self::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mut mmr =
+            Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -703,7 +705,7 @@ mod tests {
         executor.start(|context| async move {
             let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
 
-            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -735,7 +737,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -764,7 +766,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            let mmr = Journal::align(mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -991,17 +993,17 @@ mod tests {
 
             // Test 7: Position based authenticated journal rewind.
             {
-                let journal = AuthenticatedJournal::new(
+                let mut journal = AuthenticatedJournal::new(
                     context,
                     mmr_config("rewind"),
                     journal_config("rewind"),
                     |op| op.is_commit(),
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
-                let mut journal = journal.into_dirty();
                 for i in 0..5 {
                     journal.append(create_operation(i)).await.unwrap();
                 }
@@ -1043,10 +1045,11 @@ mod tests {
                 for i in 0..255 {
                     journal.append(create_operation(i)).await.unwrap();
                 }
-                let journal = journal.merkleize();
-                let mut journal = journal.into_dirty();
-                MutableContiguous::prune(&mut journal, 100).await.unwrap();
+
+                let mut journal = journal.merkleize();
+                journal.prune(Location::new_unchecked(100)).await.unwrap();
                 assert_eq!(journal.bounds().start, Location::new_unchecked(98));
+                let mut journal = journal.into_dirty();
                 let res = journal.rewind(97).await;
                 assert!(matches!(res, Err(JournalError::InvalidRewind(97))));
                 journal.rewind(98).await.unwrap();

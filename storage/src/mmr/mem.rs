@@ -289,15 +289,6 @@ impl<D: Digest> CleanMmr<D> {
         self.nodes.get(self.pos_to_index(pos)).copied()
     }
 
-    /// Pop the most recent leaf element out of the MMR if it exists, returning Empty or
-    /// ElementPruned errors otherwise.
-    pub fn pop(&mut self, hasher: &mut impl Hasher<Digest = D>) -> Result<Position, Error> {
-        let mut dirty_mmr = mem::replace(self, Self::new(hasher)).into_dirty();
-        let result = dirty_mmr.pop();
-        *self = dirty_mmr.merkleize(hasher, None);
-        result
-    }
-
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
@@ -766,7 +757,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = CleanMmr::new(&mut hasher);
+            let mmr = CleanMmr::new(&mut hasher);
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -778,7 +769,9 @@ mod tests {
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
-            assert!(matches!(mmr.pop(&mut hasher), Err(Empty)));
+            let mut mmr = mmr.into_dirty();
+            assert!(matches!(mmr.pop(), Err(Empty)));
+            let mut mmr = mmr.merkleize(&mut hasher, None);
             mmr.prune_all();
             assert_eq!(mmr.size(), 0, "prune_all on empty MMR should do nothing");
 
@@ -1090,7 +1083,9 @@ mod tests {
 
             // Pop off one node at a time until empty, confirming the root matches reference.
             for i in (0..NUM_ELEMENTS).rev() {
-                assert!(mmr.pop(&mut hasher).is_ok());
+                let mut dirty_mmr = mmr.into_dirty();
+                assert!(dirty_mmr.pop().is_ok());
+                mmr = dirty_mmr.merkleize(&mut hasher, None);
                 let root = *mmr.root();
                 let reference_mmr = CleanMmr::new(&mut hasher);
                 let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, i);
@@ -1100,13 +1095,13 @@ mod tests {
                     "root mismatch after pop at {i}"
                 );
             }
+            let mut mmr = mmr.into_dirty();
             assert!(
-                matches!(mmr.pop(&mut hasher).unwrap_err(), Empty),
+                matches!(mmr.pop().unwrap_err(), Empty),
                 "pop on empty MMR should fail"
             );
 
             // Test that we can pop all elements up to and including the oldest retained leaf.
-            let mut mmr = mmr.into_dirty();
             for i in 0u64..NUM_ELEMENTS {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
@@ -1116,13 +1111,16 @@ mod tests {
 
             let leaf_pos = Position::try_from(Location::new_unchecked(100)).unwrap();
             mmr.prune_to_pos(leaf_pos);
+            let mut mmr = mmr.into_dirty();
             while mmr.size() > leaf_pos {
-                mmr.pop(&mut hasher).unwrap();
+                mmr.pop().unwrap();
             }
+            let mmr = mmr.merkleize(&mut hasher, None);
             let reference_mmr = CleanMmr::new(&mut hasher);
             let reference_mmr = build_test_mmr(&mut hasher, reference_mmr, 100);
             assert_eq!(*mmr.root(), *reference_mmr.root());
-            let result = mmr.pop(&mut hasher);
+            let mut mmr = mmr.into_dirty();
+            let result = mmr.pop();
             assert!(matches!(result, Err(ElementPruned(_))));
             assert!(mmr.bounds().is_empty());
         });

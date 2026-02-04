@@ -8,7 +8,7 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
-    bitmap::CleanBitMap,
+    bitmap::MerkleizedBitMap,
     journal::contiguous::fixed::Journal,
     mmr::{Location, StandardHasher},
     qmdb::{
@@ -18,23 +18,23 @@ use crate::{
             FixedValue,
         },
         current::{
-            db::{merkleize_grafted_bitmap, root},
+            db::{merkleize_grafted_bitmap, root, Merkleized},
             FixedConfig as Config,
         },
-        Durable, Error, Merkleized,
+        Durable, Error,
     },
     translator::Translator,
 };
 use commonware_codec::FixedSize;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
-pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<H>, D = Durable> =
+pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, H, T, N, S, D>;
 
-// Functionality for the Clean state - init only.
+// Functionality for the Merkleized state - init only.
 impl<
         E: RStorage + Clock + Metrics,
         K: Array,
@@ -42,7 +42,7 @@ impl<
         H: Hasher,
         T: Translator,
         const N: usize,
-    > Db<E, K, V, H, T, N, Merkleized<H>, Durable>
+    > Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 {
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -65,7 +65,7 @@ impl<
         let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
         let mut hasher = StandardHasher::<H>::new();
-        let mut status = CleanBitMap::init(
+        let mut status = MerkleizedBitMap::init(
             context.with_label("bitmap"),
             &bitmap_metadata_partition,
             thread_pool,
@@ -92,12 +92,12 @@ impl<
         let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
 
         // Compute and cache the root
-        let cached_root = Some(root(&mut hasher, &status, &any.log.mmr).await?);
+        let root = root(&mut hasher, &status, &any.log.mmr).await?;
 
         Ok(Self {
             any,
             status,
-            cached_root,
+            state: Merkleized { root },
         })
     }
 }
@@ -111,6 +111,7 @@ pub mod test {
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
+                db::Unmerkleized,
                 proof::RangeProof,
                 tests::{self, apply_random_ops},
             },
@@ -119,7 +120,7 @@ pub mod test {
                 tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
                 LogStore as _,
             },
-            NonDurable, Unmerkleized,
+            NonDurable,
         },
         translator::TwoCap,
     };
@@ -149,7 +150,7 @@ pub mod test {
         }
     }
 
-    /// A type alias for the concrete clean [Db] type used in these unit tests.
+    /// A type alias for the concrete merkleized [Db] type used in these unit tests.
     type CleanCurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
     /// A type alias for the concrete mutable [Db] type used in these unit tests.
@@ -305,8 +306,10 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.loc);
             assert_eq!(
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                CleanBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*proof_inactive.loc)
+                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
+                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
+                    *proof_inactive.loc
+                )
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.loc = active_loc;

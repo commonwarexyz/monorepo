@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256, Digest, Sha256};
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Storage};
-use commonware_storage::{CleanAuthenticatedBitMap, DirtyAuthenticatedBitMap};
+use commonware_storage::{MerkleizedBitMap, UnmerkleizedBitMap};
 use commonware_utils::bitmap::BitMap;
 use libfuzzer_sys::fuzz_target;
 
@@ -11,8 +11,8 @@ const MAX_OPERATIONS: usize = 100;
 const CHUNK_SIZE: usize = 32;
 
 enum Bitmap<E: Clock + Storage + Metrics, D: Digest, const N: usize> {
-    Clean(CleanAuthenticatedBitMap<E, D, N>),
-    Dirty(DirtyAuthenticatedBitMap<E, D, N>),
+    Merkleized(MerkleizedBitMap<E, D, N>),
+    Unmerkleized(UnmerkleizedBitMap<E, D, N>),
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -59,7 +59,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
-        let init_bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+        let init_bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
             context.with_label("bitmap"),
             PARTITION,
             None,
@@ -67,7 +67,7 @@ fn fuzz(input: FuzzInput) {
         )
         .await
         .unwrap();
-        let mut bitmap = Bitmap::Clean(init_bitmap);
+        let mut bitmap = Bitmap::Merkleized(init_bitmap);
         let mut bit_count = 0u64;
         let mut pruned_bits = 0u64;
         let mut restarts = 0usize;
@@ -76,12 +76,12 @@ fn fuzz(input: FuzzInput) {
             bitmap = match op {
                 BitmapOperation::Append { bit } => {
                     let mut bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap.into_dirty(),
-                        Bitmap::Dirty(bitmap) => bitmap,
+                        Bitmap::Merkleized(bitmap) => bitmap.into_dirty(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap,
                     };
                     bitmap.push(bit);
                     bit_count += 1;
-                    Bitmap::Dirty(bitmap)
+                    Bitmap::Unmerkleized(bitmap)
                 }
 
                 BitmapOperation::GetBit { bit_offset } => {
@@ -90,8 +90,8 @@ fn fuzz(input: FuzzInput) {
                         if live > 0 {
                             let safe_offset = pruned_bits + (bit_offset % live);
                             let _ = match &bitmap {
-                                Bitmap::Clean(bitmap) => bitmap.get_bit(safe_offset),
-                                Bitmap::Dirty(bitmap) => bitmap.get_bit(safe_offset),
+                                Bitmap::Merkleized(bitmap) => bitmap.get_bit(safe_offset),
+                                Bitmap::Unmerkleized(bitmap) => bitmap.get_bit(safe_offset),
                             };
                         }
                     }
@@ -100,8 +100,8 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::SetBit { bit_offset, bit } => {
                     let mut bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap.into_dirty(),
-                        Bitmap::Dirty(bitmap) => bitmap,
+                        Bitmap::Merkleized(bitmap) => bitmap.into_dirty(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap,
                     };
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % bit_count).max(pruned_bits);
@@ -109,7 +109,7 @@ fn fuzz(input: FuzzInput) {
                             bitmap.set_bit(safe_offset, bit);
                         }
                     }
-                    Bitmap::Dirty(bitmap)
+                    Bitmap::Unmerkleized(bitmap)
                 }
 
                 BitmapOperation::GetChunk { bit_offset } => {
@@ -119,8 +119,12 @@ fn fuzz(input: FuzzInput) {
                             * BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS;
                         if chunk_aligned >= pruned_bits && chunk_aligned < bit_count {
                             let _ = match &bitmap {
-                                Bitmap::Clean(bitmap) => bitmap.get_chunk_containing(chunk_aligned),
-                                Bitmap::Dirty(bitmap) => bitmap.get_chunk_containing(chunk_aligned),
+                                Bitmap::Merkleized(bitmap) => {
+                                    bitmap.get_chunk_containing(chunk_aligned)
+                                }
+                                Bitmap::Unmerkleized(bitmap) => {
+                                    bitmap.get_chunk_containing(chunk_aligned)
+                                }
                             };
                         }
                     }
@@ -130,8 +134,8 @@ fn fuzz(input: FuzzInput) {
                 BitmapOperation::LastChunk => {
                     if bit_count > pruned_bits {
                         let (chunk, bits) = match &bitmap {
-                            Bitmap::Clean(bitmap) => bitmap.last_chunk(),
-                            Bitmap::Dirty(bitmap) => bitmap.last_chunk(),
+                            Bitmap::Merkleized(bitmap) => bitmap.last_chunk(),
+                            Bitmap::Unmerkleized(bitmap) => bitmap.last_chunk(),
                         };
                         assert!(bits <= BitMap::<CHUNK_SIZE>::CHUNK_SIZE_BITS);
                         assert!(chunk.len() == CHUNK_SIZE);
@@ -141,8 +145,8 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::Len => {
                     let count = match &bitmap {
-                        Bitmap::Clean(bitmap) => bitmap.len(),
-                        Bitmap::Dirty(bitmap) => bitmap.len(),
+                        Bitmap::Merkleized(bitmap) => bitmap.len(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.len(),
                     };
                     assert_eq!(count, bit_count);
                     bitmap
@@ -150,8 +154,8 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::PrunedBits => {
                     let pruned = match &bitmap {
-                        Bitmap::Clean(bitmap) => bitmap.pruned_bits(),
-                        Bitmap::Dirty(bitmap) => bitmap.pruned_bits(),
+                        Bitmap::Merkleized(bitmap) => bitmap.pruned_bits(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.pruned_bits(),
                     };
                     assert_eq!(pruned, pruned_bits);
                     bitmap
@@ -159,8 +163,10 @@ fn fuzz(input: FuzzInput) {
 
                 BitmapOperation::PruneToBit { bit_offset } => {
                     let mut bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap,
-                        Bitmap::Dirty(bitmap) => bitmap.merkleize(&mut hasher).await.unwrap(),
+                        Bitmap::Merkleized(bitmap) => bitmap,
+                        Bitmap::Unmerkleized(bitmap) => {
+                            bitmap.merkleize(&mut hasher).await.unwrap()
+                        }
                     };
                     if bit_count > 0 {
                         let safe_offset = (bit_offset % (bit_count + 1)).min(bit_count);
@@ -172,48 +178,54 @@ fn fuzz(input: FuzzInput) {
                             assert_eq!(bitmap.pruned_bits(), pruned_bits);
                         }
                     }
-                    Bitmap::Clean(bitmap)
+                    Bitmap::Merkleized(bitmap)
                 }
 
                 BitmapOperation::Merkleize => {
                     let bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap,
-                        Bitmap::Dirty(bitmap) => bitmap.merkleize(&mut hasher).await.unwrap(),
+                        Bitmap::Merkleized(bitmap) => bitmap,
+                        Bitmap::Unmerkleized(bitmap) => {
+                            bitmap.merkleize(&mut hasher).await.unwrap()
+                        }
                     };
-                    Bitmap::Clean(bitmap)
+                    Bitmap::Merkleized(bitmap)
                 }
 
                 BitmapOperation::GetNode { position } => {
                     let bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap,
-                        Bitmap::Dirty(bitmap) => bitmap.merkleize(&mut hasher).await.unwrap(),
+                        Bitmap::Merkleized(bitmap) => bitmap,
+                        Bitmap::Unmerkleized(bitmap) => {
+                            bitmap.merkleize(&mut hasher).await.unwrap()
+                        }
                     };
                     if bitmap.size() > 0 {
                         let safe_pos = position % bitmap.size().as_u64();
                         let _ = bitmap.get_node(safe_pos.into());
                     }
-                    Bitmap::Clean(bitmap)
+                    Bitmap::Merkleized(bitmap)
                 }
 
                 BitmapOperation::Size => {
                     match &bitmap {
-                        Bitmap::Clean(bitmap) => bitmap.size(),
-                        Bitmap::Dirty(bitmap) => bitmap.size(),
+                        Bitmap::Merkleized(bitmap) => bitmap.size(),
+                        Bitmap::Unmerkleized(bitmap) => bitmap.size(),
                     };
                     bitmap
                 }
 
                 BitmapOperation::Proof { bit_offset } => {
                     let bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap,
-                        Bitmap::Dirty(bitmap) => bitmap.merkleize(&mut hasher).await.unwrap(),
+                        Bitmap::Merkleized(bitmap) => bitmap,
+                        Bitmap::Unmerkleized(bitmap) => {
+                            bitmap.merkleize(&mut hasher).await.unwrap()
+                        }
                     };
                     if bit_count > pruned_bits {
                         let bit_offset = (bit_offset % (bit_count - pruned_bits)) + pruned_bits;
                         if let Ok((proof, chunk)) = bitmap.proof(&mut hasher, bit_offset).await {
                             let root = bitmap.root();
                             assert!(
-                                CleanAuthenticatedBitMap::<
+                                MerkleizedBitMap::<
                                     deterministic::Context,
                                     sha256::Digest,
                                     CHUNK_SIZE,
@@ -228,11 +240,11 @@ fn fuzz(input: FuzzInput) {
                             );
                         }
                     }
-                    Bitmap::Clean(bitmap)
+                    Bitmap::Merkleized(bitmap)
                 }
 
                 BitmapOperation::RestorePruned => {
-                    let bitmap = CleanAuthenticatedBitMap::<_, _, CHUNK_SIZE>::init(
+                    let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE>::init(
                         context
                             .with_label("bitmap")
                             .with_attribute("instance", restarts),
@@ -246,16 +258,18 @@ fn fuzz(input: FuzzInput) {
                     // Update tracking variables to match restored state
                     bit_count = bitmap.len();
                     pruned_bits = bitmap.pruned_bits();
-                    Bitmap::Clean(bitmap)
+                    Bitmap::Merkleized(bitmap)
                 }
 
                 BitmapOperation::WritePruned => {
                     let mut bitmap = match bitmap {
-                        Bitmap::Clean(bitmap) => bitmap,
-                        Bitmap::Dirty(bitmap) => bitmap.merkleize(&mut hasher).await.unwrap(),
+                        Bitmap::Merkleized(bitmap) => bitmap,
+                        Bitmap::Unmerkleized(bitmap) => {
+                            bitmap.merkleize(&mut hasher).await.unwrap()
+                        }
                     };
                     let _ = bitmap.write_pruned().await;
-                    Bitmap::Clean(bitmap)
+                    Bitmap::Merkleized(bitmap)
                 }
             }
         }

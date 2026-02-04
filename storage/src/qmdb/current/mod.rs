@@ -1,8 +1,8 @@
 //! A _Current_ authenticated database provides succinct proofs of _any_ value ever associated with
 //! a key, and also whether that value is the _current_ value associated with it. The
 //! implementations are based on a [crate::qmdb::any] authenticated database combined with an
-//! authenticated [crate::bitmap::CleanBitMap] over the activity status of each operation. The two
-//! structures are "grafted" together to minimize proof sizes.
+//! authenticated [crate::bitmap::MerkleizedBitMap] over the activity status of each operation.
+//! The two structures are "grafted" together to minimize proof sizes.
 
 use crate::{
     qmdb::any::{FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig},

@@ -5,7 +5,7 @@
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
 use crate::{
-    bitmap::{partial_chunk_root, CleanBitMap},
+    bitmap::{partial_chunk_root, MerkleizedBitMap},
     journal::contiguous::Contiguous,
     mmr::{
         grafting::{Storage as GraftingStorage, Verifier},
@@ -45,7 +45,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &CleanBitMap<E, D, N>,
+        status: &MerkleizedBitMap<E, D, N>,
         grafting_height: u32,
         mmr: &S,
         range: Range<Location>,
@@ -54,7 +54,7 @@ impl<D: Digest> RangeProof<D> {
         let proof = verification::range_proof(&grafted_mmr, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest = if next_bit != CleanBitMap::<E, D, N>::CHUNK_SIZE_BITS {
+        let partial_chunk_digest = if next_bit != MerkleizedBitMap::<E, D, N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
             // in the proof.
             hasher.update(last_chunk);
@@ -84,7 +84,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &CleanBitMap<E, D, N>,
+        status: &MerkleizedBitMap<E, D, N>,
         height: u32,
         mmr: &Mmr<E, D, Clean<D>>,
         log: &C,
@@ -247,7 +247,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// - Panics if `loc` is out of bounds.
     pub async fn new<E: RStorage + Clock + Metrics, H: CHasher<Digest = D>, S: Storage<D>>(
         hasher: &mut H,
-        status: &CleanBitMap<E, D, N>,
+        status: &MerkleizedBitMap<E, D, N>,
         grafting_height: u32,
         mmr: &S,
         loc: Location,

@@ -249,7 +249,7 @@ async fn run_operations(
 
         mmr = match step_result {
             Ok(mmr) => mmr,
-            Err(()) => break,
+            Err(_) => break,
         }
     }
 
@@ -379,7 +379,6 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("Should be able to add after recovery");
         let mmr = mmr.merkleize(&mut hasher);
-
         mmr.destroy().await.expect("Should be able to destroy MMR");
     });
 }
