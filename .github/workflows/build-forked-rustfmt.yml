@@ -48,13 +48,13 @@ jobs:
         full_commit="$(git -C fork rev-parse HEAD)"
         sha="$(cut -d ' ' -f1 "dist/${asset}.sha256")"
         cat > dist/RELEASE_NOTES.md <<EOF
-Forked rustfmt build
+        Forked rustfmt build
 
-Commit: ${full_commit}
-Toolchain: ${{ inputs.toolchain }}
-Asset: ${asset}
-SHA256: ${sha}
-EOF
+        Commit: ${full_commit}
+        Toolchain: ${{ inputs.toolchain }}
+        Asset: ${asset}
+        SHA256: ${sha}
+        EOF
     - name: Publish release
       env:
         GH_TOKEN: ${{ github.token }}
