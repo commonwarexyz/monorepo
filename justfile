@@ -143,16 +143,22 @@ check-stability *args='':
     for name in "${LEVEL_NAMES[@]:1}"; do
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
+    # Handle COVERAGE as a special level that only runs find_unstable_public.sh
+    if [ "$first_arg" = "COVERAGE" ]; then
+        echo "Checking for unmarked public items..."
+        ./scripts/find_unstable_public.sh
+        exit 0
+    fi
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."
             COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
         done
         echo "All stability levels pass!"
+        echo "Checking for unmarked public items..."
+        ./scripts/find_unstable_public.sh
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
         COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
     fi
-    echo "Checking for unmarked public items..."
-    ./scripts/find_unstable_public.sh
 
