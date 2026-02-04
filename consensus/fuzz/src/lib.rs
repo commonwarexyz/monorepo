@@ -1,3 +1,4 @@
+pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
 pub mod simplex;
@@ -36,7 +37,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
 };
-use commonware_utils::{channel::mpsc::Receiver, BytesRng, Faults, N3f1, NZUsize, NZU16};
+use commonware_utils::{channel::mpsc::Receiver, BytesRng, NZUsize, NZU16};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -80,7 +81,7 @@ impl Configuration {
 
     /// Returns true if this configuration can make progress (liveness).
     pub fn can_finalize(&self) -> bool {
-        N3f1::max_faults(self.n) == self.faults
+        self.faults <= bounds::max_faults(self.n)
     }
 }
 

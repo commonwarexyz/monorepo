@@ -1,4 +1,5 @@
 use crate::{
+    bounds,
     simplex::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
@@ -10,12 +11,11 @@ use commonware_cryptography::{
     certificate::{Scheme as CertificateScheme, Signers},
     sha256::Digest as Sha256Digest,
 };
-use commonware_utils::{Faults, N3f1};
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
 pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
-    let threshold = N3f1::quorum(n) as usize;
+    let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.
@@ -48,7 +48,6 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
-
     for finalized_view in finalized_views.keys() {
         for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
             assert!(
