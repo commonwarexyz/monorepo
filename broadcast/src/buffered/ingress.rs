@@ -27,6 +27,18 @@ pub enum Message<P: PublicKey, M: Committable + Digestible> {
         responder: oneshot::Sender<M>,
     },
 
+    /// Subscribe to receive a new message by digest.
+    ///
+    /// The responder will be sent the first message for an commitment when it is available; only
+    /// when a new item is received from the network. The request can be canceled by dropping the
+    /// responder. Unlike [`Self::Subscribe`], this subscription does not return cached items.
+    SubscribeNew {
+        peer: Option<P>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
+        responder: oneshot::Sender<M>,
+    },
+
     /// Get all messages for an commitment.
     Get {
         peer: Option<P>,
@@ -89,6 +101,32 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     ) {
         self.sender
             .send_lossy(Message::Subscribe {
+                peer,
+                commitment,
+                digest,
+                responder,
+            })
+            .await;
+    }
+
+    /// Subscribe to a message by peer (optionally), commitment, and digest (optionally) with an
+    /// externally prepared responder.
+    ///
+    /// The responder will be sent the first message for an commitment when it is available; only
+    /// when a new item is received from the network. The request can be canceled by dropping the
+    /// responder. Unlike [`Self::subscribe_prepared`], this subscription does not return cached
+    /// items.
+    ///
+    /// If the engine has shut down, this is a no-op.
+    pub async fn subscribe_prepared_new(
+        &mut self,
+        peer: Option<P>,
+        commitment: M::Commitment,
+        digest: Option<M::Digest>,
+        responder: oneshot::Sender<M>,
+    ) {
+        self.sender
+            .send_lossy(Message::SubscribeNew {
                 peer,
                 commitment,
                 digest,
