@@ -20,6 +20,12 @@
 //!
 //! ## Protocol Description
 //!
+//! ### Genesis
+//!
+//! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
+//! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
+//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
