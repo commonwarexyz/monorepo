@@ -70,7 +70,8 @@ pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
 
     /// Position of the next item to dequeue.
     ///
-    /// Invariant: `ack_floor <= read_pos <= journal.size()`
+    /// Invariant: `read_pos <= journal.size()`. Note that `ack_up_to` can advance
+    /// `ack_floor` past `read_pos`; in this case, `dequeue` skips the already-acked items.
     read_pos: u64,
 
     /// All items at positions < ack_floor are considered acknowledged.
@@ -826,7 +827,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_multiple_sequential_prunes() {
+    fn test_ack_across_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_multi_prune");
@@ -937,7 +938,7 @@ mod tests {
             let cfg = test_config("test_recovery_pruned");
 
             // First session: enqueue many items, ack enough to trigger pruning
-            {
+            let expected_pruning_boundary = {
                 let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
                     .await
                     .unwrap();
@@ -960,8 +961,8 @@ mod tests {
                 let pruning_boundary = queue.journal.pruning_boundary();
                 assert!(pruning_boundary > 0, "expected some pruning to occur");
 
-                drop(queue);
-            }
+                pruning_boundary
+            };
 
             // Second session: only non-pruned items are available
             {
@@ -973,6 +974,7 @@ mod tests {
                 // ack_floor = pruning_boundary (items 0-9 were pruned)
                 let pruning_boundary = queue.journal.pruning_boundary();
                 assert_eq!(queue.ack_floor(), pruning_boundary);
+                assert_eq!(pruning_boundary, expected_pruning_boundary);
 
                 // Items from pruning_boundary to 24 are re-delivered
                 for i in pruning_boundary..25 {

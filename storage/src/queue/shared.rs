@@ -108,7 +108,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain any pending notifications (stop if channel empty or closed)
+        // Drain any pending notifications to prevent unbounded channel growth
+        // if caller polls via try_recv without using recv.
         while self.notify.try_recv().is_ok() {}
 
         self.queue.lock().await.dequeue().await
@@ -218,11 +219,11 @@ pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
 /// Destroy a shared queue, removing all data from storage.
 ///
 /// Both writer and reader must be passed to ensure exclusive access.
+/// All writer clones must be dropped before calling this function.
 ///
 /// # Panics
 ///
-/// Panics if there are still outstanding references to the shared state
-/// (which shouldn't happen if both handles are passed).
+/// Panics if there are still outstanding writer clones (references to the shared state).
 pub async fn destroy<E: Clock + Storage + Metrics, V: CodecShared>(
     writer: QueueWriter<E, V>,
     reader: QueueReader<E, V>,

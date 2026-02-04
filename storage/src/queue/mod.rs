@@ -1,12 +1,11 @@
-//! A durable, at-least-once delivery queue backed by a journal.
+//! A durable, at-least-once delivery queue backed by a [`variable::Journal`](crate::journal::contiguous::variable).
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! Items are durably stored in a journal and will survive crashes. The reader must
 //! explicitly acknowledge each item after processing.
 //!
 //! On restart, the queue replays from the journal's pruning boundary. Items that were
-//! acknowledged but not yet pruned will be re-delivered. This provides simple, robust
-//! at-least-once delivery without complex metadata synchronization.
+//! acknowledged but not yet pruned will be re-delivered.
 //!
 //! # Concurrent Access
 //!
@@ -57,9 +56,6 @@
 //! items above the floor. When items are acked contiguously from the floor, the floor
 //! advances. Pruning happens during [`Persistable::sync`](crate::Persistable::sync) and
 //! removes complete sections below the ack floor.
-//!
-//! Note: The ack state is not persisted. On restart, items not yet pruned will be
-//! re-delivered regardless of prior acknowledgments.
 //!
 //! # Example
 //!
