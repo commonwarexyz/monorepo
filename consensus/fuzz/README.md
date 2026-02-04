@@ -36,6 +36,18 @@ This ensures protocol safety properties are maintained despite a byzantine node.
 
 ### Running Tests
 
+#### Property-Based Tests
+
+Run proptest-based tests that explore many seeds:
+```bash
+cargo test -p commonware-consensus-fuzz property_test
+```
+
+Reproduce a failure with a specific seed:
+```bash
+PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz property_test_ed25519 -- --nocapture
+```
+
 #### Continuous Fuzzing
 
 Run continuous fuzzing for a specific target:
@@ -59,9 +71,7 @@ Available fuzz targets (twin mode with mutating adversary):
 - `simplex_bls12381_threshold_minpk_twin`
 - `simplex_bls12381_threshold_minsig_twin`
 
-### Debugging
-
-Reproduce a fuzz failure with a specific seed:
+Reproduce a failure from a crash file:
 ```bash
-RUST_BACKTRACE=1 FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz fuzz_target -- --show-output
+cargo fuzz run simplex_ed25519 artifacts/simplex_ed25519/<crash_file>
 ```
