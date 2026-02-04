@@ -36,18 +36,6 @@ This ensures protocol safety properties are maintained despite a byzantine node.
 
 ### Running Tests
 
-#### Unit Tests
-
-Run deterministic tests with a fixed seed:
-```bash
-cargo test -p commonware-consensus-fuzz test_
-```
-
-Override the seed via environment variable:
-```bash
-FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz test_
-```
-
 #### Continuous Fuzzing
 
 Run continuous fuzzing for a specific target:
@@ -73,7 +61,7 @@ Available fuzz targets (twin mode with mutating adversary):
 
 ### Debugging
 
-For verbose output:
+Reproduce a fuzz failure with a specific seed:
 ```bash
-RUST_BACKTRACE=1 FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz test_name -- --show-output
+RUST_BACKTRACE=1 FUZZ_SEED=42 cargo test -p commonware-consensus-fuzz fuzz_target -- --show-output
 ```
