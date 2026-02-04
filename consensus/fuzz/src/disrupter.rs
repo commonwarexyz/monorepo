@@ -88,7 +88,7 @@ where
             .max(self.last_nullified_view)
     }
 
-    fn should_inject_fault(&self, view: u64) -> bool {
+    fn is_faulty_view(&self, view: u64) -> bool {
         let Some((faults, bound)) = self.strategy.fault_bounds() else {
             return true;
         };
@@ -273,7 +273,7 @@ where
             self.latest_proposals.push_back(notarize.proposal.clone());
         }
 
-        if !self.should_inject_fault(self.last_vote_view) {
+        if !self.is_faulty_view(self.last_vote_view) {
             return;
         }
 
@@ -352,7 +352,7 @@ where
             }
         };
 
-        if !self.should_inject_fault(view) {
+        if !self.is_faulty_view(view) {
             return;
         }
 
@@ -366,7 +366,7 @@ where
     }
 
     async fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
-        if !self.should_inject_fault(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) {
             return;
         }
         // Optionally send malformed resolver data
@@ -379,7 +379,7 @@ where
     }
 
     async fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
-        if !self.should_inject_fault(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) {
             return;
         }
         let Some(me) = self.scheme.me() else {
@@ -421,7 +421,7 @@ where
     }
 
     async fn send_proposal(&mut self, sender: &mut impl Sender) {
-        if !self.should_inject_fault(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) {
             return;
         }
         let proposal = self.get_proposal();
@@ -438,7 +438,7 @@ where
     }
 
     async fn send_random_message(&mut self, sender: &mut impl Sender) {
-        if !self.should_inject_fault(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) {
             return;
         }
         let cert = self.bytes();
@@ -454,7 +454,7 @@ where
         sender: &mut impl Sender<PublicKey = S::PublicKey>,
         recipients: Recipients<S::PublicKey>,
     ) {
-        if !self.should_inject_fault(self.current_view()) {
+        if !self.is_faulty_view(self.current_view()) {
             return;
         }
         let proposal = self.get_proposal();
