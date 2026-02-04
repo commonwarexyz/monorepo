@@ -18,8 +18,13 @@
 //! the composition of peer sets at specific, user-provided indices (`u64`). Each index maps to a
 //! list of peer `PublicKey`/`SocketAddr` pairs (`(u64, Vec<(PublicKey, SocketAddr)>)`).
 //!
-//! On startup, the application supplies the initial set of peers. The `Oracle` actor allows
-//! the application to update peer --> address mappings so that peers can find each other.
+//! On startup, the application supplies the initial set of peers. The [`Oracle`] provides two
+//! ways to update peer addresses:
+//!
+//! - [`Manager::update`](crate::Manager::update): Register a new peer set at a monotonically
+//!   increasing index. Use this when the peer set composition changes (peers added/removed).
+//! - [`Oracle::update_address`]: Update a single peer's address in-place without creating a new
+//!   peer set. Use this when only a peer's IP changes but the peer set composition stays the same.
 //!
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
 //! peer sets will be rejected.

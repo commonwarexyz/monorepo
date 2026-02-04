@@ -856,4 +856,35 @@ mod tests {
             assert!(!success);
         });
     }
+
+    #[test]
+    fn test_update_address_changes_acceptable_ip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pk_1 = new_signer_and_pk(1).1;
+            let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
+
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            oracle
+                .update(0, [(pk_1.clone(), addr_1.into())].try_into().unwrap())
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
+            assert!(!mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
+
+            let success = oracle.update_address(pk_1.clone(), addr_2.into()).await;
+            assert!(success);
+
+            assert!(!mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
+            assert!(mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
+        });
+    }
 }

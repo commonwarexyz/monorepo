@@ -256,8 +256,23 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
 impl<C: PublicKey> Oracle<C> {
     /// Update a peer's address without creating a new peer set.
     ///
-    /// Returns `true` if the peer is tracked and the address was updated,
-    /// `false` otherwise (peer not in any tracked peer set).
+    /// This is useful when a peer's IP changes but you don't want to create
+    /// an entirely new peer set (which would require a monotonically increasing index).
+    ///
+    /// On success, the listener's allowed IPs are automatically updated to reflect
+    /// the new address. Future incoming connections will be checked against the
+    /// new egress IP.
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the peer exists and is in at least one peer set (address updated)
+    /// - `false` if the peer doesn't exist or isn't in any peer set
+    ///
+    /// # Blocked Peers
+    ///
+    /// The address is updated even if the peer is currently blocked. However,
+    /// the peer's new egress IP won't appear in the listener's allowed IPs until
+    /// the block expires.
     pub async fn update_address(&mut self, peer: C, address: Address) -> bool {
         self.sender
             .0
