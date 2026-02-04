@@ -119,14 +119,16 @@ impl<'a, H: CHasher> Hasher<'a, H> {
             .collect::<Result<_, _>>()?;
 
         // Fetch all digests from MMR
-        let futures = leaf_positions
-            .iter()
-            .map(|&pos| self.destination_pos(pos))
-            .map(|pos| async move {
-                mmr.get_node(pos)
-                    .await?
-                    .ok_or(Error::MissingGraftedDigest(Location::try_from(pos)?))
-            });
+        let futures = leaf_positions.iter().map(|pos| {
+            let destination_pos = self.destination_pos(*pos);
+            async move {
+                mmr.get_node(destination_pos).await?.ok_or_else(|| {
+                    Error::MissingGraftedDigest(
+                        Location::try_from(*pos).expect("location validity checked above"),
+                    )
+                })
+            }
+        });
         let digests = try_join_all(futures).await?;
 
         // Insert all digests
