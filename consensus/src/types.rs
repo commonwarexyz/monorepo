@@ -872,8 +872,8 @@ commonware_macros::stability_scope!(ALPHA {
         fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
             let config = CodingConfig::arbitrary(u)?;
             let mut buf = [0u8; Self::SIZE];
-            buf[..64].copy_from_slice(u.bytes(64)?);
-            buf[64..].copy_from_slice(&config.encode());
+            buf[..96].copy_from_slice(u.bytes(96)?);
+            buf[96..].copy_from_slice(&config.encode());
             Ok(Self(buf))
         }
     }

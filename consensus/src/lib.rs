@@ -65,7 +65,7 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::{types::Round, marshal::ancestry::{AncestorStream, AncestryProvider}};
+    use crate::{types::Round, marshal::ancestry::{AncestorStream, BlockProvider}};
     use commonware_cryptography::{Digest, certificate::Scheme};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use commonware_runtime::{Clock, Metrics, Spawner};
@@ -226,7 +226,7 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].
-        fn propose<A: AncestryProvider<Block = Self::Block>>(
+        fn propose<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,
@@ -244,7 +244,7 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
-        fn verify<A: AncestryProvider<Block = Self::Block>>(
+        fn verify<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
             ancestry: AncestorStream<A, Self::Block>,

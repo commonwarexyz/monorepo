@@ -1,7 +1,7 @@
 use super::Variant;
 use crate::{
     marshal::{
-        ancestry::{AncestorStream, AncestryProvider},
+        ancestry::{AncestorStream, BlockProvider},
         Identifier,
     },
     simplex::types::{Activity, Finalization, Notarization},
@@ -311,7 +311,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 }
 
-impl<S: Scheme, V: Variant> AncestryProvider for Mailbox<S, V> {
+impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
 
     async fn fetch_block(mut self, digest: <V::Block as Digestible>::Digest) -> Self::Block {
