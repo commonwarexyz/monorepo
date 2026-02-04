@@ -140,8 +140,7 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// # Determinism Requirement
         ///
         /// The decision returned by `certify` must be deterministic and consistent across
-        /// all honest participants to ensure liveness. If honest participants disagree on
-        /// certification, the network may fail to reach the quorum needed for finalization.
+        /// all honest participants to ensure liveness.
         fn certify(
             &mut self,
             _round: Round,
