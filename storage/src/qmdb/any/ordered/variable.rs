@@ -196,7 +196,7 @@ pub mod partitioned {
                 write_buffer: cfg.log_write_buffer,
             };
 
-            let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
+            let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
                 context.with_label("log"),
                 mmr_config,
                 journal_config,
@@ -204,12 +204,18 @@ pub mod partitioned {
             )
             .await?;
 
-            if log.size() == 0 {
+            let log = if log.size() == 0 {
                 warn!("Authenticated log is empty, initializing new db");
-                log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                let mut dirty_log = log.into_dirty();
+                dirty_log
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
                     .await?;
+                let mut log = dirty_log.merkleize();
                 log.sync().await?;
-            }
+                log
+            } else {
+                log
+            };
 
             let index = Index::new(context.with_label("index"), cfg.translator);
             let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
