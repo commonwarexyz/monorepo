@@ -155,7 +155,9 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
         let mut journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            journal.append(Operation::Commit(None)).await?;
+            let mut dirty_journal = journal.into_dirty();
+            dirty_journal.append(Operation::Commit(None)).await?;
+            journal = dirty_journal.merkleize();
             journal.sync().await?;
         }
 

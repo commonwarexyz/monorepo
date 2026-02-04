@@ -132,10 +132,10 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    // Add only works on Clean MMR, so merkleize if Dirty first
+                    // Add only works on Dirty MMR, so make it dirty if clean
                     let mut mmr = match mmr {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
+                        MmrState::Clean(m) => m.into_dirty(),
+                        MmrState::Dirty(m) => m,
                     };
 
                     let size_before = mmr.size();
@@ -145,7 +145,7 @@ fn fuzz(input: FuzzInput) {
                     assert!(mmr.size() > size_before);
                     assert_eq!(mmr.last_leaf_pos(), Some(pos));
 
-                    MmrState::Clean(mmr)
+                    MmrState::Dirty(mmr)
                 }
 
                 MmrJournaledOperation::AddBatched { data } => {

@@ -157,7 +157,9 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let mmr_pos = mmr.add(&mut hasher, limited_data);
+                    let mut dirty_mmr = mmr.into_dirty();
+                    let mmr_pos = dirty_mmr.add(&mut hasher, limited_data);
+                    mmr = dirty_mmr.merkleize(&mut hasher, None);
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks

@@ -5,7 +5,7 @@ use commonware_runtime::{
     tokio::Config,
     ThreadPooler,
 };
-use commonware_storage::mmr::{mem::CleanMmr, Location, StandardHasher};
+use commonware_storage::mmr::{mem::DirtyMmr, Location, StandardHasher};
 use commonware_utils::NZUsize;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -49,8 +49,6 @@ fn bench_update(c: &mut Criterion) {
                     ),
                     |b| {
                         b.to_async(&runner).iter_custom(|_iters| async move {
-                            let mut hasher = StandardHasher::<Sha256>::new();
-                            let mut mmr = CleanMmr::new(&mut hasher);
                             let pool = match strategy {
                                 Strategy::BatchedParallel => {
                                     let ctx = context::get::<commonware_runtime::tokio::Context>();
@@ -65,6 +63,7 @@ fn bench_update(c: &mut Criterion) {
                             let mut h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
+                            let mut mmr = DirtyMmr::new();
                             for _ in 0..leaves {
                                 let digest = sha256::Digest::random(&mut sampler);
                                 elements.push(digest);
@@ -72,6 +71,7 @@ fn bench_update(c: &mut Criterion) {
                                 let loc = Location::try_from(pos).expect("leaf position");
                                 leaf_locations.push(loc);
                             }
+                            let mut mmr = mmr.merkleize(&mut h, None);
 
                             // Randomly update leaves -- this is what we are benchmarking.
                             let start = Instant::now();
@@ -88,8 +88,8 @@ fn bench_update(c: &mut Criterion) {
 
                             match strategy {
                                 Strategy::NoBatching => {
-                                    for (loc, element) in leaf_map {
-                                        mmr.update_leaf(&mut h, loc, &element).unwrap();
+                                    for (loc, element) in &leaf_map {
+                                        mmr.update_leaf(&mut h, *loc, element).unwrap();
                                     }
                                 }
                                 _ => {

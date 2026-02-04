@@ -179,16 +179,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
         }
     }
 
-    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
-    /// aren't persisted to disk until `sync` is called.
-    pub async fn add(
-        &mut self,
-        h: &mut impl Hasher<Digest = D>,
-        element: &[u8],
-    ) -> Result<Position, Error> {
-        Ok(self.mem_mmr.add(h, element))
-    }
-
     /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
     /// retained nodes respectively.
     pub fn bounds(&self) -> std::ops::Range<Position> {
@@ -345,7 +335,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             // Recover the orphaned leaf and any missing parents.
             let pos = s.mem_mmr.size();
             warn!(?pos, "recovering orphaned leaf");
-            s.mem_mmr.add_leaf_digest(hasher, leaf);
+            let mut dirty_mmr = s.mem_mmr.into_dirty();
+            dirty_mmr.add_leaf_digest(leaf);
+            s.mem_mmr = dirty_mmr.merkleize(hasher, None);
             assert_eq!(pos, journal_size);
             s.sync().await?;
             assert_eq!(s.size(), s.journal.bounds().end);
@@ -682,6 +674,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         }
     }
 
+    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
+    /// aren't persisted to disk until `sync` is called.
+    pub async fn add(
+        &mut self,
+        h: &mut impl Hasher<Digest = D>,
+        element: &[u8],
+    ) -> Result<Position, Error> {
+        Ok(self.mem_mmr.add(h, element))
+    }
+
     /// Pop elements while staying in Dirty state. No root recomputation occurs until merkleize.
     pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
         while leaves_to_pop > 0 {
@@ -875,7 +877,7 @@ mod tests {
             let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
 
-            let mut mmr = Mmr::init(context.with_label("second"), &mut hasher, test_config())
+            let mmr = Mmr::init(context.with_label("second"), &mut hasher, test_config())
                 .await
                 .unwrap();
             assert_eq!(mmr.size(), 0);
@@ -896,7 +898,9 @@ mod tests {
             ));
 
             // Confirm empty proof no longer verifies after adding an element.
+            let mut mmr = mmr.into_dirty();
             mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
+            let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root();
             assert!(!empty_proof.verify_range_inclusion(
                 &mut hasher,
@@ -921,10 +925,10 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
-                .unwrap();
-            let mut mmr = mmr.into_dirty();
+                .unwrap()
+                .into_dirty();
 
             let mut c_hasher = Sha256::new();
             for i in 0u64..NUM_ELEMENTS {
@@ -938,12 +942,13 @@ mod tests {
                 assert!(mmr.pop(1).await.is_ok());
                 let clean_mmr = mmr.merkleize(&mut hasher);
                 let root = clean_mmr.root();
-                let mut reference_mmr = mem::CleanMmr::new(&mut hasher);
+                let mut reference_mmr = mem::DirtyMmr::new();
                 for j in 0..i {
                     c_hasher.update(&j.to_be_bytes());
                     let element = c_hasher.finalize();
                     reference_mmr.add(&mut hasher, &element);
                 }
+                let reference_mmr = reference_mmr.merkleize(&mut hasher, None);
                 assert_eq!(
                     root,
                     *reference_mmr.root(),
@@ -966,6 +971,7 @@ mod tests {
                     mmr = clean_mmr.into_dirty();
                 }
             }
+
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
                 assert!(mmr.pop(2).await.is_ok(), "at position {i:?}");
                 let clean_mmr = mmr.merkleize(&mut hasher);
@@ -1024,19 +1030,21 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
+            let mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
                 .unwrap();
             // Build a test MMR with 255 leaves
             const LEAF_COUNT: usize = 255;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
+            let mut mmr = mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
                 let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
                 positions.push(pos);
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             assert_eq!(mmr.size(), Position::new(502));
             assert_eq!(mmr.journal_size, Position::new(0));
 
@@ -1087,7 +1095,8 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::init(context.with_label("first"), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             assert_eq!(mmr.size(), 0);
 
             // Build a test MMR with 252 leaves
@@ -1100,6 +1109,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
                 positions.push(pos);
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             assert_eq!(mmr.size(), 498);
             let root = mmr.root();
             mmr.sync().await.unwrap();
@@ -1147,7 +1157,7 @@ mod tests {
             // make sure pruning doesn't break root computation, adding of new nodes, etc.
             const LEAF_COUNT: usize = 2000;
             let cfg_pruned = test_config();
-            let mut pruned_mmr = Mmr::init(
+            let pruned_mmr = Mmr::init(
                 context.with_label("pruned"),
                 &mut hasher,
                 cfg_pruned.clone(),
@@ -1164,9 +1174,11 @@ mod tests {
             };
             let mut mmr = Mmr::init(context.with_label("unpruned"), &mut hasher, cfg_unpruned)
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
+            let mut pruned_mmr = pruned_mmr.into_dirty();
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
@@ -1175,6 +1187,8 @@ mod tests {
                 positions.push(pos);
                 pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
+            let mut pruned_mmr = pruned_mmr.merkleize(&mut hasher);
             assert_eq!(mmr.size(), 3994);
             assert_eq!(pruned_mmr.size(), 3994);
 
@@ -1191,9 +1205,13 @@ mod tests {
                 let digest = test_digest(LEAF_COUNT + i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let pos = pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                let mut dirty_pruned_mmr = pruned_mmr.into_dirty();
+                let pos = dirty_pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                pruned_mmr = dirty_pruned_mmr.merkleize(&mut hasher);
                 positions.push(pos);
-                mmr.add(&mut hasher, last_leaf).await.unwrap();
+                let mut dirty_mmr = mmr.into_dirty();
+                dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                mmr = dirty_mmr.merkleize(&mut hasher);
                 assert_eq!(pruned_mmr.root(), mmr.root());
             }
 
@@ -1223,13 +1241,17 @@ mod tests {
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
+            let mut mmr = mmr.into_dirty();
             mmr.add(&mut hasher, &test_digest(LEAF_COUNT))
                 .await
                 .unwrap();
-            pruned_mmr
+            let mmr = mmr.merkleize(&mut hasher);
+            let mut dirty_pruned = pruned_mmr.into_dirty();
+            dirty_pruned
                 .add(&mut hasher, &test_digest(LEAF_COUNT))
                 .await
                 .unwrap();
+            let mut pruned_mmr = dirty_pruned.merkleize(&mut hasher);
             assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
             pruned_mmr.sync().await.unwrap();
             drop(pruned_mmr);
@@ -1252,10 +1274,12 @@ mod tests {
             // Add nodes until we are on a blob boundary, and confirm prune_all still removes all
             // retained nodes.
             while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
-                pruned_mmr
+                let mut dirty_pruned_mmr = pruned_mmr.into_dirty();
+                dirty_pruned_mmr
                     .add(&mut hasher, &test_digest(LEAF_COUNT))
                     .await
                     .unwrap();
+                pruned_mmr = dirty_pruned_mmr.merkleize(&mut hasher);
             }
             pruned_mmr.prune_all().await.unwrap();
             assert!(pruned_mmr.bounds().is_empty());
@@ -1275,7 +1299,8 @@ mod tests {
             const LEAF_COUNT: usize = 2000;
             let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             let mut leaves = Vec::with_capacity(LEAF_COUNT);
             let mut positions = Vec::with_capacity(LEAF_COUNT);
             for i in 0..LEAF_COUNT {
@@ -1285,6 +1310,7 @@ mod tests {
                 let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
                 positions.push(pos);
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             assert_eq!(mmr.size(), 3994);
             mmr.sync().await.unwrap();
             drop(mmr);
@@ -1309,16 +1335,20 @@ mod tests {
                     let digest = test_digest(100 * (i + 1) + j);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
-                    let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    let mut dirty_mmr = mmr.into_dirty();
+                    let pos = dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
                     positions.push(pos);
-                    mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    mmr = dirty_mmr.merkleize(&mut hasher);
                     assert_eq!(mmr.root(), mmr.root());
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
-                    let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    let mut dirty_mmr = mmr.into_dirty();
+                    let pos = dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
                     positions.push(pos);
-                    mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    mmr = dirty_mmr.merkleize(&mut hasher);
                 }
                 let end_size = mmr.size();
                 let total_to_write = (*end_size - *start_size) as usize;
@@ -1343,13 +1373,15 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
             let mut elements = Vec::new();
             let mut positions = Vec::new();
             for i in 0..10 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
+            let mmr = mmr.merkleize(&mut hasher);
             let original_leaves = mmr.leaves();
 
             // Historical proof should match "regular" proof when historical size == current database size
@@ -1376,10 +1408,12 @@ mod tests {
             assert_eq!(regular_proof.digests, historical_proof.digests);
 
             // Add more elements to the MMR
+            let mut mmr = mmr.into_dirty();
             for i in 10..20 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
+            let mmr = mmr.merkleize(&mut hasher);
             let new_historical_proof = mmr
                 .historical_range_proof(
                     original_leaves,
@@ -1399,24 +1433,26 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(context.with_label("main"), &mut hasher, test_config())
+            let mmr = Mmr::init(context.with_label("main"), &mut hasher, test_config())
                 .await
                 .unwrap();
 
             // Add many elements
             let mut elements = Vec::new();
             let mut positions = Vec::new();
+            let mut mmr = mmr.into_dirty();
             for i in 0..50 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
 
             // Prune to position 30
             let prune_pos = Position::new(30);
             mmr.prune_to_pos(prune_pos).await.unwrap();
 
             // Create reference MMR for verification to get correct size
-            let mut ref_mmr = Mmr::init(
+            let ref_mmr = Mmr::init(
                 context.with_label("ref"),
                 &mut hasher,
                 Config {
@@ -1431,9 +1467,11 @@ mod tests {
             .await
             .unwrap();
 
+            let mut ref_mmr = ref_mmr.into_dirty();
             for elt in elements.iter().take(41) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
+            let ref_mmr = ref_mmr.merkleize(&mut hasher);
             let historical_leaves = ref_mmr.leaves();
             let historical_root = ref_mmr.root();
 
@@ -1467,7 +1505,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
 
-            let mut mmr = Mmr::init(
+            let mmr = Mmr::init(
                 context.with_label("server"),
                 &mut hasher,
                 Config {
@@ -1484,15 +1522,17 @@ mod tests {
 
             let mut elements = Vec::new();
             let mut positions = Vec::new();
+            let mut mmr = mmr.into_dirty();
             for i in 0..100 {
                 elements.push(test_digest(i));
                 positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
             }
+            let mmr = mmr.merkleize(&mut hasher);
 
             let range = Location::new_unchecked(30)..Location::new_unchecked(61);
 
             // Only apply elements up to end_loc to the reference MMR.
-            let mut ref_mmr = Mmr::init(
+            let ref_mmr = Mmr::init(
                 context.with_label("client"),
                 &mut hasher,
                 Config {
@@ -1508,9 +1548,11 @@ mod tests {
             .unwrap();
 
             // Add elements up to the end of the range to verify historical root
+            let mut ref_mmr = ref_mmr.into_dirty();
             for elt in elements.iter().take(*range.end as usize) {
                 ref_mmr.add(&mut hasher, elt).await.unwrap();
             }
+            let ref_mmr = ref_mmr.merkleize(&mut hasher);
             let historical_leaves = ref_mmr.leaves();
             let expected_root = ref_mmr.root();
 
@@ -1539,10 +1581,12 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
 
             let element = test_digest(0);
             mmr.add(&mut hasher, &element).await.unwrap();
+            let mmr = mmr.merkleize(&mut hasher);
 
             // Test single element proof at historical position
             let single_proof = mmr
@@ -1590,9 +1634,10 @@ mod tests {
             assert!(bounds.is_empty());
 
             // Should be able to add new elements
-            let mut sync_mmr = sync_mmr;
             let new_element = test_digest(999);
+            let mut sync_mmr = sync_mmr.into_dirty();
             sync_mmr.add(&mut hasher, &new_element).await.unwrap();
+            let sync_mmr = sync_mmr.merkleize(&mut hasher);
 
             // Root should be computable
             let _root = sync_mmr.root();
@@ -1609,12 +1654,14 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Create initial MMR with elements.
-            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+            let mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
                 .unwrap();
+            let mut mmr = mmr.into_dirty();
             for i in 0..50 {
                 mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
             let original_size = mmr.size();
             let original_leaves = mmr.leaves();
@@ -1670,12 +1717,14 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Create initial MMR with elements.
-            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+            let mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
                 .unwrap();
+            let mut mmr = mmr.into_dirty();
             for i in 0..30 {
                 mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
             mmr.prune_to_pos(Position::new(10)).await.unwrap();
 
@@ -1736,14 +1785,16 @@ mod tests {
             let mut hasher = Standard::<Sha256>::new();
 
             // Create an MMR with some data and prune it
-            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
+            let mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
                 .unwrap();
 
             // Add 50 elements
+            let mut mmr = mmr.into_dirty();
             for i in 0..50 {
                 mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
 
             // Prune to position 20 (this stores pinned nodes in metadata for position 20)
@@ -1798,12 +1849,14 @@ mod tests {
             // Create an MMR with some data
             let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, test_config())
                 .await
-                .unwrap();
+                .unwrap()
+                .into_dirty();
 
             // Add 50 elements
             for i in 0..50 {
                 mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
 
             // Prune to position 30 (this stores pinned nodes and updates metadata)
@@ -1850,12 +1903,14 @@ mod tests {
             };
 
             // Create MMR with enough elements to span multiple sections.
-            let mut mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
+            let mmr = Mmr::init(context.with_label("init"), &mut hasher, cfg.clone())
                 .await
                 .unwrap();
+            let mut mmr = mmr.into_dirty();
             for i in 0..100 {
                 mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
             }
+            let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
 
             // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
