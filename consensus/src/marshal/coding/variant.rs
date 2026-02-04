@@ -82,7 +82,7 @@ where
         self.finalized(commitment).await;
     }
 
-    async fn broadcast(&mut self, block: CodedBlock<B, C>, recipients: Vec<P>) {
+    async fn proposed(&mut self, block: CodedBlock<B, C>, recipients: Vec<P>) {
         self.proposed(block, recipients).await;
     }
 }

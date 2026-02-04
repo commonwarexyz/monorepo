@@ -45,12 +45,10 @@ where
     type CachedBlock = B;
 
     async fn find_by_digest(&mut self, digest: B::Digest) -> Option<Self::CachedBlock> {
-        // Try to get the block from the buffer
         self.get(None, digest, None).await.into_iter().next()
     }
 
     async fn find_by_commitment(&mut self, commitment: B::Digest) -> Option<Self::CachedBlock> {
-        // In standard mode, commitment = digest
         self.find_by_digest(commitment).await
     }
 
@@ -67,7 +65,6 @@ where
         &mut self,
         commitment: B::Digest,
     ) -> oneshot::Receiver<Self::CachedBlock> {
-        // In standard mode, commitment = digest
         self.subscribe_by_digest(commitment).await
     }
 
@@ -75,8 +72,7 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn broadcast(&mut self, block: B, _recipients: ()) {
-        // Broadcast the block to all peers
+    async fn proposed(&mut self, block: B, _recipients: ()) {
         let _peers = Broadcaster::broadcast(self, Recipients::All, block).await;
     }
 }
