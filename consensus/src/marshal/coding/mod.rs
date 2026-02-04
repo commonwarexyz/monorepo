@@ -445,10 +445,17 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_commitment), // Parent IS the boundary block
             };
 
-            // Call verify to kick off deferred verification
-            let _shard_validity = marshaled
+            // Call verify to kick off deferred verification.
+            // We must await the verify result to ensure the verification task is
+            // registered before calling certify.
+            let shard_validity = marshaled
                 .verify(reproposal_context.clone(), boundary_commitment)
+                .await
                 .await;
+            assert!(
+                shard_validity.unwrap(),
+                "Re-proposal verify should return true for shard validity"
+            );
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
@@ -496,10 +503,17 @@ mod tests {
                 parent: (View::new(10), non_boundary_commitment),
             };
 
-            // Call verify to kick off deferred verification
-            let _shard_validity = marshaled
+            // Call verify to kick off deferred verification.
+            // We must await the verify result to ensure the verification task is
+            // registered before calling certify.
+            let shard_validity = marshaled
                 .verify(invalid_reproposal_context, non_boundary_commitment)
+                .await
                 .await;
+            assert!(
+                !shard_validity.unwrap(),
+                "Invalid re-proposal verify should return false"
+            );
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
@@ -520,10 +534,17 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_commitment),
             };
 
-            // Call verify to kick off deferred verification
-            let _shard_validity = marshaled
+            // Call verify to kick off deferred verification.
+            // We must await the verify result to ensure the verification task is
+            // registered before calling certify.
+            let shard_validity = marshaled
                 .verify(cross_epoch_reproposal_context.clone(), boundary_commitment)
+                .await
                 .await;
+            assert!(
+                !shard_validity.unwrap(),
+                "Cross-epoch re-proposal verify should return false"
+            );
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
