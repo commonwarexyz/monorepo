@@ -818,6 +818,29 @@ impl IoBufsMut {
         self.coalesce_with(|len| pool.alloc(len))
     }
 
+    /// Coalesce all buffers into a single contiguous `IoBufMut` with extra
+    /// capacity, using the pool for allocation.
+    ///
+    /// Zero-copy if single buffer with sufficient spare capacity.
+    pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
+        match self {
+            Self::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
+            Self::Single(buf) => {
+                let mut result = pool.alloc(buf.len() + extra);
+                result.put_slice(buf.as_ref());
+                result
+            }
+            Self::Chunked(bufs) => {
+                let total: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
+                let mut result = pool.alloc(total + extra);
+                for buf in bufs {
+                    result.put_slice(buf.as_ref());
+                }
+                result
+            }
+        }
+    }
+
     /// Copy data from a slice into the buffers.
     ///
     /// Panics if the slice length doesn't match the total buffer length.
@@ -966,6 +989,24 @@ impl From<Vec<IoBufMut>> for IoBufsMut {
 impl<const N: usize> From<[u8; N]> for IoBufsMut {
     fn from(array: [u8; N]) -> Self {
         Self::Single(IoBufMut::from(array))
+    }
+}
+
+impl From<&[u8]> for IoBufsMut {
+    fn from(slice: &[u8]) -> Self {
+        Self::Single(IoBufMut::from(slice))
+    }
+}
+
+impl From<Bytes> for IoBufsMut {
+    fn from(bytes: Bytes) -> Self {
+        Self::Single(IoBufMut::from(bytes))
+    }
+}
+
+impl From<IoBuf> for IoBufsMut {
+    fn from(buf: IoBuf) -> Self {
+        Self::Single(IoBufMut::from(buf))
     }
 }
 

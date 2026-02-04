@@ -67,7 +67,8 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    Buf, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, Sink, Stream,
+    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, IoBufsMut, Sink,
+    Stream,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
@@ -302,28 +303,19 @@ pub struct Sender<O> {
 
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
-    ///
-    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
-    /// and sends the ciphertext.
-    pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
-        let mut bufs = buf.into();
-        let ciphertext_len = bufs.remaining() + TAG_SIZE as usize;
-
-        // Allocate buffer from pool for ciphertext (plaintext + tag).
-        let mut encryption_buf = self.pool.alloc(ciphertext_len);
-
-        // Copy plaintext into buffer.
-        encryption_buf.put(&mut bufs);
+    pub async fn send(&mut self, buf: impl Into<IoBufsMut>) -> Result<(), Error> {
+        // Coalesce to get contiguous buffer for in-place encryption.
+        let mut buf = buf.into().coalesce_with_pool_extra(&self.pool, TAG_SIZE as usize);
 
         // Encrypt in-place, get tag back.
-        let tag = self.cipher.send_in_place(encryption_buf.as_mut())?;
+        let tag = self.cipher.send_in_place(buf.as_mut())?;
 
         // Append tag to buffer.
-        encryption_buf.put_slice(&tag);
+        buf.put_slice(&tag);
 
         send_frame(
             &mut self.sink,
-            encryption_buf.freeze(),
+            buf.freeze(),
             self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;

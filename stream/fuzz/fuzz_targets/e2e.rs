@@ -264,7 +264,7 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send(Vec::new()).await.unwrap();
+                    sender.send(Vec::<u8>::new()).await.unwrap();
                     let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
                     send_frame(a_out, data, MAX_MESSAGE_SIZE).await.unwrap();
                     let res = receiver.recv().await;
