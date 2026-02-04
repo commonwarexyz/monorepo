@@ -187,6 +187,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 
 fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
+    max_participants: usize,
 ) -> Option<usize> {
     if !S::is_attributable() {
         return None;
@@ -194,12 +195,15 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
 
     let encoded = certificate.encode();
     let mut cursor = encoded.as_ref();
-    let signers =
-        Signers::read_cfg(&mut cursor, &usize::MAX).expect("certificate signers must decode");
+    let signers = Signers::read_cfg(&mut cursor, &max_participants)
+        .expect("certificate signers must decode");
     Some(signers.count())
 }
 
-pub fn extract<E, S, L>(reporters: Vec<Reporter<E, S, L, Sha256Digest>>) -> Vec<ReplicaState>
+pub fn extract<E, S, L>(
+    reporters: Vec<Reporter<E, S, L, Sha256Digest>>,
+    max_participants: usize,
+) -> Vec<ReplicaState>
 where
     E: CryptoRngCore,
     S: Scheme<Sha256Digest>,
@@ -216,7 +220,10 @@ where
                         view.get(),
                         Notarization {
                             payload: cert.proposal.payload,
-                            signature_count: get_signature_count::<S>(&cert.certificate),
+                            signature_count: get_signature_count::<S>(
+                                &cert.certificate,
+                                max_participants,
+                            ),
                         },
                     )
                 })
@@ -229,7 +236,10 @@ where
                     (
                         view.get(),
                         Nullification {
-                            signature_count: get_signature_count::<S>(&cert.certificate),
+                            signature_count: get_signature_count::<S>(
+                                &cert.certificate,
+                                max_participants,
+                            ),
                         },
                     )
                 })
@@ -243,7 +253,10 @@ where
                         view.get(),
                         Finalization {
                             payload: cert.proposal.payload,
-                            signature_count: get_signature_count::<S>(&cert.certificate),
+                            signature_count: get_signature_count::<S>(
+                                &cert.certificate,
+                                max_participants,
+                            ),
                         },
                     )
                 })

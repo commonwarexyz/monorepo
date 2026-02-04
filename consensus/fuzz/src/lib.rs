@@ -444,7 +444,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters);
+        let states = invariants::extract(reporters, config.n as usize);
         invariants::check::<P>(config.n, states);
     });
 }
@@ -663,7 +663,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters);
+        let states = invariants::extract(reporters, config.n as usize);
         invariants::check::<P>(config.n, states);
     });
 }
