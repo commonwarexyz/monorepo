@@ -124,7 +124,7 @@ The repository uses GitHub Actions with three main workflows: **Fast** (every pu
 Run these commands locally before pushing to avoid CI failures:
 
 ```bash
-# 1. Format and lint (REQUIRED)
+# 1. Format, lint, check stability (REQUIRED)
 just lint
 
 # 2. Run tests (REQUIRED)
@@ -142,9 +142,6 @@ cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 
 # 6. Unsafe code (if adding unsafe blocks)
 just miri <module>::
-
-# 7. Stability coverage (if adding public API)
-just check-stability
 ```
 
 _Always use `just` commands for testing (uses `nextest` for parallel execution)._
