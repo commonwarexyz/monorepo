@@ -1,7 +1,6 @@
 //! Utilities for random number generation.
 
 use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
-use std::hash::{Hash, Hasher as _};
 
 /// Returns a seeded RNG for deterministic testing.
 ///
@@ -16,6 +15,22 @@ pub fn test_rng() -> StdRng {
 /// or when a helper function needs its own RNG that won't collide with the caller's.
 pub fn test_rng_seeded(seed: u64) -> StdRng {
     StdRng::seed_from_u64(seed)
+}
+
+/// FNV-1a hash for deterministic seed generation.
+///
+/// Uses FNV-1a instead of `DefaultHasher` because `DefaultHasher` is not
+/// guaranteed to be stable across Rust versions.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// An RNG that reads from a byte buffer, falling back to a seeded RNG when exhausted.
@@ -36,9 +51,7 @@ impl BytesRng {
     /// All bytes are consumed sequentially as output. When exhausted, a fallback
     /// RNG (seeded from a hash of the entire buffer) provides additional randomness.
     pub fn new(bytes: Vec<u8>) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        let fallback = StdRng::seed_from_u64(hasher.finish());
+        let fallback = StdRng::seed_from_u64(fnv1a_hash(&bytes));
         Self {
             bytes,
             offset: 0,
@@ -212,5 +225,33 @@ mod tests {
             v,
             u64::from_be_bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
         );
+    }
+
+    mod conformance {
+        use super::*;
+        use commonware_conformance::Conformance;
+
+        /// Conformance wrapper for BytesRng that tests output stability.
+        ///
+        /// This ensures that the FNV-1a hash and fallback RNG behavior
+        /// remain stable across versions.
+        struct BytesRngConformance;
+
+        impl Conformance for BytesRngConformance {
+            async fn commit(seed: u64) -> Vec<u8> {
+                let mut rng = BytesRng::new(seed.to_be_bytes().to_vec());
+
+                // Generate enough output to exercise both raw bytes and fallback
+                let mut output = Vec::with_capacity(64);
+                for _ in 0..8 {
+                    output.extend_from_slice(&rng.next_u64().to_be_bytes());
+                }
+                output
+            }
+        }
+
+        commonware_conformance::conformance_tests! {
+            BytesRngConformance => 1024,
+        }
     }
 }
