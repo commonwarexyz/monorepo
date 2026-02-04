@@ -5,6 +5,9 @@ use std::vec::Vec;
 use zeroize::Zeroizing;
 
 /// Size of the ChaCha20-Poly1305 authentication tag.
+///
+/// This tag is the overhead added to each ciphertext and must be transmitted
+/// alongside it for the receiver to verify integrity and authenticity.
 pub const TAG_SIZE: usize = 16;
 
 /// How many bytes are in a nonce.
@@ -144,6 +147,7 @@ impl SendCipher {
     /// Encrypts `data` in-place and returns the authentication tag.
     ///
     /// The caller is responsible for appending the returned tag to the buffer.
+    #[inline]
     pub fn send_in_place(&mut self, data: &mut [u8]) -> Result<[u8; TAG_SIZE], Error> {
         let nonce = self.nonce.inc()?;
         self.inner
@@ -194,6 +198,7 @@ impl RecvCipher {
     /// valid ciphertexts, and will always return an error on subsequent calls
     /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
     /// is a simple (and safe) way to handle this scenario.
+    #[inline]
     pub fn recv_in_place(&mut self, encrypted_data: &mut [u8]) -> Result<usize, Error> {
         if encrypted_data.len() < TAG_SIZE {
             return Err(Error::DecryptionFailed);
