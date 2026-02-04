@@ -18,7 +18,7 @@ impl BytesRng {
     /// Creates a new `BytesRng` from a byte buffer.
     ///
     /// The fallback RNG is seeded from the last 8 bytes of the buffer (or fewer
-    /// if the buffer is shorter than 8 bytes, zero-padded on the left).
+    /// if the buffer is shorter than 8 bytes, zero-padded on the right).
     pub fn new(bytes: Vec<u8>) -> Self {
         let mut seed = [0u8; 8];
         let start = bytes.len().saturating_sub(8);
@@ -57,13 +57,11 @@ impl RngCore for BytesRng {
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for byte in dest.iter_mut() {
-            if self.offset < self.bytes.len() {
-                *byte = self.bytes[self.offset];
-                self.offset += 1;
-            } else {
-                *byte = self.fallback.next_u32() as u8;
-            }
+        let from_buffer = dest.len().min(self.bytes.len().saturating_sub(self.offset));
+        dest[..from_buffer].copy_from_slice(&self.bytes[self.offset..self.offset + from_buffer]);
+        self.offset += from_buffer;
+        if from_buffer < dest.len() {
+            self.fallback.fill_bytes(&mut dest[from_buffer..]);
         }
     }
 
