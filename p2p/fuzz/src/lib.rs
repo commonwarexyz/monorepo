@@ -6,7 +6,7 @@ use commonware_p2p::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Address, Blocker, Channel, Manager, Receiver, Recipients, Sender,
+    Address, AddressableManager, Blocker, Channel, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     deterministic::{self, Context},

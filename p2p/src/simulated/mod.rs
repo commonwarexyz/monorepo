@@ -186,7 +186,10 @@ pub use network::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Address, Ingress, Manager, Receiver, Recipients, Sender};
+    use crate::{
+        Address, AddressableManager, Ingress, Manager, PeerSetProvider, Receiver, Recipients,
+        Sender,
+    };
     use commonware_cryptography::{
         ed25519::{self, PrivateKey, PublicKey},
         Signer as _,

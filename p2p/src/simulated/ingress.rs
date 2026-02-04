@@ -286,13 +286,8 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
+impl<P: PublicKey, E: Clock> crate::PeerSetProvider for Manager<P, E> {
     type PublicKey = P;
-    type Peers = Set<Self::PublicKey>;
-
-    async fn update(&mut self, id: u64, peers: Self::Peers) {
-        self.oracle.update(id, peers).await;
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.oracle.peer_set(id).await
@@ -305,7 +300,13 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers with [Address]es.
+impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
+    async fn update(&mut self, id: u64, peers: Set<Self::PublicKey>) {
+        self.oracle.update(id, peers).await;
+    }
+}
+
+/// Implementation of [crate::AddressableManager] for peers with [Address]es.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 ///
@@ -313,7 +314,8 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
 ///
 /// Because addresses are never exposed in [crate::simulated],
 /// there is nothing to assert submitted data against. We thus consider
-/// all addresses to be valid.
+/// all addresses to be valid, and `update_address` always succeeds for
+/// tracked peers.
 pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,
@@ -333,14 +335,8 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
+impl<P: PublicKey, E: Clock> crate::PeerSetProvider for SocketManager<P, E> {
     type PublicKey = P;
-    type Peers = Map<Self::PublicKey, Address>;
-
-    async fn update(&mut self, id: u64, peers: Self::Peers) {
-        // Ignore all addresses (simulated network doesn't use them)
-        self.oracle.update(id, peers.into_keys()).await;
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.oracle.peer_set(id).await
@@ -350,6 +346,19 @@ impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
         self.oracle.subscribe().await
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
+    async fn update(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
+        // Ignore all addresses (simulated network doesn't use them)
+        self.oracle.update(id, peers.into_keys()).await;
+    }
+
+    async fn update_address(&mut self, _peer: Self::PublicKey, _address: Address) -> bool {
+        // No-op for simulated network (addresses aren't used)
+        // Always return true to match real network behavior for tracked peers
+        true
     }
 }
 

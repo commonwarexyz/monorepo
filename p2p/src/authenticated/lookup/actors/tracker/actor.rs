@@ -260,7 +260,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authenticated::lookup::actors::peer, Blocker, Ingress, Manager};
+    use crate::{authenticated::lookup::actors::peer, AddressableManager, Blocker, Ingress};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,

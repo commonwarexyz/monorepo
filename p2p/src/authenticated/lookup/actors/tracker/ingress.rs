@@ -204,21 +204,8 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::Manager for Oracle<C> {
+impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
     type PublicKey = C;
-    type Peers = Map<C, Address>;
-
-    /// Register a set of authorized peers at a given index.
-    ///
-    /// # Parameters
-    ///
-    /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Should be monotonically increasing.
-    /// * `peers` - Vector of authorized peers at an `index`.
-    ///   Each element contains the public key and address specification of the peer.
-    async fn update(&mut self, index: u64, peers: Self::Peers) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.sender
@@ -245,36 +232,12 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::Blocker for Oracle<C> {
-    type PublicKey = C;
-
-    async fn block(&mut self, public_key: Self::PublicKey) {
-        self.sender.0.send_lossy(Message::Block { public_key });
+impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
+    async fn update(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
+        self.sender.0.send_lossy(Message::Register { index, peers });
     }
-}
 
-impl<C: PublicKey> Oracle<C> {
-    /// Update a peer's address without creating a new peer set.
-    ///
-    /// This is useful when a peer's IP changes but you don't want to create
-    /// an entirely new peer set (which would require a monotonically increasing index).
-    ///
-    /// On success:
-    /// - Any existing connection to the peer is severed (it was on the old IP)
-    /// - The listener's allowed IPs are updated to reflect the new egress IP
-    /// - Future connections will use the new address
-    ///
-    /// # Returns
-    ///
-    /// - `true` if the peer exists and is in at least one peer set (address updated)
-    /// - `false` if the peer doesn't exist or isn't in any peer set
-    ///
-    /// # Blocked Peers
-    ///
-    /// The address is updated even if the peer is currently blocked. However,
-    /// the peer's new egress IP won't appear in the listener's allowed IPs until
-    /// the block expires.
-    pub async fn update_address(&mut self, peer: C, address: Address) -> bool {
+    async fn update_address(&mut self, peer: Self::PublicKey, address: Address) -> bool {
         self.sender
             .0
             .request(|responder| Message::UpdateAddress {
@@ -284,5 +247,13 @@ impl<C: PublicKey> Oracle<C> {
             })
             .await
             .unwrap_or(false)
+    }
+}
+
+impl<C: PublicKey> crate::Blocker for Oracle<C> {
+    type PublicKey = C;
+
+    async fn block(&mut self, public_key: Self::PublicKey) {
+        self.sender.0.send_lossy(Message::Block { public_key });
     }
 }

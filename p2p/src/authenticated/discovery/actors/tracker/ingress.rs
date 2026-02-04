@@ -251,24 +251,8 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::Manager for Oracle<C> {
+impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
     type PublicKey = C;
-    type Peers = Set<C>;
-
-    /// Register a set of authorized peers at a given index.
-    ///
-    /// These peer sets are used to construct a bit vector (sorted by public key)
-    /// to share knowledge about dialable IPs. If a peer does not yet have an index
-    /// associated with a bit vector, the discovery message will be dropped.
-    ///
-    /// # Parameters
-    ///
-    /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    ///   Must be monotonically increasing, per the rules of [Set].
-    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
-    async fn update(&mut self, index: u64, peers: Self::Peers) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.sender
@@ -292,6 +276,12 @@ impl<C: PublicKey> crate::Manager for Oracle<C> {
                 let (_, rx) = mpsc::unbounded_channel();
                 rx
             })
+    }
+}
+
+impl<C: PublicKey> crate::Manager for Oracle<C> {
+    async fn update(&mut self, index: u64, peers: Set<Self::PublicKey>) {
+        self.sender.0.send_lossy(Message::Register { index, peers });
     }
 }
 

@@ -1,6 +1,6 @@
 //! Utility functions for exchanging messages with many peers.
 
-use crate::Manager;
+use crate::{Manager, PeerSetProvider};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
@@ -34,13 +34,8 @@ impl<P: PublicKey> StaticManager<P> {
     }
 }
 
-impl<P: PublicKey> Manager for StaticManager<P> {
+impl<P: PublicKey> PeerSetProvider for StaticManager<P> {
     type PublicKey = P;
-    type Peers = Set<P>;
-
-    async fn update(&mut self, _: u64, _: Set<P>) {
-        panic!("updates are not supported");
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<P>> {
         assert_eq!(id, self.id);
@@ -52,5 +47,11 @@ impl<P: PublicKey> Manager for StaticManager<P> {
         sender.send_lossy((self.id, self.peers.clone(), self.peers.clone()));
         self.senders.push(sender); // prevent the receiver from closing
         receiver
+    }
+}
+
+impl<P: PublicKey> Manager for StaticManager<P> {
+    async fn update(&mut self, _: u64, _: Set<P>) {
+        panic!("updates are not supported");
     }
 }

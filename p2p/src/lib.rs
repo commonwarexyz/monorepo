@@ -16,7 +16,7 @@ stability_mod!(ALPHA, pub mod simulated);
 stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufMut};
-    use commonware_utils::{channel::mpsc, ordered::Set};
+    use commonware_utils::{channel::mpsc, ordered::{Map, Set}};
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
     pub mod authenticated;
@@ -214,19 +214,14 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
-    /// Interface for registering new peer sets as well as fetching an ordered list of connected peers, given a set id.
-    pub trait Manager: Debug + Clone + Send + 'static {
+    /// Base trait for reading peer set information.
+    ///
+    /// This trait provides read-only access to peer sets and is implemented by all
+    /// network oracle types. Components that only need to track peer membership
+    /// (without updating it) should accept `impl PeerSetProvider`.
+    pub trait PeerSetProvider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
-
-        /// The type for the peer set in registration.
-        type Peers;
-
-        /// Update the peer set.
-        ///
-        /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
-        fn update(&mut self, id: u64, peers: Self::Peers) -> impl Future<Output = ()> + Send;
 
         /// Fetch the ordered set of peers for a given ID.
         fn peer_set(
@@ -236,14 +231,67 @@ stability_scope!(BETA {
 
         /// Subscribe to notifications when new peer sets are added.
         ///
-        /// Returns a receiver that will receive the peer set ID whenever a new peer set
-        /// is registered via `update`.
+        /// Returns a receiver that will receive tuples of:
+        /// - The peer set ID
+        /// - The peers in the new set
+        /// - All currently tracked peers (union of recent peer sets)
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,
         ) -> impl Future<
             Output = mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)>,
         > + Send;
+    }
+
+    /// Interface for networks where peers discover each other dynamically.
+    ///
+    /// This trait is implemented by [`authenticated::discovery::Oracle`] and
+    /// [`simulated::Manager`]. Use this when peer addresses are discovered via
+    /// gossip rather than provided by the application.
+    pub trait Manager: PeerSetProvider {
+        /// Update the peer set membership.
+        ///
+        /// The peer set ID should be strictly managed, ideally matching the epoch
+        /// of the consensus engine. It must be monotonically increasing.
+        fn update(
+            &mut self,
+            id: u64,
+            peers: Set<Self::PublicKey>,
+        ) -> impl Future<Output = ()> + Send;
+    }
+
+    /// Interface for networks where peer addresses are provided by the application.
+    ///
+    /// This trait is implemented by [`authenticated::lookup::Oracle`] and
+    /// [`simulated::SocketManager`]. Use this when the application knows peer
+    /// addresses upfront (e.g., from a staking registry).
+    pub trait AddressableManager: PeerSetProvider {
+        /// Register a peer set with addresses.
+        ///
+        /// The peer set ID should be strictly managed, ideally matching the epoch
+        /// of the consensus engine. It must be monotonically increasing.
+        ///
+        /// The addresses are used for dialing peers and validating incoming connections.
+        fn update(
+            &mut self,
+            id: u64,
+            peers: Map<Self::PublicKey, Address>,
+        ) -> impl Future<Output = ()> + Send;
+
+        /// Update a peer's address without creating a new peer set.
+        ///
+        /// On success:
+        /// - Any existing connection to the peer is severed (it was on the old IP)
+        /// - The listener's allowed IPs are updated to reflect the new egress IP
+        /// - Future connections will use the new address
+        ///
+        /// Returns `true` if the peer exists and is in at least one peer set,
+        /// `false` otherwise.
+        fn update_address(
+            &mut self,
+            peer: Self::PublicKey,
+            address: Address,
+        ) -> impl Future<Output = bool> + Send;
     }
 
     /// Interface for blocking other peers.
