@@ -268,7 +268,7 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > CleanAny for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+    > CleanAny for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 {
     type Mutable = fixed::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
 
@@ -291,7 +291,7 @@ impl<
     type Digest = H::Digest;
     type Operation = FixedOperation<K, V>;
     type Mutable = fixed::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
-    type Merkleized = fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>;
+    type Merkleized = fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -311,7 +311,7 @@ impl<
         const P: usize,
         const N: usize,
     > MerkleizedNonDurableAny
-    for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>
+    for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, NonDurable>
 {
     type Mutable = fixed::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
 
@@ -333,7 +333,8 @@ impl<
     type Digest = H::Digest;
     type Operation = FixedOperation<K, V>;
     type Durable = fixed::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>;
-    type Merkleized = fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>;
+    type Merkleized =
+        fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, NonDurable>;
 
     async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
         self.commit(metadata).await
@@ -356,7 +357,8 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > BitmapPrunedBits for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+    > BitmapPrunedBits
+    for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -367,7 +369,7 @@ impl<
     }
 
     fn oldest_retained(&self) -> u64 {
-        *self.oldest_retained_loc()
+        *self.any.log.bounds().start
     }
 }
 
@@ -383,7 +385,7 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > CleanAny for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+    > CleanAny for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 where
     VariableOperation<K, V>: Read,
 {
@@ -410,7 +412,8 @@ where
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
     type Mutable = variable::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, NonDurable>;
-    type Merkleized = variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>;
+    type Merkleized =
+        variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>;
 
     fn into_mutable(self) -> Self::Mutable {
         self.into_mutable()
@@ -430,7 +433,7 @@ impl<
         const P: usize,
         const N: usize,
     > MerkleizedNonDurableAny
-    for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>
+    for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, NonDurable>
 where
     VariableOperation<K, V>: Read,
 {
@@ -456,7 +459,8 @@ where
     type Digest = H::Digest;
     type Operation = VariableOperation<K, V>;
     type Durable = variable::partitioned::Db<E, K, V, H, T, P, N, Unmerkleized, Durable>;
-    type Merkleized = variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, NonDurable>;
+    type Merkleized =
+        variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, NonDurable>;
 
     async fn commit(self, metadata: Option<V>) -> Result<(Self::Durable, Range<Location>), Error> {
         self.commit(metadata).await
@@ -479,7 +483,8 @@ impl<
         T: Translator,
         const P: usize,
         const N: usize,
-    > BitmapPrunedBits for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<H>, Durable>
+    > BitmapPrunedBits
+    for variable::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 where
     VariableOperation<K, V>: Read,
 {
@@ -492,6 +497,6 @@ where
     }
 
     fn oldest_retained(&self) -> u64 {
-        *self.oldest_retained_loc()
+        *self.any.log.bounds().start
     }
 }

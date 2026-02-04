@@ -1068,7 +1068,7 @@ mod test {
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.size(), 1);
         assert!(db.get_metadata().await.unwrap().is_none());
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -1081,7 +1081,7 @@ mod test {
         db.update(d1, d2).await.unwrap();
         let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.root(), root);
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.size(), 1);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
@@ -1090,14 +1090,14 @@ mod test {
         let mut db = db.into_merkleized().await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(1));
         assert_eq!(range.end, Location::new_unchecked(2));
-        assert_eq!(db.op_count(), 2); // floor op added
+        assert_eq!(db.size(), 2); // floor op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.op_count(), 2);
+        assert_eq!(db.size(), 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
@@ -1105,7 +1105,7 @@ mod test {
         let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
             let (durable_db, _) = mutable_db.commit(None).await.unwrap();
-            assert_eq!(durable_db.op_count() - 1, durable_db.inactivity_floor_loc());
+            assert_eq!(durable_db.size() - 1, durable_db.inactivity_floor_loc());
             mutable_db = durable_db.into_mutable();
         }
         let db = mutable_db.commit(None).await.unwrap().0;
@@ -1151,7 +1151,7 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
-        assert_eq!(db.op_count(), 9);
+        assert_eq!(db.size(), 9);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let (durable_db, _) = db.commit(None).await.unwrap();
         let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
@@ -1176,24 +1176,24 @@ mod test {
             .unwrap();
 
         // Multiple deletions of the same key should be a no-op.
-        let prev_op_count = db.op_count();
+        let prev_op_count = db.size();
         let mut db = db.into_mutable();
         // Note: commit always adds a floor op, so op_count will increase by 1 after commit.
         assert!(!db.delete(key1).await.unwrap());
-        assert_eq!(db.op_count(), prev_op_count);
+        assert_eq!(db.size(), prev_op_count);
 
         // Deletions of non-existent keys should be a no-op.
         let key3 = Sha256::fill(6u8);
         assert!(!db.delete(key3).await.unwrap());
-        assert_eq!(db.op_count(), prev_op_count);
+        assert_eq!(db.size(), prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
-        let op_count = db.op_count();
+        let op_count = db.size();
         let root = db.root();
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.size(), op_count);
         assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
 
@@ -1214,12 +1214,12 @@ mod test {
             .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        let op_count = db.op_count();
+        let op_count = db.size();
         let root = db.root();
         let db = reopen_db(context.with_label("reopen2")).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.size(), op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.

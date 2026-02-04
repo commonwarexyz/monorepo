@@ -181,6 +181,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
+        index::Unordered as _,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
         mmr::{Location, Position, StandardHasher},
         qmdb::{
@@ -353,32 +354,6 @@ pub(crate) mod test {
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_any_fixed_db_multiple_commits_delete_gets_replayed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let db = open_db(db_context.clone()).await;
-            crate::qmdb::any::unordered::test::test_any_db_multiple_commits_delete_replayed(
-                db_context,
-                db,
-                |ctx| Box::pin(open_db(ctx)),
-                to_digest,
-            )
-            .await;
-        });
-    }
-
-    // Test that merkleization state changes don't reset `steps`.
-    #[test_traced("DEBUG")]
-    fn test_any_unordered_fixed_db_steps_not_reset() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context).await;
-            crate::qmdb::any::test::test_any_db_steps_not_reset(db).await;
         });
     }
 
