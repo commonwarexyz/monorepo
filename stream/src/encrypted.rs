@@ -350,7 +350,6 @@ impl<I: Stream> Receiver<I> {
             self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
-
         let ciphertext_len = encrypted.remaining();
 
         // Allocate buffer from pool for decryption.
