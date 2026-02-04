@@ -5,7 +5,7 @@
 //! the `Marshaled` wrapper in both standard and coding variants.
 
 use crate::{
-    marshal::ancestry::{AncestorStream, AncestryProvider},
+    marshal::ancestry::{AncestorStream, BlockProvider},
     CertifiableBlock, Epochable,
 };
 use commonware_runtime::deterministic;
@@ -47,7 +47,7 @@ where
         self.genesis.clone()
     }
 
-    async fn propose<A: AncestryProvider<Block = Self::Block>>(
+    async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _ancestry: AncestorStream<A, Self::Block>,
@@ -62,7 +62,7 @@ where
     B::Context: Epochable + Clone + Send + Sync + 'static,
     S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
 {
-    async fn verify<A: AncestryProvider<Block = Self::Block>>(
+    async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _ancestry: AncestorStream<A, Self::Block>,

@@ -13,8 +13,8 @@ use std::{
     task::{Context, Poll},
 };
 
-/// An interface for providing ancestors.
-pub trait AncestryProvider: Clone + Send + 'static {
+/// An interface for providing blocks.
+pub trait BlockProvider: Clone + Send + 'static {
     /// The block type the provider fetches.
     type Block: Block;
 
@@ -77,7 +77,7 @@ impl<M, B: Block> AncestorStream<M, B> {
 
 impl<M, B> Stream for AncestorStream<M, B>
 where
-    M: AncestryProvider<Block = B>,
+    M: BlockProvider<Block = B>,
     B: Block,
 {
     type Item = B;
@@ -148,7 +148,7 @@ mod test {
 
     #[derive(Default, Clone)]
     struct MockProvider(Vec<Block<Sha256Digest, ()>>);
-    impl AncestryProvider for MockProvider {
+    impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
 
         async fn fetch_block(self, digest: Sha256Digest) -> Self::Block {

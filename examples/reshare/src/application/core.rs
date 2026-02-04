@@ -5,7 +5,7 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ancestry::{AncestorStream, AncestryProvider},
+    marshal::ancestry::{AncestorStream, BlockProvider},
     simplex::types::Context,
     types::{Epoch, Round, View},
     Heightable, VerifyingApplication,
@@ -71,7 +71,7 @@ where
         genesis_block::<H, C, V>(genesis_context)
     }
 
-    async fn propose<A: AncestryProvider<Block = Self::Block>>(
+    async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         (_, context): (E, Self::Context),
         mut ancestry: AncestorStream<A, Self::Block>,
@@ -105,7 +105,7 @@ where
     C: Signer,
     V: Variant,
 {
-    async fn verify<A: AncestryProvider<Block = Self::Block>>(
+    async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _: (E, Self::Context),
         _: AncestorStream<A, Self::Block>,
