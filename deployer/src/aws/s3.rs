@@ -479,6 +479,7 @@ pub async fn upload_instance_files(
         .chain(unique_config_paths.iter())
         .cloned()
         .collect();
+    info!(count = unique_paths.len(), "computing file digests");
     let path_to_digest = hash_files(unique_paths).await?;
 
     // Build dedup maps from digests
