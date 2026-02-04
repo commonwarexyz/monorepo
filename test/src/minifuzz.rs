@@ -315,6 +315,7 @@ enum SearchBound {
 /// Configures and runs a fuzz test.
 pub struct Builder {
     search_bound: SearchBound,
+    min_iterations: u64,
     seed: Option<u64>,
     reproduce: Option<Branch>,
 }
@@ -322,7 +323,8 @@ pub struct Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self {
-            search_bound: SearchBound::Limit(500_000),
+            search_bound: SearchBound::Time(Duration::from_secs(10)),
+            min_iterations: 100,
             seed: None,
             reproduce: None,
         }
@@ -334,8 +336,7 @@ impl Builder {
     pub const fn with_seed(self, seed: u64) -> Self {
         Self {
             seed: Some(seed),
-            search_bound: self.search_bound,
-            reproduce: self.reproduce,
+            ..self
         }
     }
 
@@ -343,8 +344,7 @@ impl Builder {
     pub const fn with_search_limit(self, search_limit: u64) -> Self {
         Self {
             search_bound: SearchBound::Limit(search_limit),
-            seed: self.seed,
-            reproduce: self.reproduce,
+            ..self
         }
     }
 
@@ -352,8 +352,15 @@ impl Builder {
     pub const fn with_search_time(self, duration: Duration) -> Self {
         Self {
             search_bound: SearchBound::Time(duration),
-            seed: self.seed,
-            reproduce: self.reproduce,
+            ..self
+        }
+    }
+
+    /// Sets the minimum number of iterations to run, even if the time limit is reached.
+    pub const fn with_min_iterations(self, min_iterations: u64) -> Self {
+        Self {
+            min_iterations,
+            ..self
         }
     }
 
@@ -403,9 +410,10 @@ impl Builder {
                     Ok((_, remaining)) => {
                         sampler.set_bytes_used(sample_len - remaining);
                         tries += 1;
-                        let should_stop =
+                        let past_min = tries >= self.min_iterations;
+                        let past_limit =
                             tries >= limit || deadline.is_some_and(|d| Instant::now() >= d);
-                        if should_stop {
+                        if past_min && past_limit {
                             break 'search;
                         }
                     }
@@ -461,14 +469,17 @@ mod tests {
     }
 
     fn search_haystack(depth: usize) {
-        super::Builder::default().with_seed(0).test(|u| {
-            let plan = Plan::generate(u, depth)?;
-            let mut path = [true, false].into_iter().cycle();
-            if let Some(leaf) = plan.follow_path(&mut path) {
-                assert_ne!(leaf, 77);
-            }
-            Ok(())
-        });
+        super::Builder::default()
+            .with_search_limit(1_000_000)
+            .with_seed(0)
+            .test(|u| {
+                let plan = Plan::generate(u, depth)?;
+                let mut path = [true, false].into_iter().cycle();
+                if let Some(leaf) = plan.follow_path(&mut path) {
+                    assert_ne!(leaf, 77);
+                }
+                Ok(())
+            });
     }
 
     #[test]
