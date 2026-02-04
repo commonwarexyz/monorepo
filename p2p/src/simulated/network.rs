@@ -1297,7 +1297,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, PeerSetProvider, Receiver as _, Recipients, Sender as _};
+    use crate::{Manager, Provider, Receiver as _, Recipients, Sender as _};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
     use futures::FutureExt;

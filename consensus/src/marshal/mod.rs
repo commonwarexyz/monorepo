@@ -234,7 +234,7 @@ mod tests {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -831,7 +831,7 @@ mod tests {
                     let backfill = control.register(0, TEST_QUOTA).await.unwrap();
                     let resolver_cfg = resolver::Config {
                         public_key: validator.clone(),
-                        manager: oracle_manager,
+                        provider: oracle_manager,
                         blocker: control.clone(),
                         mailbox_size: config.mailbox_size,
                         initial: Duration::from_secs(1),

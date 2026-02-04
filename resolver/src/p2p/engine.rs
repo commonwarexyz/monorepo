@@ -10,7 +10,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    Blocker, Manager, Receiver, Recipients, Sender,
+    Blocker, Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -42,7 +42,7 @@ struct Serve<E: Clock, P: PublicKey> {
 pub struct Engine<
     E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Manager<PublicKey = P>,
+    D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
@@ -60,7 +60,7 @@ pub struct Engine<
     producer: Pro,
 
     /// Manages the list of peers that can be used to fetch data
-    manager: D,
+    provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses
     blocker: B,
@@ -96,7 +96,7 @@ pub struct Engine<
 impl<
         E: Clock + Spawner + Rng + Metrics,
         P: PublicKey,
-        D: Manager<PublicKey = P>,
+        D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
         Key: Span,
         Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
@@ -128,7 +128,7 @@ impl<
                 context: ContextCell::new(context),
                 consumer: cfg.consumer,
                 producer: cfg.producer,
-                manager: cfg.manager,
+                provider: cfg.provider,
                 blocker: cfg.blocker,
                 last_peer_set_id: None,
                 mailbox: receiver,
@@ -154,7 +154,7 @@ impl<
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (NetS, NetR)) {
-        let peer_set_subscription = &mut self.manager.subscribe().await;
+        let peer_set_subscription = &mut self.provider.subscribe().await;
 
         // Wrap channel
         let (mut sender, mut receiver) = wrap((), network.0, network.1);

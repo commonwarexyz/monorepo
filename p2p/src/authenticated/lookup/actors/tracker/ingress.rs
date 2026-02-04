@@ -23,7 +23,7 @@ pub enum Message<C: PublicKey> {
     Register { index: u64, peers: Map<C, Address> },
 
     /// Update a peer's address without creating a new peer set.
-    UpdateAddress {
+    UpdatePeer {
         public_key: C,
         address: Address,
         responder: oneshot::Sender<bool>,
@@ -204,7 +204,7 @@ impl<C: PublicKey> Oracle<C> {
     }
 }
 
-impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
+impl<C: PublicKey> crate::Provider for Oracle<C> {
     type PublicKey = C;
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
@@ -233,14 +233,18 @@ impl<C: PublicKey> crate::PeerSetProvider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
+    /// Register a set of authorized peers at a given index.
+    ///
+    /// The index should be strictly managed (ideally matching the epoch
+    /// of the consensus engine) and must be monotonically increasing.
     async fn update(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
         self.sender.0.send_lossy(Message::Register { index, peers });
     }
 
-    async fn update_address(&mut self, peer: Self::PublicKey, address: Address) -> bool {
+    async fn update_peer(&mut self, peer: Self::PublicKey, address: Address) -> bool {
         self.sender
             .0
-            .request(|responder| Message::UpdateAddress {
+            .request(|responder| Message::UpdatePeer {
                 public_key: peer,
                 address,
                 responder,

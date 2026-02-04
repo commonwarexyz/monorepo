@@ -23,7 +23,7 @@
 //!
 //! - [`AddressableManager::update`](crate::AddressableManager::update): Register a new peer set at a
 //!   monotonically increasing index. Use this when the peer set composition changes (peers added/removed).
-//! - [`AddressableManager::update_address`](crate::AddressableManager::update_address): Update a single
+//! - [`AddressableManager::update_peer`](crate::AddressableManager::update_peer): Update a single
 //!   peer's address in-place without creating a new peer set. Use this when only a peer's IP changes but
 //!   the peer set composition stays the same.
 //!
@@ -183,8 +183,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{
-        Address, AddressableManager, Blocker, Ingress, PeerSetProvider, Receiver, Recipients,
-        Sender,
+        Address, AddressableManager, Blocker, Ingress, Provider, Receiver, Recipients, Sender,
     };
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};

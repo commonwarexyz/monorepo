@@ -1,21 +1,21 @@
 use crate::{p2p::Producer, Consumer};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{Blocker, Manager};
+use commonware_p2p::{Blocker, Provider};
 use commonware_utils::Span;
 use std::time::Duration;
 
 /// Configuration for the peer actor.
 pub struct Config<
     P: PublicKey,
-    D: Manager<PublicKey = P>,
+    D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
 > {
     /// Manages the current set of peers
-    pub manager: D,
+    pub provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses
     pub blocker: B,

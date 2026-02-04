@@ -157,12 +157,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
                 });
             }
-            Message::UpdateAddress {
+            Message::UpdatePeer {
                 public_key,
                 address,
                 responder,
             } => {
-                let success = self.directory.update_address(&public_key, address);
+                let success = self.directory.update_peer(&public_key, address);
                 if success {
                     // Kill any existing connection (it's on the old IP)
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_triggers_listener() {
+    fn test_update_peer_triggers_listener() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, my_pk) = new_signer_and_pk(0);
@@ -760,7 +760,7 @@ mod tests {
             assert!(registered_ips.contains(&addr_1.ip()));
             assert!(!registered_ips.contains(&addr_2.ip()));
 
-            let success = oracle.update_address(pk_1.clone(), addr_2.into()).await;
+            let success = oracle.update_peer(pk_1.clone(), addr_2.into()).await;
             assert!(success);
 
             let registered_ips = listener_receiver.recv().await.unwrap();
@@ -770,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_via_oracle() {
+    fn test_update_peer_via_oracle() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -794,7 +794,7 @@ mod tests {
             let (_, ingress) = result.unwrap();
             assert_eq!(ingress, Ingress::Socket(addr_1));
 
-            let success = oracle.update_address(pk.clone(), addr_2.into()).await;
+            let success = oracle.update_peer(pk.clone(), addr_2.into()).await;
             assert!(success);
 
             context.sleep(Duration::from_millis(1010)).await;
@@ -807,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_blocked_peer_not_in_listenable() {
+    fn test_update_peer_blocked_peer_not_in_listenable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (my_sk, my_pk) = new_signer_and_pk(0);
@@ -839,7 +839,7 @@ mod tests {
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
 
-            let success = oracle.update_address(pk_1.clone(), addr_2.into()).await;
+            let success = oracle.update_peer(pk_1.clone(), addr_2.into()).await;
             assert!(success);
 
             let registered_ips = listener_receiver.recv().await.unwrap();
@@ -849,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_untracked_peer_returns_false() {
+    fn test_update_peer_untracked_peer_returns_false() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -858,13 +858,13 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
 
-            let success = oracle.update_address(pk, addr.into()).await;
+            let success = oracle.update_peer(pk, addr.into()).await;
             assert!(!success);
         });
     }
 
     #[test]
-    fn test_update_address_changes_acceptable_ip() {
+    fn test_update_peer_changes_acceptable_ip() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pk_1 = new_signer_and_pk(1).1;
@@ -886,7 +886,7 @@ mod tests {
             assert!(mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
             assert!(!mailbox.acceptable(pk_1.clone(), addr_2.ip()).await);
 
-            let success = oracle.update_address(pk_1.clone(), addr_2.into()).await;
+            let success = oracle.update_peer(pk_1.clone(), addr_2.into()).await;
             assert!(success);
 
             assert!(!mailbox.acceptable(pk_1.clone(), addr_1.ip()).await);
@@ -895,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_severs_existing_connection() {
+    fn test_update_peer_severs_existing_connection() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -922,7 +922,7 @@ mod tests {
             mailbox.connect(pk.clone(), peer_mailbox);
 
             // Update address - should kill the connection
-            let success = oracle.update_address(pk.clone(), addr_2.into()).await;
+            let success = oracle.update_peer(pk.clone(), addr_2.into()).await;
             assert!(success);
 
             // Peer should receive kill message

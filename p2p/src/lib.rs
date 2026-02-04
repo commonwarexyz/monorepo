@@ -216,10 +216,9 @@ stability_scope!(BETA {
 
     /// Base trait for reading peer set information.
     ///
-    /// This trait provides read-only access to peer sets and is implemented by all
-    /// network oracle types. Components that only need to track peer membership
-    /// (without updating it) should accept `impl PeerSetProvider`.
-    pub trait PeerSetProvider: Debug + Clone + Send + 'static {
+    /// Provides read-only access to peer sets. Components that only need to
+    /// track peer membership (without updating it) should accept `impl Provider`.
+    pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 
@@ -245,10 +244,9 @@ stability_scope!(BETA {
 
     /// Interface for networks where peers discover each other dynamically.
     ///
-    /// This trait is implemented by [`authenticated::discovery::Oracle`] and
-    /// [`simulated::Manager`]. Use this when peer addresses are discovered via
-    /// gossip rather than provided by the application.
-    pub trait Manager: PeerSetProvider {
+    /// Use this when peer addresses are discovered via gossip rather than
+    /// provided by the application.
+    pub trait Manager: Provider {
         /// Update the peer set membership.
         ///
         /// The peer set ID should be strictly managed, ideally matching the epoch
@@ -262,10 +260,9 @@ stability_scope!(BETA {
 
     /// Interface for networks where peer addresses are provided by the application.
     ///
-    /// This trait is implemented by [`authenticated::lookup::Oracle`] and
-    /// [`simulated::SocketManager`]. Use this when the application knows peer
-    /// addresses upfront (e.g., from a staking registry).
-    pub trait AddressableManager: PeerSetProvider {
+    /// Use this when the application knows peer addresses upfront (e.g., from
+    /// a staking registry).
+    pub trait AddressableManager: Provider {
         /// Register a peer set with addresses.
         ///
         /// The peer set ID should be strictly managed, ideally matching the epoch
@@ -288,7 +285,7 @@ stability_scope!(BETA {
         /// Returns `false` if:
         /// - The peer is not tracked (not in any peer set)
         /// - The new address is identical to the existing one (no-op)
-        fn update_address(
+        fn update_peer(
             &mut self,
             peer: Self::PublicKey,
             address: Address,

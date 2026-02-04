@@ -81,7 +81,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Manager,
+        Blocker, Manager, Provider,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{non_empty_vec, NZU32};
@@ -182,7 +182,7 @@ mod tests {
 
     async fn setup_and_spawn_actor(
         context: &deterministic::Context,
-        manager: impl Manager<PublicKey = PublicKey>,
+        provider: impl Provider<PublicKey = PublicKey>,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
         connection: (
@@ -196,7 +196,7 @@ mod tests {
         let (engine, mailbox) = Engine::new(
             context.with_label(&format!("actor_{public_key}")),
             Config {
-                manager,
+                provider,
                 blocker,
                 consumer,
                 producer,
@@ -1810,7 +1810,7 @@ mod tests {
             let (engine, mailbox) = Engine::new(
                 ctx,
                 Config {
-                    manager: oracle.manager(),
+                    provider: oracle.manager(),
                     blocker: oracle.control(public_key.clone()),
                     consumer,
                     producer,

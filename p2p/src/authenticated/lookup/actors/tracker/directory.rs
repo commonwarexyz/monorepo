@@ -200,7 +200,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns `true` if the peer exists, is in at least one peer set, and the
     /// address actually changed. Returns `false` if the peer is not tracked or
     /// the new address is identical to the existing one.
-    pub fn update_address(&mut self, peer: &C, address: Address) -> bool {
+    pub fn update_peer(&mut self, peer: &C, address: Address) -> bool {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
         };
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_set_update_address() {
+    fn test_add_set_update_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
@@ -1660,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_basic() {
+    fn test_update_peer_basic() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1688,7 +1688,7 @@ mod tests {
                 Some(Ingress::Socket(addr_1))
             );
 
-            let success = directory.update_address(&pk_1, addr(addr_2));
+            let success = directory.update_peer(&pk_1, addr(addr_2));
             assert!(success);
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_untracked_peer() {
+    fn test_update_peer_untracked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1718,13 +1718,13 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let success = directory.update_address(&pk_1, addr(addr_1));
+            let success = directory.update_peer(&pk_1, addr(addr_1));
             assert!(!success);
         });
     }
 
     #[test]
-    fn test_update_address_peer_not_in_set() {
+    fn test_update_peer_peer_not_in_set() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1750,13 +1750,13 @@ mod tests {
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
 
-            let success = directory.update_address(&pk_1, addr(addr_3));
+            let success = directory.update_peer(&pk_1, addr(addr_3));
             assert!(!success);
         });
     }
 
     #[test]
-    fn test_update_address_blocked_peer() {
+    fn test_update_peer_blocked_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1781,7 +1781,7 @@ mod tests {
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
 
-            let success = directory.update_address(&pk_1, addr(addr_2));
+            let success = directory.update_peer(&pk_1, addr(addr_2));
             assert!(success);
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
@@ -1800,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_address_myself() {
+    fn test_update_peer_myself() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1819,13 +1819,13 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            let success = directory.update_address(&my_pk, addr(addr_1));
+            let success = directory.update_peer(&my_pk, addr(addr_1));
             assert!(!success);
         });
     }
 
     #[test]
-    fn test_update_address_same_address() {
+    fn test_update_peer_same_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1849,14 +1849,14 @@ mod tests {
 
             // First update with different address should succeed
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
-            assert!(directory.update_address(&pk_1, addr(addr_2)));
+            assert!(directory.update_peer(&pk_1, addr(addr_2)));
 
             // Update with same address should return false (no change)
-            assert!(!directory.update_address(&pk_1, addr(addr_2)));
+            assert!(!directory.update_peer(&pk_1, addr(addr_2)));
 
             // Update with different address should succeed again
             let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
-            assert!(directory.update_address(&pk_1, addr(addr_3)));
+            assert!(directory.update_peer(&pk_1, addr(addr_3)));
         });
     }
 }
