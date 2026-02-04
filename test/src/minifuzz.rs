@@ -26,6 +26,29 @@
 //! ```
 //!
 //! Use `with_search_limit` or `with_search_time` to control how long the fuzzer runs.
+//!
+//! # Why minifuzz?
+//!
+//! Minifuzz's goal is to both make it easier to write property tests, and to make
+//! fuzz tests less burdensome to write. Fuzz tests, using an external fuzzer, require creating a binary
+//! target, which is a lot more ceremony than just a unit test. A unit test, on the other hand,
+//! is less extensive than a fuzz or property test.
+//!
+//! When using fuzzing in Rust, you have control over how random bytes are turned
+//! into inputs, so they effectively act more like property tests. This module provides
+//! a simple fuzzer, intended for unit tests. Unlike an actual fuzzer, this harness
+//! does not use coverage information, and is not going to run for as long, so it will
+//! naturally find fewer bugs. However, it can find many bugs pretty quickly,
+//! and can usually do a much better job than a unit test.
+//!
+//! In places where you'd normally write a unit test, you should instead consider
+//! using minifuzz to cover more ground than that particular edge case, or test
+//! more examples of that kind of edge case.
+//!
+//! Instead of considering particular examples you want to test, it's useful to
+//! consider the *invariants* you want your code to satisfy. This both helps in
+//! understanding and implementing your code, but also in more effectively testing
+//! it.
 
 use arbitrary::Unstructured;
 use rand_chacha::ChaCha8Rng;
