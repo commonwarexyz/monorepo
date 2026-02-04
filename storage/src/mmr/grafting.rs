@@ -121,19 +121,17 @@ impl<'a, H: CHasher> Hasher<'a, H> {
         // Fetch all digests from MMR
         let futures = leaf_positions
             .iter()
-            .map(|&pos| mmr.get_node(self.destination_pos(pos)));
+            .map(|&pos| self.destination_pos(pos))
+            .map(|pos| async move {
+                mmr.get_node(pos)
+                    .await?
+                    .ok_or(Error::MissingGraftedDigest(Location::try_from(pos)?))
+            });
         let digests = try_join_all(futures).await?;
 
-        // Validate all digests are present before modifying state
-        for (i, digest) in digests.iter().enumerate() {
-            if digest.is_none() {
-                return Err(Error::MissingGraftedDigest(leaves[i]));
-            }
-        }
-
-        // Insert all digests (now that we know they all exist and are valid)
+        // Insert all digests
         for (pos, digest) in leaf_positions.into_iter().zip(digests) {
-            self.grafted_digests.insert(pos, digest.unwrap());
+            self.grafted_digests.insert(pos, digest);
         }
 
         Ok(())
