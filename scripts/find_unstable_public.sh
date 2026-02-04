@@ -35,31 +35,21 @@ get_crates() {
     fi
 }
 
-check_crate() {
-    local crate="$1"
-    local crate_underscore="${crate//-/_}"
+# Build exclude flags for cargo doc
+get_exclude_flags() {
+    cargo metadata --no-deps --format-version=1 2>/dev/null | \
+        jq -r '.packages[].name' | \
+        grep -E "$SKIP_REGEX" | \
+        while read -r crate; do echo "--exclude $crate"; done
+}
+
+check_json_file() {
+    local json_file="$1"
+    local crate_underscore
+    crate_underscore=$(basename "$json_file" .json)
+    local crate="${crate_underscore//_/-}"
     
     echo "=== Checking $crate ===" >&2
-    
-    # Generate rustdoc JSON at RESERVED stability level
-    # Use both RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
-    # Allow broken intra-doc links since stability-gated types won't be available
-    if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
-        RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG -Arustdoc::broken_intra_doc_links" \
-        cargo +nightly doc -p "$crate" --no-deps 2>/dev/null; then
-        echo "  Warning: Could not generate rustdoc for $crate" >&2
-        return 1
-    fi
-    
-    # Find the JSON file (respect CARGO_TARGET_DIR if set)
-    local target_dir="${CARGO_TARGET_DIR:-target}"
-    local json_file
-    json_file=$(find "$target_dir/doc" -name "${crate_underscore}.json" 2>/dev/null | head -1)
-    
-    if [[ -z "$json_file" || ! -f "$json_file" ]]; then
-        echo "  Warning: No JSON output found for $crate" >&2
-        return 1
-    fi
     
     # Extract public items (excluding the crate root and ignored items)
     local items
@@ -87,9 +77,50 @@ echo "Finding public items without #[stability(...)] markers..."
 echo "Using rustdoc JSON at --cfg $STABILITY_CFG"
 echo ""
 
+target_dir="${CARGO_TARGET_DIR:-target}/stability-check"
+
+# Build cargo doc arguments
+if [[ $# -gt 0 ]]; then
+    # Specific crates requested
+    pkg_args=""
+    for crate in "$@"; do
+        pkg_args="$pkg_args -p $crate"
+    done
+else
+    # All workspace crates (with exclusions)
+    pkg_args="--workspace $(get_exclude_flags | tr '\n' ' ')"
+fi
+
+echo "Generating rustdoc JSON for workspace..." >&2
+
+# Generate rustdoc JSON for all crates in a single invocation
+# Use RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
+# Allow broken intra-doc links since stability-gated types won't be available
+if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
+    RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG -Arustdoc::broken_intra_doc_links" \
+    CARGO_TARGET_DIR="$target_dir" \
+    cargo +nightly doc $pkg_args --no-deps 2>/dev/null; then
+    echo "Error: Could not generate rustdoc" >&2
+    exit 1
+fi
+
+echo ""
+
+# Check each generated JSON file
 exit_code=0
 for crate in $(get_crates "$@"); do
-    if ! check_crate "$crate"; then
+    crate_underscore="${crate//-/_}"
+    json_file="${target_dir}/doc/${crate_underscore}.json"
+    
+    if [[ ! -f "$json_file" ]]; then
+        echo "=== Checking $crate ===" >&2
+        echo "  Warning: No JSON output found for $crate" >&2
+        exit_code=1
+        echo ""
+        continue
+    fi
+    
+    if ! check_json_file "$json_file"; then
         exit_code=1
     fi
     echo ""

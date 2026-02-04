@@ -83,7 +83,7 @@ All public primitives are annotated with stability levels that constrain what ch
 
 **When modifying code at BETA or higher**: You must not introduce breaking changes to wire or storage formats without providing a migration path.
 
-All public API items must have stability annotations. CI enforces this via `./scripts/find_unstable_public.sh`. The script uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
+All public API items must have stability annotations. CI enforces this via `just check-stability`. The script uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.
 
 **To annotate public items**, use one of:
 - `#[stability(LEVEL)]` for individual items (structs, functions, traits, etc.)
@@ -144,7 +144,7 @@ cargo build --target wasm32-unknown-unknown --release -p commonware-cryptography
 just miri <module>::
 
 # 7. Stability coverage (if adding public API)
-./scripts/find_unstable_public.sh
+just check-stability
 ```
 
 _Always use `just` commands for testing (uses `nextest` for parallel execution)._

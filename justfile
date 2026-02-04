@@ -19,7 +19,7 @@ build *args='':
     cargo build $@
 
 # Runs pre-flight lints + tests before making a pull-request
-pre-pr: lint test-docs test check-stability
+pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
@@ -41,8 +41,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, and features.)
-lint: check-fmt clippy check-docs check-features
+# Runs all lints (fmt, clippy, docs, features, and stability.)
+lint: check-fmt clippy check-docs check-features check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -153,4 +153,6 @@ check-stability *args='':
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
         COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
     fi
+    echo "Checking for unmarked public items..."
+    ./scripts/find_unstable_public.sh
 
