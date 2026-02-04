@@ -72,10 +72,12 @@ impl<D: Digest> State<D> for Merkleized<D> {
 
 /// Unmerkleized state: the bitmap has pending changes not yet merkleized.
 pub struct Unmerkleized {
-    /// Chunks that have been modified but not yet merkleized. Each dirty chunk is identified by its
-    /// "chunk index" (the index of the chunk in the status bitmap).
+    /// Bitmap chunks that have been changed but whose changes are not yet reflected in the
+    /// root digest.
     ///
-    /// Invariant: Indices are always in the range [0,`authenticated_len`).
+    /// Each dirty chunk is identified by its absolute index, including pruned chunks.
+    ///
+    /// Invariant: Indices are always in the range [pruned_chunks, authenticated_len).
     dirty_chunks: HashSet<usize>,
 }
 
@@ -116,7 +118,8 @@ pub struct BitMap<
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
 
-    /// The number of bitmap chunks currently included in the `mmr`.
+    /// Invariant: Chunks in range [0, authenticated_len) are in `mmr`.
+    /// This is an absolute index that includes pruned chunks.
     authenticated_len: usize,
 
     /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
@@ -174,16 +177,17 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
         self.bitmap.pruned_bits()
     }
 
-    /// Returns the number of complete chunks (excludes partial chunk at end, if any).
+    /// Returns the index of the last complete chunk (excludes partial chunk at end, if any).
+    /// The returned index is an absolute index that includes pruned chunks.
     #[inline]
     fn complete_chunks(&self) -> usize {
-        let chunks_len = self.bitmap.chunks_len();
-        if self.bitmap.is_chunk_aligned() {
-            chunks_len
+        let unpruned_complete = if self.bitmap.is_chunk_aligned() {
+            self.bitmap.chunks_len()
         } else {
             // Last chunk is partial
-            chunks_len.checked_sub(1).unwrap()
-        }
+            self.bitmap.chunks_len().checked_sub(1).unwrap()
+        };
+        self.bitmap.pruned_chunks() + unpruned_complete
     }
 
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
@@ -367,7 +371,8 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         let cached_root = *mmr.root();
         Ok(Self {
             bitmap,
-            authenticated_len: 0,
+            // Pruned chunks are already authenticated in the MMR
+            authenticated_len: pruned_chunks,
             mmr,
             pool,
             metadata,
@@ -536,7 +541,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         self.bitmap.set_bit(bit, value);
 
         // If the updated chunk is already in the MMR, mark it as dirty.
-        let chunk = self.bitmap.pruned_chunk(bit);
+        let chunk = PrunableBitMap::<N>::unpruned_chunk(bit);
         if chunk < self.authenticated_len {
             self.state.dirty_chunks.insert(chunk);
         }
@@ -544,17 +549,16 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
 
     /// The chunks that have been modified or added since the last call to `merkleize`.
     pub fn dirty_chunks(&self) -> Vec<Location> {
-        let pruned_chunks = self.bitmap.pruned_chunks();
         let mut chunks: Vec<Location> = self
             .state
             .dirty_chunks
             .iter()
-            .map(|&chunk| Location::new_unchecked((chunk + pruned_chunks) as u64))
+            .map(|&chunk| Location::new_unchecked(chunk as u64))
             .collect();
 
         // Include complete chunks that haven't been authenticated yet
         for i in self.authenticated_len..self.complete_chunks() {
-            chunks.push(Location::new_unchecked((i + pruned_chunks) as u64));
+            chunks.push(Location::new_unchecked(i as u64));
         }
 
         chunks
@@ -565,23 +569,27 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
+        let pruned_chunks = self.bitmap.pruned_chunks();
+
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            self.mmr.add(hasher, self.bitmap.get_chunk(i));
+            // Convert absolute index to relative for `self.bitmap`
+            self.mmr
+                .add(hasher, self.bitmap.get_chunk(i - pruned_chunks));
         }
         self.authenticated_len = end;
 
         // Inform the MMR of modified chunks.
-        let pruned_chunks = self.bitmap.pruned_chunks();
         let updates = self
             .state
             .dirty_chunks
             .iter()
-            .map(|chunk| {
-                let loc = Location::new_unchecked((*chunk + pruned_chunks) as u64);
-                (loc, self.bitmap.get_chunk(*chunk))
+            .map(|&chunk| {
+                let loc = Location::new_unchecked(chunk as u64);
+                // Convert absolute index to relative for `self.bitmap`
+                (loc, self.bitmap.get_chunk(chunk - pruned_chunks))
             })
             .collect::<Vec<_>>();
         self.mmr
