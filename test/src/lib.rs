@@ -5,4 +5,4 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-pub mod minifuzz;
+commonware_macros::stability_mod!(ALPHA, pub mod minifuzz);
