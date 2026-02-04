@@ -607,7 +607,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the payload of the proposal's parent if:
     /// - It is less-than the proposal view.
     /// - It is greater-than-or-equal-to the last finalized view.
-    /// - It is notarized or finalized.
+    /// - It is certified (or finalized, which implies certification).
     /// - There exist nullifications for all views between it and the proposal view.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Option<D> {
         // Sanity check that the parent view is less than the proposal view.
