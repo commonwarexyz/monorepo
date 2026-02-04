@@ -334,10 +334,10 @@ pub mod test_suites {
     //!
     //! # Example
     //!
-    //! ```rust
+    //! ```
     //! # use commonware_math::algebra::test_suites::*;
-    //! # use commonware_math::test::F;
-    //! commonware_test::minifuzz(|u| fuzz_field::<F>(u));
+    //! # use commonware_math::fields::goldilocks::F;
+    //! commonware_test::minifuzz::test(|u| fuzz_field::<F>(u));
     //! ```
     use super::*;
     use arbitrary::Unstructured;
@@ -503,7 +503,7 @@ pub mod test_suites {
         let a: K = u.arbitrary()?;
         let b: K = u.arbitrary()?;
         let x: R = u.arbitrary()?;
-        check_scale_distributes(a.clone(), b.clone(), x);
+        check_scale_distributes(a.clone(), b, x);
         let c: R = u.arbitrary()?;
         check_scale_assign(a, c);
         let len: usize = u.int_in_range(0..=16)?;

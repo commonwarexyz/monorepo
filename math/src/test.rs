@@ -243,7 +243,6 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
-
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
