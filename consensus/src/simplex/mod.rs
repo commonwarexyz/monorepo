@@ -38,17 +38,17 @@
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
+//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * Request certification from application (see [Certification](#certification))
-//!     * If certification succeeds: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
-//!     * If certification fails: broadcast `nullify(v)`
+//! * Attempt to certify `c` (see [Certification](#certification))
+//!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
+//!     * On failure: broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
@@ -70,9 +70,10 @@
 //!
 //! ### Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! This means that a new participant joining consensus will immediately jump ahead on the previous
+//! view's nullification or finalization and begin participating in consensus at the current view.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -87,6 +88,9 @@
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
 //!   timeout to fire).
+//! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
+//!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
+//!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
 //!
 //! ## Architecture
 //!
@@ -231,15 +235,17 @@
 //! ## Certification
 //!
 //! After a payload is notarized, the application can optionally delay or prevent finalization via the
-//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. This is particularly useful for systems that employ
-//! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
-//! and validate the full block before voting to finalize.
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. By default, `certify`
+//! returns `true` for all payloads, meaning finalization proceeds immediately after notarization.
+//!
+//! Customizing `certify` is useful for systems that employ erasure coding, where participants may want
+//! to wait until they have received enough shards to reconstruct and validate the full block before
+//! voting to finalize.
 //!
 //! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
 //! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
-//! it as an immediate timeout). Because finalization requires `2f+1` `finalize` votes, a payload will only be
-//! finalized if a quorum of participants certify it. By default, `certify` returns `true` for all payloads,
-//! meaning finalization proceeds immediately after notarization.
+//! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
+//! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
