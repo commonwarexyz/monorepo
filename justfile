@@ -147,7 +147,7 @@ check-stability *args='':
     if [ "$first_arg" = "COVERAGE" ]; then
         echo "Checking for unmarked public items..."
         ./scripts/find_unstable_public.sh
-        exit 0
+        exit $?
     fi
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
