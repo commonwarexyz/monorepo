@@ -43,7 +43,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_nullification_in_finalized_view
-    // If any replica finalized view v, no replica may have nullification for view v.
+    // If any replica finalized view v, no replica may have a nullification for view v.
     let finalized_views: HashMap<u64, Sha256Digest> = replicas
         .iter()
         .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
@@ -58,7 +58,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Invariant: no_conflicting_notarization_in_finalized_view
-    // If any replica finalized view v for a digest, no replica may have notarization for a different digest.
+    // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
     for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
         for (&view, data) in notarizations.iter() {
             if let Some(&finalized_digest) = finalized_views.get(&view) {
