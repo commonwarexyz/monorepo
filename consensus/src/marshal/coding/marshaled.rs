@@ -682,7 +682,17 @@ where
             .insert((round, block_digest), task);
 
         match scheme.me() {
-            Some(me) => self.shards.subscribe_shard_validity(payload, me).await,
+            Some(me) => {
+                // Subscribe to shard validity. The subscription completes when a valid shard arrives.
+                let validity_rx = self.shards.subscribe_shard_validity(payload, me).await;
+                let (tx, rx) = oneshot::channel();
+                self.context.clone().spawn(|_| async move {
+                    if validity_rx.await.is_ok() {
+                        tx.send_lossy(true);
+                    }
+                });
+                rx
+            }
             None => {
                 // If we are not participating, there's no shard to verify; just accept the proposal.
                 //

@@ -39,8 +39,8 @@ where
         commitment: CodingCommitment,
         /// The index of the shard in the erasure coded block.
         index: usize,
-        /// A response channel to send the result to.
-        response: oneshot::Sender<bool>,
+        /// A response channel that completes when a valid shard arrives.
+        response: oneshot::Sender<()>,
     },
     /// Attempt to reconstruct a block from received shards.
     TryReconstruct {
@@ -114,11 +114,13 @@ where
     }
 
     /// Subscribe to and verify a shard at a given commitment and index.
+    ///
+    /// The returned receiver completes when a valid shard arrives.
     pub async fn subscribe_shard_validity(
         &mut self,
         commitment: CodingCommitment,
         index: Participant,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
         let msg = Message::SubscribeShardValidity {
             commitment,

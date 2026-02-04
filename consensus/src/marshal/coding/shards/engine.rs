@@ -20,7 +20,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::{AbortablePool, Aborter},
+    futures::Aborter,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
@@ -32,6 +32,9 @@ use std::{
 };
 use thiserror::Error;
 use tracing::debug;
+
+type AbortablePool<C, H> =
+    commonware_utils::futures::AbortablePool<((CodingCommitment, usize), Shard<C, H>)>;
 
 /// An error that can occur during reconstruction of a [CodedBlock] from [Shard]s
 #[derive(Debug, Error)]
@@ -60,10 +63,10 @@ struct BlockSubscription<B: CertifiableBlock, C: CodingScheme> {
 
 /// A subscription for a [Shard]'s validity, relative to a [CodingCommitment].
 struct ShardSubscription {
-    /// A list of subscribers waiting for the [Shard]'s validity to be checked.
-    subscribers: Vec<oneshot::Sender<bool>>,
+    /// A list of subscribers waiting for a valid [Shard] to arrive.
+    subscribers: Vec<oneshot::Sender<()>>,
     /// Aborter that aborts the waiter future when dropped.
-    _aborter: Aborter,
+    aborter: Aborter,
 }
 
 /// A wrapper around a [buffered::Mailbox] for broadcasting and receiving erasure-coded
@@ -168,8 +171,7 @@ where
 
     /// Run the shard engine.
     async fn run(mut self) {
-        let mut shard_validity_waiters =
-            AbortablePool::<((CodingCommitment, usize), Shard<C, H>)>::default();
+        let mut shard_validity_waiters = AbortablePool::default();
 
         select_loop! {
             self.context,
@@ -186,22 +188,40 @@ where
             },
             // Always serve any outstanding subscriptions first to unblock the hotpath of proposals / notarizations.
             Ok(((commitment, index), shard)) = shard_validity_waiters.next_completed() else continue => {
-                // Verify the shard and prepare it for broadcasting in a single operation.
-                // This avoids redundant SHA-256 hashing that would occur if we called
-                // verify() and then broadcast_shard() separately.
-                let reshard = shard.verify_into_reshard();
-
-                // Notify all subscribers
-                if let Some(mut sub) = self.shard_subscriptions.remove(&(commitment, index)) {
-                    let valid = reshard.is_some();
-                    for responder in sub.subscribers.drain(..) {
-                        responder.send_lossy(valid);
-                    }
-                }
-
-                // Broadcast the reshard if valid
-                if let Some(reshard) = reshard {
+                if let Some(reshard) = shard.verify_into_reshard() {
+                    // Notify all subscribers and broadcast the reshard.
                     self.broadcast_reshard(reshard).await;
+                    self.notify_shard_subscribers(commitment, index).await;
+                } else {
+                    // Before re-arming the subscription, check if any valid shard has arrived in the meantime.
+                    if let Some(shard) = self.get_valid_reshard(commitment, index).await {
+                        self.broadcast_reshard(shard).await;
+                        self.notify_shard_subscribers(commitment, index).await;
+                        continue;
+                    }
+
+                    // Get the subscription; it may have been removed if all subscribers dropped.
+                    let Some(sub) = self.shard_subscriptions.get_mut(&(commitment, index)) else {
+                        continue;
+                    };
+
+                    sub.subscribers.retain(|tx| !tx.is_closed());
+                    if sub.subscribers.is_empty() {
+                        self.shard_subscriptions.remove(&(commitment, index));
+                    } else {
+                        let aborter = self
+                            .arm_shard_subscription(commitment, index, &mut shard_validity_waiters)
+                            .await;
+                        if let Some(sub) = self.shard_subscriptions.get_mut(&(commitment, index)) {
+                            sub.aborter = aborter;
+                        }
+
+                        // Check again after arming to close the race window.
+                        if let Some(shard) = self.get_valid_reshard(commitment, index).await {
+                            self.broadcast_reshard(shard).await;
+                            self.notify_shard_subscribers(commitment, index).await;
+                        }
+                    }
                 }
             },
             Some(message) = self.mailbox.recv() else {
@@ -484,44 +504,42 @@ where
     ///
     /// When the shard is prepared and verified, it is broadcasted to all peers if valid.
     #[inline]
-    #[allow(clippy::type_complexity)]
     async fn subscribe_shard_validity(
         &mut self,
         commitment: CodingCommitment,
         index: usize,
-        responder: oneshot::Sender<bool>,
-        pool: &mut AbortablePool<((CodingCommitment, usize), Shard<C, H>)>,
+        responder: oneshot::Sender<()>,
+        pool: &mut AbortablePool<C, H>,
     ) {
-        // If we already have the shard cached, verify and broadcast in one step.
-        if let Some(shard) = self.get_shard(commitment, index).await {
-            if let Some(reshard) = shard.verify_into_reshard() {
-                responder.send_lossy(true);
-                self.broadcast_reshard(reshard).await;
-            } else {
-                responder.send_lossy(false);
-            }
+        // If we already have a valid shard cached, verify and broadcast in one step.
+        if let Some(shard) = self.get_valid_reshard(commitment, index).await {
+            self.broadcast_reshard(shard).await;
+            responder.send_lossy(());
             return;
         }
 
-        match self.shard_subscriptions.entry((commitment, index)) {
-            Entry::Vacant(entry) => {
-                let (tx, rx) = oneshot::channel();
-                let index_hash = Shard::<C, H>::uuid(commitment, index);
-                self.buffer
-                    .subscribe_prepared(None, commitment, Some(index_hash), tx)
-                    .await;
-                let aborter = pool.push(async move {
-                    let shard = rx.await.expect("shard subscription aborted");
-                    ((commitment, index), shard)
-                });
-                entry.insert(ShardSubscription {
-                    subscribers: vec![responder],
-                    _aborter: aborter,
-                });
-            }
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().subscribers.push(responder);
-            }
+        // Add to existing subscription if present.
+        if let Entry::Occupied(mut entry) = self.shard_subscriptions.entry((commitment, index)) {
+            entry.get_mut().subscribers.push(responder);
+            return;
+        }
+
+        // Arm a new subscription for this shard.
+        let aborter = self.arm_shard_subscription(commitment, index, pool).await;
+        self.shard_subscriptions.insert(
+            (commitment, index),
+            ShardSubscription {
+                subscribers: vec![responder],
+                aborter,
+            },
+        );
+
+        // Check again after arming the subscription to close the race window where a valid
+        // shard arrives between the initial cache check and the subscription creation.
+        // The waiter will catch any shard arriving after this point.
+        if let Some(shard) = self.get_valid_reshard(commitment, index).await {
+            self.broadcast_reshard(shard).await;
+            self.notify_shard_subscribers(commitment, index).await;
         }
     }
 
@@ -614,7 +632,7 @@ where
     ///
     /// If the mailbox does not have the shard cached, [None] is returned
     #[inline]
-    async fn get_shard(
+    async fn get_valid_reshard(
         &mut self,
         commitment: CodingCommitment,
         index: usize,
@@ -624,7 +642,50 @@ where
             .get(None, commitment, Some(index_hash))
             .await
             .into_iter()
+            .filter_map(Shard::verify_into_reshard)
             .next()
+    }
+
+    /// Arms a shard subscription for the given commitment and index.
+    ///
+    /// This function opens a subscription for a _new_ shard. It is expected that all shards
+    /// that are present in the mailbox ([`Self::get_valid_reshard`]) have already been processed.
+    #[inline]
+    async fn arm_shard_subscription(
+        &mut self,
+        commitment: CodingCommitment,
+        index: usize,
+        pool: &mut AbortablePool<C, H>,
+    ) -> Aborter {
+        let (tx, rx) = oneshot::channel();
+        let index_hash = Shard::<C, H>::uuid(commitment, index);
+        self.buffer
+            .subscribe_prepared_new(None, commitment, Some(index_hash), tx)
+            .await;
+        pool.push(async move {
+            let shard = rx.await.expect("buffer must not drop subscription");
+            ((commitment, index), shard)
+        })
+    }
+
+    /// Notifies any subscribers waiting for a block to be reconstructed that it is now available.
+    #[inline]
+    async fn notify_subscribers(&mut self, block: &Arc<CodedBlock<B, C>>) {
+        if let Some(mut sub) = self.block_subscriptions.remove(&block.digest()) {
+            for sub in sub.subscribers.drain(..) {
+                sub.send_lossy(Arc::clone(block));
+            }
+        }
+    }
+
+    /// Notifies any subscribers waiting for a valid shard to be available.
+    #[inline]
+    async fn notify_shard_subscribers(&mut self, commitment: CodingCommitment, index: usize) {
+        if let Some(mut sub) = self.shard_subscriptions.remove(&(commitment, index)) {
+            for responder in sub.subscribers.drain(..) {
+                responder.send_lossy(());
+            }
+        }
     }
 
     /// Determines if a subscription should be pruned based on finalization.
@@ -647,16 +708,6 @@ where
             return false;
         };
         block.height() <= height
-    }
-
-    /// Notifies any subscribers waiting for a block to be reconstructed that it is now available.
-    #[inline]
-    async fn notify_subscribers(&mut self, block: &Arc<CodedBlock<B, C>>) {
-        if let Some(mut sub) = self.block_subscriptions.remove(&block.digest()) {
-            for sub in sub.subscribers.drain(..) {
-                sub.send_lossy(Arc::clone(block));
-            }
-        }
     }
 }
 
@@ -681,13 +732,13 @@ mod test {
         sha256::Digest as Sha256Digest,
         Digest, Sha256, Signer,
     };
-    use commonware_macros::{test_collect_traces, test_traced};
+    use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::{simulated::Link, Recipients};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Metrics, Quota, Runner,
     };
-    use commonware_utils::Participant;
+    use commonware_utils::{channel::oneshot::error::TryRecvError, Participant};
     use std::{future::Future, num::NonZeroU32, time::Duration};
     use tracing::Level;
 
@@ -884,12 +935,11 @@ mod test {
             // Ensure all peers got their shards.
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
-                let valid = mailbox
+                mailbox
                     .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
-                assert!(valid);
             }
 
             // Give each peer time to broadcast their shards; Once the peer validates their
@@ -934,16 +984,15 @@ mod test {
             // Check that all valid shards are validated correctly
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
-                let valid = mailbox
+                mailbox
                     .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
-                    .unwrap();
-                assert!(valid, "shard {i} should be valid");
+                    .expect("shard {i} should be valid");
             }
 
-            // Now test that requesting validation for a non-existent shard index returns false
-            // (the shard doesn't exist so validation should fail/timeout or return invalid)
+            // Now test that requesting validation for a non-existent shard index does not complete
+            // (the shard doesn't exist so the subscription will wait indefinitely)
 
             // Request validation for an out-of-bounds index - the shard won't exist
             // so this subscription won't complete (the shard is never delivered).
@@ -1144,7 +1193,7 @@ mod test {
             // Only validate shards for the first 2 peers (insufficient for reconstruction)
             for (i, peer) in partial_peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
-                let _valid = mailbox
+                mailbox
                     .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
@@ -1252,12 +1301,11 @@ mod test {
             // Ensure all peers got their shards.
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
-                let valid = mailbox
+                mailbox
                     .subscribe_shard_validity(coded_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
-                assert!(valid);
             }
 
             // Give each peer time to broadcast their shards; Once the peer validates their
@@ -1306,7 +1354,7 @@ mod test {
             // Validate shards for the finalized block
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
-                let valid = mailbox
+                mailbox
                     .subscribe_shard_validity(
                         finalized_block.commitment(),
                         Participant::new(i as u32),
@@ -1314,7 +1362,6 @@ mod test {
                     .await
                     .await
                     .unwrap();
-                assert!(valid);
             }
             context.sleep(config.link.latency * 2).await;
 
@@ -1345,12 +1392,11 @@ mod test {
             // Validate and broadcast shards for the orphan block
             for (i, peer) in peers.iter().enumerate() {
                 let mailbox = mailboxes.get_mut(peer).unwrap();
-                let valid = mailbox
+                mailbox
                     .subscribe_shard_validity(orphan_block.commitment(), Participant::new(i as u32))
                     .await
                     .await
                     .unwrap();
-                assert!(valid);
             }
             context.sleep(config.link.latency * 2).await;
 
@@ -1387,6 +1433,178 @@ mod test {
             // Note: It may be reconstructed again from cached shards, but the key point
             // is that the reconstructed_blocks cache was pruned
             drop(result);
+        });
+    }
+
+    /// Regression test: A byzantine actor can race an invalid shard into our mailbox
+    /// before the honest proposer's valid shard arrives. The subscription should NOT
+    /// resolve to `false` when the invalid shard is processed - it should wait for
+    /// a valid shard to arrive.
+    #[test_traced]
+    fn test_shard_validity_waits_for_valid_shard() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) =
+                commonware_p2p::simulated::Network::<deterministic::Context, P>::new(
+                    context.with_label("network"),
+                    commonware_p2p::simulated::Config {
+                        max_size: 1024 * 1024,
+                        disconnect_on_block: true,
+                        tracked_peer_sets: None,
+                    },
+                );
+            network.start();
+
+            // Set up three peers: byzantine, honest proposer, and receiver
+            let mut schemes = (0..3)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<P> = schemes.iter().map(|c| c.public_key()).collect();
+
+            let byzantine = peers[0].clone();
+            let honest = peers[1].clone();
+            let receiver = peers[2].clone();
+
+            let mut registrations = BTreeMap::new();
+            for peer in peers.iter() {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                registrations.insert(peer.clone(), (sender, receiver));
+            }
+
+            // Add links between all peers
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 == p1 {
+                        continue;
+                    }
+                    oracle
+                        .add_link(p1.clone(), p2.clone(), DEFAULT_LINK)
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let mut buffered_mailboxes = BTreeMap::new();
+            let mut shard_mailboxes = BTreeMap::new();
+            while let Some((peer, network)) = registrations.pop_first() {
+                let context = context.with_label(&format!("peer_{peer}"));
+                let config = buffered::Config {
+                    public_key: peer.clone(),
+                    mailbox_size: 1024,
+                    deque_size: CACHE_SIZE,
+                    priority: false,
+                    codec_config: CodecConfig {
+                        maximum_shard_size: MAX_SHARD_SIZE,
+                    },
+                };
+                let (engine, engine_mailbox) =
+                    buffered::Engine::<_, P, Shard<C, H>>::new(context.clone(), config);
+                let buffered_mailbox = engine_mailbox.clone();
+                let (shard_engine, shard_mailbox) = ShardEngine::new(
+                    context.with_label("shard_mailbox"),
+                    engine_mailbox,
+                    (),
+                    10,
+                    STRATEGY,
+                );
+                buffered_mailboxes.insert(peer.clone(), buffered_mailbox);
+                shard_mailboxes.insert(peer.clone(), shard_mailbox);
+
+                engine.start(network);
+                shard_engine.start();
+            }
+
+            // Create a coded block
+            let coding_config = coding_config_for_participants(4);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 2);
+            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            // Get the valid shard at index 0 (this is what the receiver expects)
+            let valid_shard = coded_block.shard::<H>(0).expect("missing shard");
+
+            // Create an invalid shard by corrupting the valid shard's data
+            let DistributionShard::Strong(valid_inner) = valid_shard.clone().into_inner() else {
+                panic!("expected strong shard");
+            };
+
+            let shard_cfg = CodecConfig {
+                maximum_shard_size: MAX_SHARD_SIZE,
+            };
+            let mut encoded = valid_inner.encode().to_vec();
+            let mut cursor = encoded.as_slice();
+            let shard_len = usize::read_cfg(
+                &mut cursor,
+                &RangeCfg::from(..=shard_cfg.maximum_shard_size),
+            )
+            .expect("failed to read shard length");
+            let len_prefix_len = encoded.len() - cursor.remaining();
+            assert!(shard_len > 0, "shard length must be non-zero");
+            // Corrupt a byte in the shard data
+            encoded[len_prefix_len] ^= 0xFF;
+
+            let invalid_inner =
+                <C as CodingScheme>::Shard::read_cfg(&mut encoded.as_slice(), &shard_cfg)
+                    .expect("failed to decode invalid shard");
+            let invalid_shard =
+                Shard::<C, H>::new(commitment, 0, DistributionShard::Strong(invalid_inner));
+
+            // Verify our invalid shard is actually invalid
+            assert!(
+                invalid_shard.clone().verify_into_reshard().is_none(),
+                "invalid shard should fail verification"
+            );
+
+            // Byzantine actor sends the invalid shard FIRST
+            let mut byzantine_buffered = buffered_mailboxes.get(&byzantine).unwrap().clone();
+            let _ = byzantine_buffered
+                .broadcast(Recipients::One(receiver.clone()), invalid_shard)
+                .await
+                .await;
+
+            // Wait for the invalid shard to arrive at the receiver
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // Open a subscription for shard validity at index 0
+            let receiver_mailbox = shard_mailboxes
+                .get_mut(&receiver)
+                .expect("missing receiver mailbox");
+            let mut validity_rx = receiver_mailbox
+                .subscribe_shard_validity(commitment, Participant::new(0))
+                .await;
+
+            // Give the shard engine time to process the invalid shard
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // The subscription should NOT have resolved yet - it should still be waiting
+            // for a valid shard. We verify this by checking that the receiver is not ready.
+            assert!(
+                matches!(validity_rx.try_recv(), Err(TryRecvError::Empty)),
+                "subscription should not resolve before valid shard arrives"
+            );
+
+            // Now the honest proposer sends the valid shard
+            let mut honest_buffered = buffered_mailboxes.get(&honest).unwrap().clone();
+            let _ = honest_buffered
+                .broadcast(Recipients::One(receiver.clone()), valid_shard)
+                .await
+                .await;
+
+            // Wait for the valid shard to arrive and be processed
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // NOW the subscription should resolve (completing means valid shard arrived)
+            select! {
+                _ = validity_rx => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("subscription did not complete after valid shard arrival");
+                }
+            };
         });
     }
 }
