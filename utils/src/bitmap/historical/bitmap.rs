@@ -717,10 +717,8 @@ impl<const N: usize> DirtyBitMap<N> {
                 "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={current_pruned})",
             );
 
-            let bitmap_idx = chunk_idx - current_pruned;
-
             // Get chunk data, which may come from dirty state if it's appended
-            let chunk_data = if bitmap_idx < self.current.chunks_len() {
+            let chunk_data = if chunk_idx < self.current.chunks_len() {
                 *self.current.get_chunk(chunk_idx)
             } else {
                 // Chunk only exists in appended bits
@@ -950,11 +948,8 @@ impl<const N: usize> DirtyBitMap<N> {
     /// or `None` if it's out of bounds or pruned.
     fn get_chunk_from_current(&self, chunk_idx: usize) -> Option<[u8; N]> {
         let current_pruned = self.current.pruned_chunks();
-        if chunk_idx >= current_pruned {
-            let bitmap_idx = chunk_idx - current_pruned;
-            if bitmap_idx < self.current.chunks_len() {
-                return Some(*self.current.get_chunk(chunk_idx));
-            }
+        if chunk_idx >= current_pruned && chunk_idx < self.current.chunks_len() {
+            return Some(*self.current.get_chunk(chunk_idx));
         }
         None
     }
