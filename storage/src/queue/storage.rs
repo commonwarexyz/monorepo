@@ -906,7 +906,6 @@ mod tests {
                 assert_eq!(queue.ack_floor(), 3);
 
                 queue.sync().await.unwrap();
-                drop(queue);
             }
 
             // Second session: all items are re-delivered (no pruning occurred)
