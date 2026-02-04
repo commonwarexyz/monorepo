@@ -487,8 +487,11 @@ impl From<BytesMut> for IoBufMut {
 
 impl From<Bytes> for IoBufMut {
     fn from(bytes: Bytes) -> Self {
+        // try_into_mut() avoids copying if refcount == 1 (single owner).
+        // Falls back to BytesMut::from() which copies for shared data.
+        let bytes_mut = bytes.try_into_mut().unwrap_or_else(BytesMut::from);
         Self {
-            inner: IoBufMutInner::Owned(BytesMut::from(bytes)),
+            inner: IoBufMutInner::Owned(bytes_mut),
         }
     }
 }
