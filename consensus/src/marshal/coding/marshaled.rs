@@ -237,7 +237,7 @@ where
     /// 7. The underlying application's verification logic passes
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
-    /// the verification result. Valid blocks are reported to the marshal as verified.
+    /// the verification result.
     ///
     /// If `prefetched_block` is provided, it will be used directly instead of fetching from
     /// the marshal. This is useful in `certify` when we've already fetched the block to

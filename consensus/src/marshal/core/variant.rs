@@ -125,7 +125,7 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     ///
     /// This handles the initial dissemination of a newly proposed block.
     /// The `recipients` parameter is variant-specific.
-    fn broadcast(
+    fn proposed(
         &mut self,
         block: V::Block,
         recipients: V::Recipients,

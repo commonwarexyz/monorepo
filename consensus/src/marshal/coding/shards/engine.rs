@@ -181,6 +181,10 @@ where
                     sub.subscribers.retain(|tx| !tx.is_closed());
                     !sub.subscribers.is_empty()
                 });
+                self.block_subscriptions.retain(|_, sub| {
+                    sub.subscribers.retain(|tx| !tx.is_closed());
+                    !sub.subscribers.is_empty()
+                });
             },
             // Check for the shutdown signal.
             on_stopped => {
@@ -386,7 +390,10 @@ where
 
             // Swap-remove the strong shard to take ownership without shifting elements
             let strong_shard = shards.swap_remove(strong_pos);
-            let strong_index = strong_shard.index() as u16;
+            let Some(strong_index) = u16::try_from(strong_shard.index()).ok() else {
+                debug!(%commitment, index = strong_shard.index(), "shard index exceeds u16::MAX");
+                continue;
+            };
             let DistributionShard::Strong(shard_data) = strong_shard.into_inner() else {
                 unreachable!("we just verified this is a strong shard");
             };
@@ -409,7 +416,7 @@ where
 
         // Process remaining shards in parallel
         let checked_shards = self.strategy.map_collect_vec(shards, |s| {
-            let index = s.index() as u16;
+            let index = u16::try_from(s.index()).ok()?;
 
             match s.into_inner() {
                 DistributionShard::Strong(shard) => {
