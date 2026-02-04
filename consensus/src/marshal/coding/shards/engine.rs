@@ -189,14 +189,10 @@ where
             // Always serve any outstanding subscriptions first to unblock the hotpath of proposals / notarizations.
             Ok(((commitment, index), shard)) = shard_validity_waiters.next_completed() else continue => {
                 if let Some(reshard) = shard.verify_into_reshard() {
-                    // Notify all subscribers and broadcast the reshard.
-                    self.broadcast_reshard(reshard).await;
-                    self.notify_shard_subscribers(commitment, index).await;
+                    self.complete_shard_subscription(commitment, index, reshard).await;
                 } else {
                     // Before re-arming the subscription, check if any valid shard has arrived in the meantime.
-                    if let Some(shard) = self.get_valid_reshard(commitment, index).await {
-                        self.broadcast_reshard(shard).await;
-                        self.notify_shard_subscribers(commitment, index).await;
+                    if self.try_complete_shard_subscription(commitment, index).await {
                         continue;
                     }
 
@@ -217,10 +213,7 @@ where
                         }
 
                         // Check again after arming to close the race window.
-                        if let Some(shard) = self.get_valid_reshard(commitment, index).await {
-                            self.broadcast_reshard(shard).await;
-                            self.notify_shard_subscribers(commitment, index).await;
-                        }
+                        self.try_complete_shard_subscription(commitment, index).await;
                     }
                 }
             },
@@ -537,10 +530,8 @@ where
         // Check again after arming the subscription to close the race window where a valid
         // shard arrives between the initial cache check and the subscription creation.
         // The waiter will catch any shard arriving after this point.
-        if let Some(shard) = self.get_valid_reshard(commitment, index).await {
-            self.broadcast_reshard(shard).await;
-            self.notify_shard_subscribers(commitment, index).await;
-        }
+        self.try_complete_shard_subscription(commitment, index)
+            .await;
     }
 
     /// Subscribes to a [CodedBlock] by digest with an externally prepared responder.
@@ -685,6 +676,36 @@ where
             for responder in sub.subscribers.drain(..) {
                 responder.send_lossy(());
             }
+        }
+    }
+
+    /// Broadcasts a valid reshard and notifies all subscribers.
+    #[inline]
+    async fn complete_shard_subscription(
+        &mut self,
+        commitment: CodingCommitment,
+        index: usize,
+        shard: Shard<C, H>,
+    ) {
+        self.broadcast_reshard(shard).await;
+        self.notify_shard_subscribers(commitment, index).await;
+    }
+
+    /// Checks for a valid reshard, broadcasts it, and notifies subscribers if found.
+    ///
+    /// Returns `true` if a valid shard was found and processed.
+    #[inline]
+    async fn try_complete_shard_subscription(
+        &mut self,
+        commitment: CodingCommitment,
+        index: usize,
+    ) -> bool {
+        if let Some(shard) = self.get_valid_reshard(commitment, index).await {
+            self.complete_shard_subscription(commitment, index, shard)
+                .await;
+            true
+        } else {
+            false
         }
     }
 
