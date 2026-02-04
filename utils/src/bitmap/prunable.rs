@@ -282,11 +282,19 @@ impl<const N: usize> Prunable<N> {
         BitMap::<N>::chunk(bit)
     }
 
-    /// Get a reference to a chunk by its index in the current bitmap
-    /// Note this is an index into the chunks, not a bit.
+    /// Get a reference to a chunk by its absolute index (includes pruned chunks).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk has been pruned or is out of bounds.
     #[inline]
     pub fn get_chunk(&self, chunk: usize) -> &[u8; N] {
-        self.bitmap.get_chunk(chunk)
+        assert!(
+            chunk >= self.pruned_chunks,
+            "chunk {chunk} is pruned (pruned_chunks: {})",
+            self.pruned_chunks
+        );
+        self.bitmap.get_chunk(chunk - self.pruned_chunks)
     }
 
     /// Overwrite a chunk's data by its raw (unpruned) chunk index.
@@ -807,8 +815,8 @@ mod tests {
 
         // After pruning
         prunable.prune_to_bit(32);
-        assert_eq!(prunable.get_chunk(0), &chunk2);
-        assert_eq!(prunable.get_chunk(1), &chunk3);
+        assert_eq!(prunable.get_chunk(1), &chunk2);
+        assert_eq!(prunable.get_chunk(2), &chunk3);
     }
 
     #[test]

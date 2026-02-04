@@ -721,8 +721,7 @@ impl<const N: usize> DirtyBitMap<N> {
 
             // Get chunk data, which may come from dirty state if it's appended
             let chunk_data = if bitmap_idx < self.current.chunks_len() {
-                // Chunk exists in current bitmap
-                *self.current.get_chunk(bitmap_idx)
+                *self.current.get_chunk(chunk_idx)
             } else {
                 // Chunk only exists in appended bits
                 // Manually reconstruct it from appended_bits
@@ -954,7 +953,7 @@ impl<const N: usize> DirtyBitMap<N> {
         if chunk_idx >= current_pruned {
             let bitmap_idx = chunk_idx - current_pruned;
             if bitmap_idx < self.current.chunks_len() {
-                return Some(*self.current.get_chunk(bitmap_idx));
+                return Some(*self.current.get_chunk(chunk_idx));
             }
         }
         None

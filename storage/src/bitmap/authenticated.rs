@@ -569,15 +569,11 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         mut self,
         hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
-        let pruned_chunks = self.bitmap.pruned_chunks();
-
         // Add newly pushed complete chunks to the MMR.
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            // Convert absolute index to relative for `self.bitmap`
-            self.mmr
-                .add(hasher, self.bitmap.get_chunk(i - pruned_chunks));
+            self.mmr.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
@@ -588,8 +584,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
             .iter()
             .map(|&chunk| {
                 let loc = Location::new_unchecked(chunk as u64);
-                // Convert absolute index to relative for `self.bitmap`
-                (loc, self.bitmap.get_chunk(chunk - pruned_chunks))
+                (loc, self.bitmap.get_chunk(chunk))
             })
             .collect::<Vec<_>>();
         self.mmr
