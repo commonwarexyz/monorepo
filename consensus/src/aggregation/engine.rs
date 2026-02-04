@@ -28,7 +28,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -71,7 +71,7 @@ struct DigestRequest<D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+    E: Clock + Spawner + Storage + Metrics + CryptoRngCore + BufferPooler,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D> + Clone,
@@ -154,7 +154,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: Clock + Spawner + Storage + Metrics + CryptoRngCore + BufferPooler,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D> + Clone,
@@ -234,7 +234,8 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
         ),
     ) {
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let pool = self.context.network_buffer_pool().clone();
+        let (mut sender, mut receiver) = wrap((), pool, network.0, network.1);
 
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;

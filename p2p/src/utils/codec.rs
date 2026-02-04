@@ -2,16 +2,18 @@
 
 use crate::{CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
+use commonware_runtime::BufferPool;
 use std::time::SystemTime;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
     config: V::Cfg,
+    pool: BufferPool,
     sender: S,
     receiver: R,
 ) -> (WrappedSender<S, V>, WrappedReceiver<R, V>) {
     (
-        WrappedSender::new(sender),
+        WrappedSender::new(pool, sender),
         WrappedReceiver::new(config, receiver),
     )
 }
@@ -22,14 +24,16 @@ pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 /// Wrapper around a [Sender] that encodes messages using a [Codec].
 #[derive(Clone)]
 pub struct WrappedSender<S: Sender, V: Codec> {
+    pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
 }
 
 impl<S: Sender, V: Codec> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender].
-    pub const fn new(sender: S) -> Self {
+    pub const fn new(pool: BufferPool, sender: S) -> Self {
         Self {
+            pool,
             sender,
             _phantom_v: std::marker::PhantomData,
         }
@@ -42,8 +46,9 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
-        let encoded = message.encode();
-        self.sender.send(recipients, encoded, priority).await
+        let mut buf = self.pool.alloc(message.encode_size());
+        message.write(&mut buf);
+        self.sender.send(recipients, buf, priority).await
     }
 
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
@@ -56,6 +61,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
             .check(recipients)
             .await
             .map(|checked| CheckedWrappedSender {
+                pool: self.pool.clone(),
                 sender: checked,
                 _phantom_v: std::marker::PhantomData,
             })
@@ -63,8 +69,8 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
 }
 
 /// Checked sender that wraps a [`crate::LimitedSender::Checked`] and encodes messages using a [Codec].
-#[derive(Debug)]
 pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
+    pool: BufferPool,
     sender: S::Checked<'a>,
     _phantom_v: std::marker::PhantomData<V>,
 }
@@ -75,8 +81,9 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
-        let encoded = message.encode();
-        self.sender.send(encoded, priority).await
+        let mut buf = self.pool.alloc(message.encode_size());
+        message.write(&mut buf);
+        self.sender.send(buf, priority).await
     }
 }
 

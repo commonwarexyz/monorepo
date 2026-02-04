@@ -18,7 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc},
     ordered::Quorum,
@@ -51,7 +51,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + CryptoRngCore + Metrics + Spawner,
+        E: Clock + CryptoRngCore + Metrics + Spawner + BufferPooler,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,

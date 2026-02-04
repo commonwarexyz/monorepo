@@ -22,7 +22,8 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -89,7 +90,7 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Storage + Metrics + BufferPooler,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -120,7 +121,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics + BufferPooler,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -671,8 +672,9 @@ impl<
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
-        let mut vote_sender = WrappedSender::new(vote_sender);
-        let mut certificate_sender = WrappedSender::new(certificate_sender);
+        let pool = self.context.network_buffer_pool().clone();
+        let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
+        let mut certificate_sender = WrappedSender::new(pool, certificate_sender);
 
         // Add initial view
         //

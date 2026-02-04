@@ -67,8 +67,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, IoBufsMut, Sink,
-    Stream,
+    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, IoBufsMut, Sink, Stream,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
@@ -305,7 +304,9 @@ impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
     pub async fn send(&mut self, buf: impl Into<IoBufsMut>) -> Result<(), Error> {
         // Coalesce to get contiguous buffer for in-place encryption.
-        let mut buf = buf.into().coalesce_with_pool_extra(&self.pool, TAG_SIZE as usize);
+        let mut buf = buf
+            .into()
+            .coalesce_with_pool_extra(&self.pool, TAG_SIZE as usize);
 
         // Encrypt in-place, get tag back.
         let tag = self.cipher.send_in_place(buf.as_mut())?;

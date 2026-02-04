@@ -7,7 +7,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_resolver::p2p;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use commonware_utils::channel::mpsc;
 use rand::Rng;
 use std::time::Duration;
@@ -52,7 +52,7 @@ pub fn init<E, C, Bl, B, S, R, P>(
     p2p::Mailbox<handler::Request<B>, P>,
 )
 where
-    E: Rng + Spawner + Clock + Metrics,
+    E: Rng + Spawner + Clock + Metrics + BufferPooler,
     C: Manager<PublicKey = P>,
     Bl: Blocker<PublicKey = P>,
     B: Block,

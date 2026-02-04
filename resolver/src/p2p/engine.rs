@@ -18,7 +18,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -40,7 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics + BufferPooler,
     P: PublicKey,
     D: Manager<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -94,7 +94,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + Metrics,
+        E: Clock + Spawner + Rng + Metrics + BufferPooler,
         P: PublicKey,
         D: Manager<PublicKey = P>,
         B: Blocker<PublicKey = P>,
@@ -157,7 +157,8 @@ impl<
         let peer_set_subscription = &mut self.manager.subscribe().await;
 
         // Wrap channel
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let pool = self.context.network_buffer_pool().clone();
+        let (mut sender, mut receiver) = wrap((), pool, network.0, network.1);
 
         select_loop! {
             self.context,
