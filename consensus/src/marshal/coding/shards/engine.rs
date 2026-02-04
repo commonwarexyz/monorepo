@@ -11,7 +11,7 @@ use crate::{
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::Error as CodecError;
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{Digestible, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
@@ -758,7 +758,7 @@ mod test {
         bls12381::primitives::variant::MinSig,
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,
-        Digest, Sha256, Signer,
+        Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
     use commonware_p2p::{simulated::Link, Recipients};

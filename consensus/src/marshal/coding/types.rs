@@ -107,11 +107,11 @@ where
 /// the configuration used to code the data.
 pub struct Shard<C: Scheme, H: Hasher> {
     /// The coding commitment
-    commitment: CodingCommitment,
+    pub(crate) commitment: CodingCommitment,
     /// The index of this shard within the commitment.
-    index: usize,
+    pub(crate) index: usize,
     /// An individual shard within the commitment.
-    inner: DistributionShard<C>,
+    pub(crate) inner: DistributionShard<C>,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
 }
@@ -133,6 +133,21 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
     /// Returns the index of this shard within the commitment.
     pub const fn index(&self) -> usize {
         self.index
+    }
+
+    /// Returns the [`CodingCommitment`] for this shard.
+    pub const fn commitment(&self) -> CodingCommitment {
+        self.commitment
+    }
+
+    /// Returns true if the inner shard is strong.
+    pub fn is_strong(&self) -> bool {
+        matches!(self.inner, DistributionShard::Strong(_))
+    }
+
+    /// Returns true if the inner shard is weak.
+    pub fn is_weak(&self) -> bool {
+        matches!(self.inner, DistributionShard::Weak(_))
     }
 
     /// Takes the inner [Shard].
