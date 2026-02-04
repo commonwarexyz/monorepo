@@ -13,11 +13,7 @@ use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
 };
-use std::{
-    collections::HashMap,
-    fs::File,
-    path::PathBuf,
-};
+use std::{collections::HashMap, fs::File, path::PathBuf};
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes

@@ -12,8 +12,16 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
-use futures::{future::try_join_all, stream::{self, StreamExt, TryStreamExt}};
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, io::Read, path::Path, time::Duration};
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    io::Read,
+    path::Path,
+    time::Duration,
+};
 use tracing::{debug, info};
 
 /// File name for the bucket config (stores the S3 bucket name).
