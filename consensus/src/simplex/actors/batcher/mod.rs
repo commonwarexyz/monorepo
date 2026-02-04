@@ -1792,7 +1792,7 @@ mod tests {
             sender
                 .send(
                     Recipients::One(me.clone()),
-                    Vote::Notarize(vote1.clone()).encode(),
+                    Vote::Notarize(vote1).encode(),
                     true,
                 )
                 .await
@@ -1806,14 +1806,12 @@ mod tests {
                 "Duplicate vote should be ignored, not blocked"
             );
 
-            // Now send a vote with the SAME proposal but signed by a DIFFERENT key
-            // This simulates same proposal, different attestation (one signature must be wrong)
-            let vote_wrong_signer = Notarize::sign(&schemes[2], proposal.clone()).unwrap();
-            // But we send it as if it came from participant 1
+            // Now send a vote with the SAME proposal but with a different signature
+            let vote2 = Notarize::sign(&schemes[2], proposal.clone()).unwrap();
             sender
                 .send(
                     Recipients::One(me.clone()),
-                    Vote::Notarize(vote_wrong_signer).encode(),
+                    Vote::Notarize(vote2).encode(),
                     true,
                 )
                 .await
@@ -1821,7 +1819,7 @@ mod tests {
 
             context.sleep(Duration::from_millis(50)).await;
 
-            // Participant 1 should be blocked because they sent a vote with wrong signer
+            // Participant 1 should be blocked because they sent 2 votes with different attestations
             let blocked = oracle.blocked().await.unwrap();
             assert!(
                 blocked.iter().any(|(_, blocked)| blocked == &sender_pk),
