@@ -786,15 +786,15 @@ impl IoBufsMut {
         }
     }
 
-    /// Coalesce all buffers into a single contiguous `IoBufMut`.
-    ///
-    /// Zero-copy if only one buffer. Copies if multiple buffers.
-    pub fn coalesce(self) -> IoBufMut {
+    fn coalesce_with<F>(self, allocate: F) -> IoBufMut
+    where
+        F: FnOnce(usize) -> IoBufMut,
+    {
         match self {
             Self::Single(buf) => buf,
             Self::Chunked(bufs) => {
                 let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = IoBufMut::with_capacity(total_len);
+                let mut result = allocate(total_len);
                 for buf in bufs {
                     result.put_slice(buf.as_ref());
                 }
@@ -803,22 +803,19 @@ impl IoBufsMut {
         }
     }
 
+    /// Coalesce all buffers into a single contiguous `IoBufMut`.
+    ///
+    /// Zero-copy if only one buffer. Copies if multiple buffers.
+    pub fn coalesce(self) -> IoBufMut {
+        self.coalesce_with(IoBufMut::with_capacity)
+    }
+
     /// Coalesce all buffers into a single contiguous `IoBufMut`, using the pool
     /// for allocation if multiple buffers need to be merged.
     ///
     /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
     pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBufMut {
-        match self {
-            Self::Single(buf) => buf,
-            Self::Chunked(bufs) => {
-                let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = pool.alloc(total_len);
-                for buf in bufs {
-                    result.put_slice(buf.as_ref());
-                }
-                result
-            }
-        }
+        self.coalesce_with(|len| pool.alloc(len))
     }
 
     /// Copy data from a slice into the buffers.
