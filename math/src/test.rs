@@ -243,47 +243,49 @@ impl arbitrary::Arbitrary<'_> for G {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
-pub mod fuzz {
-    use super::*;
-    use crate::algebra::test_suites;
-    use arbitrary::{Arbitrary, Unstructured};
-    use commonware_codec::Encode as _;
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz {
+        use super::*;
+        use crate::algebra::test_suites;
+        use arbitrary::{Arbitrary, Unstructured};
+        use commonware_codec::Encode as _;
 
-    #[derive(Debug, Arbitrary)]
-    pub enum Plan {
-        FCodec(F),
-        GCodec(G),
-        FuzzField,
-        FuzzSpace,
-    }
+        #[derive(Debug, Arbitrary)]
+        pub enum Plan {
+            FCodec(F),
+            GCodec(G),
+            FuzzField,
+            FuzzSpace,
+        }
 
-    impl Plan {
-        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-            match self {
-                Self::FCodec(x) => {
-                    assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
+        impl Plan {
+            pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+                match self {
+                    Self::FCodec(x) => {
+                        assert_eq!(&x, &F::read(&mut x.encode()).unwrap());
+                    }
+                    Self::GCodec(x) => {
+                        assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
+                    }
+                    Self::FuzzField => {
+                        test_suites::fuzz_field::<F>(u)?;
+                    }
+                    Self::FuzzSpace => {
+                        test_suites::fuzz_space::<F, G>(u)?;
+                    }
                 }
-                Self::GCodec(x) => {
-                    assert_eq!(&x, &G::read(&mut x.encode()).unwrap());
-                }
-                Self::FuzzField => {
-                    test_suites::fuzz_field::<F>(u)?;
-                }
-                Self::FuzzSpace => {
-                    test_suites::fuzz_space::<F, G>(u)?;
-                }
+                Ok(())
             }
-            Ok(())
+        }
+
+        #[test]
+        fn test_fuzz() {
+            use commonware_test::minifuzz;
+            minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
         }
     }
-
-    #[test]
-    fn test_fuzz() {
-        use commonware_test::minifuzz;
-        minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
-    }
-}
+});
 
 #[allow(clippy::module_inception)]
 #[cfg(test)]
