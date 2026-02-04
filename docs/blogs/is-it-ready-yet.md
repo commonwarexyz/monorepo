@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives. Some have been running on [Alto](https://github.com/commonwarexyz/alto) for over a year. Others landed last week. More will be added next month.
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has over 30 primitives. Some have been running on [Alto](https://github.com/commonwarexyz/alto) for over a year. Others landed last week. More will be integrated in the coming months.
 
 How do you communicate what's ready without documentation that rots the moment you publish it?
 
