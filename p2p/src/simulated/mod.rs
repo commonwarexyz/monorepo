@@ -3286,23 +3286,45 @@ mod tests {
 
             // update_address should return false for untracked peer
             let addr: Address = "127.0.0.1:8000".parse::<SocketAddr>().unwrap().into();
-            assert!(!socket_manager.update_address(pk1.clone(), addr.clone()).await);
+            assert!(
+                !socket_manager
+                    .update_address(pk1.clone(), addr.clone())
+                    .await
+            );
 
             // Register a peer set
             let peers: Map<PublicKey, Address> = [
-                (pk1.clone(), "127.0.0.1:8001".parse::<SocketAddr>().unwrap().into()),
-                (pk2.clone(), "127.0.0.1:8002".parse::<SocketAddr>().unwrap().into()),
+                (
+                    pk1.clone(),
+                    "127.0.0.1:8001".parse::<SocketAddr>().unwrap().into(),
+                ),
+                (
+                    pk2.clone(),
+                    "127.0.0.1:8002".parse::<SocketAddr>().unwrap().into(),
+                ),
             ]
             .try_into()
             .unwrap();
             socket_manager.update(0, peers).await;
 
             // update_address should return true for tracked peer
-            assert!(socket_manager.update_address(pk1.clone(), addr.clone()).await);
-            assert!(socket_manager.update_address(pk2.clone(), addr.clone()).await);
+            assert!(
+                socket_manager
+                    .update_address(pk1.clone(), addr.clone())
+                    .await
+            );
+            assert!(
+                socket_manager
+                    .update_address(pk2.clone(), addr.clone())
+                    .await
+            );
 
             // update_address should return false for peer not in any set
-            assert!(!socket_manager.update_address(pk3.clone(), addr.clone()).await);
+            assert!(
+                !socket_manager
+                    .update_address(pk3.clone(), addr.clone())
+                    .await
+            );
         });
     }
 }

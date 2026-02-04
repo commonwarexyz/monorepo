@@ -472,7 +472,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::PeerTracked { public_key, result } => {
                 // A peer is tracked if it has refs > 0 (in at least one peer set)
-                let tracked = self.peer_refs.get(&public_key).is_some_and(|&refs| refs > 0);
+                let tracked = self
+                    .peer_refs
+                    .get(&public_key)
+                    .is_some_and(|&refs| refs > 0);
                 let _ = result.send(tracked);
             }
         }

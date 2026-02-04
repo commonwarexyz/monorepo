@@ -280,13 +280,14 @@ stability_scope!(BETA {
 
         /// Update a peer's address without creating a new peer set.
         ///
-        /// On success:
+        /// On success (returns `true`):
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
         ///
-        /// Returns `true` if the peer exists and is in at least one peer set,
-        /// `false` otherwise.
+        /// Returns `false` if:
+        /// - The peer is not tracked (not in any peer set)
+        /// - The new address is identical to the existing one (no-op)
         fn update_address(
             &mut self,
             peer: Self::PublicKey,

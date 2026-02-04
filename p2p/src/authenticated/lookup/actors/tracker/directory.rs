@@ -197,8 +197,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Update a tracked peer's address.
     ///
-    /// Returns `true` if peer exists and is in at least one peer set.
-    /// Updates address even if peer is blocked (used after unblock).
+    /// Returns `true` if the peer exists, is in at least one peer set, and the
+    /// address actually changed. Returns `false` if the peer is not tracked or
+    /// the new address is identical to the existing one.
     pub fn update_address(&mut self, peer: &C, address: Address) -> bool {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
@@ -206,8 +207,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         if record.sets() == 0 {
             return false;
         }
-        record.update(address);
-        true
+        record.update(address)
     }
 
     /// Gets a peer set by index.
@@ -1821,6 +1821,42 @@ mod tests {
 
             let success = directory.update_address(&my_pk, addr(addr_1));
             assert!(!success);
+        });
+    }
+
+    #[test]
+    fn test_update_address_same_address() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            rate_limit: Quota::per_second(NZU32!(10)),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // First update with different address should succeed
+            let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+            assert!(directory.update_address(&pk_1, addr(addr_2)));
+
+            // Update with same address should return false (no change)
+            assert!(!directory.update_address(&pk_1, addr(addr_2)));
+
+            // Update with different address should succeed again
+            let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
+            assert!(directory.update_address(&pk_1, addr(addr_3)));
         });
     }
 }
