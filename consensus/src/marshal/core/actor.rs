@@ -327,7 +327,7 @@ where
                 match ack {
                     Ok(()) => {
                         if let Err(e) = self
-                            .handle_block_processed(height, commitment, &mut resolver, &mut buffer)
+                            .handle_block_processed(height, commitment, &mut resolver)
                             .await
                         {
                             error!(?e, %height, "failed to update application progress");
@@ -845,12 +845,11 @@ where
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
-    async fn handle_block_processed<Buf: BlockBuffer<V>>(
+    async fn handle_block_processed(
         &mut self,
         height: Height,
         commitment: V::Commitment,
         resolver: &mut impl Resolver<Key = Request<V::Block>>,
-        buffer: &mut Buf,
     ) -> Result<(), metadata::Error> {
         // Update the processed height
         self.set_processed_height(height, resolver).await?;
@@ -858,9 +857,6 @@ where
         // Cancel any useless requests
         let digest = V::commitment_to_digest(commitment);
         resolver.cancel(Request::<V::Block>::Block(digest)).await;
-
-        // Notify buffer that finalization occurred (for cleanup)
-        buffer.finalized(commitment).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -953,7 +949,7 @@ where
         buffer: &mut Buf,
         resolver: &mut impl Resolver<Key = Request<V::Block>>,
     ) {
-        self.store_finalization(height, digest, block, finalization, application)
+        self.store_finalization(height, digest, block, finalization, application, buffer)
             .await;
 
         self.try_repair_gaps(buffer, resolver, application).await;
@@ -963,17 +959,19 @@ where
     ///
     /// After persisting the block, attempt to dispatch the next contiguous block to the
     /// application.
-    async fn store_finalization(
+    async fn store_finalization<Buf: BlockBuffer<V>>(
         &mut self,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        buffer: &mut Buf,
     ) {
         self.notify_subscribers(&block).await;
 
         // Convert block to storage format
+        let commitment = block.commitment();
         let stored: V::StoredBlock = block.into();
 
         // In parallel, update the finalized blocks and finalizations archives
@@ -1008,6 +1006,9 @@ where
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
+
+        // Notify buffer that block is finalized (for cache eviction).
+        buffer.finalized(commitment).await;
 
         self.try_dispatch_block(application).await;
     }
@@ -1125,6 +1126,7 @@ where
                         block.clone(),
                         finalization,
                         application,
+                        buffer,
                     )
                     .await;
                     debug!(height = %block.height(), "repaired block");
