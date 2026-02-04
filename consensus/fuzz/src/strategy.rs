@@ -568,7 +568,7 @@ impl Strategy for FutureScope {
         _last_nullified_view: u64,
     ) -> u64 {
         let bump = if rng.gen_bool(0.5) { 1 } else { 2 };
-        base_view.saturating_add(bump)
+        base_view.saturating_sub(bump)
     }
 
     fn random_payload(&self, rng: &mut impl Rng) -> Sha256Digest {
