@@ -251,7 +251,7 @@ pub struct Sink {
 }
 
 impl Sink {
-    fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, pool: BufferPool) -> Self {
+    const fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, pool: BufferPool) -> Self {
         Self {
             fd,
             submitter,
