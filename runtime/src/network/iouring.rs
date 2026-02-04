@@ -252,7 +252,11 @@ pub struct Sink {
 
 impl Sink {
     fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, pool: BufferPool) -> Self {
-        Self { fd, submitter, pool }
+        Self {
+            fd,
+            submitter,
+            pool,
+        }
     }
 
     fn as_raw_fd(&self) -> Fd {
