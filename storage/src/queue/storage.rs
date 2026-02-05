@@ -76,7 +76,7 @@ pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
 
     /// All items at positions < ack_floor are considered acknowledged.
     ///
-    /// On restart, this is initialized to `journal.pruning_boundary()`.
+    /// On restart, this is initialized to `journal.bounds().start`.
     ack_floor: u64,
 
     /// Ranges of acknowledged items at positions >= ack_floor (in-memory only).
@@ -118,7 +118,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
         // On restart, ack_floor is the pruning boundary (items below are deleted).
         // acked_above is empty (in-memory state lost on restart).
-        let ack_floor = journal.pruning_boundary();
+        let ack_floor = journal.bounds().start;
         let acked_above = RMap::new();
 
         debug!(ack_floor, size = journal.size(), "queue initialized");
@@ -955,7 +955,7 @@ mod tests {
                 queue.sync().await.unwrap();
 
                 // Verify pruning occurred
-                let pruning_boundary = queue.journal.pruning_boundary();
+                let pruning_boundary = queue.journal.bounds().start;
                 assert!(pruning_boundary > 0, "expected some pruning to occur");
 
                 pruning_boundary
@@ -969,7 +969,7 @@ mod tests {
                         .unwrap();
 
                 // ack_floor = pruning_boundary (items 0-9 were pruned)
-                let pruning_boundary = queue.journal.pruning_boundary();
+                let pruning_boundary = queue.journal.bounds().start;
                 assert_eq!(queue.ack_floor(), pruning_boundary);
                 assert_eq!(pruning_boundary, expected_pruning_boundary);
 
