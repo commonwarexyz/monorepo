@@ -12,13 +12,6 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::hint::black_box;
 
-fn mode_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::NonZeroCounter => "counter",
-        Mode::RootsOfUnity => "roots",
-    }
-}
-
 fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
@@ -31,9 +24,9 @@ fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
                     let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
                     c.bench_function(
                         &format!(
-                            "{}/mode={} n={} t={} invalid={} conc={}",
+                            "{}/mode={:?} n={} t={} invalid={} conc={}",
                             module_path!(),
-                            mode_name(mode),
+                            mode,
                             n,
                             t,
                             invalid,
@@ -50,60 +43,60 @@ fn bench_threshold_batch_verify_same_message(c: &mut Criterion) {
                                     let (output, shares) =
                                         deal::<MinSig, _, N3f1>(&mut rng, mode, players)
                                             .expect("deal should succeed");
-                                let signatures = shares
-                                    .values()
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(idx, s)| {
-                                        if idx < invalid as usize {
-                                            primitives::ops::threshold::sign_message::<MinSig>(
-                                                s, b"wrong", msg,
-                                            )
-                                        } else {
-                                            primitives::ops::threshold::sign_message::<MinSig>(
-                                                s, namespace, msg,
-                                            )
-                                        }
-                                    })
-                                    .collect::<Vec<_>>();
-                                (rng, output.public().clone(), signatures)
-                            },
-                            |(mut rng, polynomial, mut signatures)| {
-                                if invalid > 0 {
-                                    signatures.shuffle(&mut rng);
-                                }
+                                    let signatures = shares
+                                        .values()
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(idx, s)| {
+                                            if idx < invalid as usize {
+                                                primitives::ops::threshold::sign_message::<MinSig>(
+                                                    s, b"wrong", msg,
+                                                )
+                                            } else {
+                                                primitives::ops::threshold::sign_message::<MinSig>(
+                                                    s, namespace, msg,
+                                                )
+                                            }
+                                        })
+                                        .collect::<Vec<_>>();
+                                    (rng, output.public().clone(), signatures)
+                                },
+                                |(mut rng, polynomial, mut signatures)| {
+                                    if invalid > 0 {
+                                        signatures.shuffle(&mut rng);
+                                    }
 
-                                let result = if concurrency > 1 {
-                                    black_box(
-                                        primitives::ops::threshold::batch_verify_same_message::<
-                                            _,
-                                            MinSig,
-                                            _,
-                                        >(
-                                            &mut rng,
-                                            &polynomial,
-                                            namespace,
-                                            msg,
-                                            &signatures,
-                                            &strategy,
-                                        ),
-                                    )
-                                } else {
-                                    black_box(
-                                        primitives::ops::threshold::batch_verify_same_message::<
-                                            _,
-                                            MinSig,
-                                            _,
-                                        >(
-                                            &mut rng,
-                                            &polynomial,
-                                            namespace,
-                                            msg,
-                                            &signatures,
-                                            &Sequential,
-                                        ),
-                                    )
-                                };
+                                    let result = if concurrency > 1 {
+                                        black_box(
+                                            primitives::ops::threshold::batch_verify_same_message::<
+                                                _,
+                                                MinSig,
+                                                _,
+                                            >(
+                                                &mut rng,
+                                                &polynomial,
+                                                namespace,
+                                                msg,
+                                                &signatures,
+                                                &strategy,
+                                            ),
+                                        )
+                                    } else {
+                                        black_box(
+                                            primitives::ops::threshold::batch_verify_same_message::<
+                                                _,
+                                                MinSig,
+                                                _,
+                                            >(
+                                                &mut rng,
+                                                &polynomial,
+                                                namespace,
+                                                msg,
+                                                &signatures,
+                                                &Sequential,
+                                            ),
+                                        )
+                                    };
                                     if invalid == 0 {
                                         assert!(result.is_ok());
                                     } else {
