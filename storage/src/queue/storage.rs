@@ -229,29 +229,29 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             return Err(Error::PositionOutOfRange(position, size));
         }
 
-        // Already acked via floor
+        // Already acked (below floor)
         if position < self.ack_floor {
             return Ok(());
         }
 
-        // Already acked above floor
+        // Already acked (above floor)
         if self.acked_above.get(&position).is_some() {
             return Ok(());
         }
 
+        // Check if we can advance the floor
         if position == self.ack_floor {
-            // Advance floor
-            self.ack_floor = position + 1;
-
-            // Consume any contiguous acked items
-            while self.acked_above.get(&self.ack_floor).is_some() {
-                self.acked_above.remove(self.ack_floor, self.ack_floor);
-                self.ack_floor += 1;
-            }
-
+            // Advance floor, consuming any contiguous acked items
+            let next = position + 1;
+            let final_floor = match self.acked_above.get(&next) {
+                Some((_, end)) => end + 1,
+                None => next,
+            };
+            self.acked_above.remove(next, final_floor - 1);
+            self.ack_floor = final_floor;
             debug!(ack_floor = self.ack_floor, "advanced ack floor");
         } else {
-            // Add to acked_above
+            // Floor is not advancing, so add to acked_above
             self.acked_above.insert(position);
             debug!(position, "acked item above floor");
         }
@@ -289,17 +289,15 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             return Ok(());
         }
 
-        // Remove any acked_above entries that will be covered by the new floor
-        self.acked_above.remove(self.ack_floor, up_to - 1);
+        // Determine final floor: either up_to, or past any contiguous acked range at up_to
+        let final_floor = match self.acked_above.get(&up_to) {
+            Some((_, end)) => end + 1,
+            None => up_to,
+        };
 
-        // Advance floor
-        self.ack_floor = up_to;
-
-        // Consume any contiguous acked items above the new floor
-        while self.acked_above.get(&self.ack_floor).is_some() {
-            self.acked_above.remove(self.ack_floor, self.ack_floor);
-            self.ack_floor += 1;
-        }
+        // Remove all entries covered by the new floor and advance
+        self.acked_above.remove(self.ack_floor, final_floor - 1);
+        self.ack_floor = final_floor;
 
         // Update metrics
         self.metrics.ack_floor.set(self.ack_floor as i64);
