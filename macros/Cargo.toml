@@ -18,8 +18,8 @@ commonware-macros-impl.workspace = true
 tokio = { workspace = true, features = ["macros"], optional = true }
 
 [dev-dependencies]
-commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 futures-timer.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use commonware_macros::{select, select_loop};
-    use commonware_utils::channel::mpsc;
+    use tokio::sync::mpsc;
     use futures::executor::block_on;
     use std::future::Future;
 
