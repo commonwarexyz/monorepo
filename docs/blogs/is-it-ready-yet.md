@@ -24,9 +24,10 @@ While building with different teams, however, this approach proved insufficient:
 
 **Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles. In a world where a wrong guess means a network halt or loss of funds, however, we found this didn't cut it.
 
-**Coarse readiness slows development and is error-prone for applications.** Without more granularity, new features tend to sit in "unstable" purgatory for too long. When incorporated into downstream applications, all of "unstable" is available making it easy to accidentally rely on something much less stable than intended (with nuance hidden deep in documentation that has probably not been read).
+**Coarse readiness slows development and is error-prone for applications.** Without more granularity, new features tend to sit in "unstable" purgatory for too long. When incorporated into downstream applications, all of "unstable" is available making it easy to accidentally rely on something much less stable than intended (with nuance hidden deep in documentation that nobody reads).
 
-**Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable," it should remain supported indefinitely. If a significant breaking change is attempted, it must be backwards-compatible or introduced in a new crate. There is no `2.x` for a primitive.
+**Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable," it must remain supported indefinitely. If we need to make a significant change, it must be backwards-compatible or introduced in a new crate. There is no `2.x` for a primitive.
+
 
 ## Tiered Stability and Calendar Versioning
 
@@ -42,7 +43,7 @@ We've broken stability into the following levels:
 
 Once a primitive is marked `BETA`, it is eligible for Long-Term Support (LTS). Barring any critical vulnerabilities, the wire and storage format will remain backwards-compatible indefinitely.
 
-The Commonware Library is now versioned with [calendar versioning (YYYY.M.patch)](https://calver.org/). This versioning scheme across primitives provides "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
+For compatibility, we also needed to rethink our versioning scheme. The Commonware Library now uses [calendar versioning (YYYY.M.patch)](https://calver.org/). This provides obvious compatibility without implying stability (a library-wide semver like `1.2.1` would incorrectly suggest that every crate, including brand-new ones, is equally mature).
 
 ## Programmatic Enforcement
 
@@ -64,7 +65,7 @@ RUSTDOCFLAGS="--cfg commonware_stability_BETA" \
 cargo doc --open
 ```
 
-In CI, we enforce that any object must only depend on objects at the same or higher stability level. If something is marked `BETA`, you can trust that its entire dependency chain within the library is `BETA` or higher.
+We also enforce stability transitively in CI: any object must only depend on objects at the same or higher stability level. If something is marked `BETA`, its entire dependency chain within the library is `BETA` or higher.
 
 ![Stability consistency is enforced by the compiler.](/imgs/is-it-ready-yet.png)
 
@@ -72,21 +73,21 @@ In CI, we enforce that any object must only depend on objects at the same or hig
 
 Here are some of the primitive dialects we now consider `BETA` (eligible for LTS):
 
-* **codec** - Serialize structured data.
-* **runtime::tokio** - A production-focused runtime based on [Tokio](https://tokio.rs) with secure randomness and storage backed by the local filesystem.
-* **parallel::rayon** - Parallelize fold operations with [Rayon](https://docs.rs/rayon/latest/rayon/).
-* **math::poly** - Operations over polynomials.
-* **cryptography::ed25519** - [Ed25519](https://ed25519.cr.yp.to/) signatures.
-* **cryptography::bls12381** - [BLS12-381](https://electriccoin.co/blog/new-snark-curve/) multi-signatures, DKG/Reshare, and threshold signatures.
-* **stream::encrypted** - Encrypted stream implementation using [ChaCha20-Poly1305](https://en.wikipedia.org/wiki/ChaCha20-Poly1305).
-* **p2p::authenticated::discovery** - Communicate with a fixed set of authenticated peers without known addresses over encrypted connections.
-* **p2p::authenticated::lookup** - Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
-* **broadcast::buffered** - Broadcast messages to and cache messages from untrusted peers.
-* **resolver::p2p** - Resolve data identified by a fixed-length key by using the P2P network.
-* **storage::journal** - An append-only log for storing arbitrary data.
-* **storage::archive** - A write-once key-value store for ordered data.
-* **consensus::simplex** - Simple and fast BFT agreement inspired by [Simplex Consensus](https://simplex.blog/).
-* **consensus::marshal** - Ordered delivery of finalized blocks.
+- **codec** - Serialize structured data.
+- **runtime::tokio** - A production-focused runtime based on [Tokio](https://tokio.rs) with secure randomness and storage backed by the local filesystem.
+- **parallel::rayon** - Parallelize fold operations with [Rayon](https://docs.rs/rayon/latest/rayon/).
+- **math::poly** - Operations over polynomials.
+- **cryptography::ed25519** - [Ed25519](https://ed25519.cr.yp.to/) signatures.
+- **cryptography::bls12381** - [BLS12-381](https://electriccoin.co/blog/new-snark-curve/) multi-signatures, DKG/Reshare, and threshold signatures.
+- **stream::encrypted** - Encrypted stream implementation using [ChaCha20-Poly1305](https://en.wikipedia.org/wiki/ChaCha20-Poly1305).
+- **p2p::authenticated::discovery** - Communicate with a fixed set of authenticated peers without known addresses over encrypted connections.
+- **p2p::authenticated::lookup** - Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
+- **broadcast::buffered** - Broadcast messages to and cache messages from untrusted peers.
+- **resolver::p2p** - Resolve data identified by a fixed-length key by using the P2P network.
+- **storage::journal** - An append-only log for storing arbitrary data.
+- **storage::archive** - A write-once key-value store for ordered data.
+- **consensus::simplex** - Simple and fast BFT agreement inspired by [Simplex Consensus](https://simplex.blog/).
+- **consensus::marshal** - Ordered delivery of finalized blocks.
 
 ## Is It Ready for Production?
 
