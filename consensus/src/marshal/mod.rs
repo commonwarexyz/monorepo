@@ -475,7 +475,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager
-                .register(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor, _processed_height) = setup_validator(
@@ -625,7 +625,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager
-                .register(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
                 let (application, actor, _processed_height) = setup_validator(
@@ -1695,7 +1695,7 @@ mod tests {
             // Register the initial peer set
             let mut manager = oracle.manager();
             manager
-                .register(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
 
             // Set up two validators

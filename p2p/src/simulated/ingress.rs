@@ -17,7 +17,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P, E>, Receiver<P>), Error>>,
     },
-    Update {
+    Track {
         id: u64,
         peers: Set<P>,
     },
@@ -64,8 +64,8 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Register { .. } => f.debug_struct("Register").finish_non_exhaustive(),
-            Self::Update { id, .. } => f
-                .debug_struct("Update")
+            Self::Track { id, .. } => f
+                .debug_struct("Track")
                 .field("id", id)
                 .finish_non_exhaustive(),
             Self::PeerSet { id, .. } => f
@@ -243,8 +243,8 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    async fn register(&self, id: u64, peers: Set<P>) {
-        self.sender.0.send_lossy(Message::Update { id, peers });
+    async fn track(&self, id: u64, peers: Set<P>) {
+        self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
     /// Get the peers for a given id.
@@ -301,8 +301,8 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
-    async fn register(&mut self, id: u64, peers: Set<Self::PublicKey>) {
-        self.oracle.register(id, peers).await;
+    async fn track(&mut self, id: u64, peers: Set<Self::PublicKey>) {
+        self.oracle.track(id, peers).await;
     }
 }
 
@@ -349,9 +349,9 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
-    async fn register(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
+    async fn track(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
         // Ignore all addresses (simulated network doesn't use them)
-        self.oracle.register(id, peers.into_keys()).await;
+        self.oracle.track(id, peers.into_keys()).await;
     }
 
     async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {

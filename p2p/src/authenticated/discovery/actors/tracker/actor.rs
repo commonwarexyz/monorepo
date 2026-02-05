@@ -426,7 +426,7 @@ mod tests {
                 .map(|i| new_signer_and_pk(i).1)
                 .try_collect()
                 .unwrap();
-            oracle.register(0, too_many_peers).await;
+            oracle.track(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
             let _ = mailbox.dialable().await;
         });
@@ -671,7 +671,7 @@ mod tests {
             let set1: Set<_> = [tracker_pk.clone(), pk1.clone(), pk2.clone()]
                 .try_into()
                 .unwrap();
-            oracle.register(1, set1.clone()).await;
+            oracle.track(1, set1.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let (peer_mailbox_s1, mut peer_receiver_s1) = Mailbox::new(1);
@@ -726,7 +726,7 @@ mod tests {
             let peer_set_0_peers: Set<_> = [tracker_pk.clone(), pk1.clone(), pk2.clone()]
                 .try_into()
                 .unwrap();
-            oracle.register(0, peer_set_0_peers.clone()).await;
+            oracle.track(0, peer_set_0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let pk2_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 2002);
@@ -971,7 +971,7 @@ mod tests {
             let set0_peers: Set<_> = [tracker_pk.clone(), peer1_pk.clone(), peer2_pk.clone()]
                 .try_into()
                 .unwrap();
-            oracle.register(0, set0_peers.clone()).await;
+            oracle.track(0, set0_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let _r1 = connect_to_peer(&mut mailbox, &peer1_pk).await;
@@ -1039,11 +1039,11 @@ mod tests {
             // --- Set eviction and peer killing ---
             let (_peer3_s, peer3_pk) = new_signer_and_pk(3);
             let set1_peers: Set<_> = [tracker_pk.clone(), peer2_pk.clone()].try_into().unwrap(); // New set without peer1
-            oracle.register(1, set1_peers.clone()).await;
+            oracle.track(1, set1_peers.clone()).await;
             context.sleep(Duration::from_millis(10)).await;
 
             let set2_peers: Set<_> = [tracker_pk.clone(), peer3_pk.clone()].try_into().unwrap(); // Another new set without peer1
-            oracle.register(2, set2_peers.clone()).await; // This should evict set 0 (max_sets = 2)
+            oracle.track(2, set2_peers.clone()).await; // This should evict set 0 (max_sets = 2)
             context.sleep(Duration::from_millis(10)).await;
 
             // Peer1 was only in set 0, which is now evicted.

@@ -296,7 +296,7 @@ where
             // - Dealers and players for the active epoch
             // - Players for the next epoch
             self.manager
-                .register(
+                .track(
                     epoch.get(),
                     Set::from_iter_dedup(
                         dealers

@@ -280,7 +280,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
-    async fn register(&mut self, index: u64, peers: Set<Self::PublicKey>) {
+    async fn track(&mut self, index: u64, peers: Set<Self::PublicKey>) {
         self.sender.0.send_lossy(Message::Register { index, peers });
     }
 }

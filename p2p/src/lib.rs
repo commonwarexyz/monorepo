@@ -241,13 +241,13 @@ stability_scope!(BETA {
 
     /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
-        /// Register a peer set with the given ID and peers.
+        /// Track a peer set with the given ID and peers.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
-        /// For good connectivity, all peers must register the same peer sets at the same ID.
-        fn register(
+        /// For good connectivity, all peers must track the same peer sets at the same ID.
+        fn track(
             &mut self,
             id: u64,
             peers: Set<Self::PublicKey>,
@@ -256,13 +256,13 @@ stability_scope!(BETA {
 
     /// Interface for managing peer set membership (where peer addresses are known).
     pub trait AddressableManager: Provider {
-        /// Register a peer set with the given ID and peer<PublicKey, Address> pairs.
+        /// Track a peer set with the given ID and peer<PublicKey, Address> pairs.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
-        /// For good connectivity, all peers must register the same peer sets at the same ID.
-        fn register(
+        /// For good connectivity, all peers must track the same peer sets at the same ID.
+        fn track(
             &mut self,
             id: u64,
             peers: Map<Self::PublicKey, Address>,
