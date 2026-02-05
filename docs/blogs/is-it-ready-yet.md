@@ -39,6 +39,30 @@ We've broken stability into the following levels:
 
 The Commonware Library is versioned using calendar versioning (YYYY.M.patch). Uniform versioning across primitives for "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
 
+## Programmatic Enforcement
+
+Every public object in the Commonware Library is annotated with a stability level using proc macros that expand to `cfg` attributes.
+
+Set your minimum stability level once via `RUSTFLAGS` and it applies globally:
+
+```bash
+RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
+```
+
+If your code depends on an ALPHA API, it won't compile. No runtime checks. No documentation to read. The compiler tells you.
+
+You can also filter rustdoc to show only APIs at your desired stability level:
+
+```bash
+RUSTFLAGS="--cfg commonware_stability_BETA" \
+RUSTDOCFLAGS="--cfg commonware_stability_BETA" \
+cargo doc --open
+```
+
+### Testing Consistency
+
+In CI, we enforce that any object of some level must rely on objects with the same or higher level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
+
 ## Move Fast And (Sometimes) Break Things
 
 
