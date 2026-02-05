@@ -98,6 +98,10 @@ regenerate-conformance *args='':
 # Packages to exclude from stability checks (examples, fuzz targets)
 stability_excludes := "--exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-reshare --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
 
+# Check for public items without stability annotations
+unstable-public *args='':
+    ./scripts/find_unstable_public.sh {{ args }}
+
 # Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
 # ALPHA (level 0) is the default state and doesn't require a cfg flag.
 # Examples: just check-stability, just check-stability 3, just check-stability DELTA, just check-stability GAMMA -p commonware-cryptography
@@ -143,12 +147,6 @@ check-stability *args='':
     for name in "${LEVEL_NAMES[@]:1}"; do
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
-    # Handle COVERAGE as a special level that only runs find_unstable_public.sh
-    if [ "$first_arg" = "COVERAGE" ]; then
-        echo "Checking for unmarked public items..."
-        ./scripts/find_unstable_public.sh
-        exit $?
-    fi
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."
