@@ -217,14 +217,18 @@ fn fuzz(input: FuzzInput) {
         // Importantly, make sure that if we've gotten to this point, no data corruption
         // has happened!
         assert!(!sent_corrupted_data);
-        let mut stream_corrupted = false;
+        let mut d2l_corrupted = false;
+        let mut l2d_corrupted = false;
         for msg in messages {
             match msg {
                 Message::Authenticated(direction, data) => {
-                    if stream_corrupted {
+                    if data.len() > MAX_MESSAGE_SIZE as usize {
                         continue;
                     }
-                    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE as usize {
+                    if matches!(&direction, Direction::D2L) && d2l_corrupted {
+                        continue;
+                    }
+                    if matches!(&direction, Direction::L2D) && l2d_corrupted {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
@@ -253,10 +257,13 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
                 }
                 Message::Unauthenticated(direction, data) => {
-                    if stream_corrupted {
+                    if data.len() > MAX_CIPHERTEXT_SIZE as usize {
                         continue;
                     }
-                    if data.len() > MAX_CIPHERTEXT_SIZE as usize {
+                    if matches!(&direction, Direction::D2L) && d2l_corrupted {
+                        continue;
+                    }
+                    if matches!(&direction, Direction::L2D) && l2d_corrupted {
                         continue;
                     }
                     let (sender, a_in, a_out, receiver): (
@@ -283,8 +290,13 @@ fn fuzz(input: FuzzInput) {
                     send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap();
                     let res = receiver.recv().await;
                     assert!(res.is_err());
-                    // After unauthenticated injection, the stream state is corrupted.
-                    stream_corrupted = true;
+
+                    // After unauthenticated injection, this direction's stream state is corrupted.
+                    if matches!(&direction, Direction::D2L) {
+                        d2l_corrupted = true;
+                    } else {
+                        l2d_corrupted = true;
+                    }
                 }
             }
         }
