@@ -6,7 +6,7 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Buf, BufMut, Clock, Error as RError, Metrics, Storage,
+    Blob, Buf, BufMut, Clock, Error as RError, Metrics, RwLock, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
@@ -81,7 +81,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     intervals: RMap,
 
     // Pending index entries to be synced, grouped by section
-    pending: BTreeSet<u64>,
+    pending: RwLock<BTreeSet<u64>>,
 
     // Metrics
     puts: Counter,
@@ -239,7 +239,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             config,
             blobs,
             intervals,
-            pending: BTreeSet::new(),
+            pending: RwLock::new(BTreeSet::new()),
             puts,
             gets,
             has,
@@ -270,7 +270,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(offset, record.encode_mut()).await?;
-        self.pending.insert(section);
+        self.pending.write().await.insert(section);
 
         // Add to intervals
         self.intervals.insert(index);
@@ -373,24 +373,27 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
+        self.pending
+            .write()
+            .await
+            .retain(|&section| section >= min_section);
 
         Ok(())
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.syncs.inc();
 
+        // Take pending sections atomically
+        let pending = std::mem::take(&mut *self.pending.write().await);
+
         // Sync all modified blobs
-        let mut futures = Vec::with_capacity(self.pending.len());
-        for &section in &self.pending {
-            futures.push(self.blobs.get(&section).unwrap().sync());
+        let mut futures = Vec::with_capacity(pending.len());
+        for section in &pending {
+            futures.push(self.blobs.get(section).unwrap().sync());
         }
         try_join_all(futures).await?;
-
-        // Clear pending sections
-        self.pending.clear();
 
         Ok(())
     }
@@ -438,7 +441,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<
         self.sync().await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(&self) -> Result<(), Self::Error> {
         self.sync().await
     }
 

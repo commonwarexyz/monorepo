@@ -78,7 +78,7 @@ async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
         }
     }
     let (durable, _) = db.commit(None).await.unwrap();
-    let mut clean = durable.into_merkleized();
+    let clean = durable.into_merkleized();
     clean.sync().await.unwrap();
 
     clean
@@ -97,7 +97,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                     let mut total_elapsed = Duration::ZERO;
                     for _ in 0..iters {
                         let start = Instant::now();
-                        let mut db = gen_random_keyless(ctx.clone(), operations).await;
+                        let db = gen_random_keyless(ctx.clone(), operations).await;
                         db.sync().await.unwrap();
                         total_elapsed += start.elapsed();
 

@@ -99,7 +99,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -116,7 +116,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Bounds => {
-                    let _bounds = journal.bounds();
+                    let _bounds = journal.bounds().await;
                 }
 
                 JournalOperation::Prune { min_pos } => {
@@ -163,8 +163,8 @@ fn fuzz(input: FuzzInput) {
                     .unwrap();
                     restarts += 1;
                     // Reset tracking variables to match recovered state
-                    journal_size = journal.size();
-                    let bounds = journal.bounds();
+                    journal_size = journal.size().await;
+                    let bounds = journal.bounds().await;
                     oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
                 }
 

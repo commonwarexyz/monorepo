@@ -296,10 +296,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// (section, offset, size, item).
     pub async fn replay(
         &self,
+        buffer: NonZeroUsize,
         start_section: u64,
         mut start_offset: u64,
-        buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, V), Error>> + Send, Error> {
         // Collect all blobs to replay (keeping blob reference for potential resize)
         let codec_config = self.codec_config.clone();
         let compressed = self.compression.is_some();
@@ -711,7 +711,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::new();
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(NZUsize!(1024), 0, 0)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -779,7 +779,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -865,7 +865,7 @@ mod tests {
             let mut items = Vec::<(u64, u64)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1134,7 +1134,7 @@ mod tests {
 
             // Attempt to replay the journal
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(NZUsize!(1024), 0, 0)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1191,7 +1191,7 @@ mod tests {
 
             // Attempt to replay the journal
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(NZUsize!(1024), 0, 0)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1253,7 +1253,7 @@ mod tests {
             //
             // This will truncate the leftover bytes from our manual write.
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(NZUsize!(1024), 0, 0)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1316,7 +1316,7 @@ mod tests {
             // Attempt to replay the journal
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1397,7 +1397,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1431,7 +1431,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1468,7 +1468,7 @@ mod tests {
             let mut items = Vec::<(u64, u32)>::new();
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("unable to setup replay");
                 pin_mut!(stream);
@@ -1545,7 +1545,7 @@ mod tests {
             // Attempt to replay the journal
             let mut items = Vec::<(u64, i32)>::new();
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(NZUsize!(1024), 0, 0)
                 .await
                 .expect("unable to setup replay");
             pin_mut!(stream);
@@ -1711,7 +1711,7 @@ mod tests {
 
             // Replay and verify all items
             let stream = journal
-                .replay(0, 0, NZUsize!(1024))
+                .replay(NZUsize!(1024), 0, 0)
                 .await
                 .expect("Failed to setup replay");
             pin_mut!(stream);
@@ -1774,7 +1774,7 @@ mod tests {
 
             // Verify data integrity via replay
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(NZUsize!(1024), 0, 0).await.unwrap();
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -1823,7 +1823,7 @@ mod tests {
 
             // Verify first 3 items via replay
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(NZUsize!(1024), 0, 0).await.unwrap();
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -1870,7 +1870,7 @@ mod tests {
 
             // Verify replay returns nothing
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(NZUsize!(1024), 0, 0).await.unwrap();
                 pin_mut!(stream);
                 let items: Vec<_> = stream.collect().await;
                 assert!(items.is_empty());
@@ -1926,7 +1926,7 @@ mod tests {
 
             // Verify data integrity via replay
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(NZUsize!(1024), 0, 0).await.unwrap();
                 pin_mut!(stream);
                 let mut items = Vec::new();
                 while let Some(result) = stream.next().await {
@@ -1976,7 +1976,7 @@ mod tests {
 
             // Verify replay returns nothing
             {
-                let stream = journal.replay(0, 0, NZUsize!(1024)).await.unwrap();
+                let stream = journal.replay(NZUsize!(1024), 0, 0).await.unwrap();
                 pin_mut!(stream);
                 let items: Vec<_> = stream.collect().await;
                 assert!(items.is_empty());
@@ -2033,7 +2033,7 @@ mod tests {
                     .unwrap();
 
                 let stream = journal
-                    .replay(1, start_offset, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 1, start_offset)
                     .await
                     .unwrap();
                 pin_mut!(stream);
@@ -2112,7 +2112,7 @@ mod tests {
             // Replay and verify the large item
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("Failed to setup replay");
                 pin_mut!(stream);
@@ -2194,7 +2194,7 @@ mod tests {
             // Replay and verify all items in order
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("Failed to setup replay");
                 pin_mut!(stream);
@@ -2214,7 +2214,7 @@ mod tests {
             // Test replay starting from middle section (5)
             {
                 let stream = journal
-                    .replay(5, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 5, 0)
                     .await
                     .expect("Failed to setup replay from section 5");
                 pin_mut!(stream);
@@ -2233,7 +2233,7 @@ mod tests {
             // Test replay starting from non-existent section (should skip to next)
             {
                 let stream = journal
-                    .replay(3, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 3, 0)
                     .await
                     .expect("Failed to setup replay from section 3");
                 pin_mut!(stream);
@@ -2302,7 +2302,7 @@ mod tests {
             // Replay all - should get items from sections 1 and 3, skipping empty section 2
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("Failed to setup replay");
                 pin_mut!(stream);
@@ -2325,7 +2325,7 @@ mod tests {
             // Replay starting from empty section 2 - should get only section 3
             {
                 let stream = journal
-                    .replay(2, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 2, 0)
                     .await
                     .expect("Failed to setup replay from section 2");
                 pin_mut!(stream);
@@ -2394,7 +2394,7 @@ mod tests {
             // Replay and verify
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(1024))
+                    .replay(NZUsize!(1024), 0, 0)
                     .await
                     .expect("Failed to setup replay");
                 pin_mut!(stream);
@@ -2473,7 +2473,7 @@ mod tests {
             // Replay and verify all items
             {
                 let stream = journal
-                    .replay(0, 0, NZUsize!(64))
+                    .replay(NZUsize!(64), 0, 0)
                     .await
                     .expect("Failed to setup replay");
                 pin_mut!(stream);

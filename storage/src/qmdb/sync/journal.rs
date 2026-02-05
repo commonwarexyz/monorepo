@@ -62,7 +62,7 @@ where
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
-        if self.size() <= start {
+        if self.size().await <= start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -74,11 +74,13 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        self.bounds().await.end
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        Self::append(self, op).await.map(|_| ())
+        crate::journal::contiguous::MutableContiguous::append(self, op)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -100,7 +102,7 @@ where
         assert!(!range.is_empty(), "range must not be empty");
 
         let mut journal = Self::init(context, config).await?;
-        let size = journal.size();
+        let size = journal.size().await;
 
         if size > *range.end {
             return Err(crate::journal::Error::ItemOutOfRange(size));
@@ -117,7 +119,7 @@ where
     }
 
     async fn resize(&mut self, start: Location) -> Result<(), Self::Error> {
-        if self.size() <= start {
+        if self.size().await <= start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -129,7 +131,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Self::size(self)
+        Self::size(self).await
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {

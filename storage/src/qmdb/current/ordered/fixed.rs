@@ -368,7 +368,7 @@ pub mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.size();
+            let end_loc = db.size().await;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -427,10 +427,15 @@ pub mod test {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
-            for i in start..db.status.len() {
-                if !db.status.get_bit(i) {
-                    continue;
-                }
+            // Collect active indices first, then drop the read guard
+            let active_indices: Vec<u64> = {
+                let status = db.status.read().await;
+                (start..status.len())
+                    .filter(|&i| status.get_bit(i))
+                    .collect()
+            };
+
+            for i in active_indices {
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
                 let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
@@ -714,13 +719,13 @@ pub mod test {
             db.delete(key_exists_1).await.unwrap();
             db.delete(key_exists_2).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
-            assert_ne!(db.bounds().end, 0);
+            assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
             let proof = db

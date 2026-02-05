@@ -162,14 +162,14 @@ where
     )
     .await?;
 
-    let log = if log.size() != 0 {
+    let log = if log.size().await != 0 {
         log
     } else {
         warn!("Authenticated log is empty, initializing new db");
         let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let mut log = log.merkleize();
+        let log = log.merkleize();
         log.sync().await?;
         log
     };
@@ -224,14 +224,14 @@ where
     )
     .await?;
 
-    let log = if log.size() != 0 {
+    let log = if log.size().await != 0 {
         log
     } else {
         warn!("Authenticated log is empty, initializing new db");
         let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let mut log = log.merkleize();
+        let log = log.merkleize();
         log.sync().await?;
         log
     };
@@ -362,15 +362,15 @@ pub(crate) mod test {
         }
         let db = db.commit(None).await.unwrap().0;
         let mut db = db.into_merkleized().await.unwrap();
-        db.prune(db.inactivity_floor_loc()).await.unwrap();
-        let root = db.root();
-        let op_count = db.size();
-        let inactivity_floor_loc = db.inactivity_floor_loc();
+        db.prune(db.inactivity_floor_loc().await).await.unwrap();
+        let root = db.root().await;
+        let op_count = db.size().await;
+        let inactivity_floor_loc = db.inactivity_floor_loc().await;
 
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
@@ -379,9 +379,9 @@ pub(crate) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.size(), op_count);
-        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_eq!(db.root().await, root);
 
         let mut dirty = db.into_mutable();
         for i in 0u64..ELEMENTS {
@@ -390,8 +390,8 @@ pub(crate) mod test {
             dirty.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.size(), op_count);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for _ in 0..3 {
@@ -402,8 +402,8 @@ pub(crate) mod test {
             }
         }
         let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.size(), op_count);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, op_count);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for i in 0u64..ELEMENTS {
@@ -413,9 +413,9 @@ pub(crate) mod test {
         }
         let _ = db.commit(None).await.unwrap();
         let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.size() > op_count);
-        assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
-        assert_ne!(db.root(), root);
+        assert!(db.size().await > op_count);
+        assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+        assert_ne!(db.root().await, root);
 
         db.destroy().await.unwrap();
     }
@@ -430,11 +430,11 @@ pub(crate) mod test {
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
         D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
     {
-        let root = db.root();
+        let root = db.root().await;
 
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.size(), 1);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for i in 0u64..1000 {
@@ -443,8 +443,8 @@ pub(crate) mod test {
             db.update(k, v).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.size(), 1);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for i in 0u64..1000 {
@@ -454,8 +454,8 @@ pub(crate) mod test {
         }
         drop(db);
         let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.size(), 1);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for _ in 0..3 {
@@ -467,8 +467,8 @@ pub(crate) mod test {
         }
         drop(db);
         let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.size(), 1);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.size().await, 1);
+        assert_eq!(db.root().await, root);
 
         let mut db = db.into_mutable();
         for i in 0u64..1000 {
@@ -480,8 +480,8 @@ pub(crate) mod test {
         let db = db.into_merkleized().await.unwrap();
         drop(db);
         let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.size() > 1);
-        assert_ne!(db.root(), root);
+        assert!(db.size().await > 1);
+        assert_ne!(db.root().await, root);
 
         db.destroy().await.unwrap();
     }
@@ -509,12 +509,12 @@ pub(crate) mod test {
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
-        let root = db.root();
+        let root = db.root().await;
 
         // Reopen and verify the state is preserved correctly.
         drop(db);
         let db = reopen_db(context.with_label("reopened")).await;
-        assert_eq!(db.root(), root);
+        assert_eq!(db.root().await, root);
         assert_eq!(db.get(&k).await.unwrap(), last_value);
 
         db.destroy().await.unwrap();
@@ -544,8 +544,8 @@ pub(crate) mod test {
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
-        let root_hash = db.root();
-        let original_op_count = db.size();
+        let root_hash = db.root().await;
+        let original_op_count = db.size().await;
 
         // Historical proof should match "regular" proof when historical size == current database size
         let max_ops = NZU64!(10);
@@ -635,7 +635,7 @@ pub(crate) mod test {
         {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests[0] = Sha256::hash(b"invalid");
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             assert!(!verify_proof(
                 &mut hasher,
                 &tampered_proof,
@@ -649,7 +649,7 @@ pub(crate) mod test {
         {
             let mut tampered_proof = proof.clone();
             tampered_proof.digests.push(Sha256::hash(b"invalid"));
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             assert!(!verify_proof(
                 &mut hasher,
                 &tampered_proof,
@@ -661,7 +661,7 @@ pub(crate) mod test {
 
         // Changing the ops should cause verification to fail
         {
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             let mut tampered_ops = ops.clone();
             // Swap first two ops if we have at least 2
             if tampered_ops.len() >= 2 {
@@ -678,7 +678,7 @@ pub(crate) mod test {
 
         // Appending an extra (duplicate) op should cause verification to fail
         {
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             let mut tampered_ops = ops.clone();
             tampered_ops.push(tampered_ops[0].clone());
             assert!(!verify_proof(
@@ -692,7 +692,7 @@ pub(crate) mod test {
 
         // Changing the start location should cause verification to fail
         {
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             assert!(!verify_proof(
                 &mut hasher,
                 &proof,
@@ -718,7 +718,7 @@ pub(crate) mod test {
         {
             let mut tampered_proof = proof.clone();
             tampered_proof.leaves = Location::new_unchecked(100);
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             assert!(!verify_proof(
                 &mut hasher,
                 &tampered_proof,
@@ -828,10 +828,10 @@ pub(crate) mod test {
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 
-        let root = db.root();
+        let root = db.root().await;
         drop(db);
         let db = reopen_db(context.with_label("reopened")).await;
-        assert_eq!(root, db.root());
+        assert_eq!(root, db.root().await);
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
 

@@ -219,16 +219,16 @@ impl<
         const N: usize,
     > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N, Merkleized<DigestOf<H>>, Durable>
 {
-    fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+    async fn pruned_bits(&self) -> u64 {
+        self.status.read().await.pruned_bits()
     }
 
-    fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+    async fn get_bit(&self, index: u64) -> bool {
+        self.status.read().await.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.log.bounds().await.start
     }
 }
 
@@ -243,16 +243,16 @@ impl<
 where
     VariableOperation<K, V>: Read,
 {
-    fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+    async fn pruned_bits(&self) -> u64 {
+        self.status.read().await.pruned_bits()
     }
 
-    fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+    async fn get_bit(&self, index: u64) -> bool {
+        self.status.read().await.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.log.bounds().await.start
     }
 }
 
@@ -360,16 +360,16 @@ impl<
     > BitmapPrunedBits
     for fixed::partitioned::Db<E, K, V, H, T, P, N, Merkleized<DigestOf<H>>, Durable>
 {
-    fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+    async fn pruned_bits(&self) -> u64 {
+        self.status.read().await.pruned_bits()
     }
 
-    fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+    async fn get_bit(&self, index: u64) -> bool {
+        self.status.read().await.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.log.bounds().await.start
     }
 }
 
@@ -488,15 +488,15 @@ impl<
 where
     VariableOperation<K, V>: Read,
 {
-    fn pruned_bits(&self) -> u64 {
-        self.status.pruned_bits()
+    async fn pruned_bits(&self) -> u64 {
+        self.status.read().await.pruned_bits()
     }
 
-    fn get_bit(&self, index: u64) -> bool {
-        self.status.get_bit(index)
+    async fn get_bit(&self, index: u64) -> bool {
+        self.status.read().await.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.log.bounds().await.start
     }
 }

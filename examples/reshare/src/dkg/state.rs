@@ -219,7 +219,7 @@ impl<E: Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> Storage<E, V
         let mut epochs = BTreeMap::<EpochNum, EpochCache<V, P>>::new();
         {
             let replay = msgs
-                .replay(0, 0, READ_BUFFER)
+                .replay(READ_BUFFER, 0, 0)
                 .await
                 .expect("should be able to replay msgs");
             futures::pin_mut!(replay);

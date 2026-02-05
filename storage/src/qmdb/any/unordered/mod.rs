@@ -106,7 +106,7 @@ where
         key: K,
         value: V::Value,
     ) -> Result<Option<Location>, Error> {
-        let new_loc = self.log.bounds().end;
+        let new_loc = self.log.bounds().await.end;
         let res = self.update_loc(&key, new_loc).await?;
 
         self.log
@@ -123,7 +123,7 @@ where
 
     /// Creates a new key with the given operation, or returns false if the key already exists.
     pub(crate) async fn create_key(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
-        let new_loc = self.log.bounds().end;
+        let new_loc = self.log.bounds().await.end;
         if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
             return Ok(false);
         }
@@ -199,7 +199,7 @@ where
                 continue; // translated key collision
             };
 
-            let new_loc = self.log.bounds().end;
+            let new_loc = self.log.bounds().await.end;
             if let Some(value) = update {
                 update_known_loc(&mut self.snapshot, key, old_loc, new_loc);
                 self.log
@@ -220,7 +220,7 @@ where
             let Some(value) = value else {
                 continue; // attempt to delete a non-existent key
             };
-            self.snapshot.insert(&key, self.log.bounds().end);
+            self.snapshot.insert(&key, self.log.bounds().await.end);
             self.log
                 .append(Operation::Update(Update(key, value)))
                 .await?;
@@ -251,7 +251,11 @@ impl<
     ) -> Result<Self, Error> {
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        let last_commit_loc = log
+            .size()
+            .await
+            .checked_sub(1)
+            .expect("commit should exist");
         assert!(log.read(last_commit_loc).await?.is_commit());
 
         Ok(Self {
@@ -303,6 +307,10 @@ where
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
+    }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        self.create(key, value).await
     }
 }
 
@@ -482,10 +490,11 @@ pub(super) mod test {
             reopen_db(idx)
         };
 
-        assert_eq!(db.bounds().end, 1);
-        assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+        assert_eq!(db.bounds().await.end, 1);
+        let floor = db.inactivity_floor_loc().await;
+        assert!(matches!(db.prune(floor).await, Ok(())));
         assert!(db.get_metadata().await.unwrap().is_none());
-        let empty_root = db.root();
+        let empty_root = db.root().await;
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
@@ -496,8 +505,8 @@ pub(super) mod test {
         db.update(k1, v1).await.unwrap();
         drop(db);
         let db = next_db().await;
-        assert_eq!(db.bounds().end, 1);
-        assert_eq!(db.root(), empty_root);
+        assert_eq!(db.bounds().await.end, 1);
+        assert_eq!(db.root().await, empty_root);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
@@ -505,18 +514,19 @@ pub(super) mod test {
         let (db, range) = db.commit(Some(metadata)).await.unwrap();
         assert_eq!(range.start, 1);
         assert_eq!(range.end, 2);
-        assert_eq!(db.bounds().end, 2); // another commit op added
+        assert_eq!(db.bounds().await.end, 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let mut db = db.into_merkleized().await.unwrap();
-        let root = db.root();
-        assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
+        let root = db.root().await;
+        let floor = db.inactivity_floor_loc().await;
+        assert!(matches!(db.prune(floor).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         drop(db);
         let db = next_db().await;
-        assert_eq!(db.bounds().end, 2);
+        assert_eq!(db.bounds().await.end, 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        assert_eq!(db.root(), root);
+        assert_eq!(db.root().await, root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
@@ -526,16 +536,16 @@ pub(super) mod test {
             let (clean_db, _) = db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
-            assert!(clean_db.bounds().end - clean_db.inactivity_floor_loc() <= 3);
+            assert!(clean_db.bounds().await.end - clean_db.inactivity_floor_loc().await <= 3);
             db = clean_db.into_mutable();
-            assert!(db.bounds().end - db.inactivity_floor_loc() <= 3);
+            assert!(db.bounds().await.end - db.inactivity_floor_loc().await <= 3);
         }
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.delete(k1).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
         assert!(db.is_empty());
-        assert_eq!(db.bounds().end - 1, db.inactivity_floor_loc());
+        assert_eq!(db.bounds().await.end - 1, db.inactivity_floor_loc().await);
 
         let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
@@ -584,25 +594,32 @@ pub(super) mod test {
             map.remove(&k);
         }
 
-        assert_eq!(db.bounds().end, Location::new_unchecked(1478));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        assert_eq!(db.bounds().await.end, Location::new_unchecked(1478));
+        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
 
         // Commit + sync with pruning raises inactivity floor.
         let (db, _) = db.commit(None).await.unwrap();
         let mut db = db.into_merkleized().await.unwrap();
         db.sync().await.unwrap();
-        db.prune(db.inactivity_floor_loc()).await.unwrap();
-        assert_eq!(db.bounds().end, Location::new_unchecked(1957));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
+        let floor = db.inactivity_floor_loc().await;
+        db.prune(floor).await.unwrap();
+        assert_eq!(db.bounds().await.end, Location::new_unchecked(1957));
+        assert_eq!(
+            db.inactivity_floor_loc().await,
+            Location::new_unchecked(838)
+        );
 
         // Drop & reopen and ensure state matches.
-        let root = db.root();
+        let root = db.root().await;
         db.sync().await.unwrap();
         drop(db);
         let db = reopen_db(context.with_label("reopened")).await;
-        assert_eq!(root, db.root());
-        assert_eq!(db.bounds().end, Location::new_unchecked(1957));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
+        assert_eq!(root, db.root().await);
+        assert_eq!(db.bounds().await.end, Location::new_unchecked(1957));
+        assert_eq!(
+            db.inactivity_floor_loc().await,
+            Location::new_unchecked(838)
+        );
 
         // State matches reference map.
         for i in 0u64..ELEMENTS {
@@ -618,7 +635,7 @@ pub(super) mod test {
         }
 
         let mut hasher = StandardHasher::<Sha256>::new();
-        for loc in *db.inactivity_floor_loc()..*db.bounds().end {
+        for loc in *db.inactivity_floor_loc().await..*db.bounds().await.end {
             let loc = Location::new_unchecked(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
             assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
@@ -672,8 +689,8 @@ pub(super) mod test {
         db.update(d2, v1).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        assert_eq!(db.bounds().end, 6); // 4 updates, 1 deletion + initial commit.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        assert_eq!(db.bounds().await.end, 6); // 4 updates, 1 deletion + initial commit.
+        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
         let (db, _) = db.commit(None).await.unwrap();
         let mut db = db.into_mutable();
 
@@ -682,30 +699,30 @@ pub(super) mod test {
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
         // Should have moved 3 active operations to tip, leading to floor of 7.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
-        assert_eq!(db.bounds().end, 10); // floor of 7 + 2 active keys.
+        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(7));
+        assert_eq!(db.bounds().await.end, 10); // floor of 7 + 2 active keys.
 
         // Delete all keys.
         assert!(db.delete(d1).await.unwrap());
         assert!(db.delete(d2).await.unwrap());
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
-        assert_eq!(db.bounds().end, 12); // 2 new delete ops.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
+        assert_eq!(db.bounds().await.end, 12); // 2 new delete ops.
+        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(7));
 
         let (db, _) = db.commit(None).await.unwrap();
         let mut db = db.into_mutable();
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(12));
-        assert_eq!(db.bounds().end, 13); // only commit should remain.
+        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(12));
+        assert_eq!(db.bounds().await.end, 13); // only commit should remain.
 
         // Multiple deletions of the same key should be a no-op.
         assert!(!db.delete(d1).await.unwrap());
-        assert_eq!(db.bounds().end, 13);
+        assert_eq!(db.bounds().await.end, 13);
 
         // Deletions of non-existent keys should be a no-op.
         let d3 = Sha256::fill(3u8);
         assert!(!db.delete(d3).await.unwrap());
-        assert_eq!(db.bounds().end, 13);
+        assert_eq!(db.bounds().await.end, 13);
 
         // Make sure closing/reopening gets us back to the same state.
         let db = db
@@ -716,12 +733,12 @@ pub(super) mod test {
             .into_merkleized()
             .await
             .unwrap();
-        assert_eq!(db.bounds().end, 14);
-        let root = db.root();
+        assert_eq!(db.bounds().await.end, 14);
+        let root = db.root().await;
         drop(db);
         let db = next_db().await;
-        assert_eq!(db.bounds().end, 14);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.bounds().await.end, 14);
+        assert_eq!(db.root().await, root);
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
@@ -742,12 +759,12 @@ pub(super) mod test {
             .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        assert_eq!(db.bounds().end, 23);
-        let root = db.root();
+        assert_eq!(db.bounds().await.end, 23);
+        let root = db.root().await;
         let db = next_db().await;
 
-        assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().end, 23);
+        assert_eq!(db.root().await, root);
+        assert_eq!(db.bounds().await.end, 23);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
@@ -761,12 +778,56 @@ pub(super) mod test {
             .await
             .unwrap();
 
-        assert!(db.root() != root);
+        assert!(db.root().await != root);
 
         // Pruning inactive ops should not affect current state or root
-        let root = db.root();
-        db.prune(db.inactivity_floor_loc()).await.unwrap();
-        assert_eq!(db.root(), root);
+        let root = db.root().await;
+        let floor = db.inactivity_floor_loc().await;
+        db.prune(floor).await.unwrap();
+        assert_eq!(db.root().await, root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test making multiple commits, one of which deletes a key from a previous commit.
+    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<D: TestableAnyDb<V>, V>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        V: Clone + Eq + std::fmt::Debug,
+    {
+        let mut map = HashMap::<Digest, V>::default();
+        const ELEMENTS: u64 = 10;
+        let metadata_value = make_value(42);
+        let mut db = db.into_mutable();
+        let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_be_bytes());
+        for j in 0u64..ELEMENTS {
+            for i in 0u64..ELEMENTS {
+                let k = key_at(j, i);
+                let v = make_value(i * 1000);
+                db.update(k, v.clone()).await.unwrap();
+                map.insert(k, v);
+            }
+            let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
+            db = clean_db.into_merkleized().await.unwrap().into_mutable();
+        }
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
+        let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
+
+        db.delete(k).await.unwrap();
+        let (db, _) = db.commit(None).await.unwrap();
+        let db = db.into_merkleized().await.unwrap();
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert!(db.get(&k).await.unwrap().is_none());
+
+        let root = db.root().await;
+        drop(db);
+        let db = reopen_db(context.with_label("reopened")).await;
+        assert_eq!(root, db.root().await);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert!(db.get(&k).await.unwrap().is_none());
 
         db.destroy().await.unwrap();
     }
