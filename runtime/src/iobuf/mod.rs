@@ -1263,8 +1263,19 @@ mod tests {
 
     #[test]
     fn test_iobufs_coalesce_with_pool() {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let pool_config = BufferPoolConfig {
+                    max_per_class: commonware_utils::NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+            } else {
+                let pool_config = BufferPoolConfig::for_network();
+            }
+        }
         let mut registry = prometheus_client::registry::Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let pool = BufferPool::new(pool_config, &mut registry);
 
         // Single buffer: zero-copy (same pointer)
         let buf = IoBuf::from(vec![1u8, 2, 3, 4, 5]);
@@ -2015,8 +2026,19 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce_with_pool() {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let pool_config = BufferPoolConfig {
+                    max_per_class: commonware_utils::NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+            } else {
+                let pool_config = BufferPoolConfig::for_network();
+            }
+        }
         let mut registry = prometheus_client::registry::Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let pool = BufferPool::new(pool_config, &mut registry);
 
         // Single buffer: zero-copy (same pointer)
         let mut buf = IoBufMut::from(b"hello");

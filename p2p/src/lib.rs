@@ -16,7 +16,10 @@ stability_mod!(ALPHA, pub mod simulated);
 stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufMut};
-    use commonware_utils::{channel::mpsc, ordered::{Map, Set}};
+    use commonware_utils::{
+        channel::mpsc,
+        ordered::{Map, Set},
+    };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
     pub mod authenticated;
