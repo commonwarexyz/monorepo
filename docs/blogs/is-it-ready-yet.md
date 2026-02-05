@@ -25,6 +25,19 @@ While working with different teams, we found that this approach didn't cut it. I
 * Dependency risk is difficult to assess when things are coarsely broken into "stable" and "unstable". Often wrapped with documents that few people read, it is pretty easy to incorporate functionality once "unstable" is permitted that is a lot more "unstable" than you expected.
 * Feature flags are viral. If your crate depends on `commonware-consensus` and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. This becomes unwieldy fast.
 
+## Tiered Stability and Calendar Versioning
+
+We've broken stability into the following levels:
+
+| Level        | Index | Description                                                                              |
+|--------------|-------|------------------------------------------------------------------------------------------|
+| **ALPHA**    | 0     | Breaking changes expected. No migration path provided.                                   |
+| **BETA**     | 1     | Wire and storage formats stable. Breaking changes include a migration path.              |
+| **GAMMA**    | 2     | API stable. Extensively tested and fuzzed.                                               |
+| **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
+| **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
+
+The Commonware Library is versioned using calendar versioning (YYYY.M.patch). Uniform versioning across primitives for "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
 
 ## Move Fast And (Sometimes) Break Things
 
