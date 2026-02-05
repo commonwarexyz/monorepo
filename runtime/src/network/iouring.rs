@@ -30,10 +30,12 @@ use commonware_utils::channel::{mpsc, oneshot};
 use futures::executor::block_on;
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
+use socket2::SockRef;
 use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
+    time::Duration,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
@@ -317,6 +319,14 @@ impl crate::Sink for Sink {
             bytes_sent += result as usize;
         }
         Ok(())
+    }
+
+    fn set_linger(&self, duration: Option<Duration>) {
+        // Use socket2's SockRef to set linger on the underlying socket
+        let socket = SockRef::from(&*self.fd);
+        if let Err(err) = socket.set_linger(duration) {
+            warn!(?err, "failed to set SO_LINGER");
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{IoBufs, SinkOf, StreamOf};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 #[derive(Debug)]
 /// Tracks network metrics.
@@ -60,6 +60,10 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         self.inner.send(bufs).await?;
         self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
+    }
+
+    fn set_linger(&self, duration: Option<Duration>) {
+        self.inner.set_linger(duration);
     }
 }
 

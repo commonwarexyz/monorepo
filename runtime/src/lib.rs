@@ -576,6 +576,19 @@ stability_scope!(BETA {
             &mut self,
             buf: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Set the TCP linger option on the underlying socket.
+        ///
+        /// When `duration` is `Some(Duration::ZERO)`, closing the socket will send
+        /// an RST (reset) instead of a graceful FIN/ACK shutdown. This is useful
+        /// when rejecting connections (e.g., invalid IP, failed handshake, blocked peer)
+        /// to avoid accumulating sockets in TIME_WAIT state.
+        ///
+        /// # Platform Notes
+        ///
+        /// - For simulated/deterministic runtimes, this is a no-op.
+        /// - For production runtimes, this sets the `SO_LINGER` socket option.
+        fn set_linger(&self, duration: Option<Duration>);
     }
 
     /// Interface that any runtime must implement to receive

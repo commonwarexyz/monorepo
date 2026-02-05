@@ -19,6 +19,10 @@ impl crate::Sink for Sink {
     async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.sender.send(buf).await.map_err(|_| Error::SendFailed)
     }
+
+    fn set_linger(&self, _duration: Option<std::time::Duration>) {
+        // No-op for simulated network
+    }
 }
 
 /// Implementation of [crate::Stream] for a deterministic [Network].

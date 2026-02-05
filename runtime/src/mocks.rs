@@ -97,6 +97,10 @@ impl SinkTrait for Sink {
         os_send.send(data).map_err(|_| Error::SendFailed)?;
         Ok(())
     }
+
+    fn set_linger(&self, _duration: Option<std::time::Duration>) {
+        // No-op for mock channel
+    }
 }
 
 impl Drop for Sink {

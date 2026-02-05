@@ -1,4 +1,5 @@
 use crate::{BufferPool, Error, IoBufs};
+use socket2::SockRef;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
@@ -24,6 +25,15 @@ impl crate::Sink for Sink {
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::SendFailed)?;
         Ok(())
+    }
+
+    fn set_linger(&self, duration: Option<Duration>) {
+        // Use socket2's SockRef to set linger on the underlying socket
+        // OwnedWriteHalf::as_ref() returns &TcpStream which implements AsRawFd
+        let socket = SockRef::from(self.sink.as_ref());
+        if let Err(err) = socket.set_linger(duration) {
+            warn!(?err, "failed to set SO_LINGER");
+        }
     }
 }
 

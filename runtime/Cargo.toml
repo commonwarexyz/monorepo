@@ -53,6 +53,7 @@ console-subscriber = { workspace = true, features = ["parking_lot"], optional = 
 criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+socket2.workspace = true
 tokio = { workspace = true, features = ["full"] }
 
 [features]

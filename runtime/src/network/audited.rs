@@ -1,6 +1,6 @@
 use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
 use sha2::Digest;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 /// A sink that audits network operations.
 pub struct Sink<S: crate::Sink> {
@@ -28,6 +28,10 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
         Ok(())
+    }
+
+    fn set_linger(&self, duration: Option<Duration>) {
+        self.inner.set_linger(duration);
     }
 }
 
