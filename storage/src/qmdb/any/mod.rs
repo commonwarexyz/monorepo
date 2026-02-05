@@ -110,8 +110,7 @@ pub struct VariableConfig<T: Translator, C> {
 
 type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
 
-/// Initialize the authenticated log from the given config, returning it along with the inactivity
-/// floor specified by the last commit.
+/// Initialize a fixed-size authenticated log from the given config.
 pub(crate) async fn init_fixed_authenticated_log<
     E: Storage + Clock + Metrics,
     O: Committable + CodecFixedShared,
@@ -137,15 +136,14 @@ pub(crate) async fn init_fixed_authenticated_log<
         page_cache: cfg.page_cache,
     };
 
-    let log = AuthenticatedLog::new(
+    AuthenticatedLog::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
         O::is_commit,
     )
-    .await?;
-
-    Ok(log)
+    .await
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -679,8 +677,6 @@ pub(crate) mod test {
 
         db.destroy().await.unwrap();
     }
-
-    // Consolidated test that runs test_any_db_multiple_commits_delete_replayed on all 8 variants.
 
     use crate::qmdb::any::{
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
