@@ -733,6 +733,11 @@ where
             return rx;
         }
 
+        // Inform the shard engine of an externally proposed commitment.
+        self.shards
+            .external_proposed(payload, context.leader.clone())
+            .await;
+
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
         let round = context.round;
@@ -810,6 +815,7 @@ where
             .subscribe_by_commitment(Some(round), payload)
             .await;
         let mut marshaled = self.clone();
+        let mut shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("certify")
@@ -839,6 +845,12 @@ where
                 // Use the block's embedded context for verification, passing the prefetched
                 // block to avoid fetching it again inside deferred_verify.
                 let embedded_context = block.context();
+
+                // Inform the shard engine of an externally proposed commitment.
+                shards
+                    .external_proposed(payload, embedded_context.leader.clone())
+                    .await;
+
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, payload, Some(block))
                     .await;

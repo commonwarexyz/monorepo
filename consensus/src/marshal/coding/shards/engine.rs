@@ -45,6 +45,15 @@
 //!         |  shard for self)   |  shard for self)   |
 //!         v                    v                    v
 //!    +----------+         +----------+         +----------+
+//!    | Buffer   |         | Buffer   |         | Buffer   |
+//!    | (await   |         | (await   |         | (await   |
+//!    |  leader) |         |  leader) |         |  leader) |
+//!    +----------+         +----------+         +----------+
+//!         |                    |                    |
+//!         | ExternalProposed   | ExternalProposed   |
+//!         | (leader identity)  | (leader identity)  |
+//!         v                    v                    v
+//!    +----------+         +----------+         +----------+
 //!    | Validate |         | Validate |         | Validate |
 //!    | (reshard)|         | (reshard)|         | (reshard)|
 //!    +----------+         +----------+         +----------+
@@ -82,10 +91,33 @@
 //! ```text
 //!    +------------------+
 //!    |  Initial State   |
-//!    | (no shards)      |
+//!    | (no shards,      |
+//!    |  leader unknown) |
+//!    +------------------+
+//!           |       |
+//!           |       | Receive strong shard
+//!           |       | (buffered in pending_strong_shards)
+//!           |       |
+//!           |       | Receive weak shard
+//!           |       | (buffered in pending_shards)
+//!           |       v
+//!           |  +------------------+
+//!           |  | Buffering        |
+//!           |  | (awaiting leader |
+//!           |  |  + strong shard) |
+//!           |  +------------------+
+//!           |       |
+//!           +-------+
+//!                   |
+//!                   | ExternalProposed (leader identity)
+//!                   v
+//!    +------------------+
+//!    | Leader Known     |
+//!    | (drain buffered  |
+//!    |  strong shards)  |
 //!    +------------------+
 //!             |
-//!             | Receive strong shard (for self)
+//!             | Leader's strong shard verified (C::reshard)
 //!             v
 //!    +------------------+
 //!    | Has Checking     |<----+
@@ -131,10 +163,13 @@
 //!
 //! Peers violating these rules are blocked via the [`Blocker`] trait.
 //!
-//! Note: Duplicate strong shards are silently ignored without blocking. This
-//! prevents a Byzantine actor from relaying our strong shard before the honest
-//! proposer's message arrives, which would otherwise cause us to block the
-//! proposer.
+//! Note: Strong shards are only accepted from the leader. If the leader is not
+//! yet known, strong shards are buffered until consensus signals the leader via
+//! [`ExternalProposed`]. When the leader arrives, the leader's buffered shard is
+//! verified and all other buffered senders are blocked. Duplicate strong shards
+//! from the leader are treated as Byzantine behavior and result in blocking.
+//!
+//! [`ExternalProposed`]: super::mailbox::Message::ExternalProposed
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -394,6 +429,24 @@ where
                     Message::Proposed { block } => {
                         self.broadcast_shards(&mut sender, block).await;
                     },
+                    Message::ExternalProposed { commitment, leader } => {
+                        if self.reconstructed_blocks.contains_key(&commitment) {
+                            continue;
+                        }
+                        let Some(me) = self.me.as_ref().copied() else {
+                            continue;
+                        };
+                        self.state
+                            .entry(commitment)
+                            .or_default()
+                            .set_leader(
+                                leader,
+                                &me,
+                                &self.strategy,
+                                &mut self.blocker,
+                            ).await;
+                        self.try_advance(&mut sender, commitment).await;
+                    },
                     Message::GetByCommitment { commitment, response } => {
                         let block = self.reconstructed_blocks.get(&commitment).cloned();
                         response.send_lossy(block);
@@ -456,36 +509,8 @@ where
                         now,
                     ).await;
 
-                    if let Some(reshard) = state.take_reshard() {
-                        self.broadcast_reshard(&mut sender, reshard).await;
-                        self.notify_shard_subscribers(commitment).await;
-                    }
                 }
-
-                // Sync state count after potential state creation.
-                let _ = self.metrics.reconstruction_states_count.try_set(self.state.len());
-
-                // Attempt to reconstruct the block.
-                match self.try_reconstruct(commitment).await {
-                    Ok(Some(block)) => {
-                        debug!(
-                            %commitment,
-                            parent = %block.parent(),
-                            height = %block.height(),
-                            "successfully reconstructed block from shards"
-                        );
-                        self.update_state(|s| s.remove(&commitment));
-                        self.notify_block_subscribers(block).await;
-                    }
-                    Ok(None) => {
-                        debug!(%commitment, "not enough checked shards to reconstruct block");
-                    }
-                    Err(err) => {
-                        warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
-                        self.update_state(|s| s.remove(&commitment));
-                        self.metrics.reconstruction_failures_total.inc();
-                    }
-                }
+                self.try_advance(&mut sender, commitment).await;
             }
         }
     }
@@ -590,6 +615,51 @@ where
         let commitment = shard.commitment();
         let _ = sender.send(Recipients::All, shard, true).await;
         debug!(?commitment, "broadasted shard to all participants");
+    }
+
+    /// Broadcasts any pending reshard for the given commitment and attempts
+    /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
+    /// up and subscribers are notified.
+    #[inline]
+    async fn try_advance<Sr: Sender<PublicKey = P>>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        commitment: CodingCommitment,
+    ) {
+        if let Some(reshard) = self
+            .state
+            .get_mut(&commitment)
+            .and_then(|s| s.take_reshard())
+        {
+            self.broadcast_reshard(sender, reshard).await;
+            self.notify_shard_subscribers(commitment).await;
+        }
+
+        let _ = self
+            .metrics
+            .reconstruction_states_count
+            .try_set(self.state.len());
+
+        match self.try_reconstruct(commitment).await {
+            Ok(Some(block)) => {
+                debug!(
+                    %commitment,
+                    parent = %block.parent(),
+                    height = %block.height(),
+                    "successfully reconstructed block from shards"
+                );
+                self.update_state(|s| s.remove(&commitment));
+                self.notify_block_subscribers(block).await;
+            }
+            Ok(None) => {
+                debug!(%commitment, "not enough checked shards to reconstruct block");
+            }
+            Err(err) => {
+                warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
+                self.update_state(|s| s.remove(&commitment));
+                self.metrics.reconstruction_failures_total.inc();
+            }
+        }
     }
 
     /// Handles the registry of a shard subscription.
@@ -751,6 +821,12 @@ where
 {
     /// The checking data for this commitment.
     checking_data: Option<C::CheckingData>,
+    /// The leader of the round that this state corresponds to.
+    leader: Option<P>,
+    /// Strong shards buffered while the leader is unknown, keyed by sender.
+    /// When the leader arrives, the leader's shard is processed and all
+    /// other senders are blocked.
+    pending_strong_shards: BTreeMap<P, Shard<C, H>>,
     /// Our validated reshard, ready to broadcast to other participants.
     /// This is set when we receive and validate our own strong shard.
     own_reshard: Option<Shard<C, H>>,
@@ -774,6 +850,8 @@ where
     fn default() -> Self {
         Self {
             checking_data: None,
+            leader: None,
+            pending_strong_shards: BTreeMap::new(),
             own_reshard: None,
             pending_shards: BTreeMap::new(),
             checked_shards: Vec::new(),
@@ -798,9 +876,13 @@ where
     /// Strong shards (`CodingScheme::Shard`):
     /// - MUST be sent by a participant.
     /// - MUST correspond to self's index (self must be a participant).
+    /// - MUST be sent by the leader (when the leader is known). Non-leader senders
+    ///   are blocked.
+    /// - The leader may only send ONE strong shard. Duplicates result in blocking
+    ///   the sender.
     /// - MUST pass cryptographic verification via [`CodingScheme::reshard`].
-    /// - Duplicates are silently ignored (not blocked) to prevent Byzantine actors
-    ///   from causing us to block the honest proposer.
+    /// - If the leader is not yet known, the shard is buffered until the leader
+    ///   is set via [`ExternalProposed`].
     ///
     /// Weak shards (`CodingScheme::ReShard`):
     /// - MUST be sent by a participant.
@@ -823,19 +905,54 @@ where
             self.contributed = BitMap::zeroes(participants.len() as u64);
         }
 
-        let before = self.checked_shards.len() + self.pending_shards.len();
+        let Some(sender_index) = participants.index(&sender) else {
+            warn!(?sender, "shard sent by non-participant, blocking peer");
+            blocker.block(sender).await;
+            return;
+        };
 
         if shard.is_strong() {
             self.insert_shard(me, sender, shard, strategy, blocker)
                 .await;
         } else {
-            self.insert_reshard(sender, shard, participants, blocker)
+            self.insert_reshard(sender, sender_index, shard, blocker)
                 .await;
         }
 
-        // Only update timestamp when we actually made progress.
-        if self.checked_shards.len() + self.pending_shards.len() > before {
-            self.last_updated = now;
+        self.last_updated = now;
+    }
+
+    /// Sets the leader and processes any buffered strong shards.
+    ///
+    /// The leader's buffered shard (if present) is verified via
+    /// [`Self::verify_strong_shard`]. All other buffered senders are blocked.
+    async fn set_leader(
+        &mut self,
+        leader: P,
+        me: &Participant,
+        strategy: &impl Strategy,
+        blocker: &mut impl Blocker<PublicKey = P>,
+    ) {
+        self.leader = Some(leader.clone());
+
+        if self.checking_data.is_some() {
+            return;
+        }
+
+        let pending = std::mem::take(&mut self.pending_strong_shards);
+        for (sender, shard) in pending {
+            if sender == leader {
+                self.contributed.set(me.get() as u64, true);
+                self.verify_strong_shard(sender, shard, strategy, blocker)
+                    .await;
+            } else {
+                warn!(
+                    ?sender,
+                    ?leader,
+                    "buffered strong shard from non-leader, blocking peer"
+                );
+                blocker.block(sender).await;
+            }
         }
     }
 
@@ -845,10 +962,11 @@ where
         self.own_reshard.take()
     }
 
-    /// Attempts to insert a shard into the state. If successful, validates any pending
-    /// weak shards via [`Self::drain_pending`].
+    /// Handles a strong shard received from the network.
     ///
-    /// If the shard is invalid, the peer is blocked via the provided [`Blocker`].
+    /// If the leader is not yet known, the shard is buffered. If the leader is
+    /// known, the shard is validated immediately: the sender must be the leader,
+    /// and the shard must pass cryptographic verification via [`CodingScheme::reshard`].
     ///
     /// # Panics
     ///
@@ -861,15 +979,10 @@ where
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) {
-        let commitment = shard.commitment();
-        let shard_index = shard
+        let shard_index: u16 = shard
             .index()
             .try_into()
             .expect("shard index impossibly out of bounds");
-
-        let DistributionShard::Strong(shard_data) = shard.into_inner() else {
-            panic!("insert_shard called with non-strong shard");
-        };
 
         let Some(me) = me else {
             warn!(
@@ -891,12 +1004,65 @@ where
             return;
         }
 
-        // Short-circuit if we already have our strong shard. Don't block, but don't
-        // do any expensive work either. The sender may be an honest proposer whose
-        // message arrived after a Byzantine actor relayed the same shard.
-        if self.checking_data.is_some() {
-            return;
+        match &self.leader {
+            None => {
+                // Leader unknown: buffer the shard for later processing.
+                if self.pending_strong_shards.contains_key(&sender) {
+                    warn!(
+                        ?sender,
+                        "duplicate strong shard from participant while leader unknown, blocking peer"
+                    );
+                    blocker.block(sender).await;
+                    return;
+                }
+                self.pending_strong_shards.insert(sender, shard);
+            }
+            Some(leader) => {
+                if sender != *leader {
+                    warn!(
+                        ?sender,
+                        ?leader,
+                        "strong shard from non-leader, blocking peer"
+                    );
+                    blocker.block(sender).await;
+                    return;
+                }
+                if self.contributed.get(me.get() as u64) {
+                    warn!(?sender, "duplicate strong shard from leader, blocking peer");
+                    blocker.block(sender).await;
+                    return;
+                }
+                self.contributed.set(me.get() as u64, true);
+                self.verify_strong_shard(sender, shard, strategy, blocker)
+                    .await;
+            }
         }
+    }
+
+    /// Cryptographically verifies a strong shard and, if valid, stores the
+    /// checking data and drains any pending weak shards.
+    ///
+    /// The caller is responsible for ensuring the sender is the leader.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shard` is a [`DistributionShard::Weak`].
+    async fn verify_strong_shard(
+        &mut self,
+        sender: P,
+        shard: Shard<C, H>,
+        strategy: &impl Strategy,
+        blocker: &mut impl Blocker<PublicKey = P>,
+    ) {
+        let commitment = shard.commitment();
+        let shard_index = shard
+            .index()
+            .try_into()
+            .expect("shard index impossibly out of bounds");
+
+        let DistributionShard::Strong(shard_data) = shard.into_inner() else {
+            panic!("verify_strong_shard called with non-strong shard");
+        };
 
         let Ok((checking_data, checked, reshard_data)) = C::reshard(
             &commitment.config(),
@@ -909,7 +1075,6 @@ where
             return;
         };
 
-        self.contributed.set(me.get() as u64, true);
         self.checking_data = Some(checking_data);
         self.checked_shards.push(checked);
         self.own_reshard = Some(Shard::new(
@@ -918,14 +1083,15 @@ where
             DistributionShard::Weak(reshard_data),
         ));
 
-        // Drain pending shards now that we have checking data.
+        // Drain pending weak shards now that we have checking data.
         self.drain_pending(commitment, strategy, blocker).await;
     }
 
     /// Inserts a reshard into the state.
     ///
-    /// If the shard is invalid, or the shard's index does not correspond with the sender,
-    /// the sender is blocked via the provided [`Blocker`].
+    /// The caller must have already checked (and set) the sender's `contributed`
+    /// bit via [`Self::insert`]. This method validates the shard's index and
+    /// cryptographic integrity.
     ///
     /// # Panics
     ///
@@ -933,37 +1099,29 @@ where
     async fn insert_reshard(
         &mut self,
         sender: P,
+        sender_index: Participant,
         shard: Shard<C, H>,
-        participants: &Set<P>,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) {
         let commitment = shard.commitment();
-        let shard_index = shard
+        let shard_index: u16 = shard
             .index()
             .try_into()
             .expect("shard index impossibly out of bounds");
 
-        let Some(index) = participants.index(&sender) else {
-            warn!(?sender, "shard sent by non-participant, blocking peer");
-            blocker.block(sender).await;
-            return;
-        };
-
-        if shard_index != index.get() as u16 {
-            warn!(
-                ?sender,
-                shard_index,
-                expected_index = index.get() as usize,
-                "reshard index does not match participant index, blocking peer"
-            );
+        if self.contributed.get(sender_index.get() as u64) {
+            warn!(?sender, "duplicate reshard from participant, blocking peer");
             blocker.block(sender).await;
             return;
         }
+        self.contributed.set(sender_index.get() as u64, true);
 
-        if self.contributed.get(index.get() as u64) {
+        if shard_index != sender_index.get() as u16 {
             warn!(
                 ?sender,
-                shard_index, "participant has already contributed a valid shard, blocking peer"
+                shard_index,
+                expected_index = sender_index.get() as usize,
+                "reshard index does not match participant index, blocking peer"
             );
             blocker.block(sender).await;
             return;
@@ -989,7 +1147,6 @@ where
             return;
         };
 
-        self.contributed.set(index.get() as u64, true);
         self.checked_shards.push(checked);
     }
 
@@ -1028,7 +1185,7 @@ where
                     shard_index,
                     shard_data,
                 );
-                (peer, checked.ok().map(|c| (shard_index, c)))
+                (peer, checked.ok())
             });
 
         // Block any peers that sent invalid shards.
@@ -1037,13 +1194,9 @@ where
             blocker.block(peer).await;
         }
 
-        // Mark contributed and add valid shards
-        for (index, checked) in checked_shards {
-            let index = index as u64;
-            if !self.contributed.get(index) {
-                self.contributed.set(index, true);
-                self.checked_shards.push(checked);
-            }
+        // Add valid shards.
+        for checked in checked_shards {
+            self.checked_shards.push(checked);
         }
     }
 }
@@ -1321,7 +1474,15 @@ mod tests {
             let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
+            let leader = peers[0].public_key.clone();
             peers[0].mailbox.proposed(coded_block.clone()).await;
+
+            // Inform all peers of the leader so strong shards are processed.
+            for peer in peers[1..].iter_mut() {
+                peer.mailbox
+                    .external_proposed(commitment, leader.clone())
+                    .await;
+            }
             context.sleep(config.link.latency).await;
 
             for peer in peers.iter_mut() {
@@ -1358,11 +1519,20 @@ mod tests {
             let commitment = coded_block.commitment();
             let digest = coded_block.digest();
 
+            let leader = peers[0].public_key.clone();
+
             // Subscribe before broadcasting.
             let commitment_sub = peers[1].mailbox.subscribe_block(commitment).await;
             let digest_sub = peers[2].mailbox.subscribe_block_by_digest(digest).await;
 
             peers[0].mailbox.proposed(coded_block.clone()).await;
+
+            // Inform all peers of the leader so strong shards are processed.
+            for peer in peers[1..].iter_mut() {
+                peer.mailbox
+                    .external_proposed(commitment, leader.clone())
+                    .await;
+            }
             context.sleep(config.link.latency * 2).await;
 
             for peer in peers.iter_mut() {
@@ -1409,8 +1579,10 @@ mod tests {
                 let mut invalid_shard = valid_shard.clone();
                 invalid_shard.index = 0;
 
-                // Receiver subscribes to their shard.
+                // Receiver subscribes to their shard and learns the leader.
                 let receiver_pk = peers[2].public_key.clone();
+                let leader = peers[1].public_key.clone();
+                peers[2].mailbox.external_proposed(commitment, leader).await;
                 let mut shard_sub = peers[2].mailbox.subscribe_shard(commitment).await;
 
                 // Byzantine peer sends the invalid shard.
@@ -1520,7 +1692,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_duplicate_strong_shard_ignored_without_blocking() {
+    fn test_duplicate_leader_strong_shard_blocked() {
         let fixture = Fixture {
             ..Default::default()
         };
@@ -1529,6 +1701,7 @@ mod tests {
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as usize;
@@ -1537,8 +1710,12 @@ mod tests {
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
 
-                // Send peer 2 their strong shard from peer 0 (first time - should succeed).
+                // Inform peer 2 that peer 0 is the leader.
+                peers[2].mailbox.external_proposed(commitment, leader).await;
+
+                // Send peer 2 their strong shard from peer 0 (leader, first time - should succeed).
                 peers[0]
                     .sender
                     .send(
@@ -1550,7 +1727,46 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // Send peer 2 the same strong shard from peer 1 (duplicate - ignored, not blocked).
+                // Send the same strong shard again from peer 0 (leader duplicate - blocked).
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // The leader's duplicate strong shard should result in blocking.
+                assert_blocked(&oracle, &peers[2].public_key, &peers[0].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_non_leader_strong_shard_blocked() {
+        // Test that a non-leader sending a strong shard is blocked.
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                // Get peer 2's strong shard.
+                let peer2_index = peers[2].index.get() as usize;
+                let peer2_strong_shard =
+                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let strong_bytes = peer2_strong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 2 that peer 0 is the leader.
+                peers[2].mailbox.external_proposed(commitment, leader).await;
+
+                // Peer 1 (not the leader) sends peer 2 their strong shard.
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), strong_bytes, true)
@@ -1558,12 +1774,57 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // Peer 2 should NOT have blocked peer 1 (duplicate strong shards are ignored).
+                // Peer 1 should be blocked by peer 2 for being a non-leader.
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_buffered_non_leader_blocked_on_leader_arrival() {
+        // Test that when a non-leader's strong shard is buffered (leader unknown)
+        // and then the leader arrives, the non-leader is blocked.
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                // Get peer 2's strong shard.
+                let peer2_index = peers[2].index.get() as usize;
+                let peer2_strong_shard =
+                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let strong_bytes = peer2_strong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+
+                // Peer 1 sends the strong shard before the leader is known (buffered).
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Nobody should be blocked yet (shard is buffered, leader unknown).
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),
-                    "no peers should be blocked for duplicate strong shards"
+                    "no peers should be blocked while leader is unknown"
                 );
+
+                // Now inform peer 2 that peer 0 is the leader.
+                // This drains the buffer: peer 1's shard is from a non-leader, so
+                // peer 1 should be blocked.
+                let leader = peers[0].public_key.clone();
+                peers[2].mailbox.external_proposed(commitment, leader).await;
+                context.sleep(Duration::from_millis(10)).await;
+
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
             },
         );
     }
@@ -1595,6 +1856,13 @@ mod tests {
                     .expect("reshard failed");
 
                 let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 2 of the leader.
+                peers[2]
+                    .mailbox
+                    .external_proposed(coded_block.commitment(), leader)
+                    .await;
 
                 // Send peer 2 their strong shard (initializes checking_data, 1 checked shard).
                 let strong_bytes = peer2_strong_shard.encode();
@@ -1772,6 +2040,10 @@ mod tests {
                 // Block should not be reconstructed yet (no checking data from strong shard).
                 let block = peers[3].mailbox.get(commitment).await;
                 assert!(block.is_none(), "block should not be reconstructed yet");
+
+                // Inform peer 3 that peer 2 is the leader.
+                let leader = peers[2].public_key.clone();
+                peers[3].mailbox.external_proposed(commitment, leader).await;
 
                 // Now send peer 2's strong shard. This should:
                 // 1. Provide checking data
@@ -1970,6 +2242,299 @@ mod tests {
 
                 // Peer 3 should be blocked by peer 0 for being a non-participant.
                 assert_blocked(&oracle, &peer0_pk, &peer3_pk).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_duplicate_buffered_strong_shard_blocks_peer() {
+        // Test that the same peer sending two strong shards before the leader is known
+        // results in the sender being blocked on the second attempt.
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+
+                // Get peer 2's strong shard.
+                let peer2_index = peers[2].index.get() as usize;
+                let peer2_strong_shard =
+                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let strong_bytes = peer2_strong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+
+                // Do NOT set a leader — shards should be buffered.
+
+                // Peer 1 sends the strong shard to peer 2 (buffered, leader unknown).
+                peers[1]
+                    .sender
+                    .send(
+                        Recipients::One(peer2_pk.clone()),
+                        strong_bytes.clone(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // No one should be blocked yet.
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty(), "no peers should be blocked yet");
+
+                // Peer 1 sends the same strong shard AGAIN (duplicate while leader unknown).
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 should be blocked for sending a duplicate buffered strong shard.
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_invalid_strong_shard_crypto_blocks_leader() {
+        // Test that a strong shard failing cryptographic verification (C::reshard)
+        // results in the leader being blocked.
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                // Create two different blocks — shard from block2 won't verify
+                // against commitment from block1.
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let commitment1 = coded_block1.commitment();
+
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 2's strong shard from block2, but re-wrap it with
+                // block1's commitment so it fails C::reshard.
+                let peer2_index = peers[2].index.get() as usize;
+                let mut wrong_shard = coded_block2.shard::<H>(peer2_index).expect("missing shard");
+                wrong_shard.commitment = commitment1;
+                let wrong_bytes = wrong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 2 that peer 0 is the leader.
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment1, leader)
+                    .await;
+
+                // Leader (peer 0) sends the invalid strong shard.
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk), wrong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 0 (leader) should be blocked for invalid crypto.
+                assert_blocked(&oracle, &peers[2].public_key, &peers[0].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_reshard_index_mismatch_blocks_peer() {
+        // Test that a reshard whose shard index doesn't match the sender's
+        // participant index results in blocking the sender.
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                // Get peer 2's strong shard so peer 3 can validate reshards.
+                let peer3_index = peers[3].index.get() as usize;
+                let peer3_strong_shard =
+                    coded_block.shard::<H>(peer3_index).expect("missing shard");
+
+                // Get peer 1's valid reshard, then change the index to peer 4's index.
+                let peer1_index = peers[1].index.get() as usize;
+                let mut wrong_index_reshard = coded_block
+                    .shard::<H>(peer1_index)
+                    .expect("missing shard")
+                    .verify_into_reshard()
+                    .expect("reshard failed");
+                // Mutate the index so it doesn't match sender (peer 1).
+                wrong_index_reshard.index = peers[4].index.get() as usize;
+                let wrong_bytes = wrong_index_reshard.encode();
+
+                let peer3_pk = peers[3].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 3 of the leader and send them the strong shard.
+                peers[3].mailbox.external_proposed(commitment, leader).await;
+                let strong_bytes = peer3_strong_shard.encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer3_pk.clone()), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 sends a reshard with a mismatched index to peer 3.
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer3_pk), wrong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 should be blocked for reshard index mismatch.
+                assert_blocked(&oracle, &peers[3].public_key, &peers[1].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_invalid_reshard_crypto_blocks_peer() {
+        // Test that a reshard failing cryptographic verification (C::check)
+        // results in blocking the sender (immediate path, checking_data available).
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                // Create two different blocks.
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let commitment1 = coded_block1.commitment();
+
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 3's strong shard from block1 (valid).
+                let peer3_index = peers[3].index.get() as usize;
+                let peer3_strong_shard =
+                    coded_block1.shard::<H>(peer3_index).expect("missing shard");
+
+                // Get peer 1's reshard from block2, but re-wrap with block1's
+                // commitment so C::check fails.
+                let peer1_index = peers[1].index.get() as usize;
+                let mut wrong_reshard = coded_block2
+                    .shard::<H>(peer1_index)
+                    .expect("missing shard")
+                    .verify_into_reshard()
+                    .expect("reshard failed");
+                wrong_reshard.commitment = commitment1;
+                let wrong_bytes = wrong_reshard.encode();
+
+                let peer3_pk = peers[3].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 3 of the leader and send the valid strong shard.
+                peers[3]
+                    .mailbox
+                    .external_proposed(commitment1, leader)
+                    .await;
+                let strong_bytes = peer3_strong_shard.encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer3_pk.clone()), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 sends the invalid reshard.
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer3_pk), wrong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 should be blocked for invalid reshard crypto.
+                assert_blocked(&oracle, &peers[3].public_key, &peers[1].public_key).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_invalid_pending_reshard_blocked_on_drain() {
+        // Test that a reshard buffered in pending_shards (before checking data) is
+        // blocked when drain_pending runs and C::check fails.
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                // Create two different blocks.
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let commitment1 = coded_block1.commitment();
+
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 1's reshard from block2, but wrap with block1's commitment.
+                let peer1_index = peers[1].index.get() as usize;
+                let mut wrong_reshard = coded_block2
+                    .shard::<H>(peer1_index)
+                    .expect("missing shard")
+                    .verify_into_reshard()
+                    .expect("reshard failed");
+                wrong_reshard.commitment = commitment1;
+                let wrong_bytes = wrong_reshard.encode();
+
+                let peer3_pk = peers[3].public_key.clone();
+
+                // Send the invalid reshard BEFORE the strong shard (no checking data yet,
+                // so it gets buffered in pending_shards).
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // No one should be blocked yet (reshard is buffered).
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty(), "no peers should be blocked yet");
+
+                // Now inform peer 3 of the leader and send the valid strong shard.
+                let leader = peers[0].public_key.clone();
+                peers[3]
+                    .mailbox
+                    .external_proposed(commitment1, leader)
+                    .await;
+                let peer3_index = peers[3].index.get() as usize;
+                let peer3_strong_shard =
+                    coded_block1.shard::<H>(peer3_index).expect("missing shard");
+                let strong_bytes = peer3_strong_shard.encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer3_pk), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 1 should be blocked after drain_pending validates and
+                // rejects their invalid reshard.
+                assert_blocked(&oracle, &peers[3].public_key, &peers[1].public_key).await;
             },
         );
     }

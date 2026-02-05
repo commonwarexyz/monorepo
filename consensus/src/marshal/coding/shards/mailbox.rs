@@ -25,6 +25,13 @@ where
         /// The erasure coded block.
         block: CodedBlock<B, C>,
     },
+    /// A notification from consensus that a [`CodingCommitment`] has been proposed by another leader.
+    ExternalProposed {
+        /// The [`CodingCommitment`] of the proposed block.
+        commitment: CodingCommitment,
+        /// The leader's public key.
+        leader: P,
+    },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
         /// The [`CodingCommitment`] of the block to get.
@@ -103,6 +110,12 @@ where
     /// Broadcast a proposed erasure coded block's shards to the participants.
     pub async fn proposed(&mut self, block: CodedBlock<B, C>) {
         let msg = Message::Proposed { block };
+        self.sender.send_lossy(msg).await;
+    }
+
+    /// Inform the engine of an externally proposed [`CodingCommitment`].
+    pub async fn external_proposed(&mut self, commitment: CodingCommitment, leader: P) {
+        let msg = Message::ExternalProposed { commitment, leader };
         self.sender.send_lossy(msg).await;
     }
 
