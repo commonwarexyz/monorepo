@@ -551,6 +551,20 @@ pub(crate) mod test {
             ));
         }
 
+        // Appending an extra digest should cause verification to fail
+        {
+            let mut tampered_proof = proof.clone();
+            tampered_proof.digests.push(Sha256::hash(b"invalid"));
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &tampered_proof,
+                Location::new_unchecked(1),
+                &ops,
+                &root_hash
+            ));
+        }
+
         // Changing the ops should cause verification to fail
         {
             let root_hash = db.root();
@@ -566,6 +580,58 @@ pub(crate) mod test {
                     &root_hash
                 ));
             }
+        }
+
+        // Appending an extra (duplicate) op should cause verification to fail
+        {
+            let root_hash = db.root();
+            let mut tampered_ops = ops.clone();
+            tampered_ops.push(tampered_ops[0].clone());
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(1),
+                &tampered_ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the start location should cause verification to fail
+        {
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(2),
+                &ops,
+                &root_hash
+            ));
+        }
+
+        // Changing the root digest should cause verification to fail
+        {
+            let invalid_root = Sha256::hash(b"invalid");
+            assert!(!verify_proof(
+                &mut hasher,
+                &proof,
+                Location::new_unchecked(1),
+                &ops,
+                &invalid_root
+            ));
+        }
+
+        // Changing the proof leaves count should cause verification to fail
+        {
+            let mut tampered_proof = proof.clone();
+            tampered_proof.leaves = Location::new_unchecked(100);
+            let root_hash = db.root();
+            assert!(!verify_proof(
+                &mut hasher,
+                &tampered_proof,
+                Location::new_unchecked(1),
+                &ops,
+                &root_hash
+            ));
         }
 
         db.destroy().await.unwrap();
