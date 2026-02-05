@@ -1,16 +1,31 @@
 ---
 title: "Is it ready yet?"
 description: "How compiler-enforced stability levels help you know what's production-ready in the Commonware Library."
-date: "February 3rd, 2026"
-published-time: "2026-02-03T00:00:00Z"
-modified-time: "2026-02-03T00:00:00Z"
+date: "February 5rd, 2026"
+published-time: "2026-02-05T00:00:00Z"
+modified-time: "2026-02-05T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home to 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.). It has [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and upwards of [1500 daily benchmarks](https://commonware.xyz/benchmarks.html).
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home to 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.), with [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and [1500 daily benchmarks](https://commonware.xyz/benchmarks.html).
+
+The only number that probably matters to you, however, is how many are ready to use.
+
+Today, we are excited to share our approach to stability, explain how we enforce consistent stability with the compiler, and graduate a large number of primitives to [BETA](https://github.com/commonwarexyz/monorepo#stability).
+
+## Solving a "Solved" Problem
+
+The obvious approach to tracking stability is to break each primitive (and primitive dialect) into its own crate and to apply [semantic versioning](https://semver.org/). `1.0` means stable. `0.x` means unstable. Major bump means breaking changes. Minor bump means breaking API. Patch bump means bug fixes. Hide new features that are still in development behind an `unstable` feature flag or config.
+
+
+
+## Move Fast And (Sometimes) Break Things
+
+
+It has [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and upwards of [1500 daily benchmarks](https://commonware.xyz/benchmarks.html).
 
 The number that matters, however, is how many are ready for production.
 
