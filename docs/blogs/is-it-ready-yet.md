@@ -89,14 +89,11 @@ Here are some of the primitive dialects we now consider `BETA` (wire and storage
 * **consensus::simplex** - Simple and fast BFT agreement inspired by [Simplex Consensus](https://simplex.blog/).
 * **consensus::marshal** - Ordered delivery of finalized blocks.
 
-## Is BETA Safe for Production?
+## Is It Ready for Production?
 
-As noted above, we've taken a thorough approach to testing with our [deterministic runtime](/blogs/commonware-runtime.html) and average [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository.
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) isn't battle-tested (yet). However, we believe the Commonware Library is the next best thing.
 
-We've been running the items above on our benchmarking blockchain, [Alto](https://github.com/commonwarexyz/alto), for about 10 months.
+From the start, we've prioritized robustness and testing above all else. Our [deterministic runtime](/blogs/commonware-runtime.html) has enabled us to reach [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository and [97% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo/tree/main/consensus%2Fsrc%2Fsimplex%2Factors) in critical components (like `consensus::simplex`).
 
-Over the 9 months or so, we've been collaborating closely with [Asymmetric Research](https://asymmetric.xyz/) to build a corpus of fuzz tests and [for manual code review](https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22).
+We've been running all items marked as `BETA` for over 10 months on our benchmarking blockchain, [Alto](https://github.com/commonwarexyz/alto). And have been collaborating closely with [Asymmetric Research](https://asymmetric.xyz/) to build a corpus of fuzz tests and [for manual code review](https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22) over the last 9 months.
 
-All that being said, the Commonware Library is not yet battle-tested.
-
-We don't believe point-in-time audits provide great value (the code is stale by the time the audit is complete) and have continued pouring significant resources into testing and fuzzing.
