@@ -9,23 +9,23 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Is it ready yet?</title>
-    <meta name="description" content="Large parts of the Commonware
-Library are now BETA. Stability levels tell you exactly which parts are
-ready for production and which are still evolving.">
+    <meta name="description" content="How compiler-enforced stability
+levels help you know what’s production-ready in the Commonware
+Library.">
     <meta name="author" content="Patrick O’Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
     <meta property="og:url" content="https://commonware.xyz/blogs/is-it-ready-yet" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/imgs/is-it-ready-yet-card.png" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/is-it-ready-yet.png" />
     <meta property="og:title" content="Is it ready yet?" />
-    <meta property="og:description" content="Large parts of the
-Commonware Library are now BETA. Stability levels tell you exactly which
-parts are ready for production and which are still evolving." />
+    <meta property="og:description" content="How compiler-enforced
+stability levels help you know what’s production-ready in the Commonware
+Library." />
     <meta property="article:author" content="Patrick O’Grady" />
-    <meta property="article:published_time" content="2026-01-30T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-01-30T00:00:00Z" />
+    <meta property="article:published_time" content="2026-02-05T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-02-05T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/is-it-ready-yet" />
 
@@ -33,10 +33,10 @@ parts are ready for production and which are still evolving." />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/is-it-ready-yet" />
     <meta property="twitter:title" content="Is it ready yet?" />
-    <meta property="twitter:description" content="Large parts of the
-Commonware Library are now BETA. Stability levels tell you exactly which
-parts are ready for production and which are still evolving." />
-    <meta property="twitter:image" content="https://commonware.xyz/imgs/is-it-ready-yet-card.png" />
+    <meta property="twitter:description" content="How compiler-enforced
+stability levels help you know what’s production-ready in the Commonware
+Library." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/is-it-ready-yet.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/_patrickogrady" />
     
@@ -90,117 +90,204 @@ parts are ready for production and which are still evolving." />
 
                         <div class="author">By <a href="https://x.com/_patrickogrady">Patrick
 O’Grady</a></div>
-                        <div class="date">January 30th, 2026</div>
+                        <div class="date">February 5rd, 2026</div>
         </div>
-        <p>“Is it ready?”</p>
-        <p>It’s the most common question I get about the <a
+        <p>The <a
         href="https://github.com/commonwarexyz/monorepo">Commonware
-        Library</a>. The problem is that it’s the wrong question.
-        Libraries don’t ship all at once. Some primitives have been
-        battle-tested for over a year. Others landed last week.</p>
-        <p>The real question is: which parts are ready for your use
-        case?</p>
-        <h2 id="using-the-compiler-to-enforce-stability">Using the
-        Compiler to Enforce Stability</h2>
-        <p>Every public API in the Commonware Library is now annotated
-        with a stability level. These annotations aren’t just labels -
-        they’re <code>cfg</code> flags that Rust’s compiler
-        understands.</p>
-        <p>Filter rustdoc to show only APIs at your desired stability
-        level:</p>
-        <div class="sourceCode" id="cb1"><pre
-        class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="dt">\</span></span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTDOCFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA -A rustdoc::broken_intra_doc_links&quot;</span> <span class="dt">\</span></span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> doc <span class="at">--open</span></span></code></pre></div>
-        <p>Fail your build if you depend on an unstable API:</p>
-        <div class="sourceCode" id="cb2"><pre
-        class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="ex">cargo</span> build <span class="at">-p</span> my-app</span></code></pre></div>
-        <p>Verify stability annotations are internally consistent:</p>
-        <div class="sourceCode" id="cb3"><pre
-        class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">just</span> check-stability</span></code></pre></div>
-        <p>This works transitively. If a BETA function internally calls
-        an ALPHA function, that’s our problem to fix - not yours to
-        discover in production.</p>
-        <h2 id="the-levels">The Levels</h2>
+        Library</a> is now home to 17 primitives and over 50 primitive
+        dialects (cryptography::bls12381, cryptography::ed25519, etc.),
+        with <a
+        href="https://app.codecov.io/gh/commonwarexyz/monorepo">93% test
+        coverage</a> and <a
+        href="https://commonware.xyz/benchmarks.html">1500 daily
+        benchmarks</a>.</p>
+        <p>The only number that probably matters to you, however, is how
+        many are ready to use.</p>
+        <p>Today, we are sharing our approach to stability, explaining
+        how we enforce consistent stability with the compiler, and
+        graduate a large number of primitives to <a
+        href="https://github.com/commonwarexyz/monorepo#stability">BETA</a>.</p>
+        <h2 id="solving-a-solved-problem">Solving a “Solved”
+        Problem</h2>
+        <p>The obvious approach to tracking stability is to break each
+        primitive (and primitive dialect) into its own crate and to
+        apply <a href="https://semver.org/">semantic versioning</a>.
+        <code>1.0</code> means stable. <code>0.x</code> means unstable.
+        Major bump is breaking changes. Minor bump is breaking API.
+        Patch bump is bug fixes. Hide new features that are still in
+        development behind an <code>unstable</code> feature flag. End
+        blog here?</p>
+        <p>While working with different teams, we found that this
+        approach didn’t cut it. In an environment where a subtle
+        breaking change means a network halt or a loss of funds, we
+        opted to take a more “paranoid” approach. The root issues: *
+        With many crates all versioned independently, (tested)
+        compatibility is no longer obvious. While
+        <code>consensus-simplex@1.1.3</code> may compile with
+        <code>storage-journal@2.3.45</code> and “should” work, it
+        doesn’t mean the combination has been tested together. *
+        Dependency risk is difficult to assess when things are coarsely
+        broken into “stable” and “unstable”. Often wrapped with
+        documents that few people read, it is pretty easy to incorporate
+        functionality once “unstable” is permitted that is a lot more
+        “unstable” than you expected. * Feature flags are viral. If your
+        crate depends on <code>commonware-consensus</code> and you want
+        access to an unstable API in
+        <code>commonware-cryptography</code>, then
+        <code>commonware-consensus</code> needs to expose and forward
+        that feature. Every intermediate crate in the dependency chain
+        needs to opt in. This becomes unwieldy fast. * Doesn’t imply
+        anything about backwards-compatibility. Once something is
+        considered “stable”, it should remain supported indefinitely.
+        This is equivalent to one major version that doesn’t get
+        incremented.</p>
+        <h2 id="tiered-stability-and-calendar-versioning">Tiered
+        Stability and Calendar Versioning</h2>
+        <p>We’ve broken stability into the following levels:</p>
         <table>
         <colgroup>
-        <col style="width: 48%" />
-        <col style="width: 51%" />
+        <col style="width: 12%" />
+        <col style="width: 6%" />
+        <col style="width: 81%" />
         </colgroup>
         <thead>
         <tr>
         <th>Level</th>
-        <th>What it Means</th>
+        <th>Index</th>
+        <th>Description</th>
         </tr>
         </thead>
         <tbody>
         <tr>
         <td><strong>ALPHA</strong></td>
-        <td>Expect breaking changes. No migration path.</td>
+        <td>0</td>
+        <td>Breaking changes expected. No migration path provided.</td>
         </tr>
         <tr>
         <td><strong>BETA</strong></td>
-        <td>Wire and storage formats stable. Breaking changes come with
-        migrations.</td>
+        <td>1</td>
+        <td>Wire and storage formats stable. Breaking changes include a
+        migration path.</td>
         </tr>
         <tr>
         <td><strong>GAMMA</strong></td>
+        <td>2</td>
         <td>API stable. Extensively tested and fuzzed.</td>
         </tr>
         <tr>
         <td><strong>DELTA</strong></td>
+        <td>3</td>
         <td>Battle-tested. Bug bounty eligible.</td>
         </tr>
         <tr>
         <td><strong>EPSILON</strong></td>
-        <td>Feature-frozen. Bug fixes only.</td>
+        <td>4</td>
+        <td>Feature-frozen. Only bug fixes and performance improvements
+        accepted.</td>
         </tr>
         </tbody>
         </table>
-        <p><strong>BETA is the threshold for serious use.</strong> If
-        you’re building something real, you want BETA or higher. The
-        wire format won’t change out from under you. If we do make
-        breaking changes, we’ll provide a migration path.</p>
-        <h2 id="whats-beta-now">What’s BETA Now</h2>
-        <p>The core building blocks are ready:</p>
+        <p>We take Long-Term Support (LTS) seriously. We expect to
+        support primitives that are marked as wire/format stable for
+        years. Likewise, primitives that are massive changes won’t
+        replace existing ones. Instead they’ll be new primitive
+        dialects.</p>
+        <p>The Commonware Library is versioned using calendar versioning
+        (YYYY.M.patch). Uniform versioning across primitives for
+        “obvious” compatibility without implying stability (a uniform
+        library version of <code>1.2.1</code> may imply a brand new
+        crate is much stabler than it is).</p>
+        <h2 id="programmatic-enforcement">Programmatic Enforcement</h2>
+        <p>Every public object in the Commonware Library is annotated
+        with a stability level using proc macros that expand to
+        <code>cfg</code> attributes.</p>
+        <p>Set your minimum stability level once via
+        <code>RUSTFLAGS</code> and it applies globally:</p>
+        <div class="sourceCode" id="cb1"><pre
+        class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="ex">cargo</span> build <span class="at">-p</span> my-app</span></code></pre></div>
+        <p>If your code depends on an ALPHA API, it won’t compile. No
+        runtime checks. No documentation to read. The compiler tells
+        you.</p>
+        <p>You can also filter rustdoc to show only APIs at your desired
+        stability level:</p>
+        <div class="sourceCode" id="cb2"><pre
+        class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="dt">\</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="va">RUSTDOCFLAGS</span><span class="op">=</span><span class="st">&quot;--cfg commonware_stability_BETA&quot;</span> <span class="dt">\</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> doc <span class="at">--open</span></span></code></pre></div>
+        <h3 id="testing-consistency">Testing Consistency</h3>
+        <p>In CI, we enforce that any object of some level must rely on
+        objects with the same or higher level. If something is marked
+        BETA, you can trust that its entire dependency chain within the
+        library is BETA or higher.</p>
+        <figure>
+        <img src="/imgs/is-it-ready-yet.png"
+        alt="Figure 1: The stability levels are enforced by the compiler" />
+        <figcaption aria-hidden="true">Figure 1: The stability levels
+        are enforced by the compiler</figcaption>
+        </figure>
+        <h2 id="graduation-day">Graduation Day</h2>
+        <p>Here are some of the primitive dialects we now consider
+        <code>BETA</code> (wire and storage format stable):</p>
         <ul>
-        <li><strong>runtime</strong> - async execution with
-        deterministic testing</li>
-        <li><strong>cryptography</strong> - Ed25519, BLS12-381,
-        signatures, DKG</li>
-        <li><strong>codec</strong> - zero-copy serialization</li>
-        <li><strong>p2p</strong> - authenticated peer-to-peer
-        networking</li>
-        <li><strong>storage</strong> - persistent key-value storage</li>
-        <li><strong>stream</strong> - encrypted message streams</li>
-        <li><strong>broadcast</strong> - reliable data
-        dissemination</li>
-        <li><strong>consensus</strong> - BFT agreement (Simplex)</li>
-        <li><strong>resolver</strong> - content-addressed data
-        retrieval</li>
-        <li><strong>utils</strong> - common utilities</li>
-        <li><strong>math</strong> - numerical primitives</li>
-        <li><strong>parallel</strong> - parallel execution helpers</li>
+        <li><strong>codec</strong> - Serialize structured data.</li>
+        <li><strong>runtime::tokio</strong> - A production-focused
+        runtime based on <a href="https://tokio.rs">Tokio</a> with
+        secure randomness and storage backed by the local
+        filesystem.</li>
+        <li><strong>parallel::rayon</strong> - Parallelize fold
+        operations with <a
+        href="https://docs.rs/rayon/latest/rayon/">Rayon</a>.</li>
+        <li><strong>math::poly</strong> - Operations over
+        polynomials.</li>
+        <li><strong>cryptography::ed25519</strong> - <a
+        href="https://ed25519.cr.yp.to/">Ed25519</a> signatures.</li>
+        <li><strong>cryptography::bls12381</strong> - <a
+        href="https://electriccoin.co/blog/new-snark-curve/">BLS12-381</a>
+        multi-signatures, DKG/Reshare, and threshold signatures.</li>
+        <li><strong>stream::encrypted</strong> - Encrypted stream
+        implementation using <a
+        href="https://en.wikipedia.org/wiki/ChaCha20-Poly1305">ChaCha20-Poly1305</a>.</li>
+        <li><strong>p2p::authenticated::discovery</strong> - Communicate
+        with a fixed set of authenticated peers without known addresses
+        over encrypted connections.</li>
+        <li><strong>p2p::authenticated::lookup</strong> - Communicate
+        with a fixed set of authenticated peers with known addresses
+        over encrypted connections.</li>
+        <li><strong>broadcast::buffered</strong> - Broadcast messages to
+        and cache messages from untrusted peers.</li>
+        <li><strong>resolver::p2p</strong> - Resolve data identified by
+        a fixed-length key by using the P2P network.</li>
+        <li><strong>storage::journal</strong> - An append-only log for
+        storing arbitrary data.</li>
+        <li><strong>storage::archive</strong> - A write-once key-value
+        store for ordered data.</li>
+        <li><strong>consensus::simplex</strong> - Simple and fast BFT
+        agreement inspired by <a href="https://simplex.blog/">Simplex
+        Consensus</a>.</li>
+        <li><strong>consensus::marshal</strong> - Ordered delivery of
+        finalized blocks.</li>
         </ul>
-        <p>This isn’t a collection of experiments. These primitives
-        power <a href="https://github.com/commonwarexyz/alto">Alto</a>,
-        our reference blockchain implementation. They’ve been tested
-        under adversarial conditions, fuzzed extensively, and optimized
-        for performance.</p>
-        <h2 id="date-versioning">Date Versioning</h2>
-        <p>We’re also moving to date-based versions:
-        <code>v2026.1.30</code>.</p>
-        <p>Primitives evolve at their own pace. We add new ones when
-        they’re ready. We stabilize existing ones when they’ve proven
-        themselves. The stability level tells you what’s ready - the
-        version just tells you when it was released.</p>
-        <h2 id="whats-next">What’s Next</h2>
-        <p>More primitives will reach BETA. Some will reach GAMMA as
-        fuzzing coverage expands. A few battle-tested ones will
-        eventually hit DELTA.</p>
-        <p>You’ll always know exactly where each one stands.</p>
-        <p>Build something: <a
-        href="https://github.com/commonwarexyz/monorepo">github.com/commonwarexyz/monorepo</a></p>
+        <h2 id="is-beta-safe-for-production">Is BETA Safe for
+        Production?</h2>
+        <p>As noted above, we’ve taken a thorough approach to testing
+        with our <a
+        href="https://commonware.xyz/blogs/commonware-runtime">deterministic
+        runtime</a> and average <a
+        href="https://app.codecov.io/gh/commonwarexyz/monorepo">93% test
+        coverage</a> across the repository.</p>
+        <p>We’ve been running the items above on our benchmarking
+        blockchain, <a
+        href="https://github.com/commonwarexyz/alto">Alto</a>, for about
+        10 months.</p>
+        <p>Over the 9 months or so, we’ve been collaborating closely
+        with <a href="https://asymmetric.xyz/">Asymmetric Research</a>
+        to build a corpus of fuzz tests and <a
+        href="https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22">for
+        manual code review</a>.</p>
+        <p>We don’t believe point-in-time audits provide great value
+        (the code is stale by the time the audit is complete) and have
+        continued pouring significant resources into testing and
+        fuzzing.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>
