@@ -12,11 +12,19 @@ image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 
 The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has 17 primitives and over 50 primitive dialects (cryptography/bls12381, cryptography/ed25519, etc.). The number that matters, however, is how many are ready for production.
 
+Publishing our stability guide and graduating a large number of primitives to [BETA](https://github.com/commonwarexyz/monorepo#stability) is a major milestone for the Commonware Library.
+
 Have been working with Asymmetric Research for almost a year now: https://x.com/_patrickogrady/status/1915407345414492497?s=20
 
 What really matters, however, is how many you can use in your network today.
 
 Today, we're publishing our approach to production-readiness and graduating a large number of these primitives from [ALPHA](https://github.com/commonwarexyz/monorepo#stability) to [BETA](https://github.com/commonwarexyz/monorepo#stability).
+
+## Going All-In on Fuzzing
+
+From the get go, we've felt that security is a continuous process. A point-in-time audit doesn't cut it.
+
+Fuzzer integrated with the deterministic runtime: https://github.com/commonwarexyz/monorepo/pull/2976
 
 ## Solving a "Solved" Problem
 
