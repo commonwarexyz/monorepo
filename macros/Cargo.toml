@@ -19,8 +19,8 @@ tokio = { workspace = true, features = ["macros"], optional = true }
 
 [dev-dependencies]
 futures.workspace = true
-tokio = { workspace = true, features = ["sync"] }
 futures-timer.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
