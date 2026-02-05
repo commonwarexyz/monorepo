@@ -51,7 +51,13 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter, VerifyingApplication, marshal::{Update, ancestry::AncestorStream, core::Mailbox, is_at_epoch_boundary, standard::Standard}, simplex::types::Context, types::{Epoch, Epocher, Round}
+    marshal::{
+        ancestry::AncestorStream, core::Mailbox, is_at_epoch_boundary, standard::Standard, Update,
+    },
+    simplex::types::Context,
+    types::{Epoch, Epocher, Round},
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
+    Reporter, VerifyingApplication,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;

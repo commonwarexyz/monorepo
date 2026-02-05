@@ -145,12 +145,12 @@ use crate::{
     types::CodingCommitment,
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{Error as CodecError, Read};
+use commonware_codec::{Codec, Error as CodecError, Read};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    utils::codec::{wrap, WrappedSender},
+    utils::codec::{wrap, WrappedReceiver, WrappedSender},
     Blocker, Receiver, Recipients, Sender,
 };
 use commonware_parallel::Strategy;
@@ -171,7 +171,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use thiserror::Error;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// An error that can occur during reconstruction of a [`CodedBlock`] from [`Shard`]s
 #[derive(Debug, Error)]
@@ -347,8 +347,15 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let (mut sender, mut receiver) =
+        let (mut sender, receiver) =
             wrap::<_, _, Shard<C, H>>(self.shard_codec_cfg.clone(), sender, receiver);
+        let (receiver_service, mut receiver) = WrappedBackgroundReceiver::new(
+            self.context.with_label("wrapped_background_receiver"),
+            receiver,
+            self.blocker.clone(),
+        );
+        // Keep the handle alive to prevent the background receiver from being aborted.
+        let _receiver_handle = receiver_service.start();
 
         select_loop! {
             self.context,
@@ -369,7 +376,7 @@ where
                 debug!("received shutdown signal, stopping shard engine");
             },
             Some(message) = self.mailbox.recv() else {
-                debug!("shard mailbox closed, shutting down shard engine");
+                debug!("shard mailbox closed, stopping shard engine");
                 return;
             } => {
                 match message {
@@ -418,20 +425,10 @@ where
                     },
                 }
             },
-            Ok((peer, shard)) = receiver.recv() else {
-                error!("receiver failed, stopping shard engine");
+            Some((peer, shard)) = receiver.recv() else {
+                debug!("receiver closed, stopping shard engine");
                 return;
             } => {
-                // Verify that the codec for the shard is valid.
-                let shard = match shard {
-                    Ok(shard) => shard,
-                    Err(err) => {
-                        warn!(?peer, ?err, "received invalid shard, blocking peer");
-                        self.blocker.block(peer).await;
-                        continue;
-                    }
-                };
-
                 // Block peers that are not participants.
                 if self.participants.index(&peer).is_none() {
                     warn!(?peer, "shard sent by non-participant, blocking peer");
@@ -1046,6 +1043,85 @@ where
             if !self.contributed.get(index) {
                 self.contributed.set(index, true);
                 self.checked_shards.push(checked);
+            }
+        }
+    }
+}
+
+/// A background receiver that wraps a [`WrappedReceiver`] and decodes messages using a [`Codec`]
+/// in a separate task.
+///
+/// This is particularly useful for situations where decoding large messages introduces pressure
+/// on an event loop that uses [`WrappedReceiver`], such as in the shard engine.
+struct WrappedBackgroundReceiver<E, P, B, R, V>
+where
+    E: Spawner,
+    P: PublicKey,
+    B: Blocker<PublicKey = P>,
+    R: Receiver<PublicKey = P>,
+    V: Codec + Send,
+{
+    context: ContextCell<E>,
+    receiver: WrappedReceiver<R, V>,
+    blocker: B,
+    sender: mpsc::Sender<(P, V)>,
+}
+
+impl<E, P, B, R, V> WrappedBackgroundReceiver<E, P, B, R, V>
+where
+    E: Spawner,
+    P: PublicKey,
+    B: Blocker<PublicKey = P>,
+    R: Receiver<PublicKey = P>,
+    V: Codec + Send + 'static,
+{
+    /// Create a new [`WrappedBackgroundReceiver`] with the given receiver and blocker.
+    pub fn new(
+        context: E,
+        receiver: WrappedReceiver<R, V>,
+        blocker: B,
+    ) -> (Self, mpsc::Receiver<(P, V)>) {
+        let (tx, rx) = mpsc::channel(1024);
+        (
+            Self {
+                context: ContextCell::new(context),
+                receiver,
+                blocker,
+                sender: tx,
+            },
+            rx,
+        )
+    }
+
+    /// Start the background receiver.
+    ///
+    /// Returns a [`Handle`] that must be kept alive for the background receiver to continue
+    /// running. Dropping the handle will abort the background receiver.
+    pub fn start(mut self) -> Handle<()> {
+        spawn_cell!(self.context, self.run().await)
+    }
+
+    /// Run the background receiver's event loop.
+    async fn run(mut self) {
+        select_loop! {
+            self.context,
+            on_stopped => {
+                debug!("wrapped background receiver received shutdown signal, stopping");
+            },
+            Ok((peer, value)) = self.receiver.recv() else {
+                debug!("wrapped background receiver closed, stopping");
+                return;
+            } => {
+                let value = match value {
+                    Ok(value) => value,
+                    Err(err) => {
+                        warn!(?peer, ?err, "received invalid message, blocking peer");
+                        self.blocker.block(peer).await;
+                        continue;
+                    }
+                };
+
+                let _ = self.sender.send((peer, value)).await;
             }
         }
     }
