@@ -473,7 +473,7 @@ mod tests {
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
-                .register(0, [tracker_pk.clone(), auth_pk.clone()].try_into().unwrap())
+                .track(0, [tracker_pk.clone(), auth_pk.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -536,7 +536,7 @@ mod tests {
 
             let (_, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, [tracker_pk, pk1.clone()].try_into().unwrap())
+                .track(0, [tracker_pk, pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -570,7 +570,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -604,7 +604,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .register(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -653,7 +653,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             oracle
-                .register(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -803,7 +803,7 @@ mod tests {
             assert!(!mailbox.acceptable(peer_pk3.clone()).await);
 
             oracle
-                .register(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
+                .track(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -833,7 +833,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .register(0, [peer_pk.clone()].try_into().unwrap())
+                .track(0, [peer_pk.clone()].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -922,7 +922,7 @@ mod tests {
             let (_s1, pk1) = new_signer_and_pk(1);
             let (_s2, pk2) = new_signer_and_pk(2);
             oracle
-                .register(
+                .track(
                     0,
                     [tracker_pk, pk1.clone(), pk2.clone()].try_into().unwrap(),
                 )

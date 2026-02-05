@@ -367,7 +367,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .register(0, [(pk.clone(), addr.into())].try_into().unwrap())
+                .track(0, [(pk.clone(), addr.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -396,7 +396,7 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .register(0, [(pk1.clone(), addr.into())].try_into().unwrap())
+                .track(0, [(pk1.clone(), addr.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -451,7 +451,7 @@ mod tests {
             assert!(!mailbox.acceptable(peer_pk3.clone(), peer_addr3.ip()).await);
 
             oracle
-                .register(
+                .track(
                     0,
                     [
                         (peer_pk.clone(), peer_addr.into()),
@@ -500,7 +500,7 @@ mod tests {
             );
 
             oracle
-                .register(
+                .track(
                     0,
                     [
                         (peer_pk.clone(), peer_addr.into()),
@@ -553,7 +553,7 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .register(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
+                .track(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -588,7 +588,7 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .register(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
+                .track(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
                 .await;
 
             let dialable_peers = mailbox.dialable().await;
@@ -612,7 +612,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .register(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
+                .track(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
                 .await;
 
             let result = mailbox.dial(boot_pk.clone()).await;
@@ -649,7 +649,7 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .register(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
+                .track(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -701,7 +701,7 @@ mod tests {
 
             // Register set with myself and one other peer
             oracle
-                .register(
+                .track(
                     0,
                     [
                         (my_pk.clone(), my_addr.into()),
@@ -729,7 +729,7 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .register(1, [(pk_2.clone(), addr_2.into())].try_into().unwrap())
+                .track(1, [(pk_2.clone(), addr_2.into())].try_into().unwrap())
                 .await;
 
             // Wait for a listener update
@@ -759,7 +759,7 @@ mod tests {
             let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
 
             oracle
-                .register(
+                .track(
                     0,
                     [
                         (my_pk.clone(), my_addr.into()),
@@ -800,7 +800,7 @@ mod tests {
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1002);
 
             oracle
-                .register(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
+                .track(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -837,7 +837,7 @@ mod tests {
             let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
 
             oracle
-                .register(
+                .track(
                     0,
                     [
                         (my_pk.clone(), my_addr.into()),
@@ -898,7 +898,7 @@ mod tests {
             } = setup_actor(context.clone(), cfg);
 
             oracle
-                .register(0, [(pk_1.clone(), addr_1.into())].try_into().unwrap())
+                .track(0, [(pk_1.clone(), addr_1.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -930,7 +930,7 @@ mod tests {
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
             oracle
-                .register(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
+                .track(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -968,7 +968,7 @@ mod tests {
 
             // Register peer set with peer at address A
             oracle
-                .register(0, [(pk.clone(), addr_a.into())].try_into().unwrap())
+                .track(0, [(pk.clone(), addr_a.into())].try_into().unwrap())
                 .await;
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
@@ -982,7 +982,7 @@ mod tests {
 
             // Register new peer set with same peer at address B
             oracle
-                .register(1, [(pk.clone(), addr_b.into())].try_into().unwrap())
+                .track(1, [(pk.clone(), addr_b.into())].try_into().unwrap())
                 .await;
 
             // Peer should receive Kill message (connection severed due to address change)
@@ -1016,7 +1016,7 @@ mod tests {
 
             // Register some peers
             oracle
-                .register(
+                .track(
                     0,
                     [
                         (pk_tracked.clone(), addr_1.into()),
