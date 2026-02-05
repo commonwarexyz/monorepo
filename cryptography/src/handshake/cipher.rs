@@ -200,10 +200,10 @@ impl RecvCipher {
     /// is a simple (and safe) way to handle this scenario.
     #[inline]
     pub fn recv_in_place(&mut self, encrypted_data: &mut [u8]) -> Result<usize, Error> {
+        let nonce = self.nonce.inc()?;
         if encrypted_data.len() < TAG_SIZE {
             return Err(Error::DecryptionFailed);
         }
-        let nonce = self.nonce.inc()?;
         self.inner
             .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
     }
