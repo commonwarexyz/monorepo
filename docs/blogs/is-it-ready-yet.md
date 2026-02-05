@@ -91,7 +91,7 @@ Here are some of the primitive dialects we now consider `BETA` (wire and storage
 
 ## Is It Ready for Production?
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) isn't battle-tested (yet). However, we believe the Commonware Library is the "next best thing."
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) isn't battle-tested (yet). However, we are shooting for the "next best thing."
 
 From the start, we've prioritized robustness and testing above all else. Our [deterministic runtime](/blogs/commonware-runtime.html) has allowed us to reach [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository and [97% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo/tree/main/consensus%2Fsrc%2Fsimplex%2Factors) in critical components (like `consensus::simplex`).
 
