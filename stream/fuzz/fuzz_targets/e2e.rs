@@ -46,7 +46,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
         } else {
             MAX_CIPHERTEXT_SIZE as usize
         };
-        let len = u.int_in_range(0..=max_len)?;
+        let len = u.int_in_range(0..=max_len.min(u.len()))?;
         let msg = u.bytes(len)?.to_vec();
         let out = if authenticated {
             Self::Authenticated(direction, msg)
@@ -254,9 +254,14 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
+
+                    // Send a legitimate plaintext message through the encrypted channel.
                     sender.send(data.clone()).await.unwrap();
+                    // Intercept the resulting ciphertext frame from the wire.
                     let frame = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Forward the exact ciphertext frame unchanged.
                     send_frame(a_out, frame, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Receiver should decrypt and deliver the original plaintext.
                     let data2 = receiver.recv().await.unwrap();
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
                 }
