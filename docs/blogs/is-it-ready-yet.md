@@ -91,8 +91,10 @@ Here are some of the primitive dialects we now consider `BETA` (wire and storage
 
 ## Is It Ready for Production?
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) isn't battle-tested (yet). However, we believe the Commonware Library is the next best thing.
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) isn't battle-tested (yet). However, we believe the Commonware Library is the "next best thing."
 
-From the start, we've prioritized robustness and testing above all else. Our [deterministic runtime](/blogs/commonware-runtime.html) has enabled us to reach [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository and [97% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo/tree/main/consensus%2Fsrc%2Fsimplex%2Factors) in critical components (like `consensus::simplex`).
+From the start, we've prioritized robustness and testing above all else. Our [deterministic runtime](/blogs/commonware-runtime.html) has allowed us to reach [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository and [97% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo/tree/main/consensus%2Fsrc%2Fsimplex%2Factors) in critical components (like `consensus::simplex`).
 
-We've been running all items marked as `BETA` for over 10 months on our benchmarking blockchain, [Alto](https://github.com/commonwarexyz/alto). And have been collaborating closely with [Asymmetric Research](https://asymmetric.xyz/) on a large corpus of fuzz tests (that they run continuously) and [for manual code review](https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22) over the last 9 months.
+For over 10 months, we've been running all `BETA` primitives listed above in [Alto](https://github.com/commonwarexyz/alto). For the last 9 months, we've been collaborating with [Asymmetric Research](https://x.com/_patrickogrady/status/1915407345414492497) on fuzzing and [manual code review](https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22).
+
+We have yet to mark any primitives as `DELTA` (bug bounty eligible) but hope to do so in the coming months. In the meantime, we welcome responsible disclosures via [GitHub Vulnerability Reporting](https://github.com/commonwarexyz/monorepo/security).
