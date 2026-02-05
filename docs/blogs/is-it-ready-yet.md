@@ -24,9 +24,10 @@ While building with different teams, however, this approach fell short:
 
 **Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles, however, in a world where a wrong guess means a network halt or loss of funds, it is not good enough.
 
-**Coarse readiness stalls development and is error-prone for applications.** Without more granularity, new features tend to sit in "unstable" purgatory for too long. When incorporated into downstream applications, all of "unstable" is available making it easy to accidentally rely on something much less unstable than another (with nuance hidden deep in documentation that has probably not been read).
+**Coarse readiness slows development and is error-prone for applications.** Without more granularity, new features tend to sit in "unstable" purgatory for too long. When incorporated into downstream applications, all of "unstable" is available making it easy to accidentally rely on something much less stable than intended (with nuance hidden deep in documentation that has probably not been read).
 
-**Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable", it should remain supported indefinitely. If a significant breaking change is desired, it must be introduced in a new crate.
+**Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable," it should remain supported indefinitely. If a significant breaking change is attempted, it must be backwards-compatible or introduced in a new crate. There is no `2.x` for a primitive.
+
 
 ## Tiered Stability and Calendar Versioning
 
@@ -40,9 +41,9 @@ We've broken stability into the following levels:
 | **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
-We take Long-Term Support (LTS) seriously. We expect to support primitives that are marked as wire/format stable for years. Likewise, primitives that are massive changes won't replace existing ones. Instead they'll be new primitive dialects.
+We take Long-Term Support (LTS) seriously. We expect to support primitives that are marked as wire/format stable for years. Likewise, primitives with breaking changes to wire/storage formats won't replace existing ones—they'll become new dialects.
 
-The Commonware Library is versioned using calendar versioning (YYYY.M.patch). Uniform versioning across primitives for "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
+The Commonware Library is versioned using calendar versioning (YYYY.M.patch). Uniform versioning across primitives provides "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
 
 ## Programmatic Enforcement
 
@@ -54,7 +55,7 @@ Set your minimum stability level once via `RUSTFLAGS` and it applies globally:
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
 
-If your code depends on an ALPHA API, it won't compile. No runtime checks. No documentation to read. The compiler tells you.
+If your code depends on an `ALPHA` API, it won't compile. No runtime checks. No documentation to read. The compiler tells you.
 
 You can also filter rustdoc to show only APIs at your desired stability level:
 
@@ -66,7 +67,7 @@ cargo doc --open
 
 ### Testing Consistency
 
-In CI, we enforce that any object of some level must rely on objects with the same or higher level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
+In CI, we enforce that any object must only depend on objects at the same or higher stability level. If something is marked `BETA`, you can trust that its entire dependency chain within the library is `BETA` or higher.
 
 ![Figure 1: The stability levels are enforced by the compiler](/imgs/is-it-ready-yet.png)
 
