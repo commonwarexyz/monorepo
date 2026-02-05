@@ -22,12 +22,8 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register { index: u64, peers: Map<C, Address> },
 
-    /// Update a peer's address without creating a new peer set.
-    Overwrite {
-        public_key: C,
-        address: Address,
-        responder: oneshot::Sender<bool>,
-    },
+    /// Update addresses for multiple peers without creating a new peer set.
+    Overwrite { peers: Map<C, Address> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
@@ -241,16 +237,8 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
         self.sender.0.send_lossy(Message::Register { index, peers });
     }
 
-    async fn overwrite(&mut self, peer: Self::PublicKey, address: Address) -> bool {
-        self.sender
-            .0
-            .request(|responder| Message::Overwrite {
-                public_key: peer,
-                address,
-                responder,
-            })
-            .await
-            .unwrap_or(false)
+    async fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) {
+        self.sender.0.send_lossy(Message::Overwrite { peers });
     }
 }
 

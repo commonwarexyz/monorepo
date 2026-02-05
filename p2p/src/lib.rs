@@ -275,21 +275,18 @@ stability_scope!(BETA {
             peers: Map<Self::PublicKey, Address>,
         ) -> impl Future<Output = ()> + Send;
 
-        /// Update a peer's address without creating a new peer set.
+        /// Update addresses for multiple peers without creating a new peer set.
         ///
-        /// On success (returns `true`):
+        /// For each peer that is tracked and has a changed address:
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
         ///
-        /// Returns `false` if:
-        /// - The peer is not tracked (not in any peer set)
-        /// - The new address is identical to the existing one (no-op)
+        /// Peers that are not tracked or have unchanged addresses are silently skipped.
         fn overwrite(
             &mut self,
-            peer: Self::PublicKey,
-            address: Address,
-        ) -> impl Future<Output = bool> + Send;
+            peers: Map<Self::PublicKey, Address>,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Interface for blocking other peers.

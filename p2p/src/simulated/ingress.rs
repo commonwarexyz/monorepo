@@ -58,11 +58,6 @@ pub enum Message<P: PublicKey, E: Clock> {
     Blocked {
         result: oneshot::Sender<Result<Vec<(P, P)>, Error>>,
     },
-    /// Check if a peer is tracked (in at least one peer set).
-    PeerTracked {
-        public_key: P,
-        result: oneshot::Sender<bool>,
-    },
 }
 
 impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
@@ -90,10 +85,6 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .field("to", to)
                 .finish(),
             Self::Blocked { .. } => f.debug_struct("Blocked").finish_non_exhaustive(),
-            Self::PeerTracked { public_key, .. } => f
-                .debug_struct("PeerTracked")
-                .field("public_key", public_key)
-                .finish_non_exhaustive(),
         }
     }
 }
@@ -364,17 +355,8 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
         self.oracle.update(id, peers.into_keys()).await;
     }
 
-    async fn overwrite(&mut self, peer: Self::PublicKey, _address: Address) -> bool {
-        // Check if peer is tracked (addresses themselves aren't used in simulated network)
-        self.oracle
-            .sender
-            .0
-            .request(|result| Message::PeerTracked {
-                public_key: peer,
-                result,
-            })
-            .await
-            .unwrap_or(false)
+    async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {
+        // Simulated network doesn't use addresses - no-op
     }
 }
 

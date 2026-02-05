@@ -3279,13 +3279,12 @@ mod tests {
             // Generate keys
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
-            let pk3 = PrivateKey::from_seed(3).public_key();
+            let _pk3 = PrivateKey::from_seed(3).public_key();
 
             let mut socket_manager = oracle.socket_manager();
 
-            // overwrite should return false for untracked peer
+            // Simulated network ignores addresses, so overwrite is a no-op
             let addr: Address = "127.0.0.1:8000".parse::<SocketAddr>().unwrap().into();
-            assert!(!socket_manager.overwrite(pk1.clone(), addr.clone()).await);
 
             // Register a peer set
             let peers: Map<PublicKey, Address> = [
@@ -3302,12 +3301,10 @@ mod tests {
             .unwrap();
             socket_manager.update(0, peers).await;
 
-            // overwrite should return true for tracked peer
-            assert!(socket_manager.overwrite(pk1.clone(), addr.clone()).await);
-            assert!(socket_manager.overwrite(pk2.clone(), addr.clone()).await);
-
-            // overwrite should return false for peer not in any set
-            assert!(!socket_manager.overwrite(pk3.clone(), addr.clone()).await);
+            // overwrite is a no-op for simulated network (addresses not used)
+            socket_manager
+                .overwrite([(pk1.clone(), addr.clone())].try_into().unwrap())
+                .await;
         });
     }
 }

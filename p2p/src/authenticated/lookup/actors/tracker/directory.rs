@@ -139,7 +139,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<Vec<C>> {
+    ///
+    /// Returns `Some((deleted_peers, address_changed_peers))` on success, where:
+    /// - `deleted_peers`: peers removed due to max_sets eviction
+    /// - `address_changed_peers`: existing peers whose addresses were updated
+    ///
+    /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
+    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<(Vec<C>, Vec<C>)> {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -155,11 +161,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
+        let mut address_changed_peers = Vec::new();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
-                    entry.update(addr.clone());
+                    if entry.update(addr.clone()) {
+                        address_changed_peers.push(peer.clone());
+                    }
                     entry
                 }
                 Entry::Vacant(entry) => {
@@ -192,7 +201,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // future peer set additions.
         self.rate_limiter.retain_recent();
 
-        Some(deleted_peers)
+        Some((deleted_peers, address_changed_peers))
     }
 
     /// Update a tracked peer's address.
@@ -459,7 +468,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
@@ -472,7 +481,7 @@ mod tests {
                 "No peers should be deleted on first set"
             );
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     1,
                     [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
@@ -483,13 +492,13 @@ mod tests {
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(2, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
@@ -564,25 +573,25 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(3, [(my_pk.clone(), addr(my_addr))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(4, [(my_pk.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
 
-            let deleted = directory.add_set(
+            let result = directory.add_set(
                 0,
                 [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                     .try_into()
                     .unwrap(),
             );
-            assert!(deleted.is_none());
+            assert!(result.is_none());
         });
     }
 
@@ -694,7 +703,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             // Add set with asymmetric addresses
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [
@@ -789,7 +798,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both socket and DNS addresses
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [
@@ -852,7 +861,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both public and private egress IPs
-            let deleted = directory
+            let (deleted, _) = directory
                 .add_set(
                     0,
                     [
