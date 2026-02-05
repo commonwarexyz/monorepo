@@ -40,8 +40,15 @@ enum Message {
 impl<'a> arbitrary::Arbitrary<'a> for Message {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let direction = Direction::arbitrary(u)?;
-        let msg = Vec::arbitrary(u)?;
-        let out = if bool::arbitrary(u)? {
+        let authenticated = bool::arbitrary(u)?;
+        let max_len = if authenticated {
+            MAX_MESSAGE_SIZE as usize
+        } else {
+            MAX_CIPHERTEXT_SIZE as usize
+        };
+        let len = u.int_in_range(0..=max_len)?;
+        let msg = u.bytes(len)?.to_vec();
+        let out = if authenticated {
             Self::Authenticated(direction, msg)
         } else {
             Self::Unauthenticated(direction, msg)
@@ -222,9 +229,6 @@ fn fuzz(input: FuzzInput) {
         for msg in messages {
             match msg {
                 Message::Authenticated(direction, data) => {
-                    if data.len() > MAX_MESSAGE_SIZE as usize {
-                        continue;
-                    }
                     if matches!(&direction, Direction::D2L) && d2l_corrupted {
                         continue;
                     }
@@ -257,9 +261,6 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
                 }
                 Message::Unauthenticated(direction, data) => {
-                    if data.len() > MAX_CIPHERTEXT_SIZE as usize {
-                        continue;
-                    }
                     if matches!(&direction, Direction::D2L) && d2l_corrupted {
                         continue;
                     }
