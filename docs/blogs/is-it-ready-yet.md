@@ -98,3 +98,5 @@ From the start, we've prioritized robustness and testing above all else. Our [de
 For over 10 months, we've been running all `BETA` primitives listed above in [Alto](https://github.com/commonwarexyz/alto). For the last 9 months, we've been collaborating with [Asymmetric Research](https://x.com/_patrickogrady/status/1915407345414492497) on fuzzing and [manual code review](https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22).
 
 We have yet to mark any primitives as `DELTA` (bug bounty eligible) but hope to do so in the coming months. In the meantime, we welcome responsible disclosures via [GitHub Vulnerability Reporting](https://github.com/commonwarexyz/monorepo/security).
+
+Think you can help us get to `GAMMA`, `DELTA`, and `EPSILON`? [We're hiring for great engineers (and are still offering significant equity)](https://commonware.xyz/hiring.html).
