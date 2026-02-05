@@ -24,6 +24,7 @@ While working with different teams, we found that this approach didn't cut it. I
 * With many crates all versioned independently, (tested) compatibility is no longer obvious. While `consensus-simplex@1.1.3` may compile with `storage-journal@2.3.45` and "should" work, it doesn't mean the combination has been tested together.
 * Dependency risk is difficult to assess when things are coarsely broken into "stable" and "unstable". Often wrapped with documents that few people read, it is pretty easy to incorporate functionality once "unstable" is permitted that is a lot more "unstable" than you expected.
 * Feature flags are viral. If your crate depends on `commonware-consensus` and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. This becomes unwieldy fast.
+* Doesn't imply anything about backwards-compatibility. Once something is considered "stable", it should remain supported indefinitely. This is equivalent to one major version that doesn't get incremented.
 
 ## Tiered Stability and Calendar Versioning
 
@@ -36,6 +37,8 @@ We've broken stability into the following levels:
 | **GAMMA**    | 2     | API stable. Extensively tested and fuzzed.                                               |
 | **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
+
+We take Long-Term Support (LTS) seriously. We expect to support primitives that are marked as wire/format stable for years. Likewise, primitives that are massive changes won't replace existing ones. Instead they'll be new primitive dialects.
 
 The Commonware Library is versioned using calendar versioning (YYYY.M.patch). Uniform versioning across primitives for "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
 
@@ -83,7 +86,7 @@ Here are some of the primitive dialects we now consider `BETA` (wire and storage
 * **consensus::simplex** - Simple and fast BFT agreement inspired by [Simplex Consensus](https://simplex.blog/).
 * **consensus::marshal** - Ordered delivery of finalized blocks.
 
-## Move Fast And (Sometimes) Break Things
+##
 
 
 It has [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and upwards of [1500 daily benchmarks](https://commonware.xyz/benchmarks.html).
