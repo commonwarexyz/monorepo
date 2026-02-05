@@ -24,7 +24,7 @@ While building with different teams, however, this approach fell short:
 
 **Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles, however, in a world where a wrong guess means a network halt or loss of funds, it is not good enough.
 
-**Coarse readiness prevents rapid iteration.** Binary "stable" vs "unstable" doesn't capture the spectrum of readiness and slows down development. A brand-new algorithm and a battle-tested one might both be `1.0`. Documentation exists to explain the nuance, but few read it before depending on something.
+**Coarse readiness stalls development and is error-prone.** Without more granularity, new features tend to sit in "unstable" purgatory for too long. When incorporated into downstream applications, all of "unstable" is available making it easy to accidentally rely on something much less unstable than another (with nuance hidden deep in documentation that has probably not been read).
 
 **Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable", it should remain supported indefinitely. If a significant breaking change is desired, it must be introduced in a new crate.
 
