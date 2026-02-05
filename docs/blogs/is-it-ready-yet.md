@@ -16,7 +16,7 @@ Have been working with Asymmetric Research for almost a year now: https://x.com/
 
 What really matters, however, is how many you can use in your network today.
 
-Today, we're graduating a large number of these primitives from [ALPHA](https://github.com/commonwarexyz/monorepo#stability) to [BETA](https://github.com/commonwarexyz/monorepo#stability). -> "Can I use in prod?"
+Today, we're publishing our approach to production-readiness and graduating a large number of these primitives from [ALPHA](https://github.com/commonwarexyz/monorepo#stability) to [BETA](https://github.com/commonwarexyz/monorepo#stability).
 
 ## Solving a "Solved" Problem
 
