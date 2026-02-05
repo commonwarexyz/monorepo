@@ -135,20 +135,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // If we are no longer interested in a peer, release them.
                 let peer_keys: Set<C::PublicKey> = peers.keys().clone();
                 let Some((deleted, address_changed)) = self.directory.add_set(index, peers) else {
                     return;
                 };
 
-                // Kill connections for deleted peers
+                // Kill connections for peers no longer in any tracked peer set.
                 for peer in deleted {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
                 }
 
-                // Kill connections for peers whose addresses changed
+                // Kill connections for peers whose addresses changed. Existing
+                // connections were established to the old address (validated
+                // during handshake), so they must be severed to force reconnection
+                // to the new address.
                 for peer in address_changed {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
@@ -167,6 +169,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 });
             }
             Message::Overwrite { peers } => {
+                // Update addresses for multiple peers without creating a new peer set.
+                // For each peer that is tracked and has a changed address, we sever
+                // the existing connection (established to the old address) to force
+                // reconnection to the new address.
                 let mut any_changed = false;
                 for (public_key, address) in peers {
                     if !self.directory.overwrite(&public_key, address) {
@@ -174,7 +180,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                     any_changed = true;
 
-                    // Kill any existing connection (it's on the old IP)
+                    // Kill the existing connection - it was established to the old
+                    // address and must be replaced with a connection to the new one.
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
                         peer.kill().await;
                     }

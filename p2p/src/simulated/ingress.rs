@@ -313,9 +313,8 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
 /// # Note on [Address]
 ///
 /// Because addresses are never exposed in [crate::simulated],
-/// there is nothing to assert submitted data against. We thus consider
-/// all addresses to be valid, and `overwrite` always succeeds for
-/// tracked peers.
+/// there is nothing to assert submitted data against. The `overwrite`
+/// method is a no-op since addresses are not used for routing.
 pub struct SocketManager<P: PublicKey, E: Clock> {
     /// The oracle to send messages to.
     oracle: Oracle<P, E>,

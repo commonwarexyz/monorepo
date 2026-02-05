@@ -144,6 +144,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// - `deleted_peers`: peers removed due to max_sets eviction
     /// - `address_changed_peers`: existing peers whose addresses were updated
     ///
+    /// The caller should sever connections for `address_changed_peers` since those
+    /// connections were established to the old address and must be replaced.
+    ///
     /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
     pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<(Vec<C>, Vec<C>)> {
         // Check if peer set already exists
@@ -207,6 +210,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Update a tracked peer's address.
     ///
     /// Returns `true` if the peer exists and the address actually changed.
+    /// The caller should sever any existing connection to this peer since it
+    /// was established to the old address.
+    ///
     /// Returns `false` if the peer is not tracked, is ourselves, or the
     /// new address is identical to the existing one.
     pub fn overwrite(&mut self, peer: &C, address: Address) -> bool {
