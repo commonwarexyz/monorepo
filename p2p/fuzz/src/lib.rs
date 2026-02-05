@@ -260,7 +260,7 @@ impl NetworkScheme for Discovery {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.update(index as u64, subset).await;
+            oracle.register(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -289,7 +289,7 @@ impl NetworkScheme for Discovery {
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.update(index, peer_pks).await;
+        let _ = oracle.register(index, peer_pks).await;
     }
 }
 
@@ -332,7 +332,7 @@ impl NetworkScheme for Lookup {
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
             oracle
-                .update(
+                .register(
                     index as u64,
                     peer_list
                         .clone()
@@ -351,7 +351,7 @@ impl NetworkScheme for Lookup {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.update(index as u64, subset).await;
+            oracle.register(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -383,7 +383,7 @@ impl NetworkScheme for Lookup {
             })
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.update(index, peer_list).await;
+        let _ = oracle.register(index, peer_list).await;
     }
 }
 

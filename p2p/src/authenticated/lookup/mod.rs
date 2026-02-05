@@ -136,7 +136,7 @@
 //!         (peer2, peer2_addr.into()),
 //!         (peer3, peer3_addr.into()),
 //!     ].try_into().unwrap();
-//!     oracle.update(0, peers).await;
+//!     oracle.register(0, peers).await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -268,7 +268,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.update(0, peers.clone().try_into().unwrap()).await;
+            oracle.register(0, peers.clone().try_into().unwrap()).await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -503,13 +503,13 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .update(0, [peers[0].clone()].try_into().unwrap())
+                    .register(0, [peers[0].clone()].try_into().unwrap())
                     .await;
                 oracle
-                    .update(1, [peers[1].clone(), peers[2].clone()].try_into().unwrap())
+                    .register(1, [peers[1].clone(), peers[2].clone()].try_into().unwrap())
                     .await;
                 oracle
-                    .update(2, peers.iter().skip(2).cloned().try_collect().unwrap())
+                    .register(2, peers.iter().skip(2).cloned().try_collect().unwrap())
                     .await;
 
                 // Register basic application
@@ -595,7 +595,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.update(0, peers.clone()).await;
+            oracle.register(0, peers.clone()).await;
 
             // Register basic application
             let (mut sender, _) =
@@ -643,7 +643,7 @@ mod tests {
             // Create network for peer 0
             let config0 = Config::test(sk0, addr0, 1_024 * 1_024); // 1MB
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
-            oracle0.update(0, peers.clone()).await;
+            oracle0.register(0, peers.clone()).await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network0.start();
@@ -651,7 +651,7 @@ mod tests {
             // Create network for peer 1
             let config1 = Config::test(sk1, addr1, 1_024 * 1_024); // 1MB
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
-            oracle1.update(0, peers.clone()).await;
+            oracle1.register(0, peers.clone()).await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
@@ -715,7 +715,7 @@ mod tests {
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            oracle.update(10, set10.clone()).await;
+            oracle.register(10, set10.clone()).await;
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 10);
             assert_eq!(&new, set10.keys());
@@ -728,7 +728,7 @@ mod tests {
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            oracle.update(9, set9.clone()).await;
+            oracle.register(9, set9.clone()).await;
 
             // Add new peer set
             let set11: Map<_, _> = peers_and_sks
@@ -737,7 +737,7 @@ mod tests {
                 .map(|(_, pk, addr)| (pk.clone(), (*addr).into()))
                 .try_collect()
                 .unwrap();
-            oracle.update(11, set11.clone()).await;
+            oracle.register(11, set11.clone()).await;
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(&new, set11.keys());
@@ -781,7 +781,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.update(0, peers.clone()).await;
+                oracle.register(0, peers.clone()).await;
 
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -945,7 +945,7 @@ mod tests {
 
             // Register a peer set that does NOT include self
             let peer_set: Map<_, _> = [(other_pk.clone(), other_addr.into())].try_into().unwrap();
-            oracle.update(1, peer_set.clone()).await;
+            oracle.register(1, peer_set.clone()).await;
 
             // Receive subscription notification
             let (id, new, all) = subscription.recv().await.unwrap();
@@ -980,7 +980,7 @@ mod tests {
             ]
             .try_into()
             .unwrap();
-            oracle.update(2, peer_set.clone()).await;
+            oracle.register(2, peer_set.clone()).await;
 
             // Receive subscription notification
             let (id, new, all) = subscription.recv().await.unwrap();
@@ -1060,7 +1060,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers with DNS addresses
-                oracle.update(0, peers.clone().try_into().unwrap()).await;
+                oracle.register(0, peers.clone().try_into().unwrap()).await;
 
                 // Register channel
                 let (mut sender, mut receiver) =
@@ -1194,7 +1194,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers with mixed addresses
-                oracle.update(0, peers.clone().try_into().unwrap()).await;
+                oracle.register(0, peers.clone().try_into().unwrap()).await;
 
                 // Register channel
                 let (mut sender, mut receiver) =
@@ -1301,7 +1301,7 @@ mod tests {
                 (peer0.public_key(), Address::Symmetric(socket0)),
                 (peer1.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0.update(0, peers0.try_into().unwrap()).await;
+            oracle0.register(0, peers0.try_into().unwrap()).await;
 
             let (_sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1326,7 +1326,7 @@ mod tests {
                 ),
                 (peer1.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle1.update(0, peers1.try_into().unwrap()).await;
+            oracle1.register(0, peers1.try_into().unwrap()).await;
 
             let (mut sender1, _receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1420,7 +1420,7 @@ mod tests {
                 let config0 = Config::test(peer0.clone(), socket0, 1_024 * 1_024);
                 let (mut network0, mut oracle0) =
                     Network::new(context.with_label("peer_0"), config0);
-                oracle0.update(0, peers.clone().try_into().unwrap()).await;
+                oracle0.register(0, peers.clone().try_into().unwrap()).await;
                 let (_sender0, mut receiver0) =
                     network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network0.start();
@@ -1429,7 +1429,7 @@ mod tests {
                 let config1 = Config::test(peer1.clone(), socket1, 1_024 * 1_024);
                 let (mut network1, mut oracle1) =
                     Network::new(context.with_label("peer_1"), config1);
-                oracle1.update(0, peers.clone().try_into().unwrap()).await;
+                oracle1.register(0, peers.clone().try_into().unwrap()).await;
                 let (mut sender1, _receiver1) =
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network1.start();
@@ -1510,7 +1510,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.update(0, peer_set.clone().try_into().unwrap()).await;
+                oracle.register(0, peer_set.clone().try_into().unwrap()).await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1587,7 +1587,7 @@ mod tests {
                     // Update oracle on all running peers
                     for oracle in oracles.iter_mut().flatten() {
                         oracle
-                            .update(
+                            .register(
                                 (round * (n - 1) + restart_peer_idx) as u64,
                                 updated_peer_set.clone().try_into().unwrap(),
                             )
@@ -1606,7 +1606,7 @@ mod tests {
                         Network::new(peer_context.with_label("network"), config);
 
                     oracle
-                        .update(
+                        .register(
                             (round * (n - 1) + restart_peer_idx) as u64,
                             updated_peer_set.clone().try_into().unwrap(),
                         )
@@ -1730,7 +1730,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.update(0, peer_set.clone().try_into().unwrap()).await;
+                oracle.register(0, peer_set.clone().try_into().unwrap()).await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1809,7 +1809,7 @@ mod tests {
             oracles[0]
                 .as_mut()
                 .unwrap()
-                .update(1, updated_peer_set.clone().try_into().unwrap())
+                .register(1, updated_peer_set.clone().try_into().unwrap())
                 .await;
 
             // Restart all shutdown peers with new ports
@@ -1824,7 +1824,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 oracle
-                    .update(1, updated_peer_set.clone().try_into().unwrap())
+                    .register(1, updated_peer_set.clone().try_into().unwrap())
                     .await;
 
                 let (sender, receiver) =
@@ -1893,7 +1893,7 @@ mod tests {
                 Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200));
             let peers: Map<ed25519::PublicKey, Address> =
                 vec![(address.clone(), peer_addr)].try_into().unwrap();
-            oracle.update(0, peers.clone()).await;
+            oracle.register(0, peers.clone()).await;
 
             // Start and immediately abort the network
             let handle = network.start();
@@ -1903,7 +1903,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Oracle operations should not panic even after shutdown
-            oracle.update(1, peers.clone()).await;
+            oracle.register(1, peers.clone()).await;
             let _ = oracle.peer_set(0).await;
             let _ = oracle.subscribe().await;
             oracle.block(address.clone()).await;
@@ -1941,7 +1941,7 @@ mod tests {
                 Address::Symmetric(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5200));
             let peers: Map<ed25519::PublicKey, Address> =
                 vec![(peer.public_key(), peer_addr)].try_into().unwrap();
-            oracle.update(0, peers).await;
+            oracle.register(0, peers).await;
 
             // Start the network
             let handle = network.start();
@@ -2003,7 +2003,7 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0.update(0, peer_set0.try_into().unwrap()).await;
+            oracle0.register(0, peer_set0.try_into().unwrap()).await;
 
             // Wait for connections to be attempted
             context.sleep(Duration::from_secs(30)).await;
@@ -2028,7 +2028,7 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle1.update(0, peer_set1.try_into().unwrap()).await;
+            oracle1.register(0, peer_set1.try_into().unwrap()).await;
 
             // Wait for connections to be made
             context.sleep(Duration::from_secs(30)).await;
@@ -2092,9 +2092,9 @@ mod tests {
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
             oracle0
-                .update(0, peer_set.clone().try_into().unwrap())
+                .register(0, peer_set.clone().try_into().unwrap())
                 .await;
-            oracle2.update(0, peer_set.try_into().unwrap()).await;
+            oracle2.register(0, peer_set.try_into().unwrap()).await;
 
             // Wait for connections to be made
             context.sleep(Duration::from_secs(30)).await;
@@ -2127,7 +2127,7 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle1.update(0, peer_set1.try_into().unwrap()).await;
+            oracle1.register(0, peer_set1.try_into().unwrap()).await;
 
             // Wait for connections to be made
             context.sleep(Duration::from_secs(30)).await;

@@ -229,7 +229,7 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
-    async fn update(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
+    async fn register(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
         self.sender.0.send_lossy(Message::Register { index, peers });
     }
 

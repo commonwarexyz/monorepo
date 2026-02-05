@@ -243,7 +243,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    async fn update(&self, id: u64, peers: Set<P>) {
+    async fn register(&self, id: u64, peers: Set<P>) {
         self.sender.0.send_lossy(Message::Update { id, peers });
     }
 
@@ -301,8 +301,8 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
-    async fn update(&mut self, id: u64, peers: Set<Self::PublicKey>) {
-        self.oracle.update(id, peers).await;
+    async fn register(&mut self, id: u64, peers: Set<Self::PublicKey>) {
+        self.oracle.register(id, peers).await;
     }
 }
 
@@ -349,9 +349,9 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
-    async fn update(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
+    async fn register(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
         // Ignore all addresses (simulated network doesn't use them)
-        self.oracle.update(id, peers.into_keys()).await;
+        self.oracle.register(id, peers.into_keys()).await;
     }
 
     async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {

@@ -172,7 +172,7 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.update(0, recipients).await;
+        oracle.register(0, recipients).await;
 
         // Initialize chat
         const MAX_MESSAGE_BACKLOG: usize = 128;
