@@ -343,23 +343,34 @@ mod tests {
 
     #[test]
     fn test_nonce_sync_after_truncated_recv() {
-        // Regression test for nonce desynchronization bug.
         let mut send = SendCipher::new(&mut test_rng());
         let mut recv = RecvCipher::new(&mut test_rng());
 
-        // Send first message (sender nonce: 0 -> 1)
-        let _ = send.send(b"message 1").unwrap();
+        // Send message (sender nonce: 0 -> 1)
+        let ciphertext = send.send(b"message 1").unwrap();
 
-        // Receiver gets truncated message (receiver nonce should: 0 -> 1)
+        // Receiver gets truncated buffer (recv nonce: 0 -> 1)
         let mut truncated = vec![0u8; TAG_SIZE - 1];
         assert!(recv.recv_in_place(&mut truncated).is_err());
 
-        // Send second message (sender nonce: 1 -> 2)
-        let ciphertext2 = send.send(b"message 2").unwrap();
+        // Original ciphertext (nonce 0) no longer decrypts because recv nonce advanced to 1
+        assert!(recv.recv(&ciphertext).is_err());
+    }
 
-        // Receiver should be able to decrypt if nonces are in sync (both at 1)
-        // If nonce wasn't incremented on truncated recv, this would fail
-        let decrypted = recv.recv(&ciphertext2).unwrap();
-        assert_eq!(decrypted, b"message 2");
+    #[test]
+    fn test_nonce_sync_after_corrupted_recv() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        // Send message (sender nonce: 0 -> 1)
+        let ciphertext = send.send(b"message 1").unwrap();
+
+        // Corrupt a copy (valid length, bad content)
+        let mut corrupted = ciphertext.clone();
+        corrupted[0] ^= 0xFF;
+        assert!(recv.recv_in_place(&mut corrupted).is_err());
+
+        // Original ciphertext (nonce 0) no longer decrypts because recv nonce advanced to 1
+        assert!(recv.recv(&ciphertext).is_err());
     }
 }
