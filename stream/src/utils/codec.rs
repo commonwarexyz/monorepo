@@ -28,7 +28,7 @@ pub(crate) async fn send_frame_with<S: Sink>(
 
     let frame = assemble(prefix)?;
     assert_eq!(
-        frame.remaining(),
+        frame.len(),
         expected_frame_len,
         "assembled frame should be exactly the prefix and the payload"
     );
@@ -48,7 +48,7 @@ pub async fn send_frame<S: Sink>(
 ) -> Result<(), Error> {
     let mut bufs = buf.into();
 
-    send_frame_with(sink, bufs.remaining(), max_message_size, |prefix| {
+    send_frame_with(sink, bufs.len(), max_message_size, |prefix| {
         // Prepend varint-encoded length
         bufs.prepend(IoBuf::from(prefix.encode()));
         Ok(bufs)
