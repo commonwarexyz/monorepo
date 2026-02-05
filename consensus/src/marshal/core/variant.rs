@@ -20,10 +20,8 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
-    type Block: Block<
-            Digest = <Self::ApplicationBlock as Digestible>::Digest,
-            Commitment = Self::Commitment,
-        > + Into<Self::StoredBlock>
+    type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
+        + Into<Self::StoredBlock>
         + Clone;
 
     /// The type of block stored in the archive.
@@ -36,6 +34,13 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
+
+    /// Computes the consensus commitment for a block.
+    ///
+    /// The commitment is what validators sign over during consensus. For the standard
+    /// variant this is just the block digest; for the coding variant it is a composite
+    /// of the block digest, coding digest, context hash, and coding config.
+    fn commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Extracts the block digest from a consensus commitment.
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;

@@ -8,7 +8,7 @@ use crate::{
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 
@@ -20,12 +20,16 @@ pub struct Standard<B: Block>(std::marker::PhantomData<B>);
 
 impl<B> Variant for Standard<B>
 where
-    B: Block<Commitment = <B as Digestible>::Digest>,
+    B: Block,
 {
     type ApplicationBlock = B;
     type Block = B;
     type StoredBlock = B;
-    type Commitment = B::Commitment;
+    type Commitment = <B as Digestible>::Digest;
+
+    fn commitment(block: &Self::Block) -> Self::Commitment {
+        block.digest()
+    }
 
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         commitment
@@ -38,7 +42,7 @@ where
 
 impl<B, K> BlockBuffer<Standard<B>> for buffered::Mailbox<K, B>
 where
-    B: Block<Commitment = <B as Digestible>::Digest>,
+    B: Block + Committable<Commitment = <B as Digestible>::Digest>,
     K: PublicKey,
 {
     type CachedBlock = B;

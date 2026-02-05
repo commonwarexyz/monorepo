@@ -105,6 +105,10 @@ impl<D: Digest, C: Clone + Send + Sync + 'static> Digestible for Block<D, C> {
     }
 }
 
+/// Implements [`Committable`] for use with the standard variant's broadcast layer.
+///
+/// The commitment is the block digest, matching the standard variant's expectation
+/// that `Commitment == Digest`.
 impl<D: Digest, C: Clone + Send + Sync + 'static> Committable for Block<D, C> {
     type Commitment = D;
 
