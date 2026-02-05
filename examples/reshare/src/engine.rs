@@ -28,7 +28,7 @@ use commonware_runtime::{
     Storage,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{channel::mpsc, ordered::Set, union, NZUsize, NZU16, NZU32, NZU64};
+use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
 use futures::future::try_join_all;
 use rand_core::CryptoRngCore;
 use std::{
@@ -56,7 +56,7 @@ const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
 
 pub struct Config<C, P, B, V, T>
 where
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     C: Signer,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
@@ -78,7 +78,7 @@ pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,
@@ -122,7 +122,7 @@ impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
     H: Hasher,
     V: Variant,

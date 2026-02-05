@@ -112,7 +112,7 @@ pub struct Config<C: Signer, P> {
 pub struct Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -135,7 +135,7 @@ where
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
     E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
-    P: Manager<PublicKey = C::PublicKey, Peers = Set<C::PublicKey>>,
+    P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
     V: Variant,
@@ -296,7 +296,7 @@ where
             // - Dealers and players for the active epoch
             // - Players for the next epoch
             self.manager
-                .update(
+                .track(
                     epoch.get(),
                     Set::from_iter_dedup(
                         dealers

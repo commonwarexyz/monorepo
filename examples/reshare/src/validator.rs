@@ -105,7 +105,7 @@ pub async fn run<S, L>(
     // Create a static resolver for marshal
     let resolver_cfg = marshal_resolver::Config {
         public_key: config.signing_key.public_key(),
-        manager: oracle.clone(),
+        provider: oracle.clone(),
         blocker: oracle.clone(),
         mailbox_size: 200,
         initial: Duration::from_secs(1),
@@ -373,7 +373,7 @@ mod test {
             *restart_count += 1;
             let resolver_cfg = marshal_resolver::Config {
                 public_key: pk.clone(),
-                manager: oracle.manager(),
+                provider: oracle.manager(),
                 blocker: oracle.control(pk.clone()),
                 mailbox_size: 200,
                 initial: Duration::from_secs(1),
