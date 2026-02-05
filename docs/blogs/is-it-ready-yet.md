@@ -20,7 +20,7 @@ Today, we are sharing our approach to stability, explaining how we enforce consi
 
 The obvious approach to tracking stability is [semantic versioning](https://semver.org/): break each primitive into its own crate, use `0.x` for unstable and `1.0+` for stable, bump major versions for breaking changes, and gate experimental features behind an `unstable` flag.
 
-While building with different teams, however, this approach fell short:
+While building with different teams, however, this approach proved insufficient:
 
 **Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles, however, in a world where a wrong guess means a network halt or loss of funds, it is not good enough.
 
