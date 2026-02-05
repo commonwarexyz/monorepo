@@ -221,19 +221,25 @@ pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
 /// Both writer and reader must be passed to ensure exclusive access.
 /// All writer clones must be dropped before calling this function.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if there are still outstanding writer clones (references to the shared state).
+/// Returns [`Error::OutstandingReferences`] if there are still outstanding
+/// writer clones (references to the shared state).
 pub async fn destroy<E: Clock + Storage + Metrics, V: CodecShared>(
     writer: QueueWriter<E, V>,
     reader: QueueReader<E, V>,
 ) -> Result<(), Error> {
-    // Drop reader first to close the channel
+    // Check for outstanding writer clones before doing anything destructive.
+    // With only the original writer and reader, strong_count should be 2.
+    if Arc::strong_count(&writer.queue) != 2 {
+        return Err(Error::OutstandingReferences);
+    }
+
+    // Drop reader to release its Arc reference
     drop(reader);
 
-    // Extract the queue from the Arc<Mutex<...>>
-    // This will succeed since we have both handles
-    let queue = Arc::try_unwrap(writer.queue).expect("shared queue still has references");
+    // Now try_unwrap should succeed since we verified the count
+    let queue = Arc::try_unwrap(writer.queue).map_err(|_| Error::OutstandingReferences)?;
     queue.into_inner().destroy().await
 }
 

@@ -110,4 +110,7 @@ pub enum Error {
 
     #[error("position out of range: {0} (queue size is {1})")]
     PositionOutOfRange(u64, u64),
+
+    #[error("cannot destroy: outstanding writer references exist")]
+    OutstandingReferences,
 }
