@@ -97,4 +97,6 @@ We've been running the items above on our benchmarking blockchain, [Alto](https:
 
 Over the 9 months or so, we've been collaborating closely with [Asymmetric Research](https://asymmetric.xyz/) to build a corpus of fuzz tests and [for manual code review](https://github.com/commonwarexyz/monorepo/issues?q=is%3Aissue%20label%3A%22asymmetric%20research%22).
 
+All that being said, the Commonware Library is not yet battle-tested.
+
 We don't believe point-in-time audits provide great value (the code is stale by the time the audit is complete) and have continued pouring significant resources into testing and fuzzing.
