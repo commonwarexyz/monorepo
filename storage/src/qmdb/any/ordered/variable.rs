@@ -82,7 +82,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
             Operation::is_commit,
         )
         .await?;
-        if log.size() == 0 {
+        if log.size().await == 0 {
             warn!("Authenticated log is empty, initializing new db");
             let mut dirty_log = log.into_dirty();
             dirty_log
@@ -234,8 +234,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
+            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes().await;
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }

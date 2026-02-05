@@ -23,9 +23,9 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
-    /// Returns [start, end) where `start` and `end - 1` are the indices of the oldest and newest
-    /// retained operations respectively.
-    fn bounds(&self) -> Range<u64>;
+    /// Returns [start, end) where `start` is the index of the oldest retained operation (affected
+    /// by pruning) and `end - 1` is the index of the newest retained operation.
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send;
 
     /// Return the total number of items that have been appended to the journal.
     ///
@@ -33,8 +33,8 @@ pub trait Contiguous: Send + Sync {
     /// position as its value.
     ///
     /// Equivalent to `bounds().end`.
-    fn size(&self) -> u64 {
-        self.bounds().end
+    fn size(&self) -> impl Future<Output = u64> + Send {
+        async { self.bounds().await.end }
     }
 
     /// Return a stream of all items in the journal starting from `start_pos`.
@@ -48,8 +48,8 @@ pub trait Contiguous: Send + Sync {
     /// errors occur during replay.
     fn replay(
         &self,
-        start_pos: u64,
         buffer: NonZeroUsize,
+        start_pos: u64,
     ) -> impl std::future::Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error>,
     > + Send;
@@ -137,7 +137,7 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
         P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
-            let bounds = self.bounds();
+            let bounds = self.bounds().await;
             let mut rewind_size = bounds.end;
 
             while rewind_size > bounds.start {

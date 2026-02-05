@@ -51,15 +51,15 @@ pub mod tests {
         executor.start(|context| async move {
             let partition = "build_small".to_string();
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(1));
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
-            assert_eq!(db.oldest_retained(), 0);
-            let root0 = db.root();
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
+            assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
+            assert_eq!(db.oldest_retained().await, 0);
+            let root0 = db.root().await;
             drop(db);
             let db: C = open_db(context.with_label("second"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(1));
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root(), root0);
+            assert_eq!(db.root().await, root0);
 
             // Add one key.
             let mut db = db.into_mutable();
@@ -72,14 +72,14 @@ pub mod tests {
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.bounds().end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
-            let root1 = db.root();
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
+            let root1 = db.root().await;
             assert_ne!(root1, root0);
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 moves + 1 initial commit.
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 moves + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root(), root1);
+            assert_eq!(db.root().await, root1);
 
             // Create of same key should fail.
             let mut db = db.into_mutable();
@@ -92,41 +92,41 @@ pub mod tests {
             let db: C = db.into_merkleized().await.unwrap();
             assert_eq!(*range.start, 4);
             assert_eq!(*range.end, 6);
-            assert_eq!(db.bounds().end, Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            let root2 = db.root();
+            let root2 = db.root().await;
 
             // Repeated delete of same key should fail.
             let mut db = db.into_mutable();
             assert!(!db.delete(k1).await.unwrap());
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             // Commit adds a commit even for no-op, so op_count increases and root changes.
-            assert_eq!(db.bounds().end, Location::new_unchecked(7));
-            let root3 = db.root();
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(7));
+            let root3 = db.root().await;
             assert_ne!(root3, root2);
 
             // Confirm re-open preserves state.
             drop(db);
             let db: C = open_db(context.with_label("fourth"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(7));
+            assert_eq!(db.bounds().await.end, Location::new_unchecked(7));
             // Last commit had no metadata (passed None to commit).
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root(), root3);
+            assert_eq!(db.root().await, root3);
 
             // Confirm all activity bits are false except for the last commit.
-            for i in 0..*db.bounds().end - 1 {
-                assert!(!db.get_bit(i));
+            for i in 0..*db.bounds().await.end - 1 {
+                assert!(!db.get_bit(i).await);
             }
-            assert!(db.get_bit(*db.bounds().end - 1));
+            assert!(db.get_bit(*db.bounds().await.end - 1).await);
 
             // Test that we can get a non-durable root.
             let mut db = db.into_mutable();
             db.update(k1, v1).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_ne!(db.root(), root3);
+            assert_ne!(db.root().await, root3);
 
             db.destroy().await.unwrap();
         });

@@ -49,7 +49,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
     ) -> Result<Self, Error> {
         let translator = cfg.translator.clone();
         let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
-        if log.size() == 0 {
+        if log.size().await == 0 {
             warn!("Authenticated log is empty, initializing new db");
             let mut dirty_log = log.into_dirty();
             dirty_log
@@ -83,7 +83,7 @@ pub(crate) mod test {
             any::unordered::{fixed::Operation, Update},
             store::{
                 batch_tests,
-                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                tests::{assert_log_store, assert_prunable_store},
                 LogStore,
             },
             verify_proof, NonDurable, Unmerkleized,
@@ -273,14 +273,14 @@ pub(crate) mod test {
                 db.update(k, v).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             drop(db);
             let db = open_db(db_context.with_label("reopened")).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
         });
@@ -320,8 +320,8 @@ pub(crate) mod test {
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root_hash = db.root();
-            let original_op_count = db.bounds().end;
+            let root_hash = db.root().await;
+            let original_op_count = db.bounds().await.end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -373,8 +373,12 @@ pub(crate) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.bounds().end + 1, Location::new_unchecked(6), NZU64!(10))
-                    .await,
+                db.historical_proof(
+                    db.bounds().await.end + 1,
+                    Location::new_unchecked(6),
+                    NZU64!(10)
+                )
+                .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
@@ -413,7 +417,7 @@ pub(crate) mod test {
                 .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             let single_db = single_db.into_merkleized();
-            let single_root = single_db.root();
+            let single_root = single_db.root().await;
 
             assert!(verify_proof(
                 &mut hasher,
@@ -499,7 +503,7 @@ pub(crate) mod test {
                 );
 
                 // Verify proof against reference root
-                let ref_root = ref_db.root();
+                let ref_root = ref_db.root().await;
                 assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
@@ -539,7 +543,7 @@ pub(crate) mod test {
             {
                 let mut proof = proof.clone();
                 proof.digests[0] = Sha256::hash(b"invalid");
-                let root_hash = db.root();
+                let root_hash = db.root().await;
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -551,7 +555,7 @@ pub(crate) mod test {
             {
                 let mut proof = proof.clone();
                 proof.digests.push(Sha256::hash(b"invalid"));
-                let root_hash = db.root();
+                let root_hash = db.root().await;
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -565,7 +569,7 @@ pub(crate) mod test {
             {
                 let mut ops = ops.clone();
                 ops[0] = Operation::Update(Update(Sha256::hash(b"key1"), Sha256::hash(b"value1")));
-                let root_hash = db.root();
+                let root_hash = db.root().await;
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -580,7 +584,7 @@ pub(crate) mod test {
                     Sha256::hash(b"key1"),
                     Sha256::hash(b"value1"),
                 )));
-                let root_hash = db.root();
+                let root_hash = db.root().await;
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -592,7 +596,7 @@ pub(crate) mod test {
 
             // Changing the start location should cause verification to fail
             {
-                let root_hash = db.root();
+                let root_hash = db.root().await;
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -617,7 +621,7 @@ pub(crate) mod test {
             {
                 let mut proof = proof.clone();
                 proof.leaves = Location::new_unchecked(100);
-                let root_hash = db.root();
+                let root_hash = db.root().await;
                 assert!(!verify_proof(
                     &mut hasher,
                     &proof,
@@ -641,7 +645,6 @@ pub(crate) mod test {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
         assert_send(db.sync());
     }
 
@@ -687,8 +690,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
+            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes().await;
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }

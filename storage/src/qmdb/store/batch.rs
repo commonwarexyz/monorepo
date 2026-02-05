@@ -107,8 +107,7 @@ pub mod tests {
         Box::pin(test_delete_unchecked(new_db, counter)).await?;
         Box::pin(test_write_batch_from_to_empty(new_db, counter)).await?;
         Box::pin(test_write_batch(new_db, counter)).await?;
-        Box::pin(test_update_delete_update(new_db, counter)).await?;
-        Ok(())
+        Box::pin(test_update_delete_update(new_db, counter)).await
     }
 
     fn next_db<D, F: NewDbIndexed<D>>(

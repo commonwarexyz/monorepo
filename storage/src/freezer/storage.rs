@@ -3,7 +3,7 @@ use crate::{
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    kv, Persistable,
+    kv,
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
@@ -1168,25 +1168,6 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable for Fr
 impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable for Freezer<E, K, V> {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
-        Ok(())
-    }
-}
-
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable for Freezer<E, K, V> {
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Self::Error> {
-        self.sync().await?;
-        Ok(())
-    }
-
-    async fn sync(&mut self) -> Result<(), Self::Error> {
-        self.sync().await?;
-        Ok(())
-    }
-
-    async fn destroy(self) -> Result<(), Self::Error> {
-        self.destroy().await?;
         Ok(())
     }
 }

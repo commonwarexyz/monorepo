@@ -19,7 +19,7 @@ const PARTITION: &str = "variable_test_partition";
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
     let stream = journal
-        .replay(0, NZUsize!(buffer))
+        .replay(NZUsize!(buffer), 0)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);

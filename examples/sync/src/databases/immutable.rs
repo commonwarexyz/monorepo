@@ -13,7 +13,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use std::{future::Future, num::NonZeroU64};
+use std::num::NonZeroU64;
 use tracing::error;
 
 /// Database type alias for the clean (merkleized, durable) state.
@@ -113,27 +113,27 @@ where
         unreachable!("operations must end with a commit");
     }
 
-    fn root(&self) -> Key {
-        self.root()
+    async fn root(&self) -> Key {
+        self.root().await
     }
 
-    fn size(&self) -> Location {
-        LogStore::bounds(self).end
+    async fn size(&self) -> Location {
+        LogStore::bounds(self).await.end
     }
 
-    fn inactivity_floor(&self) -> Location {
+    async fn inactivity_floor(&self) -> Location {
         // For Immutable databases, all retained operations are active,
         // so the inactivity floor equals the pruning boundary.
-        LogStore::bounds(self).start
+        LogStore::bounds(self).await.start
     }
 
-    fn historical_proof(
+    async fn historical_proof(
         &self,
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
-        self.historical_proof(op_count, start_loc, max_ops)
+    ) -> Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error> {
+        self.historical_proof(op_count, start_loc, max_ops).await
     }
 
     fn name() -> &'static str {

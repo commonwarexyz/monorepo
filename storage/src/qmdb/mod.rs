@@ -152,10 +152,10 @@ where
     F: FnMut(bool, Option<Location>),
 {
     let stream = log
-        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
+        .replay(SNAPSHOT_READ_BUFFER_SIZE, *inactivity_floor_loc)
         .await?;
     pin_mut!(stream);
-    let last_commit_loc = log.size().saturating_sub(1);
+    let last_commit_loc = log.size().await.saturating_sub(1);
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
@@ -356,7 +356,7 @@ where
         }
 
         // Update the operation's snapshot location to point to tip.
-        cursor.update(Location::new_unchecked(self.log.size()));
+        cursor.update(Location::new_unchecked(self.log.size().await));
         drop(cursor);
 
         // Apply the operation at tip.
@@ -380,7 +380,7 @@ where
     where
         I: Index<Value = Location>,
     {
-        let tip_loc = Location::new_unchecked(self.log.size());
+        let tip_loc = Location::new_unchecked(self.log.size().await);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,

@@ -152,8 +152,8 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.log.root()
+    async fn root(&self) -> Self::Digest {
+        self.log.root().await
     }
 }
 
@@ -195,8 +195,8 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.log.root()
+    async fn root(&self) -> Self::Digest {
+        self.log.root().await
     }
 }
 
@@ -237,8 +237,8 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.log.root()
+    async fn root(&self) -> Self::Digest {
+        self.log.root().await
     }
 }
 
@@ -280,7 +280,7 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.log.root()
+    async fn root(&self) -> Self::Digest {
+        self.log.root().await
     }
 }
