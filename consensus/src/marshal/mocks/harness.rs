@@ -321,7 +321,7 @@ impl TestHarness for StandardHarness {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -540,7 +540,7 @@ impl TestHarness for StandardHarness {
         let backfill = control.register(0, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -680,7 +680,7 @@ impl TestHarness for CodingHarness {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -943,7 +943,7 @@ impl TestHarness for CodingHarness {
         let backfill = control.register(0, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -1053,7 +1053,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
         let mut manager = oracle.manager();
         manager
-            .update(0, participants.clone().try_into().unwrap())
+            .track(0, participants.clone().try_into().unwrap())
             .await;
 
         for (i, validator) in participants.iter().enumerate() {
@@ -1184,7 +1184,7 @@ pub fn sync_height_floor<H: TestHarness>() {
 
         let mut manager = oracle.manager();
         manager
-            .update(0, participants.clone().try_into().unwrap())
+            .track(0, participants.clone().try_into().unwrap())
             .await;
 
         // Skip first validator
@@ -2243,7 +2243,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         // Register the initial peer set
         let mut manager = oracle.manager();
         manager
-            .update(0, participants.clone().try_into().unwrap())
+            .track(0, participants.clone().try_into().unwrap())
             .await;
 
         // Set up two validators
