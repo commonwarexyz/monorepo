@@ -6,14 +6,10 @@
 
 use crate::{
     index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::variable::{Config as JournalConfig, Journal},
-    },
-    mmr::{journaled::Config as MmrConfig, Location},
+    journal::contiguous::variable::Journal,
+    mmr::Location,
     qmdb::{
-        any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
-        operation::Committable as _,
+        any::{init_variable, unordered, value::VariableEncoding, VariableConfig, VariableValue},
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -22,7 +18,6 @@ use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use tracing::warn;
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
@@ -56,46 +51,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        let mmr_config = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache.clone(),
-        };
-
-        let journal_config = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_blob,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let mut log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
-            context.with_label("log"),
-            mmr_config,
-            journal_config,
-            Operation::<K, V>::is_commit,
-        )
-        .await?;
-
-        if log.size() == 0 {
-            warn!("Authenticated log is empty, initializing new db");
-            let mut dirty_log = log.into_dirty();
-            dirty_log
-                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await?;
-            log = dirty_log.merkleize();
-            log.sync().await?;
-        }
-
-        let index = Index::new(context.with_label("index"), cfg.translator);
-        let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
-
-        Ok(log)
+        init_variable(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            Index::new(ctx, t)
+        })
+        .await
     }
 }
 
@@ -108,14 +67,10 @@ pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
         index::partitioned::unordered::Index,
-        journal::{
-            authenticated,
-            contiguous::variable::{Config as JournalConfig, Journal},
-        },
-        mmr::{journaled::Config as MmrConfig, Location},
+        journal::contiguous::variable::Journal,
+        mmr::Location,
         qmdb::{
-            any::{VariableConfig, VariableValue},
-            operation::Committable as _,
+            any::{init_variable, VariableConfig, VariableValue},
             Durable, Error, Merkleized,
         },
         translator::Translator,
@@ -124,7 +79,6 @@ pub mod partitioned {
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_utils::Array;
-    use tracing::warn;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -178,49 +132,10 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            let mmr_config = MmrConfig {
-                journal_partition: cfg.mmr_journal_partition,
-                metadata_partition: cfg.mmr_metadata_partition,
-                items_per_blob: cfg.mmr_items_per_blob,
-                write_buffer: cfg.mmr_write_buffer,
-                thread_pool: cfg.thread_pool,
-                page_cache: cfg.page_cache.clone(),
-            };
-
-            let journal_config = JournalConfig {
-                partition: cfg.log_partition,
-                items_per_section: cfg.log_items_per_blob,
-                compression: cfg.log_compression,
-                codec_config: cfg.log_codec_config,
-                page_cache: cfg.page_cache,
-                write_buffer: cfg.log_write_buffer,
-            };
-
-            let log = authenticated::Journal::<_, Journal<_, _>, _, _>::new(
-                context.with_label("log"),
-                mmr_config,
-                journal_config,
-                Operation::<K, V>::is_commit,
-            )
-            .await?;
-
-            let log = if log.size() == 0 {
-                warn!("Authenticated log is empty, initializing new db");
-                let mut dirty_log = log.into_dirty();
-                dirty_log
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                    .await?;
-                let mut log = dirty_log.merkleize();
-                log.sync().await?;
-                log
-            } else {
-                log
-            };
-
-            let index = Index::new(context.with_label("index"), cfg.translator);
-            let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
-
-            Ok(log)
+            init_variable(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+                Index::new(ctx, t)
+            })
+            .await
         }
     }
 

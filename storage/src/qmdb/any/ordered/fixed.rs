@@ -9,10 +9,7 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::Location,
     qmdb::{
-        any::{
-            init_fixed_authenticated_log, ordered, value::FixedEncoding, FixedConfig as Config,
-            FixedValue,
-        },
+        any::{init_fixed, ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Durable, Error, Merkleized,
     },
     translator::Translator,
@@ -20,7 +17,6 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use tracing::warn;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
 pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
@@ -51,22 +47,10 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        let translator = cfg.translator.clone();
-        let mut log = init_fixed_authenticated_log(context.with_label("log"), cfg).await?;
-        if log.size() == 0 {
-            warn!("Authenticated log is empty, initializing new db");
-            let mut dirty_log = log.into_dirty();
-            dirty_log
-                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                .await?;
-            log = dirty_log.merkleize();
-            log.sync().await?;
-        }
-
-        let index = Index::new(context.with_label("index"), translator);
-        let log = Self::init_from_log(index, log, known_inactivity_floor, callback).await?;
-
-        Ok(log)
+        init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            Index::new(ctx, t)
+        })
+        .await
     }
 }
 
@@ -82,7 +66,7 @@ pub mod partitioned {
         journal::contiguous::fixed::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_fixed_authenticated_log, FixedConfig as Config, FixedValue},
+            any::{init_fixed, FixedConfig as Config, FixedValue},
             Durable, Error, Merkleized,
         },
         translator::Translator,
@@ -90,7 +74,6 @@ pub mod partitioned {
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_utils::Array;
-    use tracing::warn;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
     ///
@@ -139,30 +122,10 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            let translator = cfg.translator.clone();
-            let log = init_fixed_authenticated_log(context.with_label("log"), cfg).await?;
-            let log = if log.size() == 0 {
-                warn!("Authenticated log is empty, initializing new db");
-                let mut dirty_log = log.into_dirty();
-                dirty_log
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
-                    .await?;
-                let mut log = dirty_log.merkleize();
-                log.sync().await?;
-                log
-            } else {
-                log
-            };
-
-            let log = Self::init_from_log(
-                Index::new(context.with_label("index"), translator),
-                log,
-                known_inactivity_floor,
-                callback,
-            )
-            .await?;
-
-            Ok(log)
+            init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+                Index::new(ctx, t)
+            })
+            .await
         }
     }
 

@@ -10,19 +10,29 @@
 //!   - Variable-size values
 
 use crate::{
+    index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::fixed::{Config as JConfig, Journal},
+        contiguous::{
+            fixed::{Config as FConfig, Journal as FJournal},
+            variable::{Config as VConfig, Journal as VJournal},
+        },
     },
-    mmr::journaled::Config as MmrConfig,
-    qmdb::{operation::Committable, Error, Merkleized},
+    mmr::{journaled::Config as MmrConfig, Location},
+    qmdb::{
+        any::operation::{Operation, Update},
+        operation::Committable,
+        Durable, Error, Merkleized,
+    },
     translator::Translator,
 };
-use commonware_codec::CodecFixedShared;
+use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
+use tracing::warn;
 
 pub(crate) mod db;
 pub(crate) mod operation;
@@ -108,18 +118,26 @@ pub struct VariableConfig<T: Translator, C> {
     pub page_cache: CacheRef,
 }
 
-type AuthenticatedLog<E, O, H, S = Merkleized<H>> = authenticated::Journal<E, Journal<E, O>, H, S>;
-
-/// Initialize a fixed-size authenticated log from the given config.
-pub(crate) async fn init_fixed_authenticated_log<
-    E: Storage + Clock + Metrics,
-    O: Committable + CodecFixedShared,
-    H: Hasher,
-    T: Translator,
->(
+/// Shared initialization logic for fixed-sized value [db::Db].
+pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
     context: E,
     cfg: FixedConfig<T>,
-) -> Result<AuthenticatedLog<E, O, H>, Error> {
+    known_inactivity_floor: Option<Location>,
+    callback: F,
+    new_index: NewIndex,
+) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V> + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: UnorderedIndex<Value = Location>,
+    F: FnMut(bool, Option<Location>),
+    NewIndex: FnOnce(E, T) -> I,
+    Operation<K, V, U>: CodecFixedShared + Committable,
+{
     let mmr_config = MmrConfig {
         journal_partition: cfg.mmr_journal_partition,
         metadata_partition: cfg.mmr_metadata_partition,
@@ -129,21 +147,97 @@ pub(crate) async fn init_fixed_authenticated_log<
         page_cache: cfg.page_cache.clone(),
     };
 
-    let journal_config = JConfig {
+    let journal_config = FConfig {
         partition: cfg.log_journal_partition,
         items_per_blob: cfg.log_items_per_blob,
         write_buffer: cfg.log_write_buffer,
         page_cache: cfg.page_cache,
     };
 
-    AuthenticatedLog::new(
+    let log = authenticated::Journal::<_, FJournal<_, _>, _, _>::new(
         context.with_label("log"),
         mmr_config,
         journal_config,
-        O::is_commit,
+        Operation::is_commit,
     )
-    .await
-    .map_err(Into::into)
+    .await?;
+
+    let log = if log.size() != 0 {
+        log
+    } else {
+        warn!("Authenticated log is empty, initializing new db");
+        let mut log = log.into_dirty();
+        let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
+        log.append(commit_floor).await?;
+        let mut log = log.merkleize();
+        log.sync().await?;
+        log
+    };
+
+    let index = new_index(context.with_label("index"), cfg.translator);
+    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
+}
+
+/// Shared initialization logic for variable-sized value [db::Db].
+pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
+    context: E,
+    cfg: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    known_inactivity_floor: Option<Location>,
+    callback: F,
+    new_index: NewIndex,
+) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V> + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: UnorderedIndex<Value = Location>,
+    F: FnMut(bool, Option<Location>),
+    NewIndex: FnOnce(E, T) -> I,
+    Operation<K, V, U>: Codec + Committable,
+{
+    let mmr_config = MmrConfig {
+        journal_partition: cfg.mmr_journal_partition,
+        metadata_partition: cfg.mmr_metadata_partition,
+        items_per_blob: cfg.mmr_items_per_blob,
+        write_buffer: cfg.mmr_write_buffer,
+        thread_pool: cfg.thread_pool,
+        page_cache: cfg.page_cache.clone(),
+    };
+
+    let journal_config = VConfig {
+        partition: cfg.log_partition,
+        items_per_section: cfg.log_items_per_blob,
+        compression: cfg.log_compression,
+        codec_config: cfg.log_codec_config,
+        page_cache: cfg.page_cache,
+        write_buffer: cfg.log_write_buffer,
+    };
+
+    let log = authenticated::Journal::<_, VJournal<_, _>, _, _>::new(
+        context.with_label("log"),
+        mmr_config,
+        journal_config,
+        Operation::is_commit,
+    )
+    .await?;
+
+    let log = if log.size() != 0 {
+        log
+    } else {
+        warn!("Authenticated log is empty, initializing new db");
+        let mut log = log.into_dirty();
+        let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
+        log.append(commit_floor).await?;
+        let mut log = log.merkleize();
+        log.sync().await?;
+        log
+    };
+
+    let index = new_index(context.with_label("index"), cfg.translator);
+    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
 }
 
 #[cfg(test)]
