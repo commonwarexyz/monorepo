@@ -471,8 +471,8 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
 impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
 
-    type Shard = Chunk<H::Digest>;
-    type ReShard = Chunk<H::Digest>;
+    type StrongShard = Chunk<H::Digest>;
+    type WeakShard = Chunk<H::Digest>;
     type CheckedShard = Chunk<H::Digest>;
     type CheckingData = ();
 
@@ -482,17 +482,17 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         config: &Config,
         mut data: impl Buf,
         strategy: &impl Strategy,
-    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+    ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         encode::<H, _>(total_shards(config)?, config.minimum_shards, data, strategy)
     }
 
-    fn reshard(
+    fn weaken(
         _config: &Config,
         commitment: &Self::Commitment,
         index: u16,
-        shard: Self::Shard,
-    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::ReShard), Self::Error> {
+        shard: Self::StrongShard,
+    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
         if shard.index != index {
             return Err(Error::WrongIndex(index));
         }
@@ -508,15 +508,15 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         commitment: &Self::Commitment,
         _checking_data: &Self::CheckingData,
         index: u16,
-        reshard: Self::ReShard,
+        weak_shard: Self::WeakShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        if reshard.index != index {
-            return Err(Error::WrongIndex(reshard.index));
+        if weak_shard.index != index {
+            return Err(Error::WrongIndex(weak_shard.index));
         }
-        if !reshard.verify::<H>(reshard.index, commitment) {
+        if !weak_shard.verify::<H>(weak_shard.index, commitment) {
             return Err(Error::InvalidProof);
         }
-        Ok(reshard)
+        Ok(weak_shard)
     }
 
     fn decode(

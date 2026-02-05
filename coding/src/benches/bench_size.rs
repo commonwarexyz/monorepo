@@ -35,7 +35,7 @@ fn bench_size<S: Scheme>(name: &str) {
                 shard.encode_size()
             );
 
-            let (_, _, reshard) = S::reshard(
+            let (_, _, weak_shard) = S::weaken(
                 &config,
                 &commitment,
                 config.minimum_shards + config.extra_shards - 1,
@@ -43,11 +43,11 @@ fn bench_size<S: Scheme>(name: &str) {
             )
             .unwrap();
             println!(
-                "{} (reshard)/msg_len={} chunks={}: {} B",
+                "{} (weak_shard)/msg_len={} chunks={}: {} B",
                 name,
                 data_length,
                 chunks,
-                reshard.encode_size()
+                weak_shard.encode_size()
             );
             println!();
         }

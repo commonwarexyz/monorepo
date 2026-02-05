@@ -23,9 +23,9 @@ const WEAK_SHARD_TAG: u8 = 1;
 pub enum DistributionShard<C: Scheme> {
     /// A shard that is broadcasted by the proposer, containing extra information for generating
     /// checking data.
-    Strong(C::Shard),
+    Strong(C::StrongShard),
     /// A shard that is broadcasted by a non-proposer, containing only the shard data.
-    Weak(C::ReShard),
+    Weak(C::WeakShard),
 }
 
 impl<C: Scheme> Write for DistributionShard<C> {
@@ -35,9 +35,9 @@ impl<C: Scheme> Write for DistributionShard<C> {
                 buf.put_u8(STRONG_SHARD_TAG);
                 shard.write(buf);
             }
-            Self::Weak(reshard) => {
+            Self::Weak(weak_shard) => {
                 buf.put_u8(WEAK_SHARD_TAG);
-                reshard.write(buf);
+                weak_shard.write(buf);
             }
         }
     }
@@ -47,7 +47,7 @@ impl<C: Scheme> EncodeSize for DistributionShard<C> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Strong(shard) => shard.encode_size(),
-            Self::Weak(reshard) => reshard.encode_size(),
+            Self::Weak(weak_shard) => weak_shard.encode_size(),
         }
     }
 }
@@ -61,12 +61,12 @@ impl<C: Scheme> Read for DistributionShard<C> {
     ) -> Result<Self, commonware_codec::Error> {
         match buf.get_u8() {
             STRONG_SHARD_TAG => {
-                let shard = C::Shard::read_cfg(buf, shard_cfg)?;
+                let shard = C::StrongShard::read_cfg(buf, shard_cfg)?;
                 Ok(Self::Strong(shard))
             }
             WEAK_SHARD_TAG => {
-                let reshard = C::ReShard::read_cfg(buf, shard_cfg)?;
-                Ok(Self::Weak(reshard))
+                let weak_shard = C::WeakShard::read_cfg(buf, shard_cfg)?;
+                Ok(Self::Weak(weak_shard))
             }
             _ => Err(commonware_codec::Error::Invalid(
                 "DistributionShard",
@@ -91,8 +91,8 @@ impl<C: Scheme> Eq for DistributionShard<C> {}
 #[cfg(feature = "arbitrary")]
 impl<C: Scheme> arbitrary::Arbitrary<'_> for DistributionShard<C>
 where
-    C::Shard: for<'a> arbitrary::Arbitrary<'a>,
-    C::ReShard: for<'a> arbitrary::Arbitrary<'a>,
+    C::StrongShard: for<'a> arbitrary::Arbitrary<'a>,
+    C::WeakShard: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         if u.arbitrary::<bool>()? {
@@ -155,28 +155,28 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         self.inner
     }
 
-    /// Verifies the shard and returns the weak reshard for broadcasting if valid.
+    /// Verifies the shard and returns the weak shard for broadcasting if valid.
     ///
     /// Returns `Some(weak_shard)` if the shard is valid and can be rebroadcast,
     /// or `None` if the shard is invalid or already weak.
-    pub fn verify_into_reshard(self) -> Option<Self> {
+    pub fn verify_into_weak(self) -> Option<Self> {
         let DistributionShard::Strong(shard) = self.inner else {
             return None;
         };
 
-        let reshard = C::reshard(
+        let weak_shard = C::weaken(
             &self.commitment.config(),
             &self.commitment.coding_digest(),
             u16::try_from(self.index).expect("shard index fits in u16"),
             shard,
         )
         .ok()
-        .map(|(_, _, reshard)| reshard)?;
+        .map(|(_, _, weak_shard)| weak_shard)?;
 
         Some(Self::new(
             self.commitment,
             self.index,
-            DistributionShard::Weak(reshard),
+            DistributionShard::Weak(weak_shard),
         ))
     }
 }
@@ -279,7 +279,7 @@ pub struct CodedBlock<B: Block, C: Scheme> {
     /// The coded shards.
     ///
     /// These shards are optional to enable lazy construction.
-    shards: Option<Vec<C::Shard>>,
+    shards: Option<Vec<C::StrongShard>>,
 }
 
 impl<B: Block, C: Scheme> CodedBlock<B, C> {
@@ -288,7 +288,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
         inner: &B,
         config: CodingConfig,
         strategy: &impl Strategy,
-    ) -> (C::Commitment, Vec<C::Shard>) {
+    ) -> (C::Commitment, Vec<C::StrongShard>) {
         let mut buf = Vec::with_capacity(config.encode_size() + inner.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
@@ -325,7 +325,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     /// Returns a reference to the shards in this coded block.
     ///
     /// If the shards have not yet been generated, they will be created via [Scheme::encode].
-    pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::Shard] {
+    pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::StrongShard] {
         match self.shards {
             Some(ref shards) => shards,
             None => {
