@@ -286,9 +286,14 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
+
+                    // Trigger one legitimate encrypted frame so nonce/state advance as normal.
                     sender.send(vec![0u8]).await.unwrap();
+                    // Adversary intercepts and drops that frame.
                     let _ = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Adversary injects forged unauthenticated bytes instead.
                     send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Receiver must reject the forged frame.
                     let res = receiver.recv().await;
                     assert!(res.is_err());
 
