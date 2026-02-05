@@ -28,7 +28,6 @@ While building with different teams, however, this approach proved insufficient:
 
 **Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable," it should remain supported indefinitely. If a significant breaking change is attempted, it must be backwards-compatible or introduced in a new crate. There is no `2.x` for a primitive.
 
-
 ## Tiered Stability and Calendar Versioning
 
 We've broken stability into the following levels:
@@ -41,9 +40,9 @@ We've broken stability into the following levels:
 | **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
-We take Long-Term Support (LTS) seriously. We expect to support primitives that are marked as wire/format stable for years. Likewise, primitives with breaking changes to wire/storage formats won't replace existing ones—they'll become new dialects.
+Once a primitive is marked `BETA`, it is eligible for Long-Term Support (LTS). Barring any critical vulnerabilities, the wire and storage format will remain backwards-compatible indefinitely.
 
-The Commonware Library is versioned using calendar versioning (YYYY.M.patch). Uniform versioning across primitives provides "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
+The Commonware Library is now versioned with [calendar versioning (YYYY.M.patch)](https://calver.org/). This versioning scheme across primitives provides "obvious" compatibility without implying stability (a uniform library version of `1.2.1` may imply a brand new crate is much stabler than it is).
 
 ## Programmatic Enforcement
 
@@ -65,15 +64,13 @@ RUSTDOCFLAGS="--cfg commonware_stability_BETA" \
 cargo doc --open
 ```
 
-### Testing Consistency
-
 In CI, we enforce that any object must only depend on objects at the same or higher stability level. If something is marked `BETA`, you can trust that its entire dependency chain within the library is `BETA` or higher.
 
-![Figure 1: The stability levels are enforced by the compiler](/imgs/is-it-ready-yet.png)
+![Stability consistency is enforced by the compiler.](/imgs/is-it-ready-yet.png)
 
 ## Graduation Day
 
-Here are some of the primitive dialects we now consider `BETA` (wire and storage format stable):
+Here are some of the primitive dialects we now consider `BETA` (eligible for LTS):
 
 * **codec** - Serialize structured data.
 * **runtime::tokio** - A production-focused runtime based on [Tokio](https://tokio.rs) with secure randomness and storage backed by the local filesystem.
