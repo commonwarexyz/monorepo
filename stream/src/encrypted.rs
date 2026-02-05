@@ -67,7 +67,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    Buf, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, Sink, Stream,
+    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBufs, Sink, Stream,
 };
 use commonware_utils::{hex, SystemTimeExt};
 use rand_core::CryptoRngCore;
@@ -307,7 +307,7 @@ impl<O: Sink> Sender<O> {
     /// and sends the ciphertext.
     pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
         let mut bufs = buf.into();
-        let ciphertext_len = bufs.remaining() + TAG_SIZE as usize;
+        let ciphertext_len = bufs.len() + TAG_SIZE as usize;
 
         send_frame_with(
             &mut self.sink,
@@ -359,7 +359,7 @@ impl<I: Stream> Receiver<I> {
             self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
-        let ciphertext_len = encrypted.remaining();
+        let ciphertext_len = encrypted.len();
 
         // Allocate buffer from pool for decryption.
         let mut decryption_buf = self.pool.alloc(ciphertext_len);
