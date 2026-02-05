@@ -22,7 +22,7 @@ The obvious approach to tracking stability is [semantic versioning](https://semv
 
 While building with different teams, however, this approach proved insufficient:
 
-**Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles, however, in a world where a wrong guess means a network halt or loss of funds, it is not good enough.
+**Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles. In a world where a wrong guess means a network halt or loss of funds, however, we found this didn't cut it.
 
 **Coarse readiness slows development and is error-prone for applications.** Without more granularity, new features tend to sit in "unstable" purgatory for too long. When incorporated into downstream applications, all of "unstable" is available making it easy to accidentally rely on something much less stable than intended (with nuance hidden deep in documentation that has probably not been read).
 
