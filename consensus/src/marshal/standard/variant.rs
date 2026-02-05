@@ -26,7 +26,6 @@ where
     type Block = B;
     type StoredBlock = B;
     type Commitment = B::Commitment;
-    type Recipients = ();
 
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         commitment
@@ -72,7 +71,7 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn proposed(&mut self, block: B, _recipients: ()) {
+    async fn proposed(&mut self, block: B) {
         let _peers = Broadcaster::broadcast(self, Recipients::All, block).await;
     }
 }

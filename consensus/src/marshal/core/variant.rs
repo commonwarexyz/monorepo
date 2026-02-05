@@ -37,9 +37,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
 
-    /// The type used for broadcast recipients.
-    type Recipients: Send;
-
     /// Extracts the block digest from a consensus commitment.
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
@@ -124,12 +121,7 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// Broadcast a proposed block to peers.
     ///
     /// This handles the initial dissemination of a newly proposed block.
-    /// The `recipients` parameter is variant-specific.
-    fn proposed(
-        &mut self,
-        block: V::Block,
-        recipients: V::Recipients,
-    ) -> impl Future<Output = ()> + Send;
+    fn proposed(&mut self, block: V::Block) -> impl Future<Output = ()> + Send;
 }
 
 /// A trait for cached block types that can be converted to the underlying block.

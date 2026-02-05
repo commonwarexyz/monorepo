@@ -86,8 +86,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The block to broadcast.
         block: V::Block,
-        /// The recipients for the broadcast (variant-specific).
-        recipients: V::Recipients,
     },
     /// A notification that a block has been verified by the application.
     Verified {
@@ -271,13 +269,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Requests that a proposed block is sent to peers.
-    pub async fn proposed(&mut self, round: Round, block: V::Block, recipients: V::Recipients) {
+    pub async fn proposed(&mut self, round: Round, block: V::Block) {
         self.sender
-            .send_lossy(Message::Proposed {
-                round,
-                block,
-                recipients,
-            })
+            .send_lossy(Message::Proposed { round, block })
             .await;
     }
 

@@ -1,213 +1,157 @@
 //! Mailbox for the shard buffer engine.
 
-use crate::{
-    marshal::coding::{shards::ReconstructionError, types::CodedBlock},
-    simplex::types::{Activity, Notarize},
-    types::CodingCommitment,
-    CertifiableBlock, Reporter, Scheme,
-};
+use crate::{marshal::coding::types::CodedBlock, types::CodingCommitment, CertifiableBlock};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{mpsc, oneshot},
-    Participant,
+    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
+    ordered::Set,
 };
 use std::sync::Arc;
-use tracing::error;
 
-/// A message that can be sent to the coding [Engine].
+/// A message that can be sent to the coding [`Engine`].
 ///
-/// [Engine]: super::Engine
-pub enum Message<B, S, C, P>
+/// [`Engine`]: super::Engine
+pub enum Message<B, C, P>
 where
     B: CertifiableBlock,
-    S: Scheme,
     C: CodingScheme,
     P: PublicKey,
 {
-    /// A request to broadcast a proposed [CodedBlock] to all peers.
+    /// A request to update the participant set.
+    UpdateParticipants { participants: Set<P> },
+    /// A request to broadcast a proposed [`CodedBlock`] to all peers.
     Proposed {
         /// The erasure coded block.
         block: CodedBlock<B, C>,
-        /// The peers to broadcast the shards to.
-        peers: Vec<P>,
     },
-    /// Subscribes to and verifies a shard at a given commitment and index.
-    /// If the shard is valid, it will be broadcasted to all peers.
-    SubscribeShardValidity {
-        /// The [CodingCommitment] for the block the shard belongs to.
+    /// A request to get a reconstructed block, if available.
+    Get {
+        /// The [`CodingCommitment`] of the block to get.
         commitment: CodingCommitment,
-        /// The index of the shard in the erasure coded block.
-        index: usize,
-        /// A response channel that completes when a valid shard arrives.
+        /// The response channel.
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C>>>>,
+    },
+    /// A request to open a subscription for the receipt of our valid shard from
+    /// the leader.
+    SubscribeShard {
+        /// The block's commitment.
+        commitment: CodingCommitment,
+        /// The response channel.
         response: oneshot::Sender<()>,
     },
-    /// Attempt to reconstruct a block from received shards.
-    TryReconstruct {
-        /// The [CodingCommitment] for the block to reconstruct.
-        commitment: CodingCommitment,
-        /// A response channel to send the reconstructed block to.
-        #[allow(clippy::type_complexity)]
-        response: oneshot::Sender<Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>>>,
-    },
-    /// Subscribe to notifications for when a block is fully reconstructed, by digest.
-    ///
-    /// This subscription cannot trigger shard reconstruction since we don't have
-    /// the full commitment needed.
-    SubscribeBlockByDigest {
-        /// The digest of the block to subscribe to.
-        digest: B::Digest,
-        /// A response channel to send the reconstructed block to.
-        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
-    },
-    /// Subscribe to notifications for when a block is fully reconstructed, by commitment.
-    ///
-    /// Having the commitment enables shard reconstruction when enough shards are available.
+    /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
+    /// by its [`CodingCommitment`].
     SubscribeBlockByCommitment {
-        /// The [CodingCommitment] for the block to subscribe to.
+        /// The block's digest.
         commitment: CodingCommitment,
-        /// A response channel to send the reconstructed block to.
+        /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     },
-    /// A notarization vote to be processed.
-    Notarize {
-        /// The notarization vote.
-        notarization: Notarize<S, CodingCommitment>,
+    /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
+    /// by its digest.
+    SubscribeBlockByDigest {
+        /// The block's digest.
+        digest: B::Digest,
+        /// The response channel.
+        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     },
-    /// A notice that a block has been finalized.
-    Finalized {
-        /// The [CodingCommitment] for the finalized block.
+    /// A notification from marshal that a reconstructed block has been made durable.
+    Durable {
+        /// The block's [`CodingCommitment`].
         commitment: CodingCommitment,
     },
 }
 
-/// A mailbox for sending messages to the [Engine].
+/// A mailbox for sending messages to the [`Engine`].
 ///
-/// [Engine]: super::Engine
+/// [`Engine`]: super::Engine
 #[derive(Clone)]
-pub struct Mailbox<B, S, C, P>
+pub struct Mailbox<B, C, P>
 where
     B: CertifiableBlock,
-    S: Scheme,
     C: CodingScheme,
     P: PublicKey,
 {
-    pub(super) sender: mpsc::Sender<Message<B, S, C, P>>,
+    pub(super) sender: mpsc::Sender<Message<B, C, P>>,
 }
 
-impl<B, S, C, P> Mailbox<B, S, C, P>
+impl<B, C, P> Mailbox<B, C, P>
 where
     B: CertifiableBlock,
-    S: Scheme,
     C: CodingScheme,
     P: PublicKey,
 {
     /// Create a new [Mailbox] with the given sender.
-    pub const fn new(sender: mpsc::Sender<Message<B, S, C, P>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<B, C, P>>) -> Self {
         Self { sender }
     }
 
-    /// Broadcast a proposed erasure coded block's shards to a set of peers.
-    pub async fn proposed(&mut self, block: CodedBlock<B, C>, peers: Vec<P>) {
-        let msg = Message::Proposed { block, peers };
-        self.sender.send(msg).await.expect("mailbox closed");
+    /// Update the participant set.
+    pub async fn update_participants(&mut self, participants: Set<P>) {
+        let msg = Message::UpdateParticipants { participants };
+        self.sender.send_lossy(msg).await;
     }
 
-    /// Subscribe to and verify a shard at a given commitment and index.
-    ///
-    /// The returned receiver completes when a valid shard arrives.
-    pub async fn subscribe_shard_validity(
-        &mut self,
-        commitment: CodingCommitment,
-        index: Participant,
-    ) -> oneshot::Receiver<()> {
-        let (tx, rx) = oneshot::channel();
-        let msg = Message::SubscribeShardValidity {
+    /// Broadcast a proposed erasure coded block's shards to the participants.
+    pub async fn proposed(&mut self, block: CodedBlock<B, C>) {
+        let msg = Message::Proposed { block };
+        self.sender.send_lossy(msg).await;
+    }
+
+    /// Request a reconstructed block by its [`CodingCommitment`].
+    pub async fn get(&mut self, commitment: CodingCommitment) -> Option<Arc<CodedBlock<B, C>>> {
+        self.sender
+            .request(|tx| Message::Get {
+                commitment,
+                response: tx,
+            })
+            .await
+            .flatten()
+    }
+
+    /// Subscribe to the receipt of our valid shard from the leader.
+    pub async fn subscribe_shard(&mut self, commitment: CodingCommitment) -> oneshot::Receiver<()> {
+        let (responder, receiver) = oneshot::channel();
+        let msg = Message::SubscribeShard {
             commitment,
-            index: index.get() as usize,
-            response: tx,
+            response: responder,
         };
-        self.sender.send(msg).await.expect("mailbox closed");
-
-        rx
+        self.sender.send_lossy(msg).await;
+        receiver
     }
 
-    /// Attempt to reconstruct a block from received shards.
-    pub async fn try_reconstruct(
-        &mut self,
-        commitment: CodingCommitment,
-    ) -> Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = Message::TryReconstruct {
-            commitment,
-            response: tx,
-        };
-        self.sender.send(msg).await.expect("mailbox closed");
-
-        rx.await.expect("mailbox closed")
-    }
-
-    /// Subscribe to notifications for when a block is fully reconstructed, by digest.
-    ///
-    /// This subscription cannot trigger shard reconstruction since we don't have
-    /// the full commitment needed.
-    pub async fn subscribe_block_by_digest(
-        &mut self,
-        digest: B::Digest,
-    ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
-        let (tx, rx) = oneshot::channel();
-        let msg = Message::SubscribeBlockByDigest {
-            digest,
-            response: tx,
-        };
-        self.sender.send(msg).await.expect("mailbox closed");
-
-        rx
-    }
-
-    /// Subscribe to notifications for when a block is fully reconstructed, by commitment.
-    ///
-    /// Having the commitment enables shard reconstruction when enough shards are available.
+    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`CodingCommitment`].
     pub async fn subscribe_block_by_commitment(
         &mut self,
         commitment: CodingCommitment,
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
-        let (tx, rx) = oneshot::channel();
+        let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeBlockByCommitment {
             commitment,
-            response: tx,
+            response: responder,
         };
-        self.sender.send(msg).await.expect("mailbox closed");
-
-        rx
+        self.sender.send_lossy(msg).await;
+        receiver
     }
 
-    /// A notice that a block has been finalized.
-    pub async fn finalized(&mut self, commitment: CodingCommitment) {
-        let msg = Message::Finalized { commitment };
-        self.sender.send(msg).await.expect("mailbox closed");
-    }
-}
-
-impl<B, S, C, P> Reporter for Mailbox<B, S, C, P>
-where
-    B: CertifiableBlock,
-    S: Scheme,
-    C: CodingScheme,
-    P: PublicKey,
-{
-    type Activity = Activity<S, CodingCommitment>;
-
-    async fn report(&mut self, activity: Self::Activity) {
-        let message = match activity {
-            Activity::Notarize(notarization) => Message::Notarize { notarization },
-            _ => {
-                // Ignore other activity types
-                return;
-            }
+    /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
+    pub async fn subscribe_block_by_digest(
+        &mut self,
+        digest: B::Digest,
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
+        let (responder, receiver) = oneshot::channel();
+        let msg = Message::SubscribeBlockByDigest {
+            digest,
+            response: responder,
         };
-        if self.sender.send(message).await.is_err() {
-            error!("failed to report activity to shard engine: receiver dropped");
-        }
+        self.sender.send_lossy(msg).await;
+        receiver
+    }
+
+    /// Notify the engine that a reconstructed block has been made durable.
+    pub async fn durable(&mut self, commitment: CodingCommitment) {
+        let msg = Message::Durable { commitment };
+        self.sender.send_lossy(msg).await;
     }
 }

@@ -370,9 +370,9 @@ where
                         };
                         response.send_lossy(info);
                     }
-                    Message::Proposed { round, block, recipients } => {
+                    Message::Proposed { round, block } => {
                         self.cache_verified(round, block.digest(), block.clone()).await;
-                        buffer.proposed(block, recipients).await;
+                        buffer.proposed(block).await;
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.digest(), block).await;
