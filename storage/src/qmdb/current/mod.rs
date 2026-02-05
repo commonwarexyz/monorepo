@@ -5,11 +5,26 @@
 //! The two structures are "grafted" together to minimize proof sizes.
 
 use crate::{
-    qmdb::any::{FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig},
+    bitmap::MerkleizedBitMap,
+    index::Unordered as UnorderedIndex,
+    journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
+    mmr::{Location, StandardHasher},
+    qmdb::{
+        any::{
+            self,
+            operation::{Operation, Update},
+            FixedConfig as AnyFixedConfig, ValueEncoding, VariableConfig as AnyVariableConfig,
+        },
+        operation::Committable,
+        Durable, Error,
+    },
     translator::Translator,
 };
+use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_utils::Array;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -130,6 +145,156 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
             page_cache: cfg.page_cache,
         }
     }
+}
+
+/// Shared initialization logic for fixed-sized value Current [db::Db].
+pub(super) async fn init_fixed<E, K, V, U, H, T, I, const N: usize, NewIndex>(
+    context: E,
+    config: FixedConfig<T>,
+    new_index: NewIndex,
+) -> Result<
+    db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
+    Error,
+>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V> + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: UnorderedIndex<Value = Location>,
+    NewIndex: FnOnce(E, T) -> I,
+    Operation<K, V, U>: CodecFixedShared + Committable,
+{
+    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+    const {
+        // A compile-time assertion that the chunk size is some multiple of digest size. A multiple
+        // of 1 is optimal with respect to proof size, but a higher multiple allows for a smaller
+        // (RAM resident) merkle tree over the structure.
+        assert!(
+            N.is_multiple_of(H::Digest::SIZE),
+            "chunk size must be some multiple of the digest size",
+        );
+        // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
+        // the status bitmap tree to be aligned with the underlying operations MMR.
+        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
+    }
+
+    let thread_pool = config.thread_pool.clone();
+    let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+
+    let mut hasher = StandardHasher::<H>::new();
+    let mut status = MerkleizedBitMap::init(
+        context.with_label("bitmap"),
+        &bitmap_metadata_partition,
+        thread_pool,
+        &mut hasher,
+    )
+    .await?
+    .into_dirty();
+
+    // Initialize the anydb with a callback that initializes the status bitmap.
+    let last_known_inactivity_floor = Location::new_unchecked(status.len());
+    let any = any::init_fixed(
+        context.with_label("any"),
+        config.into(),
+        Some(last_known_inactivity_floor),
+        |append: bool, loc: Option<Location>| {
+            status.push(append);
+            if let Some(loc) = loc {
+                status.set_bit(*loc, false);
+            }
+        },
+        new_index,
+    )
+    .await?;
+
+    let status = db::merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+
+    // Compute and cache the root
+    let root = db::root(&mut hasher, &status, &any.log.mmr).await?;
+
+    Ok(db::Db {
+        any,
+        status,
+        state: db::Merkleized { root },
+    })
+}
+
+/// Shared initialization logic for variable-sized value Current [db::Db].
+pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>(
+    context: E,
+    config: VariableConfig<T, <Operation<K, V, U> as Read>::Cfg>,
+    new_index: NewIndex,
+) -> Result<
+    db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, N, db::Merkleized<DigestOf<H>>, Durable>,
+    Error,
+>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V> + Send + Sync,
+    H: Hasher,
+    T: Translator,
+    I: UnorderedIndex<Value = Location>,
+    NewIndex: FnOnce(E, T) -> I,
+    Operation<K, V, U>: Codec + Committable,
+{
+    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+    const {
+        // A compile-time assertion that the chunk size is some multiple of digest size. A multiple
+        // of 1 is optimal with respect to proof size, but a higher multiple allows for a smaller
+        // (RAM resident) merkle tree over the structure.
+        assert!(
+            N.is_multiple_of(H::Digest::SIZE),
+            "chunk size must be some multiple of the digest size",
+        );
+        // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
+        // the status bitmap tree to be aligned with the underlying operations MMR.
+        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
+    }
+
+    let thread_pool = config.thread_pool.clone();
+    let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+
+    let mut hasher = StandardHasher::<H>::new();
+    let mut status = MerkleizedBitMap::init(
+        context.with_label("bitmap"),
+        &bitmap_metadata_partition,
+        thread_pool,
+        &mut hasher,
+    )
+    .await?
+    .into_dirty();
+
+    // Initialize the anydb with a callback that initializes the status bitmap.
+    let last_known_inactivity_floor = Location::new_unchecked(status.len());
+    let any = any::init_variable(
+        context.with_label("any"),
+        config.into(),
+        Some(last_known_inactivity_floor),
+        |append: bool, loc: Option<Location>| {
+            status.push(append);
+            if let Some(loc) = loc {
+                status.set_bit(*loc, false);
+            }
+        },
+        new_index,
+    )
+    .await?;
+
+    let status = db::merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+
+    // Compute and cache the root
+    let root = db::root(&mut hasher, &status, &any.log.mmr).await?;
+
+    Ok(db::Db {
+        any,
+        status,
+        state: db::Merkleized { root },
+    })
 }
 
 /// Extension trait for Current QMDB types that exposes bitmap information for testing.

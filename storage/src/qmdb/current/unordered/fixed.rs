@@ -8,25 +8,16 @@
 
 pub use super::db::KeyValueProof;
 use crate::{
-    bitmap::MerkleizedBitMap,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    mmr::{Location, StandardHasher},
+    mmr::Location,
     qmdb::{
-        any::{
-            unordered::fixed::{Db as AnyDb, Operation},
-            value::FixedEncoding,
-            FixedValue,
-        },
-        current::{
-            db::{merkleize_grafted_bitmap, root, Merkleized},
-            FixedConfig as Config,
-        },
+        any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
+        current::{db::Merkleized, FixedConfig as Config},
         Durable, Error,
     },
     translator::Translator,
 };
-use commonware_codec::FixedSize;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
@@ -58,58 +49,7 @@ impl<
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
     pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
-        // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-        const {
-            // A compile-time assertion that the chunk size is some multiple of digest size. A
-            // multiple of 1 is optimal with respect to proof size, but a higher multiple allows for
-            // a smaller (RAM resident) merkle tree over the structure.
-            assert!(
-                N.is_multiple_of(H::Digest::SIZE),
-                "chunk size must be some multiple of the digest size",
-            );
-            // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-            // the status bitmap tree to be aligned with the underlying operations MMR.
-            assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-        }
-
-        let thread_pool = config.thread_pool.clone();
-        let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
-
-        let mut hasher = StandardHasher::<H>::new();
-        let mut status = MerkleizedBitMap::init(
-            context.with_label("bitmap"),
-            &bitmap_metadata_partition,
-            thread_pool,
-            &mut hasher,
-        )
-        .await?
-        .into_dirty();
-
-        // Initialize the anydb with a callback that initializes the status bitmap.
-        let last_known_inactivity_floor = Location::new_unchecked(status.len());
-        let any = AnyDb::init_with_callback(
-            context.with_label("any"),
-            config.into(),
-            Some(last_known_inactivity_floor),
-            |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            },
-        )
-        .await?;
-
-        let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
-
-        // Compute and cache the root
-        let root = root(&mut hasher, &status, &any.log.mmr).await?;
-
-        Ok(Self {
-            any,
-            status,
-            state: Merkleized { root },
-        })
+        crate::qmdb::current::init_fixed(context, config, |ctx, t| Index::new(ctx, t)).await
     }
 }
 
@@ -121,25 +61,16 @@ pub mod partitioned {
 
     pub use super::KeyValueProof;
     use crate::{
-        bitmap::MerkleizedBitMap,
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
-        mmr::{Location, StandardHasher},
+        mmr::Location,
         qmdb::{
-            any::{
-                unordered::fixed::partitioned::{Db as AnyDb, Operation},
-                value::FixedEncoding,
-                FixedValue,
-            },
-            current::{
-                db::{merkleize_grafted_bitmap, root, Merkleized},
-                FixedConfig as Config,
-            },
+            any::{unordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
+            current::{db::Merkleized, FixedConfig as Config},
             Durable, Error,
         },
         translator::Translator,
     };
-    use commonware_codec::FixedSize;
     use commonware_cryptography::{DigestOf, Hasher};
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
@@ -185,52 +116,7 @@ pub mod partitioned {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
         /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
         pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
-            const {
-                assert!(
-                    N.is_multiple_of(H::Digest::SIZE),
-                    "chunk size must be some multiple of the digest size",
-                );
-                assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-            }
-
-            let thread_pool = config.thread_pool.clone();
-            let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
-
-            let mut hasher = StandardHasher::<H>::new();
-            let mut status = MerkleizedBitMap::init(
-                context.with_label("bitmap"),
-                &bitmap_metadata_partition,
-                thread_pool,
-                &mut hasher,
-            )
-            .await?
-            .into_dirty();
-
-            // Initialize the anydb with a callback that initializes the status bitmap.
-            let last_known_inactivity_floor = Location::new_unchecked(status.len());
-            let any = AnyDb::<_, K, V, H, T, P>::init_with_callback(
-                context.with_label("any"),
-                config.into(),
-                Some(last_known_inactivity_floor),
-                |append: bool, loc: Option<Location>| {
-                    status.push(append);
-                    if let Some(loc) = loc {
-                        status.set_bit(*loc, false);
-                    }
-                },
-            )
-            .await?;
-
-            let status = merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
-
-            // Compute and cache the root
-            let root = root(&mut hasher, &status, &any.log.mmr).await?;
-
-            Ok(Self {
-                any,
-                status,
-                state: Merkleized { root },
-            })
+            crate::qmdb::current::init_fixed(context, config, |ctx, t| Index::new(ctx, t)).await
         }
     }
 }
@@ -239,8 +125,9 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
+        bitmap::MerkleizedBitMap,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
-        mmr::{hasher::Hasher as _, Proof},
+        mmr::{hasher::Hasher as _, Proof, StandardHasher},
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
