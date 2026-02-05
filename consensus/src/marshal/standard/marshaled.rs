@@ -105,7 +105,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: CertifiableBlock<Commitment = <B as Digestible>::Digest>,
+    B: CertifiableBlock,
     ES: Epocher,
 {
     context: E,
@@ -128,10 +128,7 @@ where
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
-    B: CertifiableBlock<
-        Context = <A as Application<E>>::Context,
-        Commitment = <B as Digestible>::Digest,
-    >,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
@@ -267,10 +264,7 @@ where
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
-    B: CertifiableBlock<
-        Context = <A as Application<E>>::Context,
-        Commitment = <B as Digestible>::Digest,
-    >,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -559,10 +553,7 @@ where
         SigningScheme = S,
         Context = Context<B::Digest, S::PublicKey>,
     >,
-    B: CertifiableBlock<
-        Context = <A as Application<E>>::Context,
-        Commitment = <B as Digestible>::Digest,
-    >,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
@@ -648,10 +639,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: CertifiableBlock<
-        Context = <A as Application<E>>::Context,
-        Commitment = <B as Digestible>::Digest,
-    >,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -692,10 +680,7 @@ where
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
-    B: CertifiableBlock<
-        Context = <A as Application<E>>::Context,
-        Commitment = <B as Digestible>::Digest,
-    >,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
     type Activity = A::Activity;
@@ -730,7 +715,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block<Commitment = <B as Digestible>::Digest>,
+    B: Block,
 {
     let genesis = application.genesis().await;
     if parent_digest == genesis.digest() {

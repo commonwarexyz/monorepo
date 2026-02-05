@@ -10,7 +10,7 @@ use crate::{
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
 
@@ -28,6 +28,10 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
     type Block = CodedBlock<B, C>;
     type StoredBlock = StoredCodedBlock<B, C>;
     type Commitment = CodingCommitment;
+
+    fn commitment(block: &Self::Block) -> Self::Commitment {
+        block.commitment()
+    }
 
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         commitment.block_digest()

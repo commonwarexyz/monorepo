@@ -15,7 +15,7 @@ commonware_macros::stability_scope!(ALPHA {
 });
 commonware_macros::stability_scope!(BETA {
     use commonware_codec::{Codec, EncodeSize, Write};
-    use commonware_cryptography::{Committable, Digestible};
+    use commonware_cryptography::Digestible;
 
     pub mod simplex;
 
@@ -46,7 +46,7 @@ commonware_macros::stability_scope!(BETA {
     /// Block is the interface for a block in the blockchain.
     ///
     /// Blocks are used to track the progress of the consensus engine.
-    pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
+    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
     }

@@ -19,7 +19,7 @@ use crate::{
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    Committable, Digestible,
+    Digestible,
 };
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
@@ -708,7 +708,7 @@ where
                                 let commitment = finalization.proposal.payload;
                                 let digest = V::commitment_to_digest(commitment);
                                 if block.height() != height
-                                    || block.commitment() != commitment
+                                    || V::commitment(&block) != commitment
                                     || !finalization.verify(&mut self.context, &scheme, &self.strategy)
                                 {
                                     response.send_lossy(false);
@@ -750,7 +750,7 @@ where
                                 let commitment = notarization.proposal.payload;
                                 let digest = V::commitment_to_digest(commitment);
                                 if notarization.round() != round
-                                    || block.commitment() != commitment
+                                    || V::commitment(&block) != commitment
                                     || !notarization.verify(&mut self.context, &scheme, &self.strategy)
                                 {
                                     response.send_lossy(false);
@@ -832,7 +832,7 @@ where
             "finalized block height mismatch"
         );
 
-        let (height, commitment) = (block.height(), block.commitment());
+        let (height, commitment) = (block.height(), V::commitment(&block));
         let (ack, ack_waiter) = A::handle();
         application
             .report(Update::Block(V::into_application_block(block), ack))
@@ -971,7 +971,7 @@ where
         self.notify_subscribers(&block).await;
 
         // Convert block to storage format
-        let commitment = block.commitment();
+        let commitment = V::commitment(&block);
         let stored: V::StoredBlock = block.into();
 
         // In parallel, update the finalized blocks and finalizations archives
