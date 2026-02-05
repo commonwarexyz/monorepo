@@ -7,7 +7,6 @@ use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
         keyless::{Config, Keyless},
-        store::LogStore as _,
         verify_proof,
     },
 };
@@ -167,7 +166,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
@@ -188,13 +187,13 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
+                    let clean_db = durable_db.into_merkleized();
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    let _ = db.bounds().await.end;
                 }
 
                 Operation::LastCommitLoc => {
@@ -202,12 +201,12 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().start;
+                    let _ = db.bounds().await.start;
                 }
 
                 Operation::Root => {
                     let merkleized_db = db.into_merkleized();
-                    let _ = merkleized_db.root();
+                    let _ = merkleized_db.root().await;
                     db = merkleized_db.into_mutable();
                 }
 
@@ -215,7 +214,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count == 0 {
                         continue;
                     }
@@ -223,7 +222,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc).unwrap();
-                    let root = merkleized_db.root();
+                    let root = merkleized_db.root().await;
                     if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
@@ -238,7 +237,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count == 0 {
                         continue;
                     }
@@ -248,7 +247,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = (*start_offset as u64) % *size;
                     let start_loc = Location::new(start_loc).unwrap();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let root = merkleized_db.root();
+                    let root = merkleized_db.root().await;
                     if let Ok((proof, ops)) = merkleized_db
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {

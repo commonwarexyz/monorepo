@@ -82,7 +82,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Tra
         )
         .await?;
 
-        if log.size() == 0 {
+        if log.size().await == 0 {
             warn!("Authenticated log is empty, initializing new db");
             let mut dirty_log = log.into_dirty();
             dirty_log
@@ -108,7 +108,7 @@ pub(crate) mod test {
         qmdb::{
             store::{
                 batch_tests,
-                tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+                tests::{assert_log_store, assert_prunable_store},
                 LogStore,
             },
             NonDurable, Unmerkleized,
@@ -255,14 +255,14 @@ pub(crate) mod test {
                 db.update(k, v).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             drop(db);
             let db = open_db(context.with_label("second")).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
         });
@@ -290,7 +290,7 @@ pub(crate) mod test {
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
             let db = open_db(context.with_label("open1")).await;
-            let root = db.root();
+            let root = db.root().await;
             let mut db = db.into_mutable();
 
             for i in 0u64..ELEMENTS {
@@ -302,7 +302,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open2")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
 
             // re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
@@ -312,7 +312,7 @@ pub(crate) mod test {
                 db.update(k, v.clone()).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Update every 3rd key
             let mut db = db.into_mutable();
@@ -328,7 +328,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open3")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
 
             // Re-apply updates for every 3rd key and commit them this time.
             let mut db = db.into_mutable();
@@ -341,7 +341,7 @@ pub(crate) mod test {
                 db.update(k, v.clone()).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Delete every 7th key
             let mut db = db.into_mutable();
@@ -356,7 +356,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open4")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
 
             // Re-delete every 7th key and commit this time.
             let mut db = db.into_mutable();
@@ -369,16 +369,17 @@ pub(crate) mod test {
             }
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
-            let root = db.root();
-            assert_eq!(db.bounds().end, 1961);
+            let root = db.root().await;
+            assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
-                Location::try_from(db.log.mmr.size()).ok(),
+                Location::try_from(db.log.mmr.size().await).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
+            let floor = db.inactivity_floor_loc();
+            db.prune(floor).await.unwrap();
+            assert_eq!(db.log.bounds().await.start, Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.sync().await.unwrap();
@@ -386,14 +387,14 @@ pub(crate) mod test {
 
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
-            assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, 1961);
+            assert_eq!(root, db.root().await);
+            assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
-                Location::try_from(db.log.mmr.size()).ok(),
+                Location::try_from(db.log.mmr.size().await).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
+            assert_eq!(db.log.bounds().await.start, Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -512,8 +513,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
+            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes().await;
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
@@ -544,7 +545,6 @@ pub(crate) mod test {
         assert_gettable(db, &key);
         assert_log_store(db);
         assert_prunable_store(db, loc);
-        assert_merkleized_store(db, loc);
         assert_send(db.sync());
     }
 

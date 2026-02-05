@@ -55,16 +55,16 @@ pub trait LogStore: Send + Sync {
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    fn bounds(&self) -> std::ops::Range<Location>;
+    fn bounds(&self) -> impl Future<Output = std::ops::Range<Location>> + Send;
 
     /// Return the Location of the next operation appended to this db.
-    fn size(&self) -> Location {
-        self.bounds().end
+    fn size(&self) -> impl Future<Output = Location> + Send {
+        async { self.bounds().await.end }
     }
 
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
+    fn inactivity_floor_loc(&self) -> impl Future<Output = Location> + Send;
 
     /// Get the metadata associated with the last commit.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send;
@@ -85,7 +85,7 @@ pub trait MerkleizedStore: LogStore {
     type Operation;
 
     /// Returns the root digest of the authenticated store.
-    fn root(&self) -> Self::Digest;
+    fn root(&self) -> impl Future<Output = Self::Digest> + Send;
 
     /// Generate and return:
     ///  1. a proof of all operations applied to the store in the range starting at (and including)
@@ -105,7 +105,10 @@ pub trait MerkleizedStore: LogStore {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
     {
-        self.historical_proof(self.bounds().end, start_loc, max_ops)
+        async move {
+            self.historical_proof(self.bounds().await.end, start_loc, max_ops)
+                .await
+        }
     }
 
     /// Generate and return:
@@ -132,8 +135,8 @@ pub trait MerkleizedStore: LogStore {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{LogStore, MerkleizedStore, PrunableStore};
-    use crate::mmr::Location;
+    use super::{LogStore, PrunableStore};
+    use crate::{mmr::Location, qmdb::store::MerkleizedStore};
     use commonware_utils::NZU64;
 
     pub fn assert_send<T: Send>(_: T) {}

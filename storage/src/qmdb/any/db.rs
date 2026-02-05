@@ -128,8 +128,8 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    pub const fn root(&self) -> H::Digest {
-        self.log.root()
+    pub async fn root(&self) -> H::Digest {
+        self.log.root().await
     }
 
     pub async fn proof(
@@ -137,7 +137,7 @@ where
         loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(self.log.bounds().end, loc, max_ops)
+        self.historical_proof(self.log.bounds().await.end, loc, max_ops)
             .await
     }
 
@@ -203,7 +203,11 @@ where
     {
         // If the last-known inactivity floor is behind the current floor, then invoke the callback
         // appropriately to report the inactive bits.
-        let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
+        let last_commit_loc = log
+            .size()
+            .await
+            .checked_sub(1)
+            .expect("commit should exist");
         let last_commit = log.read(last_commit_loc).await?;
         let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
         if let Some(known_inactivity_floor) = known_inactivity_floor {
@@ -226,7 +230,7 @@ where
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -349,7 +353,7 @@ where
     /// Panics if the given operation is not a commit operation.
     pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
-        self.last_commit_loc = self.log.bounds().end;
+        self.last_commit_loc = self.log.bounds().await.end;
         self.log.append(op).await?;
 
         self.log.commit().await.map_err(Into::into)
@@ -372,7 +376,7 @@ where
         self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
             .await?;
 
-        let range = start_loc..self.log.bounds().end;
+        let range = start_loc..self.log.bounds().await.end;
 
         let db = Db {
             log: self.log,
@@ -391,7 +395,7 @@ where
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
         if self.is_empty() {
-            self.inactivity_floor_loc = self.log.bounds().end;
+            self.inactivity_floor_loc = self.log.bounds().await.end;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.durable_state.steps + 1;
@@ -416,7 +420,7 @@ where
         status: &mut UnmerkleizedBitMap<F, D, N>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
-            self.inactivity_floor_loc = self.log.bounds().end;
+            self.inactivity_floor_loc = self.log.bounds().await.end;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.durable_state.steps + 1;
@@ -462,7 +466,7 @@ where
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.sync().await
     }
 
@@ -486,8 +490,8 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    fn root(&self) -> H::Digest {
-        self.root()
+    async fn root(&self) -> H::Digest {
+        self.root().await
     }
 
     async fn historical_proof(
@@ -516,20 +520,20 @@ where
 {
     type Value = V::Value;
 
-    fn bounds(&self) -> std::ops::Range<Location> {
-        self.log.bounds()
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    async fn bounds(&self) -> std::ops::Range<Location> {
+        self.log.bounds().await
+    }
+
+    async fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 }
 

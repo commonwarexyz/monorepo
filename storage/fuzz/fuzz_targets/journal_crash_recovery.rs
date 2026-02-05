@@ -160,8 +160,8 @@ trait FuzzJournal: Sized {
         cfg: Self::Config,
     ) -> impl std::future::Future<Output = Result<Self, commonware_storage::journal::Error>> + Send;
 
-    fn size(&self) -> u64;
-    fn bounds(&self) -> Range<u64>;
+    async fn size(&self) -> u64;
+    async fn bounds(&self) -> Range<u64>;
 
     fn append(
         &mut self,
@@ -229,12 +229,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::init(ctx, cfg).await
     }
 
-    fn size(&self) -> u64 {
-        FixedJournal::size(self)
+    async fn size(&self) -> u64 {
+        <FixedJournal<deterministic::Context, Item>>::size(self).await
     }
 
-    fn bounds(&self) -> Range<u64> {
-        FixedJournal::bounds(self)
+    async fn bounds(&self) -> Range<u64> {
+        <FixedJournal<deterministic::Context, Item>>::bounds(self).await
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
@@ -302,12 +302,14 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::init(ctx, cfg).await
     }
 
-    fn size(&self) -> u64 {
-        VariableJournal::size(self)
+    async fn size(&self) -> u64 {
+        <VariableJournal<deterministic::Context, Item>>::bounds(self)
+            .await
+            .end
     }
 
-    fn bounds(&self) -> Range<u64> {
-        VariableJournal::bounds(self)
+    async fn bounds(&self) -> Range<u64> {
+        <VariableJournal<deterministic::Context, Item>>::bounds(self).await
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
@@ -335,7 +337,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = VariableJournal::replay(self, start_pos, buffer).await?;
+        let _ = VariableJournal::replay(self, buffer, start_pos).await?;
         Ok(())
     }
 
@@ -353,19 +355,19 @@ async fn run_operations<J: FuzzJournal>(
     operations: &[JournalOperation],
 ) -> (u64, u64, u64, u64) {
     let mut min_expected_size = 0u64;
-    let mut max_expected_size = journal.size();
+    let mut max_expected_size = journal.size().await;
     let mut min_expected_oldest = 0u64;
-    let mut max_expected_oldest = journal.bounds().start;
+    let mut max_expected_oldest = journal.bounds().await.start;
 
     for op in operations.iter() {
         let step_result: Result<(), ()> = match op {
             JournalOperation::Append { value } => {
-                let size_before = journal.size();
+                let size_before = journal.size().await;
                 if journal.append(Item::from(*value)).await.is_err() {
                     max_expected_size = max_expected_size.max(size_before + 1);
                     Err(())
                 } else {
-                    max_expected_size = max_expected_size.max(journal.size());
+                    max_expected_size = max_expected_size.max(journal.size().await);
                     Ok(())
                 }
             }
@@ -379,10 +381,10 @@ async fn run_operations<J: FuzzJournal>(
                 if journal.sync().await.is_err() {
                     Err(())
                 } else {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     min_expected_size = size;
                     max_expected_size = max_expected_size.max(size);
-                    let oldest = journal.bounds().start;
+                    let oldest = journal.bounds().await.start;
                     min_expected_oldest = oldest;
                     max_expected_oldest = max_expected_oldest.max(oldest);
                     Ok(())
@@ -390,7 +392,7 @@ async fn run_operations<J: FuzzJournal>(
             }
 
             JournalOperation::Rewind { size } => {
-                let prev_size = journal.size();
+                let prev_size = journal.size().await;
                 if *size >= prev_size {
                     Ok(())
                 } else if journal.rewind(*size).await.is_err() {
@@ -404,12 +406,13 @@ async fn run_operations<J: FuzzJournal>(
 
             JournalOperation::Prune { min_pos } => match journal.prune(*min_pos).await {
                 Err(_) => {
-                    max_expected_oldest = max_expected_oldest.max((*min_pos).min(journal.size()));
+                    max_expected_oldest =
+                        max_expected_oldest.max((*min_pos).min(journal.size().await));
                     Err(())
                 }
                 Ok(false) => Ok(()),
                 Ok(true) => {
-                    let new_oldest = journal.bounds().start;
+                    let new_oldest = journal.bounds().await.start;
                     min_expected_oldest = new_oldest;
                     max_expected_oldest = new_oldest;
                     Ok(())
@@ -429,10 +432,10 @@ async fn run_operations<J: FuzzJournal>(
                 if journal.commit().await.is_err() {
                     Err(())
                 } else {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     min_expected_size = size;
                     max_expected_size = size;
-                    let oldest = journal.bounds().start;
+                    let oldest = journal.bounds().await.start;
                     min_expected_oldest = oldest;
                     max_expected_oldest = oldest;
                     Ok(())
@@ -460,8 +463,8 @@ async fn verify_recovery<J: FuzzJournal>(
     min_expected_oldest: u64,
     max_expected_oldest: u64,
 ) {
-    let size = journal.size();
-    let oldest = journal.bounds().start;
+    let size = journal.size().await;
+    let oldest = journal.bounds().await.start;
     assert!(size >= oldest);
 
     assert!(

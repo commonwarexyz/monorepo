@@ -10,6 +10,8 @@ use crate::{
 };
 use commonware_parallel::ThreadPool;
 use commonware_runtime::buffer::paged::CacheRef;
+#[cfg(any(test, feature = "test-traits"))]
+use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -136,13 +138,13 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
 #[cfg(any(test, feature = "test-traits"))]
 pub trait BitmapPrunedBits {
     /// Returns the number of bits that have been pruned from the bitmap.
-    fn pruned_bits(&self) -> u64;
+    fn pruned_bits(&self) -> impl Future<Output = u64> + Send;
 
     /// Returns the value of the bit at the given index.
-    fn get_bit(&self, index: u64) -> bool;
+    fn get_bit(&self, index: u64) -> impl Future<Output = bool> + Send;
 
     /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> u64;
+    fn oldest_retained(&self) -> impl Future<Output = u64> + Send;
 }
 
 #[cfg(test)]
@@ -241,16 +243,16 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
             // Drop and reopen the db
-            let root = db.root();
+            let root = db.root().await;
             drop(db);
             let db: C = open_db_clone(context.with_label("second"), partition).await;
 
             // Ensure the root matches
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
             context.auditor().state()
@@ -266,13 +268,13 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
-            let root = db.root();
+            let root = db.root().await;
             drop(db);
             let db: C = open_db(context.with_label("second"), partition).await;
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
             context.auditor().state()
@@ -300,63 +302,89 @@ pub mod tests {
             let partition = "build_random_fail_commit".to_string();
             let rng_seed = context.next_u64();
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
-            let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
-                .await
-                .unwrap();
+            let db = Box::pin(apply_random_ops::<C>(
+                ELEMENTS,
+                true,
+                rng_seed,
+                db.into_mutable(),
+            ))
+            .await
+            .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
-            let committed_root = db.root();
-            let committed_op_count = db.bounds().end;
-            let committed_inactivity_floor = db.inactivity_floor_loc();
+            let committed_root = db.root().await;
+            let committed_op_count = db.bounds().await.end;
+            let committed_inactivity_floor = db.inactivity_floor_loc().await;
             db.prune(committed_inactivity_floor).await.unwrap();
 
             // Perform more random operations without committing any of them.
-            let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
-                .await
-                .unwrap();
+            let db = Box::pin(apply_random_ops::<C>(
+                ELEMENTS,
+                false,
+                rng_seed + 1,
+                db.into_mutable(),
+            ))
+            .await
+            .unwrap();
 
             // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
             // state of the DB should be as of the last commit.
             drop(db);
             let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
-            assert_eq!(db.root(), committed_root);
-            assert_eq!(db.bounds().end, committed_op_count);
+            assert_eq!(db.root().await, committed_root);
+            assert_eq!(db.bounds().await.end, committed_op_count);
 
             // Re-apply the exact same uncommitted operations.
-            let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
-                .await
-                .unwrap();
+            let db = Box::pin(apply_random_ops::<C>(
+                ELEMENTS,
+                false,
+                rng_seed + 1,
+                db.into_mutable(),
+            ))
+            .await
+            .unwrap();
 
             // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
             // before the state of the pruned bitmap can be written to disk (i.e., before
             // into_merkleized is called). We do this by committing and then dropping the durable
             // db without calling close or into_merkleized.
             let (durable_db, _) = db.commit(None).await.unwrap();
-            let committed_op_count = durable_db.bounds().end;
+            let committed_op_count = durable_db.bounds().await.end;
             drop(durable_db);
 
             // We should be able to recover, so the root should differ from the previous commit, and
             // the op count should be greater than before.
             let db: C = open_db(context.with_label("scenario2"), partition.clone()).await;
-            let scenario_2_root = db.root();
+            let scenario_2_root = db.root().await;
 
             // To confirm the second committed hash is correct we'll re-build the DB in a new
             // partition, but without any failures. They should have the exact same state.
             let fresh_partition = "build_random_fail_commit_fresh".to_string();
             let db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
-            let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
-                .await
-                .unwrap();
+            let db = Box::pin(apply_random_ops::<C>(
+                ELEMENTS,
+                true,
+                rng_seed,
+                db.into_mutable(),
+            ))
+            .await
+            .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
-                .await
-                .unwrap();
+            let db = Box::pin(apply_random_ops::<C>(
+                ELEMENTS,
+                false,
+                rng_seed + 1,
+                db.into_mutable(),
+            ))
+            .await
+            .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            let floor = db.inactivity_floor_loc().await;
+            db.prune(floor).await.unwrap();
             // State from scenario #2 should match that of a successful commit.
-            assert_eq!(db.bounds().end, committed_op_count);
-            assert_eq!(db.root(), scenario_2_root);
+            assert_eq!(db.bounds().await.end, committed_op_count);
+            assert_eq!(db.root().await, scenario_2_root);
 
             db.destroy().await.unwrap();
         });
@@ -406,7 +434,7 @@ pub mod tests {
                     let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
                     let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
                     clean_pruning
-                        .prune(clean_no_pruning.inactivity_floor_loc())
+                        .prune(clean_no_pruning.inactivity_floor_loc().await)
                         .await
                         .unwrap();
                     db_no_pruning_mut = clean_no_pruning.into_mutable();
@@ -421,14 +449,14 @@ pub mod tests {
             db_pruning = db_2.into_merkleized().await.unwrap();
 
             // Get roots from both databases - they should match
-            let root_no_pruning = db_no_pruning.root();
-            let root_pruning = db_pruning.root();
+            let root_no_pruning = db_no_pruning.root().await;
+            let root_pruning = db_pruning.root().await;
             assert_eq!(root_no_pruning, root_pruning);
 
             // Also verify inactivity floors match
             assert_eq!(
-                db_no_pruning.inactivity_floor_loc(),
-                db_pruning.inactivity_floor_loc()
+                db_no_pruning.inactivity_floor_loc().await,
+                db_pruning.inactivity_floor_loc().await
             );
 
             db_no_pruning.destroy().await.unwrap();
@@ -463,15 +491,15 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
 
             // The bitmap should have been pruned during into_merkleized().
-            let pruned_bits_before = db.pruned_bits();
+            let pruned_bits_before = db.pruned_bits().await;
             warn!(
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
                 pruned_bits_before,
-                *db.inactivity_floor_loc(),
-                *db.bounds().end
+                *db.inactivity_floor_loc().await,
+                *db.bounds().await.end
             );
 
             // Verify we actually have some pruning (otherwise the test is meaningless).
@@ -485,7 +513,7 @@ pub mod tests {
             db.sync().await.unwrap();
 
             // Record the root before dropping.
-            let root_before = db.root();
+            let root_before = db.root().await;
             drop(db);
 
             // Reopen the database.
@@ -493,7 +521,7 @@ pub mod tests {
 
             // The pruned bits count should match. If sync() didn't persist the bitmap pruned
             // state, this would be 0.
-            let pruned_bits_after = db.pruned_bits();
+            let pruned_bits_after = db.pruned_bits().await;
             warn!("pruned_bits_after={}", pruned_bits_after);
 
             assert_eq!(
@@ -502,7 +530,7 @@ pub mod tests {
             );
 
             // Also verify the root matches.
-            assert_eq!(db.root(), root_before);
+            assert_eq!(db.root().await, root_before);
 
             db.destroy().await.unwrap();
         });
@@ -532,9 +560,8 @@ pub mod tests {
         const ELEMENTS: u64 = 1000;
 
         let executor = deterministic::Runner::default();
-        let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
-            let mut db = open_db_clone(context.with_label("first"), "build_big".to_string())
+            let mut db = open_db(context.with_label("first"), "build_big".to_string())
                 .await
                 .into_mutable();
 
@@ -571,26 +598,15 @@ pub mod tests {
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.inactivity_floor_loc().await).await.unwrap();
 
             // Verify expected state after prune.
-            assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
-                db.inactivity_floor_loc(),
-                Location::new_unchecked(expected_inactivity_floor)
+                db.bounds().await.end,
+                Location::new_unchecked(expected_op_count)
             );
-
-            // Record root before dropping.
-            let root = db.root();
-            db.sync().await.unwrap();
-            drop(db);
-
-            // Reopen the db and verify it has exactly the same state.
-            let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
-            assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
-                db.inactivity_floor_loc(),
+                db.inactivity_floor_loc().await,
                 Location::new_unchecked(expected_inactivity_floor)
             );
 
@@ -606,6 +622,23 @@ pub mod tests {
                     assert!(db.get(&k).await.unwrap().is_none());
                 }
             }
+
+            // Record root before dropping.
+            let root = db.root().await;
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen the db and verify it has exactly the same state.
+            let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
+            assert_eq!(root, db.root().await);
+            assert_eq!(
+                db.bounds().await.end,
+                Location::new_unchecked(expected_op_count)
+            );
+            assert_eq!(
+                db.inactivity_floor_loc().await,
+                Location::new_unchecked(expected_inactivity_floor)
+            );
         });
     }
 }

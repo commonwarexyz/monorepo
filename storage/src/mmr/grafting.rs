@@ -489,7 +489,7 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
     }
 
     pub async fn root(&self, hasher: &mut StandardHasher<H>) -> Result<H::Digest, Error> {
-        let size = self.size();
+        let size = self.size().await;
         let leaves = Location::try_from(size).expect("size should be valid leaves");
         let peak_futures = PeakIterator::new(size).map(|(peak_pos, _)| self.get_node(peak_pos));
         let peaks = try_join_all(peak_futures).await?;
@@ -506,8 +506,8 @@ impl<'a, H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>>
 impl<H: CHasher, S1: StorageTrait<H::Digest>, S2: StorageTrait<H::Digest>> StorageTrait<H::Digest>
     for Storage<'_, H, S1, S2>
 {
-    fn size(&self) -> Position {
-        self.base_mmr.size()
+    async fn size(&self) -> Position {
+        self.base_mmr.size().await
     }
 
     async fn get_node(&self, pos: Position) -> Result<Option<H::Digest>, Error> {
@@ -732,7 +732,7 @@ mod tests {
 
             {
                 let grafted_mmr = Storage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
-                assert_eq!(grafted_mmr.size(), base_mmr.size());
+                assert_eq!(grafted_mmr.size().await, base_mmr.size());
 
                 let grafted_storage_root = grafted_mmr.root(&mut standard).await.unwrap();
                 assert_ne!(grafted_storage_root, base_root);
@@ -912,7 +912,7 @@ mod tests {
             let base_mmr = base_mmr.merkleize(&mut standard, None);
 
             let grafted_mmr = Storage::new(&peak_tree, &base_mmr, GRAFTING_HEIGHT);
-            assert_eq!(grafted_mmr.size(), base_mmr.size());
+            assert_eq!(grafted_mmr.size().await, base_mmr.size());
 
             // Confirm we can generate and verify inclusion proofs for the "orphaned" leaf as well
             // as an existing one.

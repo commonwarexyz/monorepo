@@ -42,7 +42,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                     let mut j =
                         get_fixed_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
                     append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
-                    let sz = j.size();
+                    let sz = j.size().await;
                     assert_eq!(sz, items);
 
                     // Run the benchmark

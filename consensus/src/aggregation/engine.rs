@@ -801,7 +801,7 @@ impl<
         let mut certified = Vec::new();
         let mut acks = Vec::new();
         let stream = journal
-            .replay(0, 0, self.journal_replay_buffer)
+            .replay(self.journal_replay_buffer, 0, 0)
             .await
             .expect("replay failed");
         pin_mut!(stream);

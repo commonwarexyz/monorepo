@@ -49,7 +49,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// no recovery will be needed on startup.
         ///
         /// This provides a stronger guarantee than [Self::commit] but may be slower.
-        fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
+        fn sync(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 
         /// Destroy the structure, removing all associated storage.
         ///

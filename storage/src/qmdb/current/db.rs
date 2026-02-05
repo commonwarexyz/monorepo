@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::{bitmap::Prunable as PrunableBitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 
@@ -89,7 +89,7 @@ pub struct Db<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub(super) status: bitmap::BitMap<E, H::Digest, N, S::BitMapState>,
+    pub(super) status: RwLock<bitmap::BitMap<E, H::Digest, N, S::BitMapState>>,
 
     /// Type state based on whether the database is [Merkleized] or [Unmerkleized].
     pub(super) state: S,
@@ -191,9 +191,10 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
+        let status = self.status.read().await;
         RangeProof::<H::Digest>::new_with_ops(
             hasher,
-            &self.status,
+            &status,
             Self::grafting_height(),
             &self.any.log.mmr,
             &self.any.log,
@@ -214,7 +215,7 @@ where
         // Write the pruned portion of the bitmap to disk *first* to ensure recovery in case of
         // failure during pruning. If we don't do this, we may not be able to recover the bitmap
         // because it may require replaying of pruned operations.
-        self.status.write_pruned().await?;
+        self.status.get_mut().write_pruned().await?;
 
         self.any.prune(prune_loc).await
     }
@@ -233,18 +234,23 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.status.write_pruned().await.map_err(Into::into)
+        {
+            let mut status = self.status.write().await;
+            status.write_pruned().await?;
+        }
+
+        Ok(())
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        self.status.destroy().await?;
+        self.status.into_inner().destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -254,7 +260,7 @@ where
     pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
-            status: self.status.into_dirty(),
+            status: RwLock::new(self.status.into_inner().into_dirty()),
             state: Unmerkleized,
         }
     }
@@ -281,8 +287,9 @@ where
         let mut any = self.any.into_merkleized();
 
         // Merkleize the bitmap using the clean MMR
+        let status = self.status.into_inner();
         let hasher = &mut any.log.hasher;
-        let mut status = merkleize_grafted_bitmap(hasher, self.status, &any.log.mmr).await?;
+        let mut status = merkleize_grafted_bitmap(hasher, status, &any.log.mmr).await?;
 
         // Prune the bitmap of no-longer-necessary bits.
         status.prune_to_bit(*any.inactivity_floor_loc)?;
@@ -292,7 +299,7 @@ where
 
         Ok(Db {
             any,
-            status,
+            status: RwLock::new(status),
             state: Merkleized { root },
         })
     }
@@ -342,19 +349,20 @@ where
         let start_loc = self.any.last_commit_loc + 1;
 
         // Inactivate the current commit operation.
-        self.status.set_bit(*self.any.last_commit_loc, false);
+        let status = self.status.get_mut();
+        status.set_bit(*self.any.last_commit_loc, false);
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
+        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(status).await?;
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
-        self.status.push(true);
+        status.push(true);
         let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
 
         self.any.apply_commit_op(commit_op).await?;
 
-        Ok(start_loc..self.any.log.bounds().end)
+        Ok(start_loc..self.any.log.bounds().await.end)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
@@ -404,7 +412,7 @@ where
     pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
         Db {
             any: self.any.into_mutable(),
-            status: self.status.into_dirty(),
+            status: RwLock::new(self.status.into_inner().into_dirty()),
             state: Unmerkleized,
         }
     }
@@ -429,7 +437,7 @@ where
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.sync().await
     }
 
@@ -458,7 +466,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    fn root(&self) -> H::Digest {
+    async fn root(&self) -> H::Digest {
         self.root()
     }
 
@@ -489,20 +497,20 @@ where
 {
     type Value = V::Value;
 
-    fn bounds(&self) -> std::ops::Range<Location> {
-        self.any.bounds()
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    async fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds().await
+    }
+
+    async fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 }
 

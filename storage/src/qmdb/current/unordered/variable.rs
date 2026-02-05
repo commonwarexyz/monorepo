@@ -27,7 +27,7 @@ use crate::{
 };
 use commonware_codec::{FixedSize, Read};
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage as RStorage};
 use commonware_utils::Array;
 
 pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Durable> =
@@ -100,7 +100,7 @@ where
 
         Ok(Self {
             any,
-            status,
+            status: RwLock::new(status),
             state: Merkleized { root },
         })
     }
@@ -108,6 +108,7 @@ where
 
 #[cfg(test)]
 mod test {
+    use super::Config;
     use crate::{
         bitmap::MerkleizedBitMap,
         kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
@@ -119,7 +120,6 @@ mod test {
                 proof::RangeProof,
                 tests::{self, apply_random_ops},
                 unordered::{db::KeyValueProof, variable::Db},
-                VariableConfig as Config,
             },
             store::{
                 batch_tests,
@@ -393,7 +393,7 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.size();
+            let end_loc = db.size().await;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -452,10 +452,15 @@ mod test {
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
             let start = *db.inactivity_floor_loc();
-            for i in start..db.status.len() {
-                if !db.status.get_bit(i) {
-                    continue;
-                }
+            // Collect active indices first, then drop the read guard
+            let active_indices: Vec<u64> = {
+                let status = db.status.read().await;
+                (start..status.len())
+                    .filter(|&i| status.get_bit(i))
+                    .collect()
+            };
+
+            for i in active_indices {
                 // Found an active operation! Create a proof for its active current key/value if
                 // it's a key-updating operation.
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
