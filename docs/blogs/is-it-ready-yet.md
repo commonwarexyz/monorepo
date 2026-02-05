@@ -67,21 +67,21 @@ In CI, we enforce that any object of some level must rely on objects with the sa
 
 Here are some of the primitive dialects we now consider `BETA` (wire and storage format stable):
 
-* **codec**
-* **runtime::tokio**
-* **parallel::rayon**
-* **math::poly**
-* **cryptography::ed25519**
-* **cryptography::bls12381**
-* **stream::encrypted**
-* **p2p::authenticated::discovery**
-* **p2p::authenticated::lookup**
-* **broadcast::buffered**
-* **resolver::p2p**
-* **storage::journal**
-* **storage::archive**
-* **consensus::simplex**
-* **consensus::marshal**
+* **codec** - Serialize structured data.
+* **runtime::tokio** - A production-focused runtime based on [Tokio](https://tokio.rs) with secure randomness and storage backed by the local filesystem.
+* **parallel::rayon** - Parallelize fold operations with [Rayon](https://docs.rs/rayon/latest/rayon/).
+* **math::poly** - Operations over polynomials.
+* **cryptography::ed25519** - [Ed25519](https://ed25519.cr.yp.to/) signatures.
+* **cryptography::bls12381** - [BLS12-381](https://electriccoin.co/blog/new-snark-curve/) multi-signatures, DKG/Reshare, and threshold signatures.
+* **stream::encrypted** - Encrypted stream implementation using [ChaCha20-Poly1305](https://en.wikipedia.org/wiki/ChaCha20-Poly1305).
+* **p2p::authenticated::discovery** - Communicate with a fixed set of authenticated peers without known addresses over encrypted connections.
+* **p2p::authenticated::lookup** - Communicate with a fixed set of authenticated peers with known addresses over encrypted connections.
+* **broadcast::buffered** - Broadcast messages to and cache messages from untrusted peers.
+* **resolver::p2p** - Resolve data identified by a fixed-length key by using the P2P network.
+* **storage::journal** - An append-only log for storing arbitrary data.
+* **storage::archive** - A write-once key-value store for ordered data.
+* **consensus::simplex** - Simple and fast BFT agreement inspired by [Simplex Consensus](https://simplex.blog/).
+* **consensus::marshal** - Ordered delivery of finalized blocks.
 
 ## Move Fast And (Sometimes) Break Things
 
