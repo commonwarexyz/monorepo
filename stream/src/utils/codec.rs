@@ -1,7 +1,7 @@
 use crate::encrypted::Error;
 use commonware_codec::{
     varint::{Decoder, UInt, MAX_U32_VARINT_SIZE},
-    Encode,
+    Encode, EncodeSize,
 };
 use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
 
@@ -23,9 +23,15 @@ pub(crate) async fn send_frame_with<S: Sink>(
     if payload_len > max_message_size as usize {
         return Err(Error::SendTooLarge(payload_len));
     }
-
     let prefix = UInt(payload_len as u32);
+    let expected_frame_len = prefix.encode_size() + payload_len;
+
     let frame = assemble(prefix)?;
+    assert_eq!(
+        frame.remaining(),
+        expected_frame_len,
+        "assembled frame should be exactly the prefix and the payload"
+    );
     sink.send(frame).await.map_err(Error::SendFailed)
 }
 
@@ -212,6 +218,24 @@ mod tests {
             assert!(
                 matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE as usize + 1)
             );
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "assembled frame should be exactly the prefix and the payload")]
+    fn test_send_frame_with_incorrect_encoder_panics() {
+        let (mut sink, _) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let _ = send_frame_with(&mut sink, 10, MAX_MESSAGE_SIZE, |prefix| {
+                // Intentionally return one byte less payload than declared.
+                let mut frame = IoBufMut::with_capacity(prefix.encode().len() + 9);
+                frame.put_slice(&prefix.encode());
+                frame.put_slice(&[0u8; 9]);
+                Ok(frame.freeze().into())
+            })
+            .await;
         });
     }
 
