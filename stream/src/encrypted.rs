@@ -55,8 +55,8 @@
 //! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
-use crate::utils::codec::{recv_frame, send_frame};
-use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
+use crate::utils::codec::{recv_frame, send_frame, send_frame_with};
+use commonware_codec::{DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
@@ -309,25 +309,34 @@ impl<O: Sink> Sender<O> {
         let mut bufs = buf.into();
         let ciphertext_len = bufs.remaining() + TAG_SIZE as usize;
 
-        // Allocate buffer from pool for ciphertext (plaintext + tag).
-        let mut encryption_buf = self.pool.alloc(ciphertext_len);
-
-        // Copy plaintext into buffer.
-        encryption_buf.put(&mut bufs);
-
-        // Encrypt in-place, get tag back.
-        let tag = self.cipher.send_in_place(encryption_buf.as_mut())?;
-
-        // Append tag to buffer.
-        encryption_buf.put_slice(&tag);
-
-        send_frame(
+        send_frame_with(
             &mut self.sink,
-            encryption_buf.freeze(),
+            ciphertext_len,
             self.max_message_size.saturating_add(TAG_SIZE),
+            |prefix| {
+                let prefix_len = prefix.encode_size();
+
+                // Allocate buffer from pool for prefix + ciphertext (plaintext + tag).
+                let mut frame = self.pool.alloc(prefix_len + ciphertext_len);
+
+                // Write prefix.
+                prefix.write(&mut frame);
+
+                // Copy plaintext into buffer.
+                frame.put(&mut bufs);
+
+                // Encrypt in-place.
+                let tag = self
+                    .cipher
+                    .send_in_place(&mut frame.as_mut()[prefix_len..])?;
+
+                // Append tag.
+                frame.put_slice(&tag);
+
+                Ok(frame.freeze().into())
+            },
         )
-        .await?;
-        Ok(())
+        .await
     }
 }
 

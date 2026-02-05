@@ -5,7 +5,35 @@ use commonware_codec::{
 };
 use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
 
+/// Sends a frame with a varint length prefix, delegating frame assembly to the caller.
+///
+/// The `assemble` closure receives the varint prefix and must combine it with
+/// the payload. This allows callers to choose between:
+/// - Chunked: prepend the prefix as a separate buffer
+/// - Contiguous: write the prefix directly into a pre-allocated buffer
+///
+/// Returns an error if the message is too large or the sink is closed.
+pub(crate) async fn send_frame_with<S: Sink>(
+    sink: &mut S,
+    payload_len: usize,
+    max_message_size: u32,
+    assemble: impl FnOnce(UInt<u32>) -> Result<IoBufs, Error>,
+) -> Result<(), Error> {
+    // Validate frame size
+    if payload_len > max_message_size as usize {
+        return Err(Error::SendTooLarge(payload_len));
+    }
+
+    let prefix = UInt(payload_len as u32);
+    let frame = assemble(prefix)?;
+    sink.send(frame).await.map_err(Error::SendFailed)
+}
+
 /// Sends data to the sink with a varint length prefix.
+///
+/// The varint length prefix is prepended to the buffer(s), which results in a
+/// chunked `IoBufs`.
+///
 /// Returns an error if the message is too large or the stream is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
@@ -14,16 +42,12 @@ pub async fn send_frame<S: Sink>(
 ) -> Result<(), Error> {
     let mut bufs = buf.into();
 
-    // Validate frame size
-    let n = bufs.remaining();
-    if n > max_message_size as usize {
-        return Err(Error::SendTooLarge(n));
-    }
-
-    // Prepend varint-encoded length
-    let len = UInt(n as u32);
-    bufs.prepend(IoBuf::from(len.encode()));
-    sink.send(bufs).await.map_err(Error::SendFailed)
+    send_frame_with(sink, bufs.remaining(), max_message_size, |prefix| {
+        // Prepend varint-encoded length
+        bufs.prepend(IoBuf::from(prefix.encode()));
+        Ok(bufs)
+    })
+    .await
 }
 
 /// Receives data from the stream with a varint length prefix.
