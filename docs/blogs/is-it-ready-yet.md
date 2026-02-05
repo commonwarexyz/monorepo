@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.). With [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and upwards of [1000 daily benchmarks](https://commonware.xyz/benchmarks.html).
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home to 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.). With [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and upwards of [1000 daily benchmarks](https://commonware.xyz/benchmarks.html).
 
 The number that matters, however, is how many are ready for production.
 
@@ -22,11 +22,19 @@ What really matters, however, is how many you can use in your network today.
 
 Today, we're publishing our approach to production-readiness and graduating a large number of these primitives from [ALPHA](https://github.com/commonwarexyz/monorepo#stability) to [BETA](https://github.com/commonwarexyz/monorepo#stability).
 
-## Going All-In on Fuzzing
+## Tiered Stability
 
 From the get go, we've felt that security is a continuous process. A point-in-time audit doesn't cut it.
 
 Fuzzer integrated with the deterministic runtime: https://github.com/commonwarexyz/monorepo/pull/2976
+
+| Level        | What it Means |
+|--------------|---------------|
+| **ALPHA**    | Expect breaking changes. No migration path. |
+| **BETA**     | Wire and storage formats stable. Breaking changes come with migrations. |
+| **GAMMA**    | API stable. Extensively tested and fuzzed. |
+| **DELTA**    | Battle-tested. Bug bounty eligible. |
+| **EPSILON**  | Feature-frozen. Bug fixes only. |
 
 ## Solving a "Solved" Problem
 
