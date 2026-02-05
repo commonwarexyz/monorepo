@@ -1,14 +1,35 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     queue::{Config, Queue},
     Persistable,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::{collections::BTreeSet, num::NonZeroU16};
+use std::{
+    collections::BTreeSet,
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+};
+
+/// Maximum write buffer size.
+const MAX_WRITE_BUF: usize = 2048;
+
+fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
+    u.int_in_range(1..=256)
+}
+
+fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
+    u.int_in_range(1..=16)
+}
+
+fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
+    u.int_in_range(1..=64)
+}
+
+fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
+    u.int_in_range(1..=MAX_WRITE_BUF)
+}
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
@@ -36,11 +57,21 @@ enum QueueOperation {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
+    /// Page size for buffer pool.
+    #[arbitrary(with = bounded_page_size)]
+    page_size: u16,
+    /// Number of pages in the buffer pool cache.
+    #[arbitrary(with = bounded_page_cache_size)]
+    page_cache_size: usize,
+    /// Items per section.
+    #[arbitrary(with = bounded_items_per_section)]
+    items_per_section: u64,
+    /// Write buffer size.
+    #[arbitrary(with = bounded_write_buffer)]
+    write_buffer: usize,
+    /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
 }
-
-const PAGE_SIZE: NonZeroU16 = NZU16!(512);
-const PAGE_CACHE_SIZE: usize = 4;
 
 /// Reference model for verifying queue behavior.
 struct ReferenceQueue {
@@ -139,14 +170,19 @@ impl ReferenceQueue {
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
+    let page_size = NonZeroU16::new(input.page_size).unwrap();
+    let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
+    let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
+    let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
+
     runner.start(|context| async move {
         let cfg = Config {
             partition: "queue_operations_fuzz_test".to_string(),
-            items_per_section: NZU64!(5),
+            items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
-            write_buffer: NZUsize!(1024),
+            page_cache: CacheRef::new(page_size, page_cache_size),
+            write_buffer,
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
