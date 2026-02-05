@@ -12,13 +12,6 @@ use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{rngs::StdRng, SeedableRng};
 use std::hint::black_box;
 
-fn mode_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::NonZeroCounter => "counter",
-        Mode::RootsOfUnity => "roots",
-    }
-}
-
 fn bench_threshold_recover(c: &mut Criterion) {
     let mut rng = StdRng::seed_from_u64(0);
     let namespace = b"benchmark";
@@ -27,7 +20,7 @@ fn bench_threshold_recover(c: &mut Criterion) {
         for &n in &[5, 10, 20, 50, 100, 250, 500] {
             let t = N3f1::quorum(n);
             c.bench_function(
-                &format!("{}/mode={} n={} t={}", module_path!(), mode_name(mode), n, t),
+                &format!("{}/mode={:?} n={} t={}", module_path!(), mode, n, t),
                 |b| {
                     b.iter_batched(
                         || {
@@ -35,9 +28,8 @@ fn bench_threshold_recover(c: &mut Criterion) {
                                 .map(|i| PrivateKey::from_seed(i as u64).public_key())
                                 .try_collect()
                                 .unwrap();
-                            let (public, shares) =
-                                deal::<MinSig, _, N3f1>(&mut rng, mode, players)
-                                    .expect("deal should succeed");
+                            let (public, shares) = deal::<MinSig, _, N3f1>(&mut rng, mode, players)
+                                .expect("deal should succeed");
                             (
                                 public,
                                 shares
