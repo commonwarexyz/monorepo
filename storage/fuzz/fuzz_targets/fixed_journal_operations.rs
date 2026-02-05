@@ -11,6 +11,7 @@ use std::num::NonZeroU16;
 
 const MAX_REPLAY_BUF: usize = 2048;
 const MAX_WRITE_BUF: usize = 2048;
+const MAX_OPERATIONS: usize = 50;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> Result<usize> {
     let v = u.int_in_range(1..=MAX_REPLAY_BUF)?;
@@ -47,9 +48,19 @@ enum JournalOperation {
     MultipleSync,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
-    operations: Vec<JournalOperation>,
+    ops: Vec<JournalOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
+        let ops = (0..num_ops)
+            .map(|_| JournalOperation::arbitrary(u))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(FuzzInput { ops })
+    }
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(57);
@@ -73,7 +84,7 @@ fn fuzz(input: FuzzInput) {
         let mut oldest_retained_pos = 0u64;
         let mut restarts = 0usize;
 
-        for op in input.operations.iter() {
+        for op in input.ops.iter() {
             match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());
@@ -116,7 +127,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Replay { buffer, start_pos } => {
-                    let start_pos = *start_pos % (journal_size + 1);
+                    // Ensure start_pos is within valid range [oldest_retained_pos, journal_size]
+                    let start_pos = if journal_size > oldest_retained_pos {
+                        oldest_retained_pos
+                            + (*start_pos % (journal_size - oldest_retained_pos + 1))
+                    } else {
+                        oldest_retained_pos
+                    };
                     match journal.replay(NZUsize!(*buffer), start_pos).await {
                         Ok(stream) => {
                             pin_mut!(stream);
