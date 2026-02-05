@@ -332,7 +332,7 @@ impl NetworkScheme for Lookup {
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
             oracle
-                .register(
+                .track(
                     index as u64,
                     peer_list
                         .clone()

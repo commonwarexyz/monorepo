@@ -832,9 +832,7 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle
-                .track(0, [peer_pk.clone()].try_into().unwrap())
-                .await;
+            oracle.track(0, [peer_pk.clone()].try_into().unwrap()).await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.acceptable(peer_pk.clone()).await);

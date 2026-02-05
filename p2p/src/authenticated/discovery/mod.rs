@@ -326,9 +326,7 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle
-                .track(0, addresses.clone().try_into().unwrap())
-                .await;
+            oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -870,9 +868,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1140,9 +1136,7 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                 // Register channel
                 let (mut sender, mut receiver) =
@@ -1378,9 +1372,7 @@ mod tests {
                     1_024 * 1_024,
                 );
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network.start();
@@ -1672,9 +1664,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1748,9 +1738,7 @@ mod tests {
                         Network::new(peer_context.with_label("network"), config);
 
                     // Register peer set
-                    oracle
-                        .track(0, addresses.clone().try_into().unwrap())
-                        .await;
+                    oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                     let (sender, receiver) = network.register(
                         0,
@@ -1862,9 +1850,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1940,9 +1926,7 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -2041,9 +2025,7 @@ mod tests {
                 let (mut network, mut oracle) =
                     Network::new(peer_context.with_label("network"), config);
 
-                oracle
-                    .track(0, addresses.clone().try_into().unwrap())
-                    .await;
+                oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -2118,9 +2100,7 @@ mod tests {
             let (mut network, mut oracle) =
                 Network::new(peer_context.with_label("network"), config);
 
-            oracle
-                .track(0, addresses.clone().try_into().unwrap())
-                .await;
+            oracle.track(0, addresses.clone().try_into().unwrap()).await;
 
             let (sender, receiver) =
                 network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);

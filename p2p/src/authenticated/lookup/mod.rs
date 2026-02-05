@@ -2091,9 +2091,7 @@ mod tests {
                 (peer1.public_key(), Address::Symmetric(socket1)),
                 (peer2.public_key(), Address::Symmetric(socket1)),
             ];
-            oracle0
-                .track(0, peer_set.clone().try_into().unwrap())
-                .await;
+            oracle0.track(0, peer_set.clone().try_into().unwrap()).await;
             oracle2.track(0, peer_set.try_into().unwrap()).await;
 
             // Wait for connections to be made
