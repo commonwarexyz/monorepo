@@ -257,12 +257,15 @@ Meier</a></div>
         growing from 2 pieces into 4, and split across the
         followers</figcaption>
         </figure>
-        <p>The cost of this scheme is now: - <span
-        class="math inline">\(m \cdot \frac{D}{n}\)</span> for the
-        leader, - <span class="math inline">\((m - 1) \cdot
-        \frac{D}{n}\)</span> for each follower, - <span
-        class="math inline">\(\frac{m^2}{n} \cdot D\)</span> in
-        total.</p>
+        <p>The cost of this scheme is now:</p>
+        <ul>
+        <li><span class="math inline">\(m \cdot \frac{D}{n}\)</span> for
+        the leader,</li>
+        <li><span class="math inline">\((m - 1) \cdot
+        \frac{D}{n}\)</span> for each follower,</li>
+        <li><span class="math inline">\(\frac{m^2}{n} \cdot D\)</span>
+        in total.</li>
+        </ul>
         <p>As the redundancy decreases, with <span
         class="math inline">\(m \to n\)</span>, we get the same cost as
         before. We want some redundancy though, with <span
@@ -326,12 +329,15 @@ Meier</a></div>
         selectively withholding them. Proceeding with different data is
         very bad, so we want to avoid this.</p>
         <p>Something we can do is to check that re-encoding the data
-        produces what the leader claimed. If encoding is: -
-        <em>deterministic</em>, producing, always, the same result, -
-        <em>injective</em>, with different data producing different
+        produces what the leader claimed. If encoding is:</p>
+        <ul>
+        <li><em>deterministic</em>, producing, always, the same
+        result,</li>
+        <li><em>injective</em>, with different data producing different
         results, then this works out. A malicious leader shares one
         commitment, and there can be at most one original piece of data
-        that commits to that value.</p>
+        that commits to that value.</li>
+        </ul>
         <p>One drawback is that now we can only know that the data
         exists <em>after</em> we’ve reconstructed it. If we’re tying
         this process to consensus, it would be nice to avoid coming to

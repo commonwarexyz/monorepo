@@ -120,27 +120,29 @@ O’Grady</a></div>
         <p>While working with different teams, we found that this
         approach didn’t cut it. In an environment where a subtle
         breaking change means a network halt or a loss of funds, we
-        opted to take a more “paranoid” approach. The root issues: -
-        With many crates all versioned independently, (tested)
+        opted to take a more “paranoid” approach. The root issues:</p>
+        <ul>
+        <li>With many crates all versioned independently, (tested)
         compatibility is no longer obvious. While
         <code>consensus-simplex@1.1.3</code> may compile with
         <code>storage-journal@2.3.45</code> and “should” work, it
-        doesn’t mean the combination has been tested together. -
-        Dependency risk is difficult to assess when things are coarsely
-        broken into “stable” and “unstable”. Often wrapped with
+        doesn’t mean the combination has been tested together.</li>
+        <li>Dependency risk is difficult to assess when things are
+        coarsely broken into “stable” and “unstable”. Often wrapped with
         documents that few people read, it is pretty easy to incorporate
         functionality once “unstable” is permitted that is a lot more
-        “unstable” than you expected. - Feature flags are viral. If your
-        crate depends on <code>commonware-consensus</code> and you want
-        access to an unstable API in
-        <code>commonware-cryptography</code>, then
+        “unstable” than you expected.</li>
+        <li>Feature flags are viral. If your crate depends on
+        <code>commonware-consensus</code> and you want access to an
+        unstable API in <code>commonware-cryptography</code>, then
         <code>commonware-consensus</code> needs to expose and forward
         that feature. Every intermediate crate in the dependency chain
-        needs to opt in. This becomes unwieldy fast. - Doesn’t imply
-        anything about backwards-compatibility. Once something is
-        considered “stable”, it should remain supported indefinitely.
-        This is equivalent to one major version that doesn’t get
-        incremented.</p>
+        needs to opt in. This becomes unwieldy fast.</li>
+        <li>Doesn’t imply anything about backwards-compatibility. Once
+        something is considered “stable”, it should remain supported
+        indefinitely. This is equivalent to one major version that
+        doesn’t get incremented.</li>
+        </ul>
         <h2 id="tiered-stability-and-calendar-versioning">Tiered
         Stability and Calendar Versioning</h2>
         <p>We’ve broken stability into the following levels:</p>
