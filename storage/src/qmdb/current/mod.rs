@@ -822,7 +822,7 @@ pub mod tests {
     }
 
     // ============================================================
-    // Consolidated tests for all 8 Current QMDB variants
+    // Consolidated tests for all 12 Current QMDB variants
     // ============================================================
 
     use crate::translator::OneCap;
