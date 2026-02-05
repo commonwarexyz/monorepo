@@ -86,7 +86,7 @@ where
     ) -> Result<LocatedKey<K, V>, Error> {
         let mut last_key: LocatedKey<K, V> = None;
         for loc in locs {
-            if loc >= self.op_count() {
+            if loc >= self.log.bounds().end {
                 // Don't try to look up operations that don't yet exist in the log. This can happen
                 // when there are translated key conflicts between a created key and its
                 // previous-key.
@@ -396,7 +396,7 @@ where
         value: V::Value,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<(), Error> {
-        let next_loc = self.op_count();
+        let next_loc = self.log.bounds().end;
         if self.is_empty() {
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
@@ -453,7 +453,7 @@ where
         value: V::Value,
         mut callback: impl FnMut(Option<Location>),
     ) -> Result<bool, Error> {
-        let next_loc = self.op_count();
+        let next_loc = self.log.bounds().end;
         if self.is_empty() {
             // We're inserting the very first key. For this special case, the next-key value is the
             // same as the key.
@@ -566,7 +566,7 @@ where
 
         let prev_key = prev_key.expect("prev_key should have been found");
 
-        let loc = self.op_count();
+        let loc = self.log.bounds().end;
         callback(true, Some(prev_key.0));
         update_known_loc(&mut self.snapshot, &prev_key.1, prev_key.0, loc);
 
@@ -721,7 +721,7 @@ where
         // Apply the updates of existing keys.
         let mut already_updated = BTreeSet::new();
         for (key, (value, loc)) in updated {
-            let new_loc = self.op_count();
+            let new_loc = self.log.bounds().end;
             update_known_loc(&mut self.snapshot, &key, loc, new_loc);
 
             let next_key = find_next_key(&key, &possible_next);
@@ -740,7 +740,7 @@ where
 
         // Create each new key, and update its previous key if it hasn't already been updated.
         for (key, value) in created {
-            let new_loc = self.op_count();
+            let new_loc = self.log.bounds().end;
             self.snapshot.insert(&key, new_loc);
             let next_key = find_next_key(&key, &possible_next);
             let op = Operation::Update(Update {
@@ -764,7 +764,7 @@ where
             }
             already_updated.insert(prev_key.clone());
 
-            let new_loc = self.op_count();
+            let new_loc = self.log.bounds().end;
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
             let next_key = find_next_key(prev_key, &possible_next);
             let op = Operation::Update(Update {
@@ -791,7 +791,7 @@ where
             }
             already_updated.insert(prev_key.clone());
 
-            let new_loc = self.op_count();
+            let new_loc = self.log.bounds().end;
             update_known_loc(&mut self.snapshot, prev_key, *prev_loc, new_loc);
             let next_key = find_next_key(prev_key, &possible_next);
             let op = Operation::Update(Update {
@@ -1097,7 +1097,7 @@ mod test {
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
     ) {
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.bounds().end, 1);
         assert!(db.get_metadata().await.unwrap().is_none());
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
@@ -1110,7 +1110,7 @@ mod test {
         db.update(d1, d2).await.unwrap();
         let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.root(), root);
-        assert_eq!(db.op_count(), 1);
+        assert_eq!(db.bounds().end, 1);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
@@ -1119,14 +1119,14 @@ mod test {
         let mut db = db.into_merkleized().await.unwrap();
         assert_eq!(range.start, Location::new_unchecked(1));
         assert_eq!(range.end, Location::new_unchecked(2));
-        assert_eq!(db.op_count(), 2); // floor op added
+        assert_eq!(db.bounds().end, 2); // floor op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let root = db.root();
         assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
 
         // Re-opening the DB without a clean shutdown should still recover the correct state.
         let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.op_count(), 2);
+        assert_eq!(db.bounds().end, 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
 
@@ -1134,7 +1134,10 @@ mod test {
         let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
             let (durable_db, _) = mutable_db.commit(None).await.unwrap();
-            assert_eq!(durable_db.op_count() - 1, durable_db.inactivity_floor_loc());
+            assert_eq!(
+                durable_db.bounds().end - 1,
+                durable_db.inactivity_floor_loc()
+            );
             mutable_db = durable_db.into_mutable();
         }
         mutable_db
@@ -1239,7 +1242,7 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
-        assert_eq!(db.op_count(), 9);
+        assert_eq!(db.bounds().end, 9);
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
         let (durable_db, _) = db.commit(None).await.unwrap();
         let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
@@ -1264,16 +1267,16 @@ mod test {
             .unwrap();
 
         // Multiple deletions of the same key should be a no-op.
-        let prev_op_count = db.op_count();
+        let prev_op_count = db.bounds().end;
         let mut db = db.into_mutable();
         // Note: commit always adds a floor op, so op_count will increase by 1 after commit.
         assert!(!db.delete(key1.clone()).await.unwrap());
-        assert_eq!(db.op_count(), prev_op_count);
+        assert_eq!(db.bounds().end, prev_op_count);
 
         // Deletions of non-existent keys should be a no-op.
         let key3 = FixedBytes::from([6u8; 4]);
         assert!(!db.delete(key3).await.unwrap());
-        assert_eq!(db.op_count(), prev_op_count);
+        assert_eq!(db.bounds().end, prev_op_count);
 
         // Make sure closing/reopening gets us back to the same state.
         let db = db
@@ -1284,10 +1287,10 @@ mod test {
             .into_merkleized()
             .await
             .unwrap();
-        let op_count = db.op_count();
+        let op_count = db.bounds().end;
         let root = db.root();
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
 
@@ -1308,12 +1311,12 @@ mod test {
             .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        let op_count = db.op_count();
+        let op_count = db.bounds().end;
         let root = db.root();
         let db = reopen_db(context.with_label("reopen2")).await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.op_count(), op_count);
+        assert_eq!(db.bounds().end, op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.

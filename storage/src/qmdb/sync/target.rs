@@ -2,9 +2,9 @@ use crate::{
     mmr::Location,
     qmdb::sync::{self, error::EngineError},
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 use std::ops::Range;
 
 /// Target state to sync to
@@ -74,7 +74,7 @@ where
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    if new_target.range.is_empty() {
+    if new_target.range.is_empty() || !new_target.range.end.is_valid() {
         return Err(sync::Error::Engine(EngineError::InvalidTarget {
             lower_bound_pos: new_target.range.start,
             upper_bound_pos: new_target.range.end,

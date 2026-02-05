@@ -4,10 +4,9 @@ use crate::{
     utils::limited::{CheckedSender, LimitedSender},
     Channel, Message, Recipients,
 };
-use bytes::Buf;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, Quota};
-use futures::{channel::mpsc, StreamExt};
+use commonware_runtime::{Clock, IoBufMut, Quota};
+use commonware_utils::channel::mpsc;
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and
@@ -27,11 +26,12 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
-        if message.remaining() > self.max_size as usize {
-            return Err(Error::MessageTooLarge(message.remaining()));
+        let message = message.into();
+        if message.len() > self.max_size as usize {
+            return Err(Error::MessageTooLarge(message.len()));
         }
 
         Ok(self
@@ -105,7 +105,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
+        let (sender, message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
@@ -113,7 +113,7 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Channels<P: PublicKey> {
     messenger: router::Messenger<P>,
     max_size: u32,

@@ -55,7 +55,7 @@ use crate::{
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
-    DirtyAuthenticatedBitMap,
+    UnmerkleizedBitMap,
 };
 use commonware_cryptography::{Digest, DigestOf};
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -408,7 +408,7 @@ where
         const N: usize,
     >(
         &mut self,
-        status: &mut DirtyAuthenticatedBitMap<E, D, N>,
+        status: &mut UnmerkleizedBitMap<E, D, N>,
         mut inactivity_floor_loc: Location,
     ) -> Result<Location, Error>
     where

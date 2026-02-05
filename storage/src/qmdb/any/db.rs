@@ -19,7 +19,7 @@ use crate::{
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    AuthenticatedBitMap, Persistable,
+    Persistable, UnmerkleizedBitMap,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -94,12 +94,6 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    /// The number of operations that have been applied to this db, including those that have been
-    /// pruned and those that are not yet committed.
-    pub fn op_count(&self) -> Location {
-        self.log.size()
-    }
-
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
     pub const fn inactivity_floor_loc(&self) -> Location {
@@ -109,13 +103,6 @@ where
     /// Whether the snapshot currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
-    }
-
-    /// Returns the location of the oldest operation that remains retrievable.
-    pub fn oldest_retained_loc(&self) -> Location {
-        self.log
-            .oldest_retained_loc()
-            .expect("at least one operation should exist")
     }
 
     /// Get the metadata associated with the last commit.
@@ -150,7 +137,8 @@ where
         loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        self.historical_proof(self.op_count(), loc, max_ops).await
+        self.historical_proof(self.log.bounds().end, loc, max_ops)
+            .await
     }
 
     pub async fn historical_proof(
@@ -261,6 +249,32 @@ where
     }
 }
 
+// Functionality shared across Unmerkleized states.
+impl<E, K, V, U, C, I, H, D> Db<E, C, I, H, U, Unmerkleized, D>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Contiguous<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    D: DurabilityState,
+    Operation<K, V, U>: Codec,
+{
+    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
+        Db {
+            log: self.log.merkleize(),
+            inactivity_floor_loc: self.inactivity_floor_loc,
+            last_commit_loc: self.last_commit_loc,
+            snapshot: self.snapshot,
+            active_keys: self.active_keys,
+            durable_state: self.durable_state,
+            _update: core::marker::PhantomData,
+        }
+    }
+}
+
 // Functionality specific to (Unmerkleized,Durable) state.
 impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, Durable>
 where
@@ -282,43 +296,6 @@ where
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: store::NonDurable { steps: 0 },
-            _update: core::marker::PhantomData,
-        }
-    }
-
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, Durable> {
-        Db {
-            log: self.log.merkleize(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: self.durable_state,
-            _update: core::marker::PhantomData,
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized,NonDurable) state.
-impl<E, K, V, U, C, I, H> Db<E, C, I, H, U, Unmerkleized, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Array,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, NonDurable> {
-        Db {
-            log: self.log.merkleize(),
-            inactivity_floor_loc: self.inactivity_floor_loc,
-            last_commit_loc: self.last_commit_loc,
-            snapshot: self.snapshot,
-            active_keys: self.active_keys,
-            durable_state: self.durable_state,
             _update: core::marker::PhantomData,
         }
     }
@@ -372,7 +349,7 @@ where
     /// Panics if the given operation is not a commit operation.
     pub(crate) async fn apply_commit_op(&mut self, op: Operation<K, V, U>) -> Result<(), Error> {
         assert!(op.is_commit(), "commit operation expected");
-        self.last_commit_loc = self.op_count();
+        self.last_commit_loc = self.log.bounds().end;
         self.log.append(op).await?;
 
         self.log.commit().await.map_err(Into::into)
@@ -395,7 +372,7 @@ where
         self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
             .await?;
 
-        let range = start_loc..self.op_count();
+        let range = start_loc..self.log.bounds().end;
 
         let db = Db {
             log: self.log,
@@ -414,7 +391,7 @@ where
     /// Raises the floor to the tip if the db is empty.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
         if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
+            self.inactivity_floor_loc = self.log.bounds().end;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.durable_state.steps + 1;
@@ -436,10 +413,10 @@ where
         const N: usize,
     >(
         &mut self,
-        status: &mut AuthenticatedBitMap<F, D, N, Unmerkleized>,
+        status: &mut UnmerkleizedBitMap<F, D, N>,
     ) -> Result<Location, Error> {
         if self.is_empty() {
-            self.inactivity_floor_loc = self.op_count();
+            self.inactivity_floor_loc = self.log.bounds().end;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
             let steps_to_take = self.durable_state.steps + 1;
@@ -539,8 +516,8 @@ where
 {
     type Value = V::Value;
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    fn bounds(&self) -> std::ops::Range<Location> {
+        self.log.bounds()
     }
 
     fn inactivity_floor_loc(&self) -> Location {

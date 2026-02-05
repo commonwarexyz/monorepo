@@ -57,10 +57,10 @@
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits
 
-use commonware_utils::StableBuf;
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt as _,
+use crate::{IoBuf, IoBufMut};
+use commonware_utils::channel::{
+    mpsc::{self, error::TryRecvError},
+    oneshot,
 };
 use io_uring::{
     cqueue::Entry as CqueueEntry,
@@ -75,16 +75,41 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
 
+/// Buffer for io_uring operations.
+///
+/// The variant must match the operation type:
+/// - `Read`: For operations where the kernel writes INTO the buffer (e.g., recv, read)
+/// - `Write`: For operations where the kernel reads FROM the buffer (e.g., send, write)
+#[derive(Debug)]
+pub enum OpBuffer {
+    /// Buffer for read operations - kernel writes into this.
+    Read(IoBufMut),
+    /// Buffer for write operations - kernel reads from this.
+    Write(IoBuf),
+}
+
+impl From<IoBufMut> for OpBuffer {
+    fn from(buf: IoBufMut) -> Self {
+        Self::Read(buf)
+    }
+}
+
+impl From<IoBuf> for OpBuffer {
+    fn from(buf: IoBuf) -> Self {
+        Self::Write(buf)
+    }
+}
+
 /// Active operations keyed by their work id.
 ///
-/// Each entry keeps the caller's oneshot sender, the `StableBuf` that must stay
+/// Each entry keeps the caller's oneshot sender, the buffer that must stay
 /// alive until the kernel finishes touching it, and when op_timeout is enabled,
 /// the boxed `Timespec` used when we link in an IOSQE_IO_LINK timeout.
 type Waiters = HashMap<
     u64,
     (
-        oneshot::Sender<(i32, Option<StableBuf>)>,
-        Option<StableBuf>,
+        oneshot::Sender<(i32, Option<OpBuffer>)>,
+        Option<OpBuffer>,
         Option<Box<Timespec>>,
     ),
 >;
@@ -206,13 +231,15 @@ pub struct Op {
     /// Its user data field will be overwritten. Users shouldn't rely on it.
     pub work: SqueueEntry,
     /// Sends the result of the operation and `buffer`.
-    pub sender: oneshot::Sender<(i32, Option<StableBuf>)>,
+    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
     /// The buffer used for the operation, if any.
-    /// E.g. For read, this is the buffer being read into.
-    /// If None, the operation doesn't use a buffer (e.g. a sync operation).
+    /// - For reads: `OpBuffer::Read(IoBufMut)` - kernel writes into this
+    /// - For writes: `OpBuffer::Write(IoBuf)` - kernel reads from this
+    /// - None for operations that don't use a buffer (e.g. sync, timeout)
+    ///
     /// We hold the buffer here so it's guaranteed to live until the operation
-    /// completes, preventing write-after-free issues.
-    pub buffer: Option<StableBuf>,
+    /// completes, preventing use-after-free issues.
+    pub buffer: Option<OpBuffer>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -269,7 +296,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             // Wait for more work
             let op = if waiters.is_empty() {
                 // Block until there is something to do
-                match receiver.next().await {
+                match receiver.recv().await {
                     // Got work
                     Some(work) => work,
                     // Channel closed, shut down
@@ -280,16 +307,16 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                 }
             } else {
                 // Handle incoming work
-                match receiver.try_next() {
+                match receiver.try_recv() {
                     // Got work without blocking
-                    Ok(Some(work_item)) => work_item,
+                    Ok(work_item) => work_item,
                     // Channel closed, shut down
-                    Ok(None) => {
+                    Err(TryRecvError::Disconnected) => {
                         drain(&mut ring, &mut waiters, &cfg);
                         return;
                     }
                     // No new work available, wait for a completion
-                    Err(_) => break,
+                    Err(TryRecvError::Empty) => break,
                 }
             };
             let Op {
@@ -441,15 +468,12 @@ pub const fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::iouring::{Config, Op};
-    use futures::{
-        channel::{
-            mpsc::channel,
-            oneshot::{self, Canceled},
-        },
-        executor::block_on,
-        SinkExt as _,
+    use crate::iouring::{Config, IoBuf, IoBufMut, Op};
+    use commonware_utils::channel::{
+        mpsc,
+        oneshot::{self, error::RecvError},
     };
+    use futures::executor::block_on;
     use io_uring::{
         opcode,
         types::{Fd, Timespec},
@@ -463,20 +487,20 @@ mod tests {
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
-        let (mut submitter, receiver) = channel(0);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics.clone(), receiver));
 
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
         // Submit a read
-        let msg = b"hello".to_vec();
-        let mut buf = vec![0; msg.len()];
+        let msg = IoBuf::from(b"hello");
+        let mut buf = IoBufMut::with_capacity(msg.len());
         let recv =
-            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+            opcode::Recv::new(Fd(left_pipe.as_raw_fd()), buf.as_mut_ptr(), msg.len() as _).build();
         let (recv_tx, recv_rx) = oneshot::channel();
         submitter
-            .send(crate::iouring::Op {
+            .send(Op {
                 work: recv,
                 sender: recv_tx,
                 buffer: Some(buf.into()),
@@ -494,7 +518,7 @@ mod tests {
             opcode::Write::new(Fd(right_pipe.as_raw_fd()), msg.as_ptr(), msg.len() as _).build();
         let (write_tx, write_rx) = oneshot::channel();
         submitter
-            .send(crate::iouring::Op {
+            .send(Op {
                 work: write,
                 sender: write_tx,
                 buffer: Some(msg.into()),
@@ -552,18 +576,22 @@ mod tests {
             op_timeout: Some(std::time::Duration::from_secs(1)),
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(1);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
-        let mut buf = vec![0; 8];
-        let work =
-            opcode::Recv::new(Fd(pipe_left.as_raw_fd()), buf.as_mut_ptr(), buf.len() as _).build();
+        let mut buf = IoBufMut::with_capacity(8);
+        let work = opcode::Recv::new(
+            Fd(pipe_left.as_raw_fd()),
+            buf.as_mut_ptr(),
+            buf.capacity() as _,
+        )
+        .build();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(crate::iouring::Op {
+            .send(Op {
                 work,
                 sender: tx,
                 buffer: Some(buf.into()),
@@ -584,7 +612,7 @@ mod tests {
             shutdown_timeout: None,
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(1);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -617,7 +645,7 @@ mod tests {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(1);
+        let (submitter, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -641,9 +669,9 @@ mod tests {
         drop(submitter);
 
         // The event loop should shut down before the `timeout` fires,
-        // dropping `tx` and causing `rx` to return Canceled.
+        // dropping `tx` and causing `rx` to return RecvError.
         let err = rx.await.unwrap_err();
-        assert!(matches!(err, Canceled { .. }));
+        assert!(matches!(err, RecvError { .. }));
         handle.await.unwrap();
     }
 
@@ -658,7 +686,7 @@ mod tests {
             op_timeout: Some(Duration::from_millis(5)),
             ..Default::default()
         };
-        let (mut submitter, receiver) = channel(8);
+        let (submitter, receiver) = mpsc::channel(8);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
         let handle = tokio::spawn(super::run(cfg, metrics, receiver));
 
@@ -698,7 +726,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (mut sender, receiver) = channel(1);
+        let (sender, receiver) = mpsc::channel(1);
         let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
 
         // Run io_uring in a dedicated thread

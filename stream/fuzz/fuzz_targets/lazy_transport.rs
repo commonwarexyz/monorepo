@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{ed25519::PrivateKey, Signer};
 use commonware_runtime::{deterministic, mocks, Runner, Spawner};
-use commonware_stream::{dial, listen, Config, Receiver, Sender};
+use commonware_stream::encrypted::{dial, listen, Config, Receiver, Sender};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
@@ -92,10 +92,10 @@ fn fuzz(data: &[u8]) {
         };
 
         for chunk in data.chunks(1024) {
-            block_on(transport.dialer_sender.send(chunk)).unwrap();
+            block_on(transport.dialer_sender.send(chunk.to_vec())).unwrap();
 
             let received = block_on(transport.listener_receiver.recv()).unwrap();
-            assert_eq!(&received[..], chunk, "Data corruption detected");
+            assert_eq!(received.coalesce(), chunk, "Data corruption detected");
         }
     });
 }

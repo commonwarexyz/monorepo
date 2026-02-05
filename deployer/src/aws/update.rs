@@ -4,7 +4,6 @@ use crate::aws::{
     deployer_directory,
     ec2::{self, *},
     s3::{self, *},
-    services::*,
     utils::*,
     Config, Error, InstanceConfig, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME,
     MONITORING_REGION,
@@ -14,11 +13,7 @@ use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    fs::File,
-    path::PathBuf,
-};
+use std::{collections::HashMap, fs::File, path::PathBuf};
 use tracing::{error, info};
 
 /// Updates the binary and configuration on all binary nodes
@@ -32,7 +27,7 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
     info!(tag = tag.as_str(), "loaded configuration");
 
     // Ensure created file exists
-    let tag_directory = deployer_directory(tag);
+    let tag_directory = deployer_directory(Some(tag));
     let created_file = tag_directory.join(CREATED_FILE_NAME);
     if !created_file.exists() {
         return Err(Error::DeploymentNotComplete(tag.clone()));
@@ -59,112 +54,15 @@ pub async fn update(config_path: &PathBuf, concurrency: usize) -> Result<(), Err
 
     // Upload updated binaries and configs to S3 and generate pre-signed URLs
     // Uses digest-based deduplication to avoid re-uploading identical files
+    let bucket_name = get_bucket_name();
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
-
-    // Collect unique binary and config paths (dedup before hashing)
-    info!("computing file digests");
-    let mut unique_binary_paths: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    let mut unique_config_paths: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for instance in &config.instances {
-        unique_binary_paths.insert(instance.binary.clone());
-        unique_config_paths.insert(instance.config.clone());
-    }
-
-    // Compute digests concurrently for unique files only
-    let unique_paths: Vec<String> = unique_binary_paths
-        .iter()
-        .chain(unique_config_paths.iter())
-        .cloned()
-        .collect();
-    let path_to_digest = hash_files(unique_paths).await?;
-
-    // Build dedup maps from digests
-    let mut binary_digests: BTreeMap<String, String> = BTreeMap::new();
-    let mut config_digests: BTreeMap<String, String> = BTreeMap::new();
-    let mut instance_binary_digest: HashMap<String, String> = HashMap::new();
-    let mut instance_config_digest: HashMap<String, String> = HashMap::new();
-    for instance in &config.instances {
-        let binary_digest = path_to_digest[&instance.binary].clone();
-        let config_digest = path_to_digest[&instance.config].clone();
-        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
-        config_digests.insert(config_digest.clone(), instance.config.clone());
-        instance_binary_digest.insert(instance.name.clone(), binary_digest);
-        instance_config_digest.insert(instance.name.clone(), config_digest);
-    }
 
     // Upload unique binaries and configs (deduplicated by digest)
     info!("uploading unique binaries and configs to S3");
-    let (binary_digest_to_url, config_digest_to_url): (
-        HashMap<String, String>,
-        HashMap<String, String>,
-    ) = tokio::try_join!(
-        async {
-            Ok::<_, Error>(
-                try_join_all(binary_digests.iter().map(|(digest, path)| {
-                    let s3_client = s3_client.clone();
-                    let digest = digest.clone();
-                    let key = binary_s3_key(tag, &digest);
-                    let path = path.clone();
-                    async move {
-                        let url = cache_and_presign(
-                            &s3_client,
-                            BUCKET_NAME,
-                            &key,
-                            UploadSource::File(path.as_ref()),
-                            PRESIGN_DURATION,
-                        )
-                        .await?;
-                        Ok::<_, Error>((digest, url))
-                    }
-                }))
-                .await?
-                .into_iter()
-                .collect(),
-            )
-        },
-        async {
-            Ok::<_, Error>(
-                try_join_all(config_digests.iter().map(|(digest, path)| {
-                    let s3_client = s3_client.clone();
-                    let digest = digest.clone();
-                    let key = config_s3_key(tag, &digest);
-                    let path = path.clone();
-                    async move {
-                        let url = cache_and_presign(
-                            &s3_client,
-                            BUCKET_NAME,
-                            &key,
-                            UploadSource::File(path.as_ref()),
-                            PRESIGN_DURATION,
-                        )
-                        .await?;
-                        Ok::<_, Error>((digest, url))
-                    }
-                }))
-                .await?
-                .into_iter()
-                .collect(),
-            )
-        },
-    )?;
-
-    // Map instance names to URLs via their digests
-    let mut instance_binary_urls: HashMap<String, String> = HashMap::new();
-    let mut instance_config_urls: HashMap<String, String> = HashMap::new();
-    for instance in &config.instances {
-        let binary_digest = &instance_binary_digest[&instance.name];
-        let config_digest = &instance_config_digest[&instance.name];
-        instance_binary_urls.insert(
-            instance.name.clone(),
-            binary_digest_to_url[binary_digest].clone(),
-        );
-        instance_config_urls.insert(
-            instance.name.clone(),
-            config_digest_to_url[config_digest].clone(),
-        );
-    }
+    let instance_file_urls =
+        s3::upload_instance_files(&s3_client, &bucket_name, tag, &config.instances).await?;
+    let instance_binary_urls = instance_file_urls.binary_urls;
+    let instance_config_urls = instance_file_urls.config_urls;
     info!("uploaded all updated binaries and configs");
 
     // Determine all regions (binary + monitoring)

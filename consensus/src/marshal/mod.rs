@@ -72,7 +72,10 @@ pub use ingress::mailbox::Mailbox;
 pub mod resolver;
 pub mod store;
 
-use crate::{types::Height, Block};
+use crate::{
+    types::{Height, Round},
+    Block,
+};
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
 /// An update reported to the application, either a new finalized tip or a finalized block.
@@ -81,8 +84,8 @@ use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 /// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
-    /// A new finalized tip.
-    Tip(Height, B::Commitment),
+    /// A new finalized tip and the finalization round.
+    Tip(Round, Height, B::Commitment),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
     /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
@@ -113,23 +116,25 @@ mod tests {
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, Heightable, Reporter, VerifyingApplication,
+        Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
         certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
-        ed25519::PublicKey,
+        ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Sha256},
-        Committable, Digestible, Hasher as _,
+        Committable, Digestible, Hasher as _, Signer,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         Manager,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Clock, Metrics, Quota, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+    };
     use commonware_storage::{
         archive::{immutable, prunable},
         translator::EightCap,
@@ -148,11 +153,36 @@ mod tests {
     use tracing::info;
 
     type D = Sha256Digest;
-    type B = Block<D>;
     type K = PublicKey;
+    type Ctx = crate::simplex::types::Context<D, K>;
+    type B = Block<D, Ctx>;
     type V = MinPk;
     type S = bls12381_threshold_vrf::Scheme<K, V>;
     type P = ConstantProvider<S, Epoch>;
+
+    /// Default leader key for tests.
+    fn default_leader() -> K {
+        PrivateKey::from_seed(0).public_key()
+    }
+
+    /// Create a test block with a derived context.
+    ///
+    /// The context is constructed with:
+    /// - Round: epoch 0, view = height
+    /// - Leader: default (all zeros)
+    /// - Parent: (view = height - 1, commitment = parent)
+    fn make_block(parent: D, height: Height, timestamp: u64) -> B {
+        let parent_view = height
+            .previous()
+            .map(|h| View::new(h.get()))
+            .unwrap_or(View::zero());
+        let context = Ctx {
+            round: Round::new(Epoch::zero(), View::new(height.get())),
+            leader: default_leader(),
+            parent: (parent_view, parent),
+        };
+        B::new::<Sha256>(context, parent, height, timestamp)
+    }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -195,7 +225,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -204,7 +234,7 @@ mod tests {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -247,7 +277,7 @@ mod tests {
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
@@ -290,7 +320,7 @@ mod tests {
                     "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_buffer_pool: config.buffer_pool.clone(),
+                freezer_key_page_cache: config.page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
@@ -445,7 +475,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager
-                .update(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor, _processed_height) = setup_validator(
@@ -466,7 +496,7 @@ mod tests {
             let mut blocks = Vec::<B>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -595,7 +625,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager
-                .update(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
                 let (application, actor, _processed_height) = setup_validator(
@@ -617,7 +647,7 @@ mod tests {
             let mut blocks = Vec::<B>::new();
             let mut parent = Sha256::hash(b"");
             for i in 1..=NUM_BLOCKS {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 parent = block.digest();
                 blocks.push(block);
             }
@@ -767,7 +797,7 @@ mod tests {
 
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
-            let buffer_pool = PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let control = oracle.control(validator.clone());
 
             // Closure to initialize marshal with prunable archives
@@ -776,7 +806,7 @@ mod tests {
                 let validator = validator.clone();
                 let schemes = schemes.clone();
                 let partition_prefix = partition_prefix.clone();
-                let buffer_pool = buffer_pool.clone();
+                let page_cache = page_cache.clone();
                 let control = control.clone();
                 let oracle_manager = oracle.manager();
                 async move {
@@ -793,7 +823,7 @@ mod tests {
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
-                        buffer_pool: buffer_pool.clone(),
+                        page_cache: page_cache.clone(),
                         strategy: Sequential,
                     };
 
@@ -801,7 +831,7 @@ mod tests {
                     let backfill = control.register(0, TEST_QUOTA).await.unwrap();
                     let resolver_cfg = resolver::Config {
                         public_key: validator.clone(),
-                        manager: oracle_manager,
+                        provider: oracle_manager,
                         blocker: control.clone(),
                         mailbox_size: config.mailbox_size,
                         initial: Duration::from_secs(1),
@@ -834,7 +864,7 @@ mod tests {
                                 "{}-finalizations-by-height-key",
                                 partition_prefix
                             ),
-                            key_buffer_pool: buffer_pool.clone(),
+                            key_page_cache: page_cache.clone(),
                             value_partition: format!(
                                 "{}-finalizations-by-height-value",
                                 partition_prefix
@@ -855,7 +885,7 @@ mod tests {
                         prunable::Config {
                             translator: EightCap,
                             key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                            key_buffer_pool: buffer_pool.clone(),
+                            key_page_cache: page_cache.clone(),
                             value_partition: format!("{}-finalized-blocks-value", partition_prefix),
                             compression: None,
                             codec_config: config.block_codec_config,
@@ -889,7 +919,7 @@ mod tests {
             let mut parent = Sha256::hash(b"");
             let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
             for i in 1..=20u64 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let bounds = epocher.containing(Height::new(i)).unwrap();
                 let round = Round::new(bounds.epoch(), View::new(i));
@@ -1039,7 +1069,7 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             let subscription_rx = actor
@@ -1094,8 +1124,8 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
-            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
+            let block1 = make_block(parent, Height::new(1), 1);
+            let block2 = make_block(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -1170,8 +1200,8 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
-            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
+            let block1 = make_block(parent, Height::new(1), 1);
+            let block2 = make_block(block1.digest(), Height::new(2), 2);
             let commitment1 = block1.digest();
             let commitment2 = block2.digest();
 
@@ -1238,11 +1268,11 @@ mod tests {
             setup_network_links(&mut oracle, &participants, LINK).await;
 
             let parent = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent, Height::new(1), 1);
-            let block2 = B::new::<Sha256>(block1.digest(), Height::new(2), 2);
-            let block3 = B::new::<Sha256>(block2.digest(), Height::new(3), 3);
-            let block4 = B::new::<Sha256>(block3.digest(), Height::new(4), 4);
-            let block5 = B::new::<Sha256>(block4.digest(), Height::new(5), 5);
+            let block1 = make_block(parent, Height::new(1), 1);
+            let block2 = make_block(block1.digest(), Height::new(2), 2);
+            let block3 = make_block(block2.digest(), Height::new(3), 3);
+            let block4 = make_block(block3.digest(), Height::new(4), 4);
+            let block5 = make_block(block4.digest(), Height::new(5), 5);
 
             let sub1_rx = actor.subscribe(None, block1.digest()).await;
             let sub2_rx = actor.subscribe(None, block2.digest()).await;
@@ -1351,7 +1381,7 @@ mod tests {
 
             // Create and verify a block, then finalize it
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let digest = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1417,7 +1447,7 @@ mod tests {
 
             // Build and finalize heights 1..=3
             let parent0 = Sha256::hash(b"");
-            let block1 = B::new::<Sha256>(parent0, Height::new(1), 1);
+            let block1 = make_block(parent0, Height::new(1), 1);
             let d1 = block1.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
@@ -1435,7 +1465,7 @@ mod tests {
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(1), d1)));
 
-            let block2 = B::new::<Sha256>(d1, Height::new(2), 2);
+            let block2 = make_block(d1, Height::new(2), 2);
             let d2 = block2.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
@@ -1453,7 +1483,7 @@ mod tests {
             let latest = actor.get_info(Identifier::Latest).await;
             assert_eq!(latest, Some((Height::new(2), d2)));
 
-            let block3 = B::new::<Sha256>(d2, Height::new(3), 3);
+            let block3 = make_block(d2, Height::new(3), 3);
             let d3 = block3.digest();
             actor
                 .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
@@ -1500,7 +1530,7 @@ mod tests {
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1557,7 +1587,7 @@ mod tests {
 
             // 1) From cache via verified
             let parent = Sha256::hash(b"");
-            let ver_block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let ver_block = make_block(parent, Height::new(1), 1);
             let ver_commitment = ver_block.digest();
             let round1 = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round1, ver_block.clone()).await;
@@ -1568,7 +1598,7 @@ mod tests {
             assert_eq!(got.digest(), ver_commitment);
 
             // 2) From finalized archive
-            let fin_block = B::new::<Sha256>(ver_commitment, Height::new(2), 2);
+            let fin_block = make_block(ver_commitment, Height::new(2), 2);
             let fin_commitment = fin_block.digest();
             let round2 = Round::new(Epoch::new(0), View::new(2));
             actor.verified(round2, fin_block.clone()).await;
@@ -1619,7 +1649,7 @@ mod tests {
 
             // Finalize a block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
             actor.verified(round, block.clone()).await;
@@ -1665,7 +1695,7 @@ mod tests {
             // Register the initial peer set
             let mut manager = oracle.manager();
             manager
-                .update(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
 
             // Set up two validators
@@ -1690,7 +1720,7 @@ mod tests {
             // Validator 0: Create and finalize blocks 1-5
             let mut parent = Sha256::hash(b"");
             for i in 1..=5u64 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
@@ -1756,7 +1786,7 @@ mod tests {
             // Finalize blocks at heights 1-5
             let mut parent = Sha256::hash(b"");
             for i in 1..=5 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
                 actor.verified(round, block.clone()).await;
@@ -1839,7 +1869,7 @@ mod tests {
             .await;
 
             // Create genesis block
-            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
             // Wrap with Marshaled verifier
             let mock_app = MockVerifyingApp {
@@ -1858,7 +1888,7 @@ mod tests {
             // With BLOCKS_PER_EPOCH=20: epoch 0 is heights 0-19, epoch 1 is heights 20-39
             //
             // Store honest parent at height 21 (epoch 1)
-            let honest_parent = B::new::<Sha256>(
+            let honest_parent = make_block(
                 genesis.commitment(),
                 Height::new(BLOCKS_PER_EPOCH.get() + 1),
                 1000,
@@ -1873,7 +1903,7 @@ mod tests {
             // Byzantine proposer broadcasts malicious block at height 35
             // In reality this would come via buffered broadcast, but for test simplicity
             // we call broadcast() directly which makes it available for subscription
-            let malicious_block = B::new::<Sha256>(
+            let malicious_block = make_block(
                 parent_commitment,
                 Height::new(BLOCKS_PER_EPOCH.get() + 15),
                 2000,
@@ -1892,20 +1922,25 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 35
+            let byzantine_round = Round::new(Epoch::new(1), View::new(35));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(35)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
-            // Marshaled.verify() should reject the malicious block
+            // Marshaled.certify() should reject the malicious block
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 35) from marshal based on digest
             // 3. Validate height is contiguous (fail)
             // 4. Return false
-            let verify = marshaled
+            let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
+                .await
+                .await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
                 .await;
 
             assert!(
@@ -1916,7 +1951,7 @@ mod tests {
             // Test case 2: Mismatched parent commitment
             //
             // Create another malicious block with correct height but invalid parent commitment
-            let malicious_block = B::new::<Sha256>(
+            let malicious_block = make_block(
                 genesis.commitment(),
                 Height::new(BLOCKS_PER_EPOCH.get() + 2),
                 3000,
@@ -1935,21 +1970,26 @@ mod tests {
 
             // Consensus determines parent should be block at height 21
             // and calls verify on the Marshaled automaton with a block at height 22
+            let byzantine_round = Round::new(Epoch::new(1), View::new(22));
             let byzantine_context = Context {
-                round: Round::new(Epoch::new(1), View::new(22)),
+                round: byzantine_round,
                 leader: me.clone(),
                 parent: (View::new(21), parent_commitment), // Consensus says parent is at height 21
             };
 
-            // Marshaled.verify() should reject the malicious block
+            // Marshaled.certify() should reject the malicious block
             // The Marshaled verifier will:
             // 1. Fetch honest_parent (height 21) from marshal based on context.parent
             // 2. Fetch malicious_block (height 22) from marshal based on digest
             // 3. Validate height is contiguous
             // 3. Validate parent commitment matches (fail)
             // 4. Return false
-            let verify = marshaled
+            let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
+                .await
+                .await;
+            let verify = marshaled
+                .certify(byzantine_round, malicious_commitment)
                 .await;
 
             assert!(
@@ -1985,7 +2025,7 @@ mod tests {
 
             // Create block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             // Both validators verify the block
@@ -2103,7 +2143,7 @@ mod tests {
             let mut parent = Sha256::hash(b"");
             let mut blocks = Vec::new();
             for i in 1..=3 {
-                let block = B::new::<Sha256>(parent, Height::new(i), i);
+                let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
@@ -2235,7 +2275,7 @@ mod tests {
             )
             .await;
 
-            let genesis = B::new::<Sha256>(Sha256::hash(b""), Height::zero(), 0);
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
 
             let mock_app = MockVerifyingApp {
                 genesis: genesis.clone(),
@@ -2248,13 +2288,13 @@ mod tests {
                 Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
-            let parent = B::new::<Sha256>(genesis.commitment(), Height::new(19), 1000);
+            let parent = make_block(genesis.commitment(), Height::new(19), 1000);
             let parent_commitment = parent.commitment();
             let parent_round = Round::new(Epoch::new(0), View::new(19));
             marshal.clone().verified(parent_round, parent).await;
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
-            let block = B::new::<Sha256>(parent_commitment, Height::new(20), 2000);
+            let block = make_block(parent_commitment, Height::new(20), 2000);
             let block_commitment = block.commitment();
             marshal
                 .clone()
@@ -2263,19 +2303,407 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
+            let unsupported_round = Round::new(Epoch::new(1), View::new(20));
             let unsupported_context = Context {
-                round: Round::new(Epoch::new(1), View::new(20)),
+                round: unsupported_round,
                 leader: me.clone(),
                 parent: (View::new(19), parent_commitment),
             };
 
-            let verify = marshaled
+            let verify_result = marshaled
                 .verify(unsupported_context, block_commitment)
+                .await
                 .await;
 
             assert!(
-                !verify.await.unwrap(),
+                !verify_result.unwrap(),
                 "Block in unsupported epoch should be rejected"
+            );
+        })
+    }
+
+    /// Regression test for verification task cleanup.
+    ///
+    /// Verifies that certifying blocks out of order works correctly. When multiple
+    /// blocks are verified at different views, certifying a higher-view block should
+    /// not interfere with certifying a lower-view block that was verified earlier.
+    ///
+    /// Scenario:
+    /// 1. Verify block A at view V
+    /// 2. Verify block B at view V+K
+    /// 3. Certify block B at view V+K
+    /// 4. Certify block A at view V - should succeed
+    #[test_traced("INFO")]
+    fn test_certify_lower_view_after_higher_view() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                true
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Create parent block at height 1
+            let parent = make_block(genesis.commitment(), Height::new(1), 100);
+            let parent_commitment = parent.commitment();
+            let parent_round = Round::new(Epoch::new(0), View::new(1));
+            marshal.clone().verified(parent_round, parent).await;
+
+            // Block A at view 5 (height 2) - create with context matching what verify will receive
+            let round_a = Round::new(Epoch::new(0), View::new(5));
+            let context_a = Context {
+                round: round_a,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_a =
+                B::new::<Sha256>(context_a.clone(), parent_commitment, Height::new(2), 200);
+            let commitment_a = block_a.commitment();
+            marshal.clone().proposed(round_a, block_a).await;
+
+            // Block B at view 10 (height 2, different block same height - could happen with
+            // different proposers or re-proposals)
+            let round_b = Round::new(Epoch::new(0), View::new(10));
+            let context_b = Context {
+                round: round_b,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let block_b =
+                B::new::<Sha256>(context_b.clone(), parent_commitment, Height::new(2), 300);
+            let commitment_b = block_b.commitment();
+            marshal.clone().proposed(round_b, block_b).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Step 1: Verify block A at view 5
+            let _ = marshaled.verify(context_a, commitment_a).await.await;
+
+            // Step 2: Verify block B at view 10
+            let _ = marshaled.verify(context_b, commitment_b).await.await;
+
+            // Step 3: Certify block B at view 10 FIRST
+            let certify_b = marshaled.certify(round_b, commitment_b).await;
+            assert!(
+                certify_b.await.unwrap(),
+                "Block B certification should succeed"
+            );
+
+            // Step 4: Certify block A at view 5 - should succeed
+            let certify_a = marshaled.certify(round_a, commitment_a).await;
+
+            // Use select with timeout to detect never-resolving receiver
+            select! {
+                result = certify_a => {
+                    assert!(result.unwrap(), "Block A certification should succeed");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("Block A certification timed out");
+                },
+            }
+        })
+    }
+
+    /// Regression test for re-proposal validation in optimistic_verify.
+    ///
+    /// Verifies that:
+    /// 1. Valid re-proposals at epoch boundaries are accepted
+    /// 2. Invalid re-proposals (not at epoch boundary) are rejected
+    ///
+    /// A re-proposal occurs when the parent commitment equals the block being verified,
+    /// meaning the same block is being proposed again in a new view.
+    #[test_traced("INFO")]
+    fn test_marshaled_reproposal_validation() {
+        #[derive(Clone)]
+        struct MockVerifyingApp {
+            genesis: B,
+        }
+
+        impl crate::Application<deterministic::Context> for MockVerifyingApp {
+            type Block = B;
+            type Context = Context<D, K>;
+            type SigningScheme = S;
+
+            async fn genesis(&mut self) -> Self::Block {
+                self.genesis.clone()
+            }
+
+            async fn propose(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> Option<Self::Block> {
+                None
+            }
+        }
+
+        impl VerifyingApplication<deterministic::Context> for MockVerifyingApp {
+            async fn verify(
+                &mut self,
+                _context: (deterministic::Context, Self::Context),
+                _ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ) -> bool {
+                true
+            }
+        }
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let (_base_app, marshal, _processed_height) = setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let genesis = make_block(Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app = MockVerifyingApp {
+                genesis: genesis.clone(),
+            };
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Build a chain up to the epoch boundary (height 19 is the last block in epoch 0
+            // with BLOCKS_PER_EPOCH=20, since epoch 0 covers heights 0-19)
+            let mut parent = genesis.commitment();
+            let mut last_view = View::zero();
+            for i in 1..BLOCKS_PER_EPOCH.get() {
+                let round = Round::new(Epoch::new(0), View::new(i));
+                let ctx = Context {
+                    round,
+                    leader: me.clone(),
+                    parent: (last_view, parent),
+                };
+                let block = B::new::<Sha256>(ctx.clone(), parent, Height::new(i), i * 100);
+                marshal.clone().verified(round, block.clone()).await;
+                parent = block.commitment();
+                last_view = View::new(i);
+            }
+
+            // Create the epoch boundary block (height 19, last block in epoch 0)
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_round = Round::new(Epoch::new(0), View::new(boundary_height.get()));
+            let boundary_context = Context {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (last_view, parent),
+            };
+            let boundary_block = B::new::<Sha256>(
+                boundary_context.clone(),
+                parent,
+                boundary_height,
+                boundary_height.get() * 100,
+            );
+            let boundary_commitment = boundary_block.commitment();
+            marshal
+                .clone()
+                .verified(boundary_round, boundary_block.clone())
+                .await;
+
+            // Make the boundary block available for subscription
+            marshal
+                .clone()
+                .proposed(boundary_round, boundary_block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Test 1: Valid re-proposal at epoch boundary should be accepted
+            // Re-proposal context: parent commitment equals the block being verified
+            // Re-proposals happen within the same epoch when the parent is the last block
+            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
+            let reproposal_context = Context {
+                round: reproposal_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get()), boundary_commitment), // Parent IS the boundary block
+            };
+
+            // Call verify (which calls optimistic_verify internally via Automaton trait)
+            let verify_result = marshaled
+                .verify(reproposal_context.clone(), boundary_commitment)
+                .await
+                .await;
+            assert!(
+                verify_result.unwrap(),
+                "Valid re-proposal at epoch boundary should be accepted"
+            );
+
+            // Test 2: Invalid re-proposal (not at epoch boundary) should be rejected
+            // Create a block at height 10 (not at epoch boundary)
+            let non_boundary_height = Height::new(10);
+            let non_boundary_round = Round::new(Epoch::new(0), View::new(10));
+            let non_boundary_context = Context {
+                round: non_boundary_round,
+                leader: me.clone(),
+                parent: (View::new(9), parent),
+            };
+            let non_boundary_block = B::new::<Sha256>(
+                non_boundary_context.clone(),
+                parent,
+                non_boundary_height,
+                1000,
+            );
+            let non_boundary_commitment = non_boundary_block.commitment();
+
+            // Make the non-boundary block available
+            marshal
+                .clone()
+                .proposed(non_boundary_round, non_boundary_block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Attempt to re-propose the non-boundary block
+            let invalid_reproposal_round = Round::new(Epoch::new(0), View::new(15));
+            let invalid_reproposal_context = Context {
+                round: invalid_reproposal_round,
+                leader: me.clone(),
+                parent: (View::new(10), non_boundary_commitment),
+            };
+
+            let verify_result = marshaled
+                .verify(invalid_reproposal_context, non_boundary_commitment)
+                .await
+                .await;
+            assert!(
+                !verify_result.unwrap(),
+                "Invalid re-proposal (not at epoch boundary) should be rejected"
+            );
+
+            // Test 3: Re-proposal with mismatched epoch should be rejected
+            // This is a regression test - re-proposals must be in the same epoch as the block.
+            let cross_epoch_reproposal_round = Round::new(Epoch::new(1), View::new(20));
+            let cross_epoch_reproposal_context = Context {
+                round: cross_epoch_reproposal_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get()), boundary_commitment),
+            };
+
+            let verify_result = marshaled
+                .verify(cross_epoch_reproposal_context, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                !verify_result.unwrap(),
+                "Re-proposal with mismatched epoch should be rejected"
+            );
+
+            // Test 4: Certify-only path for re-proposal (no prior verify call)
+            // This tests the crash recovery scenario where a validator needs to certify
+            // a re-proposal without having called verify first.
+            let certify_only_round = Round::new(Epoch::new(0), View::new(21));
+            let certify_result = marshaled
+                .certify(certify_only_round, boundary_commitment)
+                .await
+                .await;
+            assert!(
+                certify_result.unwrap(),
+                "Certify-only path for re-proposal should succeed"
+            );
+
+            // Test 5: Certify-only path for a normal block (no prior verify call)
+            // Build a normal block (not at epoch boundary) and test certify without verify.
+            // Use genesis as the parent since we don't have finalized blocks at other heights.
+            let normal_height = Height::new(1);
+            let normal_round = Round::new(Epoch::new(0), View::new(100));
+            let genesis_commitment = genesis.commitment();
+
+            let normal_context = Context {
+                round: normal_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment),
+            };
+            let normal_block = B::new::<Sha256>(
+                normal_context.clone(),
+                genesis_commitment,
+                normal_height,
+                500,
+            );
+            let normal_commitment = normal_block.commitment();
+            marshal
+                .clone()
+                .proposed(normal_round, normal_block.clone())
+                .await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Certify without calling verify first
+            let certify_result = marshaled
+                .certify(normal_round, normal_commitment)
+                .await
+                .await;
+            assert!(
+                certify_result.unwrap(),
+                "Certify-only path for normal block should succeed"
             );
         })
     }
@@ -2304,7 +2732,7 @@ mod tests {
 
             // Create block at height 1
             let parent = Sha256::hash(b"");
-            let block = B::new::<Sha256>(parent, Height::new(1), 1);
+            let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
 
             // Broadcast the block

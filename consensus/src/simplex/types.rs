@@ -18,7 +18,7 @@ use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Context<D: Digest, P: PublicKey> {
     /// Current round of consensus.
     pub round: Round,
@@ -42,6 +42,51 @@ impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
 impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
     fn view(&self) -> View {
         self.round.view()
+    }
+}
+
+impl<D: Digest, P: PublicKey> Write for Context<D, P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.round.write(buf);
+        self.leader.write(buf);
+        self.parent.write(buf);
+    }
+}
+
+impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.leader.encode_size() + self.parent.encode_size()
+    }
+}
+
+impl<D: Digest, P: PublicKey> Read for Context<D, P> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let round = Round::read(reader)?;
+        let leader = P::read(reader)?;
+        let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
+
+        Ok(Self {
+            round,
+            leader,
+            parent,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<D: Digest, P: PublicKey> arbitrary::Arbitrary<'_> for Context<D, P>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+    P: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            round: Round::arbitrary(u)?,
+            leader: P::arbitrary(u)?,
+            parent: (View::arbitrary(u)?, D::arbitrary(u)?),
+        })
     }
 }
 
@@ -901,11 +946,11 @@ pub struct Notarization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a>(
-        scheme: &S,
-        notarizes: impl IntoIterator<Item = &'a Notarize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Notarize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = notarizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
@@ -1139,11 +1184,11 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a>(
-        scheme: &S,
-        nullifies: impl IntoIterator<Item = &'a Nullify<S>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Nullify<S>>,
+        I::IntoIter: Send,
+    {
         let mut iter = nullifies.into_iter().peekable();
         let round = iter.peek()?.round;
         let certificate =
@@ -1384,11 +1429,11 @@ pub struct Finalization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a>(
-        scheme: &S,
-        finalizes: impl IntoIterator<Item = &'a Finalize<S, D>>,
-        strategy: &impl Strategy,
-    ) -> Option<Self> {
+    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a Finalize<S, D>>,
+        I::IntoIter: Send,
+    {
         let mut iter = finalizes.into_iter().peekable();
         let proposal = iter.peek()?.proposal.clone();
         let certificate =
@@ -2179,9 +2224,18 @@ impl<S: Scheme, D: Digest> Hash for ConflictingNotarize<S, D> {
 
 impl<S: Scheme, D: Digest> ConflictingNotarize<S, D> {
     /// Creates a new conflicting notarize evidence from two conflicting notarizes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two notarizes do not have the same round and signer, or if they
+    /// have identical proposals (which would not constitute conflicting evidence).
     pub fn new(notarize_1: Notarize<S, D>, notarize_2: Notarize<S, D>) -> Self {
         assert_eq!(notarize_1.round(), notarize_2.round());
         assert_eq!(notarize_1.signer(), notarize_2.signer());
+        assert_ne!(
+            notarize_1.proposal, notarize_2.proposal,
+            "proposals must differ to constitute conflicting evidence"
+        );
 
         Self {
             notarize_1,
@@ -2232,7 +2286,10 @@ impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
         let notarize_1 = Notarize::read(reader)?;
         let notarize_2 = Notarize::read(reader)?;
 
-        if notarize_1.signer() != notarize_2.signer() || notarize_1.round() != notarize_2.round() {
+        if notarize_1.signer() != notarize_2.signer()
+            || notarize_1.round() != notarize_2.round()
+            || notarize_1.proposal == notarize_2.proposal
+        {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingNotarize",
                 "invalid conflicting notarize",
@@ -2295,9 +2352,18 @@ impl<S: Scheme, D: Digest> Hash for ConflictingFinalize<S, D> {
 
 impl<S: Scheme, D: Digest> ConflictingFinalize<S, D> {
     /// Creates a new conflicting finalize evidence from two conflicting finalizes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two finalizes do not have the same round and signer, or if they
+    /// have identical proposals (which would not constitute conflicting evidence).
     pub fn new(finalize_1: Finalize<S, D>, finalize_2: Finalize<S, D>) -> Self {
         assert_eq!(finalize_1.round(), finalize_2.round());
         assert_eq!(finalize_1.signer(), finalize_2.signer());
+        assert_ne!(
+            finalize_1.proposal, finalize_2.proposal,
+            "proposals must differ to constitute conflicting evidence"
+        );
 
         Self {
             finalize_1,
@@ -2348,7 +2414,10 @@ impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
         let finalize_1 = Finalize::read(reader)?;
         let finalize_2 = Finalize::read(reader)?;
 
-        if finalize_1.signer() != finalize_2.signer() || finalize_1.round() != finalize_2.round() {
+        if finalize_1.signer() != finalize_2.signer()
+            || finalize_1.round() != finalize_2.round()
+            || finalize_1.proposal == finalize_2.proposal
+        {
             return Err(Error::Invalid(
                 "consensus::simplex::ConflictingFinalize",
                 "invalid conflicting finalize",
@@ -2504,6 +2573,7 @@ mod tests {
             ed25519, secp256r1, Scheme,
         },
     };
+    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -3044,7 +3114,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(3));
-        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3082,7 +3152,7 @@ mod tests {
         let mut rng = test_rng();
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
-        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3225,7 +3295,7 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(9));
-        let quorum = N3f1::quorum_from_slice(&fixture.schemes) as usize;
+        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
         let finalizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3334,6 +3404,76 @@ mod tests {
         assert!(iter.next().is_none());
     }
 
+    #[test]
+    #[should_panic(expected = "proposals must differ")]
+    fn issue_2944_regression_conflicting_notarize_new() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
+        let _ = ConflictingNotarize::new(notarize.clone(), notarize);
+    }
+
+    #[test]
+    fn issue_2944_regression_conflicting_notarize_decode() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let notarize = Notarize::sign(&fixture.schemes[0], proposal).unwrap();
+
+        // Manually encode two identical notarizes
+        let mut buf = Vec::new();
+        notarize.write(&mut buf);
+        notarize.write(&mut buf);
+
+        // Decoding should fail
+        let result = ConflictingNotarize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "proposals must differ")]
+    fn issue_2944_regression_conflicting_finalize_new() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
+        let _ = ConflictingFinalize::new(finalize.clone(), finalize);
+    }
+
+    #[test]
+    fn issue_2944_regression_conflicting_finalize_decode() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 1);
+        let proposal = Proposal::new(
+            Round::new(Epoch::new(0), View::new(10)),
+            View::new(5),
+            sample_digest(1),
+        );
+        let finalize = Finalize::sign(&fixture.schemes[0], proposal).unwrap();
+
+        // Manually encode two identical finalizes
+        let mut buf = Vec::new();
+        finalize.write(&mut buf);
+        finalize.write(&mut buf);
+
+        // Decoding should fail
+        let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        assert!(result.is_err());
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -3361,6 +3501,7 @@ mod tests {
             CodecConformance<ConflictingNotarize<Scheme, Sha256Digest>>,
             CodecConformance<ConflictingFinalize<Scheme, Sha256Digest>>,
             CodecConformance<NullifyFinalize<Scheme, Sha256Digest>>,
+            CodecConformance<Context<Sha256Digest, PublicKey>>
         }
     }
 }

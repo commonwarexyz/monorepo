@@ -22,11 +22,10 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
-use bytes::Buf;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::pool::{PoolRef, Replay},
-    Blob, Metrics, Storage,
+    buffer::paged::{CacheRef, Replay},
+    Blob, Buf, IoBufMut, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},
@@ -49,8 +48,8 @@ pub struct Config {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// The buffer pool to use for caching data.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -88,7 +87,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             partition: cfg.partition,
             factory: AppendFactory {
                 write_buffer: cfg.write_buffer,
-                pool_ref: cfg.buffer_pool,
+                page_cache_ref: cfg.page_cache,
             },
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
@@ -158,8 +157,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemOutOfRange(position));
         }
 
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec)
+        let buf = blob
+            .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
+            .await?;
+        A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
     /// Read the last item in a section, if any.
@@ -176,8 +177,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob.read_at(vec![0u8; Self::CHUNK_SIZE], offset).await?;
-        A::decode(buf.as_ref()).map_err(Error::Codec).map(Some)
+        let buf = blob
+            .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
+            .await?;
+        A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
     }
 
     /// Returns a stream of all items starting from the given section.
@@ -341,31 +344,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.clear().await
     }
 
-    /// Initialize a section with a specific number of zero-filled items.
-    ///
-    /// This creates the section's blob and fills it with `item_count` items worth of zeros.
-    /// The data is written through the Append wrapper which handles checksums properly.
-    ///
-    /// # Arguments
-    /// * `section` - The section number to initialize
-    /// * `item_count` - Number of zero-filled items to write
-    pub(crate) async fn init_section_at_size(
-        &mut self,
-        section: u64,
-        item_count: u64,
-    ) -> Result<(), Error> {
-        // Get or create the blob for this section
-        let blob = self.manager.get_or_create(section).await?;
-
-        // Calculate the target byte size
-        let target_size = item_count * Self::CHUNK_SIZE_U64;
-
-        // Resize grows the blob by appending zeros, which handles checksums properly
-        blob.resize(target_size).await?;
-
-        Ok(())
-    }
-
     /// Ensure a section exists, creating an empty blob if needed.
     ///
     /// This is used to maintain the invariant that at least one blob always exists
@@ -381,7 +359,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
@@ -396,7 +374,7 @@ mod tests {
     fn test_cfg() -> Config {
         Config {
             partition: "test_partition".into(),
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1184,127 +1162,12 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_init_section_at_size() {
-        // Test that init_section_at_size correctly initializes a section with zero-filled items.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.with_label("first"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Initialize section 1 with 5 zero-filled items
-            journal
-                .init_section_at_size(1, 5)
-                .await
-                .expect("failed to init section at size");
-
-            // Verify section has correct length
-            assert_eq!(journal.section_len(1).await.unwrap(), 5);
-
-            // Verify size is correct (5 items * 32 bytes per Digest)
-            assert_eq!(journal.size(1).await.unwrap(), 5 * 32);
-
-            // Verify we can read the zero-filled items
-            let zero_digest = Sha256::fill(0);
-            for i in 0u64..5 {
-                let item = journal.get(1, i).await.expect("failed to get");
-                assert_eq!(item, zero_digest, "item {i} should be zero-filled");
-            }
-
-            // Verify position past the initialized range returns error
-            let err = journal.get(1, 5).await;
-            assert!(matches!(err, Err(Error::ItemOutOfRange(5))));
-
-            // Verify we can append after the initialized items
-            let pos = journal
-                .append(1, test_digest(100))
-                .await
-                .expect("failed to append");
-            assert_eq!(pos, 5, "append should return position 5");
-
-            // Verify section now has 6 items
-            assert_eq!(journal.section_len(1).await.unwrap(), 6);
-
-            // Verify the appended item is readable
-            let item = journal.get(1, 5).await.expect("failed to get");
-            assert_eq!(item, test_digest(100));
-
-            journal.sync_all().await.expect("failed to sync");
-            drop(journal);
-
-            // Test persistence - reopen and verify
-            let journal = Journal::<_, Digest>::init(context.with_label("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            assert_eq!(journal.section_len(1).await.unwrap(), 6);
-
-            // Verify zero-filled items persisted
-            for i in 0u64..5 {
-                let item = journal.get(1, i).await.expect("failed to get");
-                assert_eq!(
-                    item, zero_digest,
-                    "item {i} should still be zero-filled after restart"
-                );
-            }
-
-            // Verify appended item persisted
-            let item = journal.get(1, 5).await.expect("failed to get");
-            assert_eq!(item, test_digest(100));
-
-            // Test replay includes zero-filled items
-            {
-                let stream = journal
-                    .replay(1, 0, NZUsize!(1024))
-                    .await
-                    .expect("failed to replay");
-                pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    let (section, pos, item) = result.expect("replay error");
-                    items.push((section, pos, item));
-                }
-
-                assert_eq!(items.len(), 6);
-                for (i, item) in items.iter().enumerate().take(5) {
-                    assert_eq!(*item, (1, i as u64, zero_digest));
-                }
-                assert_eq!(items[5], (1, 5, test_digest(100)));
-            }
-
-            // Test replay with non-zero start offset skips zero-filled items
-            {
-                let stream = journal
-                    .replay(1, 3, NZUsize!(1024))
-                    .await
-                    .expect("failed to replay");
-                pin_mut!(stream);
-
-                let mut items = Vec::new();
-                while let Some(result) = stream.next().await {
-                    let (section, pos, item) = result.expect("replay error");
-                    items.push((section, pos, item));
-                }
-
-                assert_eq!(items.len(), 3);
-                assert_eq!(items[0], (1, 3, zero_digest));
-                assert_eq!(items[1], (1, 4, zero_digest));
-                assert_eq!(items[2], (1, 5, test_digest(100)));
-            }
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
     fn test_journal_clear() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear_test".into(),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 

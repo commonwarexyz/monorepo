@@ -3,10 +3,9 @@ use crate::{authenticated::UnboundedMailbox, Address, Channel};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
-    channels::{fallible::FallibleExt, ring},
+    channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::{Map, Set},
 };
-use futures::channel::{mpsc, oneshot};
 use rand_distr::Normal;
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         #[allow(clippy::type_complexity)]
         result: oneshot::Sender<Result<(Sender<P, E>, Receiver<P>), Error>>,
     },
-    Update {
+    Track {
         id: u64,
         peers: Set<P>,
     },
@@ -65,8 +64,8 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Register { .. } => f.debug_struct("Register").finish_non_exhaustive(),
-            Self::Update { id, .. } => f
-                .debug_struct("Update")
+            Self::Track { id, .. } => f
+                .debug_struct("Track")
                 .field("id", id)
                 .finish_non_exhaustive(),
             Self::PeerSet { id, .. } => f
@@ -244,8 +243,8 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    async fn update(&self, id: u64, peers: Set<P>) {
-        self.sender.0.send_lossy(Message::Update { id, peers });
+    async fn track(&self, id: u64, peers: Set<P>) {
+        self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
     /// Get the peers for a given id.
@@ -259,7 +258,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
 
     /// Subscribe to notifications when new peer sets are added.
     async fn subscribe(&self) -> mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)> {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         self.sender.0.send_lossy(Message::Subscribe { sender });
         receiver
     }
@@ -287,13 +286,8 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
+impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
-    type Peers = Set<Self::PublicKey>;
-
-    async fn update(&mut self, id: u64, peers: Self::Peers) {
-        self.oracle.update(id, peers).await;
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.oracle.peer_set(id).await
@@ -306,7 +300,13 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     }
 }
 
-/// Implementation of [crate::Manager] for peers with [Address]es.
+impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
+    async fn track(&mut self, id: u64, peers: Set<Self::PublicKey>) {
+        self.oracle.track(id, peers).await;
+    }
+}
+
+/// Implementation of [crate::AddressableManager] for peers with [Address]es.
 ///
 /// Useful for mocking [crate::authenticated::lookup].
 ///
@@ -334,14 +334,8 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
+impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
     type PublicKey = P;
-    type Peers = Map<Self::PublicKey, Address>;
-
-    async fn update(&mut self, id: u64, peers: Self::Peers) {
-        // Ignore all addresses (simulated network doesn't use them)
-        self.oracle.update(id, peers.into_keys()).await;
-    }
 
     async fn peer_set(&mut self, id: u64) -> Option<Set<Self::PublicKey>> {
         self.oracle.peer_set(id).await
@@ -351,6 +345,17 @@ impl<P: PublicKey, E: Clock> crate::Manager for SocketManager<P, E> {
         &mut self,
     ) -> mpsc::UnboundedReceiver<(u64, Set<Self::PublicKey>, Set<Self::PublicKey>)> {
         self.oracle.subscribe().await
+    }
+}
+
+impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
+    async fn track(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
+        // Ignore all addresses (simulated network doesn't use them)
+        self.oracle.track(id, peers.into_keys()).await;
+    }
+
+    async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {
+        // We consider all addresses to be valid, so this is a no-op
     }
 }
 

@@ -4,9 +4,9 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    buffer::PoolRef,
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
-    RayonPoolSpawner,
+    ThreadPooler as _,
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
@@ -28,7 +28,7 @@ const PARTITION_SUFFIX: &str = "keyless_bench_partition";
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 
-/// The number of pages to cache in the buffer pool.
+/// The number of pages to cache in the page cache.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// Threads (cores) to use for parallelization. We pick 8 since our benchmarking pipeline is
@@ -47,7 +47,7 @@ fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, 
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         thread_pool: Some(pool),
-        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -60,7 +60,7 @@ type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
-    let pool = ctx.clone().create_pool(THREADS).unwrap();
+    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
     let keyless_cfg = keyless_cfg(pool);
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 

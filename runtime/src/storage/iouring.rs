@@ -3,8 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent via a [futures::channel::mpsc] channel to a dedicated io_uring event loop
-//! running in another thread. Operation results are returned via a [futures::channel::oneshot] channel.
+//! I/O operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop
+//! running in another thread. Operation results are returned via a [commonware_utils::channel::oneshot] channel.
 //!
 //! ## Memory Safety
 //!
@@ -22,16 +22,15 @@
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry},
-    Error,
+    iouring::{self, should_retry, OpBuffer},
+    Error, IoBufMut, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{from_hex, hex, StableBuf};
-use futures::{
+use commonware_utils::{
     channel::{mpsc, oneshot},
-    executor::block_on,
-    SinkExt as _,
+    from_hex, hex,
 };
+use futures::executor::block_on;
 use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
@@ -260,34 +259,38 @@ impl Blob {
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
-        buf: impl Into<StableBuf> + Send,
         offset: u64,
-    ) -> Result<StableBuf, Error> {
-        let mut buf = buf.into();
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        let input_buf = buf.into();
+
+        // For single buffers, read directly into them (zero-copy).
+        // For chunked buffers, use a temporary and copy to preserve the input structure.
+        let buf_len = input_buf.len();
+        let (mut io_buf, original_bufs) = match input_buf {
+            IoBufsMut::Single(buf) => (buf, None),
+            IoBufsMut::Chunked(bufs) => (IoBufMut::zeroed(buf_len), Some(bufs)),
+        };
+
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
-        let buf_len = buf.len();
-        let mut io_sender = self.io_sender.clone();
+        let io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
         while bytes_read < buf_len {
             // Figure out how much is left to read and where to read into.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: IoBufMut wraps BytesMut which has stable memory addresses.
             // `bytes_read` is always < `buf_len` due to the loop condition, so
             // `add(bytes_read)` stays within bounds and `buf_len - bytes_read`
             // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().add(bytes_read),
-                    buf_len - bytes_read,
-                )
-            };
+            let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
+            let remaining_len = buf_len - bytes_read;
             let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
-            let op = opcode::Read::new(fd, remaining.as_mut_ptr(), remaining.len() as _)
+            let op = opcode::Read::new(fd, ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -297,14 +300,17 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffer: Some(OpBuffer::Read(io_buf)),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
 
             // Wait for the result
             let (result, got_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            buf = got_buf.unwrap();
+            io_buf = match got_buf {
+                Some(OpBuffer::Read(b)) => b,
+                _ => return Err(Error::ReadFailed),
+            };
             if should_retry(result) {
                 continue;
             }
@@ -318,35 +324,48 @@ impl crate::Blob for Blob {
             }
             bytes_read += op_bytes_read;
         }
-        Ok(buf)
+
+        // Return the same buffer structure as input
+        match original_bufs {
+            None => Ok(IoBufsMut::Single(io_buf)),
+            Some(mut bufs) => {
+                // Copy from temporary buffer to the original chunked buffers
+                let mut offset = 0;
+                for buf in bufs.iter_mut() {
+                    let len = buf.len();
+                    buf.as_mut()
+                        .copy_from_slice(&io_buf.as_ref()[offset..offset + len]);
+                    offset += len;
+                }
+                Ok(IoBufsMut::Chunked(bufs))
+            }
+        }
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf> + Send, offset: u64) -> Result<(), Error> {
-        let mut buf = buf.into();
+    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        // Convert to contiguous IoBuf for io_uring write
+        // (zero-copy if single buffer, copies if multiple)
+        let mut buf = buf.into().coalesce();
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
         let buf_len = buf.len();
-        let mut io_sender = self.io_sender.clone();
+        let io_sender = self.io_sender.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
         while bytes_written < buf_len {
             // Figure out how much is left to write and where to write from.
             //
-            // SAFETY: `buf` is a `StableBuf` guaranteeing the memory won't move.
+            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
             // `bytes_written` is always < `buf_len` due to the loop condition, so
             // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
             // correctly represents the remaining valid bytes.
-            let remaining = unsafe {
-                std::slice::from_raw_parts(
-                    buf.as_mut_ptr().add(bytes_written) as *const u8,
-                    buf_len - bytes_written,
-                )
-            };
+            let ptr = unsafe { buf.as_ptr().add(bytes_written) };
+            let remaining_len = buf_len - bytes_written;
             let offset = offset + bytes_written as u64;
 
             // Create an operation to do the write
-            let op = opcode::Write::new(fd, remaining.as_ptr(), remaining.len() as _)
+            let op = opcode::Write::new(fd, ptr, remaining_len as _)
                 .offset(offset as _)
                 .build();
 
@@ -356,14 +375,17 @@ impl crate::Blob for Blob {
                 .send(iouring::Op {
                     work: op,
                     sender,
-                    buffer: Some(buf),
+                    buffer: Some(OpBuffer::Write(buf)),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
 
             // Wait for the result
             let (return_value, got_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = got_buf.unwrap();
+            buf = match got_buf {
+                Some(OpBuffer::Write(b)) => b,
+                _ => return Err(Error::WriteFailed),
+            };
             if should_retry(return_value) {
                 continue;
             }
@@ -439,7 +461,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -485,7 +507,7 @@ mod tests {
 
         // Test 2: Logical offset handling - write at offset 0 stores at raw offset 8
         let data = b"hello world";
-        blob.write_at(data.to_vec(), 0).await.unwrap();
+        blob.write_at(0, data.to_vec()).await.unwrap();
         blob.sync().await.unwrap();
 
         // Verify raw file size
@@ -504,8 +526,12 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(vec![0u8; data.len()], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), data);
+        let read_buf = blob
+            .read_at(0, IoBufMut::zeroed(data.len()))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read_buf, data);
 
         // Test 4: Resize with logical length
         blob.resize(5).await.unwrap();
@@ -528,14 +554,18 @@ mod tests {
         );
 
         // Test 5: Reopen existing blob preserves header and returns correct logical size
-        blob.write_at(b"test data".to_vec(), 0).await.unwrap();
+        blob.write_at(0, b"test data".to_vec()).await.unwrap();
         blob.sync().await.unwrap();
         drop(blob);
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(vec![0u8; 9], 0).await.unwrap();
-        assert_eq!(read_buf.as_ref(), b"test data");
+        let read_buf = blob2
+            .read_at(0, IoBufMut::zeroed(9))
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read_buf, b"test data");
         drop(blob2);
 
         // Test 6: Corrupted blob recovery (0 < raw_size < 8)

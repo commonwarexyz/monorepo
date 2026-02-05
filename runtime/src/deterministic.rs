@@ -42,14 +42,15 @@
 //! });
 //! ```
 
+pub use crate::storage::faulty::Config as FaultConfig;
 use crate::{
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
     },
     storage::{
-        audited::Storage as AuditedStorage, memory::Storage as MemStorage,
-        metered::Storage as MeteredStorage,
+        audited::Storage as AuditedStorage, faulty::Storage as FaultyStorage,
+        memory::Storage as MemStorage, metered::Storage as MeteredStorage,
     },
     telemetry::metrics::task::Label,
     utils::{
@@ -58,14 +59,16 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, Clock, Error, Execution, Handle, ListenerOf, Metrics as _, Panicked,
-    Spawner as _, METRICS_PREFIX,
+    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
+    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
+#[cfg(miri)]
+use commonware_utils::NZUsize;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -94,7 +97,7 @@ use std::{
     num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, RwLock, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -210,6 +213,10 @@ pub struct Config {
 
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
+
+    /// Configuration for deterministic storage fault injection.
+    /// Defaults to no faults being injected.
+    storage_faults: FaultConfig,
 }
 
 impl Config {
@@ -220,6 +227,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
+            storage_faults: FaultConfig::default(),
         }
     }
 
@@ -252,6 +260,16 @@ impl Config {
     /// See [Config]
     pub const fn with_catch_panics(mut self, catch_panics: bool) -> Self {
         self.catch_panics = catch_panics;
+        self
+    }
+
+    /// Configure storage fault injection.
+    ///
+    /// When set, the runtime will inject deterministic storage errors based on
+    /// the provided configuration. Faults are drawn from the shared RNG, ensuring
+    /// reproducible failure patterns for a given seed.
+    pub const fn with_storage_faults(mut self, faults: FaultConfig) -> Self {
+        self.storage_faults = faults;
         self
     }
 
@@ -299,7 +317,7 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<BoxDynRng>,
+    rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -386,7 +404,7 @@ pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
     auditor: Arc<Auditor>,
-    rng: Mutex<BoxDynRng>,
+    rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
@@ -798,7 +816,7 @@ impl Tasks {
 }
 
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
-type Storage = MeteredStorage<AuditedStorage<MemStorage>>;
+type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `deterministic`
@@ -809,6 +827,8 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -823,6 +843,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
 
             tree: child,
             execution: Execution::default(),
@@ -844,12 +866,49 @@ impl Context {
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let auditor = Arc::new(Auditor::default());
+
+        // Create shared RNG (used by both executor and storage)
+        let rng = Arc::new(Mutex::new(cfg.rng));
+
+        // Create storage fault config (default to disabled if None)
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
         let storage = MeteredStorage::new(
-            AuditedStorage::new(MemStorage::default(), auditor.clone()),
+            AuditedStorage::new(
+                FaultyStorage::new(MemStorage::default(), rng.clone(), storage_fault_config),
+                auditor.clone(),
+            ),
             runtime_registry,
         );
+
+        // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
+
+        // Initialize buffer pools
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+            } else {
+                let network_config = BufferPoolConfig::for_network();
+                let storage_config = BufferPoolConfig::for_storage();
+            }
+        }
+        let network_buffer_pool = BufferPool::new(
+            network_config,
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            storage_config,
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -861,7 +920,7 @@ impl Context {
             deadline,
             metrics,
             auditor,
-            rng: Mutex::new(cfg.rng),
+            rng,
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks::new()),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -877,6 +936,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                network_buffer_pool,
+                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -908,6 +969,32 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
 
+        // Initialize buffer pools
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under Miri
+                let network_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+                let storage_config = BufferPoolConfig {
+                    max_per_class: NZUsize!(32),
+                    ..BufferPoolConfig::for_storage()
+                };
+            } else {
+                let network_config = BufferPoolConfig::for_network();
+                let storage_config = BufferPoolConfig::for_storage();
+            }
+        }
+        let network_buffer_pool = BufferPool::new(
+            network_config,
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            storage_config,
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(checkpoint.catch_panics);
 
@@ -936,6 +1023,8 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
+                network_buffer_pool,
+                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
                 instrumented: false,
@@ -962,7 +1051,16 @@ impl Context {
 
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
-        self.storage.inner().inner().audit()
+        self.storage.inner().inner().inner().audit()
+    }
+
+    /// Access the storage fault configuration.
+    ///
+    /// Changes to the returned [`FaultConfig`] take effect immediately for
+    /// subsequent storage operations. This allows dynamically enabling or
+    /// disabling fault injection during a test.
+    pub fn storage_faults(&self) -> Arc<RwLock<FaultConfig>> {
+        self.storage.inner().inner().config()
     }
 
     /// Register a DNS mapping for a hostname.
@@ -1074,9 +1172,7 @@ impl crate::Spawner for Context {
                 result.map_err(|_| Error::Closed)?;
                 Ok(())
             },
-            _ = timeout_future => {
-                Err(Error::Timeout)
-            }
+            _ = timeout_future => Err(Error::Timeout),
         }
     }
 
@@ -1088,8 +1184,11 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+impl crate::ThreadPooler for Context {
+    fn create_thread_pool(
+        &self,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
         let mut builder = ThreadPoolBuilder::new().num_threads(concurrency.get());
 
         if rayon::current_thread_index().is_none() {
@@ -1493,6 +1592,16 @@ impl crate::Storage for Context {
     }
 }
 
+impl crate::BufferPooler for Context {
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
+        &self.network_buffer_pool
+    }
+
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
+        &self.storage_buffer_pool
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1500,8 +1609,20 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
-    use futures::stream::{FuturesUnordered, StreamExt as _};
+    use crate::{
+        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
+    };
+    use commonware_macros::test_traced;
+    #[cfg(feature = "external")]
+    use commonware_utils::channel::mpsc;
+    use commonware_utils::channel::oneshot;
+    #[cfg(not(feature = "external"))]
+    use futures::future::pending;
+    #[cfg(not(feature = "external"))]
+    use futures::stream::StreamExt as _;
+    #[cfg(feature = "external")]
+    use futures::StreamExt;
+    use futures::{stream::FuturesUnordered, task::noop_waker};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1525,12 +1646,6 @@ mod tests {
             (context.auditor().state(), outputs)
         })
     }
-    use commonware_macros::test_traced;
-    #[cfg(not(feature = "external"))]
-    use futures::future::pending;
-    #[cfg(feature = "external")]
-    use futures::{channel::mpsc, SinkExt, StreamExt};
-    use futures::{channel::oneshot, task::noop_waker};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
@@ -1648,7 +1763,7 @@ mod tests {
         // Run some tasks, sync storage, and recover the runtime
         let (state, checkpoint) = executor1.start_and_recover(|context| async move {
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(Vec::from(data), 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
             blob.sync().await.unwrap();
             context.auditor().state()
         });
@@ -1661,8 +1776,8 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read.as_ref(), data);
+            let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read.coalesce(), data);
         });
     }
 
@@ -1688,13 +1803,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         let partition = "test_partition";
         let name = b"test_blob";
-        let data = Vec::from("Hello, world!");
+        let data = b"Hello, world!";
 
         // Run some tasks without syncing storage
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let context = context.clone();
             let (blob, _) = context.open(partition, name).await.unwrap();
-            blob.write_at(data, 0).await.unwrap();
+            blob.write_at(0, data).await.unwrap();
         });
 
         // Recover the runtime
@@ -1832,7 +1947,7 @@ mod tests {
             let start_sim = context.current();
             let (first_tx, first_rx) = oneshot::channel();
             let (second_tx, second_rx) = oneshot::channel();
-            let (mut results_tx, mut results_rx) = mpsc::channel(2);
+            let (results_tx, mut results_rx) = mpsc::channel(2);
 
             // Create a thread that waits for 1 second
             let first_wait = Duration::from_secs(1);
@@ -1849,7 +1964,7 @@ mod tests {
 
             // Wait for a delay sampled before the external send occurs
             let first = context.clone().spawn({
-                let mut results_tx = results_tx.clone();
+                let results_tx = results_tx.clone();
                 move |context| async move {
                     first_rx.pace(&context, Duration::ZERO).await.unwrap();
                     let elapsed_real = SystemTime::now().duration_since(start_real).unwrap();
@@ -1877,7 +1992,7 @@ mod tests {
             // Ensure order is correct
             let mut results = Vec::new();
             for _ in 0..2 {
-                results.push(results_rx.next().await.unwrap());
+                results.push(results_rx.recv().await.unwrap());
             }
             assert_eq!(results, vec![1, 2]);
         });
@@ -1975,5 +2090,171 @@ mod tests {
                 .with_attribute("epoch", "old")
                 .with_attribute("epoch", "new");
         });
+    }
+
+    #[test]
+    fn test_storage_fault_injection_and_recovery() {
+        // Phase 1: Run with 100% sync failure rate
+        let cfg = deterministic::Config::default().with_storage_faults(FaultConfig {
+            sync_rate: Some(1.0),
+            ..Default::default()
+        });
+
+        let (result, checkpoint) =
+            deterministic::Runner::new(cfg).start_and_recover(|ctx| async move {
+                let (blob, _) = ctx.open("test_fault", b"blob").await.unwrap();
+                blob.write_at(0, b"data".to_vec()).await.unwrap();
+                blob.sync().await // This should fail due to fault injection
+            });
+
+        // Verify sync failed
+        assert!(result.is_err());
+
+        // Phase 2: Recover and disable faults explicitly
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            // Explicitly disable faults for recovery verification
+            *ctx.storage_faults().write().unwrap() = FaultConfig::default();
+
+            // Data was not synced, so blob should be empty (unsynced writes are lost)
+            let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
+            assert_eq!(len, 0, "unsynced data should be lost after recovery");
+
+            // Now we can write and sync successfully
+            blob.write_at(0, b"recovered".to_vec()).await.unwrap();
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+
+            // Verify data persisted
+            let read_buf = blob.read_at(0, vec![0u8; 9]).await.unwrap();
+            assert_eq!(read_buf.coalesce(), b"recovered");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_dynamic_config() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
+
+            // Initially no faults - sync should succeed
+            blob.write_at(0, b"initial".to_vec()).await.unwrap();
+            blob.sync().await.expect("initial sync should succeed");
+
+            // Enable sync faults dynamically
+            let faults = ctx.storage_faults();
+            faults.write().unwrap().sync_rate = Some(1.0);
+
+            // Now sync should fail
+            blob.write_at(0, b"updated".to_vec()).await.unwrap();
+            let result = blob.sync().await;
+            assert!(result.is_err(), "sync should fail with faults enabled");
+
+            // Disable faults
+            faults.write().unwrap().sync_rate = Some(0.0);
+
+            // Sync should succeed again
+            blob.sync()
+                .await
+                .expect("sync should succeed with faults disabled");
+        });
+    }
+
+    #[test]
+    fn test_storage_fault_determinism() {
+        // Run the same sequence twice with the same seed
+        fn run_with_seed(seed: u64) -> Vec<bool> {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_faults(FaultConfig {
+                    open_rate: Some(0.5),
+                    ..Default::default()
+                });
+
+            let runner = deterministic::Runner::new(cfg);
+            runner.start(|ctx| async move {
+                let mut results = Vec::new();
+                for i in 0..20 {
+                    let name = format!("blob{i}");
+                    let result = ctx.open("test_determinism", name.as_bytes()).await;
+                    results.push(result.is_ok());
+                }
+                results
+            })
+        }
+
+        let results1 = run_with_seed(12345);
+        let results2 = run_with_seed(12345);
+        assert_eq!(
+            results1, results2,
+            "same seed should produce same failure pattern"
+        );
+
+        let results3 = run_with_seed(99999);
+        assert_ne!(
+            results1, results3,
+            "different seeds should produce different patterns"
+        );
+    }
+
+    #[test]
+    fn test_storage_fault_determinism_multi_task() {
+        // Run the same multi-task sequence twice with the same seed.
+        // This tests that task shuffling + fault decisions interleave deterministically.
+        fn run_with_seed(seed: u64) -> Vec<u32> {
+            let cfg = deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_faults(FaultConfig {
+                    open_rate: Some(0.5),
+                    write_rate: Some(0.3),
+                    sync_rate: Some(0.2),
+                    ..Default::default()
+                });
+
+            let runner = deterministic::Runner::new(cfg);
+            runner.start(|ctx| async move {
+                // Spawn multiple tasks that do storage operations
+                let mut handles = Vec::new();
+                for i in 0..5 {
+                    let ctx = ctx.clone();
+                    handles.push(ctx.spawn(move |ctx| async move {
+                        let mut successes = 0u32;
+                        for j in 0..4 {
+                            let name = format!("task{i}_blob{j}");
+                            if let Ok((blob, _)) = ctx.open("partition", name.as_bytes()).await {
+                                successes += 1;
+                                if blob.write_at(0, b"data".to_vec()).await.is_ok() {
+                                    successes += 1;
+                                }
+                                if blob.sync().await.is_ok() {
+                                    successes += 1;
+                                }
+                            }
+                        }
+                        successes
+                    }));
+                }
+
+                // Collect results from all tasks
+                let mut results = Vec::new();
+                for handle in handles {
+                    results.push(handle.await.unwrap());
+                }
+                results
+            })
+        }
+
+        let results1 = run_with_seed(42);
+        let results2 = run_with_seed(42);
+        assert_eq!(
+            results1, results2,
+            "same seed should produce same multi-task pattern"
+        );
+
+        let results3 = run_with_seed(99999);
+        assert_ne!(
+            results1, results3,
+            "different seeds should produce different patterns"
+        );
     }
 }

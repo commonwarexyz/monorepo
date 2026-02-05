@@ -4,12 +4,13 @@ members = [
     "codec",
     "coding",
     "collector",
-    "conformance/macros",
     "conformance",
+    "conformance/macros",
     "consensus",
     "cryptography",
     "deployer",
     "macros",
+    "macros/impl",
     "math",
     "p2p",
     "parallel",
@@ -43,22 +44,25 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.65"
+version = "2026.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
+warnings = "deny"
 
 [workspace.lints.clippy]
 missing-const-for-fn = "warn"
 use-self = "warn"
 redundant-clone = "warn"
 option-if-let-else = "warn"
+disallowed_types = "deny"
+disallowed_macros = "deny"
 undocumented_unsafe_blocks = "deny"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
@@ -81,28 +85,30 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-broadcast = { version = "0.0.65", path = "broadcast" }
-commonware-codec = { version = "0.0.65", path = "codec", default-features = false }
-commonware-coding = { version = "0.0.65", path = "coding" }
-commonware-collector = { version = "0.0.65", path = "collector" }
-commonware-conformance = { version = "0.0.65", path = "conformance" }
-commonware-conformance-macros = { version = "0.0.65", path = "conformance/macros" }
-commonware-consensus = { version = "0.0.65", path = "consensus" }
-commonware-cryptography = { version = "0.0.65", path = "cryptography", default-features = false }
-commonware-deployer = { version = "0.0.65", path = "deployer", default-features = false }
-commonware-macros = { version = "0.0.65", path = "macros" }
-commonware-math = { version = "0.0.65", path = "math", default-features = false }
-commonware-p2p = { version = "0.0.65", path = "p2p" }
-commonware-parallel = { version = "0.0.65", path = "parallel", default-features = false }
-commonware-resolver = { version = "0.0.65", path = "resolver" }
-commonware-runtime = { version = "0.0.65", path = "runtime" }
-commonware-storage = { version = "0.0.65", path = "storage", default-features = false }
-commonware-stream = { version = "0.0.65", path = "stream" }
-commonware-utils = { version = "0.0.65", path = "utils", default-features = false }
+commonware-broadcast = { version = "2026.2.0", path = "broadcast" }
+commonware-codec = { version = "2026.2.0", path = "codec", default-features = false }
+commonware-coding = { version = "2026.2.0", path = "coding" }
+commonware-collector = { version = "2026.2.0", path = "collector" }
+commonware-conformance = { version = "2026.2.0", path = "conformance" }
+commonware-conformance-macros = { version = "2026.2.0", path = "conformance/macros" }
+commonware-consensus = { version = "2026.2.0", path = "consensus" }
+commonware-cryptography = { version = "2026.2.0", path = "cryptography", default-features = false }
+commonware-deployer = { version = "2026.2.0", path = "deployer", default-features = false }
+commonware-macros = { version = "2026.2.0", path = "macros", default-features = false }
+commonware-macros-impl = { version = "2026.2.0", path = "macros/impl" }
+commonware-math = { version = "2026.2.0", path = "math", default-features = false }
+commonware-p2p = { version = "2026.2.0", path = "p2p" }
+commonware-parallel = { version = "2026.2.0", path = "parallel", default-features = false }
+commonware-resolver = { version = "2026.2.0", path = "resolver" }
+commonware-runtime = { version = "2026.2.0", path = "runtime" }
+commonware-storage = { version = "2026.2.0", path = "storage", default-features = false }
+commonware-stream = { version = "2026.2.0", path = "stream" }
+commonware-utils = { version = "2026.2.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
+crossbeam-queue = "0.3.12"
 crossterm = "0.29.0"
 ctutils = "0.3.1"
 ecdsa = { version = "0.16.9", default-features = false }

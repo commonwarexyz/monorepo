@@ -7,7 +7,7 @@
 
 use thiserror::Error;
 
-pub mod authenticated;
+commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
 pub mod segmented;
 
@@ -25,6 +25,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
     #[error("invalid blob size: index={0} size={1}")]

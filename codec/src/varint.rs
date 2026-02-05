@@ -53,6 +53,22 @@ const DATA_BITS_MASK: u8 = 0x7F;
 /// if clear this is the final byte.
 const CONTINUATION_BIT_MASK: u8 = 0x80;
 
+/// Maximum encoded size of a u16 varint in bytes.
+pub const MAX_U16_VARINT_SIZE: usize =
+    (size_of::<u16>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
+/// Maximum encoded size of a u32 varint in bytes.
+pub const MAX_U32_VARINT_SIZE: usize =
+    (size_of::<u32>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
+/// Maximum encoded size of a u64 varint in bytes.
+pub const MAX_U64_VARINT_SIZE: usize =
+    (size_of::<u64>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
+/// Maximum encoded size of a u128 varint in bytes.
+pub const MAX_U128_VARINT_SIZE: usize =
+    (size_of::<u128>() * BITS_PER_BYTE).div_ceil(DATA_BITS_PER_BYTE);
+
 /// An incremental varint decoder for reading varints byte-by-byte from streams.
 ///
 /// This is useful when reading from async streams where you receive one byte at a time
@@ -411,8 +427,6 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 mod tests {
     use super::*;
     use crate::{error::Error, DecodeExt, Encode};
-    #[cfg(not(feature = "std"))]
-    use alloc::vec::Vec;
     use bytes::Bytes;
 
     #[test]
@@ -742,6 +756,26 @@ mod tests {
         test_single_bits::<u32>();
         test_single_bits::<u64>();
         test_single_bits::<u128>();
+    }
+
+    #[test]
+    fn test_max_varint_size_constants() {
+        let mut buf = Vec::new();
+
+        write(u16::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U16_VARINT_SIZE);
+        buf.clear();
+
+        write(u32::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U32_VARINT_SIZE);
+        buf.clear();
+
+        write(u64::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U64_VARINT_SIZE);
+        buf.clear();
+
+        write(u128::MAX, &mut buf);
+        assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
     }
 
     #[cfg(feature = "arbitrary")]

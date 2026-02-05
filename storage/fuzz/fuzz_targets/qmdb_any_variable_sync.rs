@@ -2,11 +2,12 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
+        store::LogStore as _,
         verify_proof,
     },
     translator::TwoCap,
@@ -147,7 +148,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_codec_config: ((0..=100000).into(), ()),
         translator: TwoCap,
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(1)),
     }
 }
 
@@ -190,7 +191,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.op_count(), clean_db.root());
+                    historical_roots.insert(clean_db.bounds().end, clean_db.root());
                     db = clean_db.into_mutable();
                 }
 
@@ -212,7 +213,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Proof { start_loc, max_ops } => {
-                    let op_count = db.op_count();
+                    let op_count = db.bounds().end;
                     let oldest_retained_loc = db.inactivity_floor_loc();
                     if op_count == 0 {
                         continue;
@@ -234,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                     start_loc,
                     max_ops,
                 } => {
-                    let op_count = db.op_count();
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -268,7 +269,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    let _ = db.bounds().end;
                 }
 
                 Operation::Root => {

@@ -69,10 +69,18 @@ impl Record {
     // ---------- Setters ----------
 
     /// Update the record with a new address.
-    pub fn update(&mut self, addr: types::Address) {
+    ///
+    /// Returns `true` if the address was changed, `false` if unchanged or self.
+    pub fn update(&mut self, addr: types::Address) -> bool {
         match &mut self.address {
-            Address::Myself => {}
-            Address::Known(existing) => *existing = addr,
+            Address::Myself => false,
+            Address::Known(existing) => {
+                if *existing == addr {
+                    return false;
+                }
+                *existing = addr;
+                true
+            }
         }
     }
 

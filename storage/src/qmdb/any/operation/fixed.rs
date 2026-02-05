@@ -6,11 +6,11 @@ use crate::{
         FixedValue,
     },
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     util::{at_least, ensure_zeros},
     Codec, CodecFixed, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
+use commonware_runtime::{Buf, BufMut};
 use commonware_utils::Array;
 
 impl<K, V, S> Operation<K, FixedEncoding<V>, S>

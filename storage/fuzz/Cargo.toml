@@ -10,7 +10,6 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
@@ -226,6 +225,20 @@ bench = false
 [[bin]]
 name = "oversized_recovery"
 path = "fuzz_targets/oversized_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_crash_recovery"
+path = "fuzz_targets/journal_crash_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mmr_journaled_crash_recovery"
+path = "fuzz_targets/mmr_journaled_crash_recovery.rs"
 test = false
 doc = false
 bench = false

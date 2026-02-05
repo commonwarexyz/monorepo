@@ -7,6 +7,16 @@ inputs:
 runs:
   using: composite
   steps:
+    # Use /mnt for Cargo builds on Linux (has ~70GB vs ~14GB on /)
+    - name: Relocate Cargo directories to /mnt on Linux
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo mkdir -p /mnt/target /mnt/.cargo/bin
+        sudo chown -R "$(id -u):$(id -g)" /mnt/target /mnt/.cargo
+        echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
+        echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
+        echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
     - name: Normalize cache key
       id: cache-key
       shell: bash
@@ -22,3 +32,4 @@ runs:
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
         cache-workspace-crates: true
+        cache-directories: ${{ env.CARGO_TARGET_DIR }}

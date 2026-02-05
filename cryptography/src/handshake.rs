@@ -24,8 +24,10 @@
 //! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
 //! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
 //! a 12 byte counter to used as a nonce, with every call to [SendCipher::send] on one end,
-//! or [RecvCipher::recv] on the other end incrementing this counter.
-//! Note that this guarantees that messages sent are received in order.
+//! or [RecvCipher::recv] on the other end incrementing this counter. This guarantees that if
+//! a message is successfully received, then it was delivered in order. Re-ordering messages on
+//! the wire will have the effect of producing errors on the receiving end, but not of producing
+//! successful messages in a different order.
 //!
 //! # Security Features
 //!
@@ -47,7 +49,7 @@ mod key_exchange;
 use key_exchange::{EphemeralPublicKey, SecretKey};
 
 mod cipher;
-pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
+pub use cipher::{RecvCipher, SendCipher, TAG_SIZE};
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;

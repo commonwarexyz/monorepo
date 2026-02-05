@@ -1,4 +1,4 @@
-use futures::channel::mpsc;
+use commonware_utils::channel::mpsc::{self, error::TrySendError};
 
 #[derive(Clone, Debug)]
 pub struct Relay<T> {
@@ -16,12 +16,8 @@ impl<T> Relay<T> {
     /// Uses non-blocking `try_send` to avoid blocking the caller when the
     /// channel buffer is full. Returns an error if the channel is full or
     /// disconnected.
-    pub fn send(&mut self, message: T, priority: bool) -> Result<(), mpsc::TrySendError<T>> {
-        let sender = if priority {
-            &mut self.high
-        } else {
-            &mut self.low
-        };
+    pub fn send(&self, message: T, priority: bool) -> Result<(), TrySendError<T>> {
+        let sender = if priority { &self.high } else { &self.low };
         sender.try_send(message)
     }
 }
@@ -34,28 +30,28 @@ mod tests {
     fn test_relay_content_priority() {
         let (low_sender, mut low_receiver) = mpsc::channel(1);
         let (high_sender, mut high_receiver) = mpsc::channel(1);
-        let mut relay = Relay::new(low_sender, high_sender);
+        let relay = Relay::new(low_sender, high_sender);
 
         // Send a high priority message
         let data = 123;
         relay.send(data, true).unwrap();
-        match high_receiver.try_next() {
-            Ok(Some(received_data)) => {
+        match high_receiver.try_recv() {
+            Ok(received_data) => {
                 assert_eq!(data, received_data);
             }
             _ => panic!("Expected high priority message"),
         }
-        assert!(low_receiver.try_next().is_err());
+        assert!(low_receiver.try_recv().is_err());
 
         // Send a low priority message
         let data = 456;
         relay.send(data, false).unwrap();
-        match low_receiver.try_next() {
-            Ok(Some(received_data)) => {
+        match low_receiver.try_recv() {
+            Ok(received_data) => {
                 assert_eq!(data, received_data);
             }
             _ => panic!("Expected low priority message"),
         }
-        assert!(high_receiver.try_next().is_err());
+        assert!(high_receiver.try_recv().is_err());
     }
 }

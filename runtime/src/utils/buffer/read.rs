@@ -1,5 +1,4 @@
-use crate::{Blob, Error};
-use commonware_utils::StableBuf;
+use crate::{Blob, Error, IoBufMut};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -17,7 +16,7 @@ use std::num::NonZeroUsize;
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to open blob");
 ///     let data = b"Hello, world! This is a test.".to_vec();
 ///     let size = data.len() as u64;
-///     blob.write_at(data, 0).await.expect("unable to write data");
+///     blob.write_at(0, data).await.expect("unable to write data");
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
@@ -36,7 +35,7 @@ pub struct Read<B: Blob> {
     /// The underlying blob to read from.
     blob: B,
     /// The buffer storing the data read from the blob.
-    buffer: StableBuf,
+    buffer: IoBufMut,
     /// The current position in the blob from where the buffer was filled.
     blob_position: u64,
     /// The size of the blob.
@@ -58,7 +57,7 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: vec![0; buffer_size.get()].into(),
+            buffer: IoBufMut::with_capacity(buffer_size.get()),
             blob_position: 0,
             blob_size,
             buffer_position: 0,
@@ -100,22 +99,19 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Read the data - we only need a single read operation since we know exactly how much data is available.
-        if bytes_to_read < self.buffer_size {
-            // Read into a temp buffer for the end-of-blob case to avoid truncating underlying buffer.
-            let mut tmp_buffer = vec![0u8; bytes_to_read];
-            tmp_buffer = self
-                .blob
-                .read_at(tmp_buffer, self.blob_position)
-                .await?
-                .into();
-            self.buffer.as_mut()[0..bytes_to_read].copy_from_slice(&tmp_buffer[0..bytes_to_read]);
+        // Reuse existing buffer if it has enough capacity, otherwise allocate new
+        let mut buf = std::mem::take(&mut self.buffer);
+        buf.clear();
+        let buf = if buf.capacity() >= bytes_to_read {
+            // SAFETY: We just cleared the buffer and verified capacity.
+            // The bytes will be overwritten by read_at before being read.
+            unsafe { buf.set_len(bytes_to_read) };
+            buf
         } else {
-            self.buffer = self
-                .blob
-                .read_at(std::mem::take(&mut self.buffer), self.blob_position)
-                .await?;
-        }
+            IoBufMut::zeroed(bytes_to_read)
+        };
+        let read_result = self.blob.read_at(self.blob_position, buf).await?;
+        self.buffer = read_result.coalesce();
         self.buffer_valid_len = bytes_to_read;
 
         Ok(bytes_to_read)

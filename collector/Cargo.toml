@@ -15,15 +15,13 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-commonware-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
 commonware-p2p.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
-futures.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 thiserror.workspace = true

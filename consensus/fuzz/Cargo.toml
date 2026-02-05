@@ -10,7 +10,6 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-bytes.workspace = true
 commonware-codec.workspace = true
 commonware-consensus = { workspace = true, features = ["arbitrary", "fuzz"] }
 commonware-cryptography.workspace = true
@@ -23,6 +22,12 @@ commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
+rand_core.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 rand_core.workspace = true
 
 [[bin]]
@@ -49,6 +54,48 @@ bench = false
 [[bin]]
 name = "simplex_ed25519"
 path = "fuzz_targets/simplex_ed25519.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_twin"
+path = "fuzz_targets/simplex_ed25519_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minpk_twin"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minsig_twin"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk_twin"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig_twin"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_twin"
+path = "fuzz_targets/simplex_secp256r1_twin.rs"
 test = false
 doc = false
 bench = false

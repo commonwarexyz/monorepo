@@ -3,10 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{
     buffer::{
-        pool::{Append, PoolRef},
+        paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, IoBufMut, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -34,8 +34,8 @@ enum FuzzOperation {
     CreateAppend {
         initial_size: u16,
         buffer_size: u16,
-        pool_page_size: u16,
-        pool_capacity: u16,
+        cache_page_size: u16,
+        cache_capacity: u16,
     },
     ReadExact {
         size: u16,
@@ -65,7 +65,7 @@ enum FuzzOperation {
         new_size: u16,
     },
     AppendSync,
-    PoolCache {
+    PageCache {
         blob_id: u16,
         data: Vec<u8>,
         offset: u16,
@@ -100,14 +100,14 @@ fn fuzz(input: FuzzInput) {
         let prefill = (input.seed as usize) & 0x0FFF;
         if prefill > 0 && initial_size == 0 {
             let initial_data: Vec<u8> = (0..prefill).map(|i| i as u8).collect();
-            let _ = blob.write_at(initial_data, 0).await;
+            let _ = blob.write_at(0, initial_data).await;
         }
 
         let mut read_buffer = None;
         let mut write_buffer = None;
         let mut append_buffer = None;
-        let mut pool_ref = None;
-        let mut pool_page_size_ref = None;
+        let mut cache_ref = None;
+        let mut cache_page_size_ref = None;
 
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
@@ -126,7 +126,7 @@ fn fuzz(input: FuzzInput) {
                     if size == 0 && blob_size > 0 {
                         let data: Vec<u8> = (0..blob_size).map(|i| i as u8).collect();
                         if (0u64).checked_add(data.len() as u64).is_some() {
-                            blob.write_at(data, 0).await.expect("cannot write");
+                            blob.write_at(0, data).await.expect("cannot write");
                         }
                     }
 
@@ -150,29 +150,29 @@ fn fuzz(input: FuzzInput) {
                 FuzzOperation::CreateAppend {
                     initial_size,
                     buffer_size,
-                    pool_page_size,
-                    pool_capacity,
+                    cache_page_size,
+                    cache_capacity,
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
-                    let pool_capacity = NZUsize!((pool_capacity as usize).clamp(1, MAX_SIZE));
+                    let cache_capacity = NZUsize!((cache_capacity as usize).clamp(1, MAX_SIZE));
 
                     let (blob, _) = context
                         .open("test_partition", b"append_blob")
                         .await
                         .expect("cannot open write blob");
 
-                    // Only create a new pool if one doesn't exist. Reusing the same blob with
+                    // Only create a new cache if one doesn't exist. Reusing the same blob with
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
-                    if pool_ref.is_none() {
-                        let pool_page_size = pool_page_size.clamp(1, u16::MAX);
-                        pool_ref = Some(PoolRef::new(NZU16!(pool_page_size), pool_capacity));
-                        pool_page_size_ref = Some(pool_page_size);
+                    if cache_ref.is_none() {
+                        let cache_page_size = cache_page_size.clamp(1, u16::MAX);
+                        cache_ref = Some(CacheRef::new(NZU16!(cache_page_size), cache_capacity));
+                        cache_page_size_ref = Some(cache_page_size);
                     }
 
-                    if let Some(ref pool) = pool_ref {
+                    if let Some(ref cache) = cache_ref {
                         append_buffer =
-                            Append::new(blob, initial_size as u64, buffer_size, pool.clone())
+                            Append::new(blob, initial_size as u64, buffer_size, cache.clone())
                                 .await
                                 .ok();
                     }
@@ -219,7 +219,7 @@ fn fuzz(input: FuzzInput) {
                         };
                         let offset = offset as u64;
                         if offset.checked_add(data.len() as u64).is_some() {
-                            let _ = writer.write_at(data.to_vec(), offset).await;
+                            let _ = writer.write_at(offset, data.to_vec()).await;
                         }
                     }
                 }
@@ -263,19 +263,19 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                FuzzOperation::PoolCache {
+                FuzzOperation::PageCache {
                     blob_id,
                     data,
                     offset,
                 } => {
-                    if let Some(ref pool) = pool_ref {
+                    if let Some(ref cache) = cache_ref {
                         let offset = offset as u64;
-                        if data.len() >= pool.page_size() as usize {
-                            let data = &data[..pool.page_size() as usize];
-                            if let Some(pool_page_size) = pool_page_size_ref {
+                        if data.len() >= cache.page_size() as usize {
+                            let data = &data[..cache.page_size() as usize];
+                            if let Some(cache_page_size) = cache_page_size_ref {
                                 let aligned_offset =
-                                    (offset / pool_page_size as u64) * pool_page_size as u64;
-                                let _ = pool.cache(blob_id as u64, data, aligned_offset).await;
+                                    (offset / cache_page_size as u64) * cache_page_size as u64;
+                                let _ = cache.cache(blob_id as u64, data, aligned_offset).await;
                             }
                         }
                     }
@@ -316,8 +316,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let buf = vec![0u8; size];
-                            let _ = writer.read_at(buf, offset).await;
+                            let _ = writer.read_at(offset, IoBufMut::zeroed(size)).await;
                         }
                     }
                 }
@@ -345,8 +344,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let buf = vec![0u8; size];
-                            let _ = append.read_at(buf, offset).await;
+                            let _ = append.read_at(offset, IoBufMut::zeroed(size)).await;
                         }
                     }
                 }

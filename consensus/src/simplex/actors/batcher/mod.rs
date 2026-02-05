@@ -46,8 +46,8 @@ mod tests {
                 ed25519, secp256r1, Scheme,
             },
             types::{
-                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
-                Nullify, Proposal, Vote,
+                Activity, Certificate, Finalization, Finalize, Notarization, Notarize,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Participant, Round, View},
@@ -68,7 +68,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use futures::{channel::mpsc, StreamExt};
+    use commonware_utils::channel::mpsc;
     use std::{num::NonZeroU32, time::Duration};
 
     /// Default rate limit set high enough to not interfere with normal operation
@@ -225,7 +225,7 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
             );
@@ -243,7 +243,7 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Nullification(n), _) if n.view() == view)
             );
@@ -260,7 +260,7 @@ mod tests {
 
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Finalization(f), _) if f.view() == view)
             );
@@ -403,13 +403,13 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Should receive the leader's proposal first (participant 1 is leader)
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload"))
             );
 
             // Should receive notarization certificate from quorum of votes
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view));
         });
     }
@@ -559,7 +559,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive the leader's proposal (participant 1)
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(&output, voter::Message::Proposal(p) if p.view() == view));
 
             // Now send the certificate from network
@@ -576,7 +576,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive exactly one notarization
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(output, voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view)
             );
@@ -600,7 +600,7 @@ mod tests {
 
             // Try to receive another message (with timeout)
             let got_duplicate = select! {
-                _ = voter_receiver.next() => { true },
+                _ = voter_receiver.recv() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
             };
 
@@ -736,7 +736,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // The batcher should receive the leader's proposal
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(matches!(
                 &output,
                 voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"payload_a")
@@ -768,7 +768,7 @@ mod tests {
 
             // Should NOT have a certificate yet
             let got_certificate = select! {
-                _output = voter_receiver.next() => { true },
+                _output = voter_receiver.recv() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
             };
             assert!(
@@ -801,7 +801,7 @@ mod tests {
 
             // Still should not have certificate (only 3 votes for proposal_a: 0, 1, 6)
             let got_certificate = select! {
-                _output = voter_receiver.next() => { true },
+                _output = voter_receiver.recv() => { true },
                 _ = context.sleep(Duration::from_millis(100)) => { false },
             };
             assert!(
@@ -940,7 +940,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive the leader's proposal forwarded to voter
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
                 "Expected proposal to be forwarded after leader set"
@@ -1068,7 +1068,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Should receive the leader's proposal forwarded to voter
-            let output = voter_receiver.next().await.unwrap();
+            let output = voter_receiver.recv().await.unwrap();
             assert!(
                 matches!(&output, voter::Message::Proposal(p) if p.view() == view && p.payload == Sha256::hash(b"test_payload")),
                 "Expected proposal to be forwarded after leader set (vote arrived before leader was known)"
@@ -1371,7 +1371,7 @@ mod tests {
 
             // Should receive a notarization certificate (view 1 is above finalized=0)
             loop {
-                let output = voter_receiver.next().await.unwrap();
+                let output = voter_receiver.recv().await.unwrap();
                 match output {
                     voter::Message::Proposal(_) => continue,
                     voter::Message::Verified(Certificate::Notarization(n), _) => {
@@ -1417,16 +1417,14 @@ mod tests {
 
             // Should NOT receive any certificate for the finalized view
             select! {
-                msg = voter_receiver.next() => {
-                    match msg {
-                        Some(voter::Message::Proposal(_)) => {},
-                        Some(voter::Message::Verified(cert, _)) if cert.view() == view2 => {
-                            panic!("should not receive any certificate for the finalized view");
-                        },
-                        _ => {},
+                msg = voter_receiver.recv() => match msg {
+                    Some(voter::Message::Proposal(_)) => {}
+                    Some(voter::Message::Verified(cert, _)) if cert.view() == view2 => {
+                        panic!("should not receive any certificate for the finalized view");
                     }
+                    _ => {}
                 },
-                _ = context.sleep(Duration::from_millis(200)) => { },
+                _ = context.sleep(Duration::from_millis(200)) => {},
             };
         });
     }
@@ -1587,7 +1585,7 @@ mod tests {
 
             // Receive proposal and certificate
             loop {
-                let output = voter_receiver.next().await.unwrap();
+                let output = voter_receiver.recv().await.unwrap();
                 match output {
                     voter::Message::Proposal(_) => continue,
                     voter::Message::Verified(Certificate::Notarization(n), _) => {
@@ -1678,5 +1676,443 @@ mod tests {
         latest_vote_metric_tracking(bls12381_multisig::fixture::<MinSig, _>);
         latest_vote_metric_tracking(ed25519::fixture);
         latest_vote_metric_tracking(secp256r1::fixture);
+    }
+
+    fn duplicate_vote_with_different_attestation_blocks_peer<S, F, V>(mut fixture: F, sign_vote: V)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Set up participant 1 as sender
+            let sender_pk = participants[1].clone();
+            let (mut sender, _receiver) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(sender_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            let active = batcher_mailbox
+                .update(view, Participant::new(1), View::zero())
+                .await;
+            assert!(active);
+
+            let round = Round::new(epoch, view);
+            let proposal = Proposal::new(round, View::zero(), Sha256::hash(b"test_payload"));
+
+            // Send first valid vote from participant 1
+            let vote1 = sign_vote(&schemes[1], proposal.clone());
+            sender
+                .send(Recipients::One(me.clone()), vote1.encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Verify not blocked yet
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "No peers should be blocked after first vote"
+            );
+
+            // Send same vote again (exact duplicate) - should be ignored, not blocked
+            sender
+                .send(Recipients::One(me.clone()), vote1.encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "Duplicate vote should be ignored, not blocked"
+            );
+
+            // Now send a vote with the SAME proposal but with a different signature
+            let vote2 = sign_vote(&schemes[2], proposal.clone());
+            sender
+                .send(Recipients::One(me.clone()), vote2.encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Participant 1 should be blocked because they sent 2 votes with different attestations
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.iter().any(|(_, blocked)| blocked == &sender_pk),
+                "Sender should be blocked for vote with mismatched signer"
+            );
+        });
+    }
+
+    fn sign_notarize<S: Scheme<Sha256Digest>>(
+        scheme: &S,
+        p: Proposal<Sha256Digest>,
+    ) -> Vote<S, Sha256Digest> {
+        Vote::Notarize(Notarize::sign(scheme, p).unwrap())
+    }
+
+    fn sign_finalize<S: Scheme<Sha256Digest>>(
+        scheme: &S,
+        p: Proposal<Sha256Digest>,
+    ) -> Vote<S, Sha256Digest> {
+        Vote::Finalize(Finalize::sign(scheme, p).unwrap())
+    }
+
+    #[test_traced]
+    fn test_duplicate_notarize_with_different_attestation_blocks_peer() {
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            sign_notarize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            sign_notarize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            sign_notarize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            sign_notarize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_multisig::fixture::<MinPk, _>,
+            sign_notarize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_multisig::fixture::<MinSig, _>,
+            sign_notarize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture, sign_notarize);
+        duplicate_vote_with_different_attestation_blocks_peer(secp256r1::fixture, sign_notarize);
+    }
+
+    #[test_traced]
+    fn test_duplicate_finalize_with_different_attestation_blocks_peer() {
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            sign_finalize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            sign_finalize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            sign_finalize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            sign_finalize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_multisig::fixture::<MinPk, _>,
+            sign_finalize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(
+            bls12381_multisig::fixture::<MinSig, _>,
+            sign_finalize,
+        );
+        duplicate_vote_with_different_attestation_blocks_peer(ed25519::fixture, sign_finalize);
+        duplicate_vote_with_different_attestation_blocks_peer(secp256r1::fixture, sign_finalize);
+    }
+
+    fn conflicting_vote_creates_evidence<S, F, V, A>(
+        mut fixture: F,
+        sign_vote: V,
+        is_expected_activity: A,
+    ) where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
+        A: Fn(&Activity<S, Sha256Digest>) -> bool + Send + 'static,
+    {
+        let n = 5;
+        let namespace = b"batcher_test".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, _voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            // Set up participant 1 as sender
+            let sender_pk = participants[1].clone();
+            let (mut sender, _receiver) = oracle
+                .control(sender_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(sender_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            let active = batcher_mailbox
+                .update(view, Participant::new(1), View::zero())
+                .await;
+            assert!(active);
+
+            let round = Round::new(epoch, view);
+            let proposal1 = Proposal::new(round, View::zero(), Sha256::hash(b"payload1"));
+            let proposal2 = Proposal::new(round, View::zero(), Sha256::hash(b"payload2"));
+
+            // Send first valid vote for proposal1
+            let vote1 = sign_vote(&schemes[1], proposal1);
+            sender
+                .send(Recipients::One(me.clone()), vote1.encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "No peers should be blocked after first vote"
+            );
+
+            // Send conflicting vote for proposal2 (different payload = different proposal)
+            let vote2 = sign_vote(&schemes[1], proposal2);
+            sender
+                .send(Recipients::One(me.clone()), vote2.encode(), true)
+                .await
+                .unwrap();
+
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Participant 1 should be blocked for sending conflicting votes
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.iter().any(|(_, blocked)| blocked == &sender_pk),
+                "Sender should be blocked for conflicting vote"
+            );
+
+            // Verify conflicting evidence was reported via faults
+            let faults = reporter.faults.lock().unwrap();
+            let has_expected_fault = faults
+                .get(&sender_pk)
+                .and_then(|sf| sf.get(&view))
+                .is_some_and(|vf| vf.iter().any(&is_expected_activity));
+            assert!(has_expected_fault, "Should have conflicting fault reported");
+        });
+    }
+
+    fn is_conflicting_notarize<S: Scheme<Sha256Digest>>(a: &Activity<S, Sha256Digest>) -> bool {
+        matches!(a, Activity::ConflictingNotarize(_))
+    }
+
+    fn is_conflicting_finalize<S: Scheme<Sha256Digest>>(a: &Activity<S, Sha256Digest>) -> bool {
+        matches!(a, Activity::ConflictingFinalize(_))
+    }
+
+    #[test_traced]
+    fn test_conflicting_notarize_creates_evidence() {
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_multisig::fixture::<MinPk, _>,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_multisig::fixture::<MinSig, _>,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+        conflicting_vote_creates_evidence(ed25519::fixture, sign_notarize, is_conflicting_notarize);
+        conflicting_vote_creates_evidence(
+            secp256r1::fixture,
+            sign_notarize,
+            is_conflicting_notarize,
+        );
+    }
+
+    #[test_traced]
+    fn test_conflicting_finalize_creates_evidence() {
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_multisig::fixture::<MinPk, _>,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
+        conflicting_vote_creates_evidence(
+            bls12381_multisig::fixture::<MinSig, _>,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
+        conflicting_vote_creates_evidence(ed25519::fixture, sign_finalize, is_conflicting_finalize);
+        conflicting_vote_creates_evidence(
+            secp256r1::fixture,
+            sign_finalize,
+            is_conflicting_finalize,
+        );
     }
 }

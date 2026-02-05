@@ -14,7 +14,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -108,12 +108,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
             on_stopped => {
                 debug!("context shutdown, stopping spawner");
             },
-            msg = self.receiver.next() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping spawner");
-                    break;
-                };
-
+            Some(msg) = self.receiver.recv() else {
+                debug!("mailbox closed, stopping spawner");
+                break;
+            } => {
                 match msg {
                     Message::Spawn {
                         peer,
@@ -162,7 +160,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
                                 );
 
                                 // Register peer with the router (may fail during shutdown)
-                                let Some(channels) = router.ready(peer.clone(), messenger).await else {
+                                let Some(channels) = router.ready(peer.clone(), messenger).await
+                                else {
                                     debug!(?peer, "router shut down during peer setup");
                                     connections.dec();
                                     return;
@@ -186,7 +185,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: Public
                         });
                     }
                 }
-            }
+            },
         }
     }
 }

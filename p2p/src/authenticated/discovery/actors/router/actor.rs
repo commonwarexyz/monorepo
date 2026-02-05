@@ -4,19 +4,21 @@ use super::{
 };
 use crate::{
     authenticated::{
-        data::Data,
+        data::EncodedData,
         discovery::{channels::Channels, metrics},
         relay::Relay,
         Mailbox,
     },
-    Channel, Recipients,
+    Recipients,
 };
-use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channels::ring, NZUsize};
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_utils::{
+    channel::{mpsc, ring},
+    NZUsize,
+};
+use futures::SinkExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
 use tracing::debug;
@@ -26,7 +28,7 @@ pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
     context: ContextCell<E>,
 
     control: mpsc::Receiver<Message<P>>,
-    connections: BTreeMap<P, Relay<Data>>,
+    connections: BTreeMap<P, Relay<EncodedData>>,
     open_subscriptions: Vec<ring::Sender<Vec<P>>>,
 
     messages_dropped: Family<metrics::Message, Counter>,
@@ -61,17 +63,11 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         )
     }
 
-    /// Sends a message to the given `recipient`.
-    fn send(
-        &mut self,
-        recipient: P,
-        channel: Channel,
-        message: Bytes,
-        priority: bool,
-        sent: &mut Vec<P>,
-    ) {
-        if let Some(messenger) = self.connections.get_mut(&recipient) {
-            if messenger.send(Data { channel, message }, priority).is_ok() {
+    /// Sends pre-encoded data to the given `recipient`.
+    fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool, sent: &mut Vec<P>) {
+        let channel = encoded.channel;
+        if let Some(relay) = self.connections.get_mut(&recipient) {
+            if relay.send(encoded, priority).is_ok() {
                 sent.push(recipient);
             } else {
                 self.messages_dropped
@@ -101,12 +97,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
             on_stopped => {
                 debug!("context shutdown, stopping router");
             },
-            msg = self.control.next() => {
-                let Some(msg) = msg else {
-                    debug!("mailbox closed, stopping router");
-                    break;
-                };
-
+            Some(msg) = self.control.recv() else {
+                debug!("mailbox closed, stopping router");
+                break;
+            } => {
                 match msg {
                     Message::Ready {
                         peer,
@@ -125,40 +119,25 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                     }
                     Message::Content {
                         recipients,
-                        channel,
-                        message,
+                        encoded,
                         priority,
                         success,
                     } => {
                         let mut sent = Vec::new();
+                        let channel = encoded.channel;
                         match recipients {
                             Recipients::One(recipient) => {
-                                self.send(recipient, channel, message, priority, &mut sent);
+                                self.send(recipient, encoded, priority, &mut sent);
                             }
                             Recipients::Some(recipients) => {
                                 for recipient in recipients {
-                                    self.send(
-                                        recipient,
-                                        channel,
-                                        message.clone(),
-                                        priority,
-                                        &mut sent,
-                                    );
+                                    self.send(recipient, encoded.clone(), priority, &mut sent);
                                 }
                             }
                             Recipients::All => {
                                 // Send to all connected peers
-                                for (recipient, messenger) in self.connections.iter_mut() {
-                                    if messenger
-                                        .send(
-                                            Data {
-                                                channel,
-                                                message: message.clone(),
-                                            },
-                                            priority,
-                                        )
-                                        .is_ok()
-                                    {
+                                for (recipient, relay) in self.connections.iter_mut() {
+                                    if relay.send(encoded.clone(), priority).is_ok() {
                                         sent.push(recipient.clone());
                                     } else {
                                         self.messages_dropped
@@ -185,7 +164,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
                         let _ = response.send(receiver);
                     }
                 }
-            }
+            },
         }
     }
 

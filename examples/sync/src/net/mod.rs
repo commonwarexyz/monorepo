@@ -1,5 +1,5 @@
-use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_runtime::{Buf, BufMut};
 use std::mem::size_of;
 
 /// Maximum message size in bytes (10MB).

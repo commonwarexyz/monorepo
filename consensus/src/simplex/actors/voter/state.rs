@@ -2,7 +2,9 @@ use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
-        interesting, min_active,
+        interesting,
+        metrics::Peer,
+        min_active,
         scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -15,7 +17,7 @@ use crate::{
 use commonware_cryptography::{certificate, Digest};
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics};
 use commonware_utils::futures::Aborter;
-use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -62,7 +64,8 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 
     current_view: Gauge,
     tracked_views: Gauge,
-    skipped_views: Counter,
+    skips_per_leader: Family<Peer, Counter>,
+    nullifications_per_leader: Family<Peer, Counter>,
 }
 
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
@@ -71,10 +74,24 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
-        let skipped_views = Counter::default();
+        let skips_per_leader = Family::<Peer, Counter>::default();
+        let nullifications_per_leader = Family::<Peer, Counter>::default();
         context.register("current_view", "current view", current_view.clone());
         context.register("tracked_views", "tracked views", tracked_views.clone());
-        context.register("skipped_views", "skipped views", skipped_views.clone());
+        context.register(
+            "skips_per_leader",
+            "skipped views per leader",
+            skips_per_leader.clone(),
+        );
+        context.register(
+            "nullifications_per_leader",
+            "nullifications per leader",
+            nullifications_per_leader.clone(),
+        );
+        for participant in cfg.scheme.participants().iter() {
+            let _ = skips_per_leader.get_or_create(&Peer::new(participant));
+            let _ = nullifications_per_leader.get_or_create(&Peer::new(participant));
+        }
 
         // Build elector with participants
         let elector = cfg.elector.build(cfg.scheme.participants());
@@ -96,7 +113,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             outstanding_certifications: BTreeSet::new(),
             current_view,
             tracked_views,
-            skipped_views,
+            skips_per_leader,
+            nullifications_per_leader,
         }
     }
 
@@ -252,7 +270,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let view = nullification.view();
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&nullification.certificate));
-        self.create_round(view).add_nullification(nullification)
+
+        // Track skipped view per leader if we know who the leader was
+        let round = self.create_round(view);
+        let added = round.add_nullification(nullification);
+        if let Some(leader) = added.then(|| round.leader()).flatten() {
+            self.nullifications_per_leader
+                .get_or_create(&Peer::new(&leader.key))
+                .inc();
+        }
+
+        added
     }
 
     /// Inserts a finalization certificate, updates the finalized height, and advances the view.
@@ -366,10 +394,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
     pub fn expire_round(&mut self, view: View) {
         let now = self.context.current();
-        self.create_round(view).set_deadlines(now, now);
+        let round = self.create_round(view);
+        round.set_deadlines(now, now);
 
         // Update metrics
-        self.skipped_views.inc();
+        if let Some(leader) = round.leader() {
+            self.skips_per_leader
+                .get_or_create(&Peer::new(&leader.key))
+                .inc();
+        }
     }
 
     /// Attempt to propose a new block.
@@ -574,7 +607,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the payload of the proposal's parent if:
     /// - It is less-than the proposal view.
     /// - It is greater-than-or-equal-to the last finalized view.
-    /// - It is notarized or finalized.
+    /// - It is certified (or finalized, which implies certification).
     /// - There exist nullifications for all views between it and the proposal view.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Option<D> {
         // Sanity check that the parent view is less than the proposal view.

@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
     Write,
@@ -16,11 +15,8 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
-};
+use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
+use commonware_utils::channel::{mpsc, oneshot};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
@@ -30,6 +26,7 @@ use std::{
 
 const MAX_LEN: usize = 1_000_000;
 const MAX_OPERATIONS: usize = 256;
+const MIN_BUFFER_SIZE: u16 = 1;
 
 #[derive(Debug, Arbitrary)]
 enum RecipientsType {
@@ -231,7 +228,7 @@ impl CheckedSender for MockCheckedSender {
 
     async fn send(
         self,
-        _message: impl bytes::Buf + Send,
+        _message: impl Into<IoBufMut> + Send,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         Ok(vec![])
@@ -251,11 +248,11 @@ impl Receiver for MockReceiver {
     type Error = MockRecvError;
     type PublicKey = PublicKey;
 
-    async fn recv(&mut self) -> Result<(Self::PublicKey, bytes::Bytes), Self::Error> {
-        let (pk, msg) = self.rx.next().await.ok_or(MockRecvError)?;
+    async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
+        let (pk, msg) = self.rx.recv().await.ok_or(MockRecvError)?;
         match msg {
             Ok(req) => {
-                let mut buf = bytes::BytesMut::new();
+                let mut buf = IoBufMut::with_capacity(req.encode_size());
                 req.write(&mut buf);
                 Ok((pk, buf.freeze()))
             }
@@ -415,6 +412,7 @@ fn fuzz(input: FuzzInput) {
                     priority_response,
                 } => {
                     let idx = (peer_idx as usize) % peers.len();
+                    let mailbox_size = mailbox_size.max(MIN_BUFFER_SIZE);
                     let handler = handlers.get(&idx).cloned().unwrap_or_else(|| {
                         FuzzHandler::new(true, StdRng::seed_from_u64(rng.gen()))
                     });
@@ -439,14 +437,14 @@ fn fuzz(input: FuzzInput) {
                     restarts += 1;
                     mailboxes.insert(idx, mailbox);
 
-                    let (_tx, _rx) = mpsc::unbounded();
+                    let (_tx, _rx) = mpsc::unbounded_channel();
                     let mock_receiver = MockReceiver { rx: _rx };
                     engine.start(
                         (MockSender, mock_receiver),
                         (
                             MockSender,
                             MockReceiver {
-                                rx: mpsc::unbounded().1,
+                                rx: mpsc::unbounded_channel().1,
                             },
                         ),
                     );

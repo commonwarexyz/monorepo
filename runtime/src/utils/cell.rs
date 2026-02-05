@@ -1,9 +1,7 @@
-use crate::{signal, Error, Handle, SinkOf, StreamOf};
-use commonware_parallel::ThreadPool;
+use crate::{signal, Error, Handle};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
-use rayon::ThreadPoolBuildError;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -143,15 +141,6 @@ where
     }
 }
 
-impl<C> crate::RayonPoolSpawner for Cell<C>
-where
-    C: crate::RayonPoolSpawner,
-{
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
-        self.as_present().create_pool(concurrency)
-    }
-}
-
 impl<C> crate::Metrics for Cell<C>
 where
     C: crate::Metrics,
@@ -208,54 +197,87 @@ where
     }
 }
 
-impl<C> crate::Network for Cell<C>
-where
-    C: crate::Network,
-{
-    type Listener = <C as crate::Network>::Listener;
+commonware_macros::stability_scope!(BETA {
+    use crate::{SinkOf, StreamOf};
+    use commonware_parallel::ThreadPool;
+    use rayon::ThreadPoolBuildError;
 
-    fn bind(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
-        self.as_present().bind(socket)
+    impl<C> crate::ThreadPooler for Cell<C>
+    where
+        C: crate::ThreadPooler,
+    {
+        fn create_thread_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError> {
+            self.as_present().create_thread_pool(concurrency)
+        }
     }
 
-    fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
-        self.as_present().dial(socket)
-    }
-}
+    impl<C> crate::Network for Cell<C>
+    where
+        C: crate::Network,
+    {
+        type Listener = <C as crate::Network>::Listener;
 
-impl<C> crate::Storage for Cell<C>
-where
-    C: crate::Storage,
-{
-    type Blob = <C as crate::Storage>::Blob;
+        fn bind(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + Send {
+            self.as_present().bind(socket)
+        }
 
-    fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
-        self.as_present().open_versioned(partition, name, versions)
+        fn dial(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
+            self.as_present().dial(socket)
+        }
     }
 
-    fn remove(
-        &self,
-        partition: &str,
-        name: Option<&[u8]>,
-    ) -> impl Future<Output = Result<(), Error>> + Send {
-        self.as_present().remove(partition, name)
+    impl<C> crate::Storage for Cell<C>
+    where
+        C: crate::Storage,
+    {
+        type Blob = <C as crate::Storage>::Blob;
+
+        fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<u16>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send {
+            self.as_present().open_versioned(partition, name, versions)
+        }
+
+        fn remove(
+            &self,
+            partition: &str,
+            name: Option<&[u8]>,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.as_present().remove(partition, name)
+        }
+
+        fn scan(
+            &self,
+            partition: &str,
+        ) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
+            self.as_present().scan(partition)
+        }
     }
 
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send {
-        self.as_present().scan(partition)
+    impl<C> crate::Resolver for Cell<C>
+    where
+        C: crate::Resolver,
+    {
+        fn resolve(
+            &self,
+            host: &str,
+        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, crate::Error>> + Send {
+            self.as_present().resolve(host)
+        }
     }
-}
+});
 
 impl<C> RngCore for Cell<C>
 where
@@ -293,14 +315,15 @@ where
 
 impl<C> ReasonablyRealtime for Cell<C> where C: ReasonablyRealtime {}
 
-impl<C> crate::Resolver for Cell<C>
+impl<C> crate::BufferPooler for Cell<C>
 where
-    C: crate::Resolver,
+    C: crate::BufferPooler,
 {
-    fn resolve(
-        &self,
-        host: &str,
-    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, crate::Error>> + Send {
-        self.as_present().resolve(host)
+    fn network_buffer_pool(&self) -> &crate::BufferPool {
+        self.as_present().network_buffer_pool()
+    }
+
+    fn storage_buffer_pool(&self) -> &crate::BufferPool {
+        self.as_present().storage_buffer_pool()
     }
 }

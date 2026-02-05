@@ -15,10 +15,9 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::Buf;
 use commonware_runtime::{
-    buffer::pool::{Append, PoolRef},
-    deterministic, Blob, Error, Runner, Storage,
+    buffer::paged::{Append, CacheRef},
+    deterministic, Blob, Buf, Error, IoBufMut, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -38,8 +37,8 @@ struct FuzzInput {
     seed: u64,
     /// Logical page size (1-255).
     page_size: u8,
-    /// Pool page cache capacity (1-10).
-    pool_capacity: u8,
+    /// Page cache capacity (1-10).
+    cache_capacity: u8,
     /// Number of pages to write (1-10).
     num_pages: u8,
     /// Byte offset within the blob to corrupt (will be modulo physical_size).
@@ -60,7 +59,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         Ok(FuzzInput {
             seed: u.arbitrary()?,
             page_size: u.int_in_range(1..=255)?,
-            pool_capacity: u.int_in_range(1..=10)?,
+            cache_capacity: u.int_in_range(1..=10)?,
             num_pages: u.int_in_range(1..=10)?,
             corrupt_byte_offset: u.arbitrary()?,
             corrupt_bit: u.int_in_range(0..=7)?,
@@ -94,8 +93,8 @@ fn fuzz(input: FuzzInput) {
     executor.start(|context| async move {
         let page_size = input.page_size as u64;
         let physical_page_size = page_size + CRC_SIZE;
-        let pool_capacity = input.pool_capacity as usize;
-        let pool_ref = PoolRef::new(NZU16!(page_size as u16), NZUsize!(pool_capacity));
+        let cache_capacity = input.cache_capacity as usize;
+        let cache_ref = CacheRef::new(NZU16!(page_size as u16), NZUsize!(cache_capacity));
 
         // Compute logical size from number of pages.
         let logical_size = input.num_pages as u64 * page_size;
@@ -111,7 +110,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot open blob");
 
-        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, pool_ref.clone())
+        let append = Append::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
             .expect("cannot create append wrapper");
 
@@ -136,11 +135,12 @@ fn fuzz(input: FuzzInput) {
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
-            .read_at(vec![0u8; 1], corrupt_offset)
+            .read_at(corrupt_offset, IoBufMut::zeroed(1))
             .await
-            .expect("cannot read byte to corrupt");
+            .expect("cannot read byte to corrupt")
+            .coalesce();
         let corrupted_byte = byte_buf.as_ref()[0] ^ (1 << corrupt_bit);
-        blob.write_at(vec![corrupted_byte], corrupt_offset)
+        blob.write_at(corrupt_offset, vec![corrupted_byte])
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
@@ -156,7 +156,7 @@ fn fuzz(input: FuzzInput) {
 
         // The append wrapper may truncate if the corruption affected the last page's CRC
         // during initialization, so we handle both cases.
-        let append = match Append::new(blob, size, BUFFER_CAPACITY, pool_ref.clone()).await {
+        let append = match Append::new(blob, size, BUFFER_CAPACITY, cache_ref.clone()).await {
             Ok(a) => a,
             Err(_) => {
                 // Corruption was severe enough to fail initialization - this is acceptable.
@@ -252,16 +252,14 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let buf = vec![0u8; len];
-                let read_result = append.read_at(buf, offset).await;
+                let read_result = append.read_at(offset, IoBufMut::zeroed(len)).await;
 
                 match read_result {
                     Ok(buf) => {
                         // Read succeeded - data must match expected.
-                        let buf: Vec<u8> = buf.into();
                         let expected_slice = &expected_data[offset as usize..offset as usize + len];
                         assert_eq!(
-                            &buf, expected_slice,
+                            buf.coalesce(), expected_slice,
                             "Read via Append returned wrong data at offset {}, len {}",
                             offset, len
                         );

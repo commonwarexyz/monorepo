@@ -72,8 +72,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
-    #[error("blob too large: {0}")]
-    BlobTooLarge(u64),
 }
 
 /// Configuration for [Metadata] storage.
@@ -370,7 +368,7 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
 
             // Reopen the metadata store
@@ -425,10 +423,10 @@ mod tests {
 
             // Corrupt the metadata store
             let (blob, _) = context.open("test", b"left").await.unwrap();
-            blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
             let (blob, _) = context.open("test", b"right").await.unwrap();
-            blob.write_at(b"corrupted".to_vec(), 0).await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec()).await.unwrap();
             blob.sync().await.unwrap();
 
             // Reopen the metadata store

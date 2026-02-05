@@ -18,8 +18,7 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::DurationExt;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use commonware_utils::{channel::mpsc, DurationExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -157,16 +156,20 @@ where
     state.request_counter.inc();
 
     // Get the current database state
-    let (root, lower_bound, upper_bound) = {
+    let (root, inactivity_floor, size) = {
         let db_opt = state.database.read().await;
         let database = db_opt.as_ref().expect("database should exist");
-        (database.root(), database.lower_bound(), database.op_count())
+        (
+            database.root(),
+            database.inactivity_floor(),
+            database.size(),
+        )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
         request_id: request.request_id,
         target: Target {
             root,
-            range: lower_bound..upper_bound,
+            range: inactivity_floor..size,
         },
     };
 
@@ -189,7 +192,7 @@ where
     let database = db_opt.as_ref().expect("database should exist");
 
     // Check if we have enough operations
-    let db_size = database.op_count();
+    let db_size = database.size();
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -313,7 +316,7 @@ where
             match incoming {
                 Ok(message_data) => {
                     // Parse the message.
-                    let message = match wire::Message::decode(&message_data[..]) {
+                    let message = match wire::Message::decode(message_data.coalesce()) {
                         Ok(msg) => msg,
                         Err(err) => {
                             warn!(client_addr = %client_addr, ?err, "failed to parse message");
@@ -326,7 +329,7 @@ where
                     // The response will be sent on `response_sender`.
                     context.with_label("request_handler").spawn({
                         let state = state.clone();
-                        let mut response_sender = response_sender.clone();
+                        let response_sender = response_sender.clone();
                         move |_| async move {
                             let response = handle_message::<DB>(&state, message).await;
                             if let Err(err) = response_sender.send(response).await {
@@ -343,20 +346,18 @@ where
             }
         },
 
-        outgoing = response_receiver.next() => {
-            if let Some(response) = outgoing {
-                // We have a response to send to the client.
-                let response_data = response.encode();
-                if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
-                    info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            } else {
-                // Channel closed
+        Some(response) = response_receiver.recv() else {
+            // Channel closed
+            return Ok(());
+        } => {
+            // We have a response to send to the client.
+            let response_data = response.encode();
+            if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
+                info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+                state.error_counter.inc();
                 return Ok(());
             }
-        }
+        },
     }
 
     Ok(())
@@ -390,7 +391,8 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        op_count = ?database.op_count(),
+        size = ?database.size(),
+        inactivity_floor = ?database.inactivity_floor(),
         root = %root_hex,
         "{} database ready",
         DB::name()
@@ -455,7 +457,7 @@ where
                     error!(?err, "❌ failed to accept client");
                 }
             }
-        }
+        },
     }
 
     Ok(())

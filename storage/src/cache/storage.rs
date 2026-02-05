@@ -4,9 +4,8 @@ use crate::{
     kv,
     rmap::RMap,
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Metrics, Storage};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Buf, BufMut, Metrics, Storage};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,7 +92,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
         )

@@ -24,7 +24,7 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 prometheus-client.workspace = true
-rand.workspace = true
+rand = { workspace = true, features = ["small_rng"] }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml.workspace = true
 tracing.workspace = true

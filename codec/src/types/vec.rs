@@ -57,8 +57,6 @@ impl<T: Read> Read for Vec<T> {
 mod tests {
     use super::*;
     use crate::{DecodeRangeExt, Encode};
-    #[cfg(not(feature = "std"))]
-    use alloc::vec;
 
     #[test]
     fn test_vec() {

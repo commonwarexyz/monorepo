@@ -23,6 +23,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
+use bytes::{Buf, BufMut};
+use commonware_codec::{types::lazy::Lazy, Error, FixedSize, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Set, Faults, Participant};
 use core::fmt::Debug;
@@ -217,7 +219,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: share.index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -235,12 +237,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
         };
+        let Some(signature) = attestation.signature.get() else {
+            return false;
+        };
 
         ops::verify_message::<V>(
             &evaluated,
             subject.namespace(self.namespace()),
             &subject.message(),
-            &attestation.signature,
+            signature,
         )
         .is_ok()
     }
@@ -259,17 +264,19 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
     {
-        let mut invalid = BTreeSet::new();
-        let partials: Vec<_> = attestations
-            .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
-
+        let (partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let partial = attestation
+                    .signature
+                    .get()
+                    .map(|&value| PartialSignature::<V> { index, value });
+                (index, partial)
+            });
+        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
         let polynomial = self.polynomial();
         if let Err(errs) = threshold::batch_verify_same_message::<_, V, _>(
             rng,
@@ -289,7 +296,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             .filter(|partial| !invalid.contains(&partial.index))
             .map(|partial| Attestation {
                 signer: partial.index,
-                signature: partial.value,
+                signature: partial.value.into(),
             })
             .collect();
 
@@ -297,27 +304,35 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Assembles a certificate from a collection of attestations.
-    pub fn assemble<S, I, T, M>(&self, attestations: I, strategy: &T) -> Option<V::Signature>
+    pub fn assemble<S, I, T, M>(&self, attestations: I, strategy: &T) -> Option<Certificate<V>>
     where
         S: Scheme<Signature = V::Signature>,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
         M: Faults,
     {
-        let partials: Vec<_> = attestations
-            .into_iter()
-            .map(|attestation| PartialSignature::<V> {
-                index: attestation.signer,
-                value: attestation.signature,
-            })
-            .collect();
+        let (partials, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let index = attestation.signer;
+                let value = attestation
+                    .signature
+                    .get()
+                    .map(|&sig| PartialSignature::<V> { index, value: sig });
+                (index, value)
+            });
+        if !failures.is_empty() {
+            return None;
+        }
 
         let quorum = self.polynomial();
         if partials.len() < quorum.required::<M>() as usize {
             return None;
         }
 
-        threshold::recover::<V, _, M>(quorum, partials.iter(), strategy).ok()
+        threshold::recover::<V, _, M>(quorum, partials.iter(), strategy)
+            .ok()
+            .map(Certificate::new)
     }
 
     /// Verifies a certificate.
@@ -325,7 +340,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         &self,
         _rng: &mut R,
         subject: S::Subject<'a, D>,
-        certificate: &V::Signature,
+        certificate: &Certificate<V>,
     ) -> bool
     where
         S: Scheme,
@@ -334,11 +349,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
         M: Faults,
     {
+        let Some(signature) = certificate.get() else {
+            return false;
+        };
         ops::verify_message::<V>(
             self.identity(),
             subject.namespace(self.namespace()),
             &subject.message(),
-            certificate,
+            signature,
         )
         .is_ok()
     }
@@ -355,16 +373,19 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRngCore,
         D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a V::Signature)>,
+        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
         T: Strategy,
         M: Faults,
     {
         let mut entries: Vec<_> = Vec::new();
 
         for (subject, certificate) in certificates {
+            let Some(signature) = certificate.get() else {
+                return false;
+            };
             let namespace = subject.namespace(self.namespace());
             let message = subject.message();
-            entries.push((namespace.to_vec(), message.to_vec(), *certificate));
+            entries.push((namespace.to_vec(), message.to_vec(), *signature));
         }
 
         if entries.is_empty() {
@@ -392,245 +413,299 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     pub const fn certificate_codec_config_unbounded() {}
 }
 
-mod macros {
-    /// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
-    ///
-    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-    /// implementation, and a `fixture` function for testing.
-    ///
-    /// # Parameters
-    ///
-    /// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
-    ///   in the subject type to bind to the GAT lifetime and digest type parameters.
-    ///
-    /// - `$namespace`: The namespace type that implements [`Namespace`](crate::certificate::Namespace).
-    ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
-    ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
-    ///   to create the namespace, then passes it to `Subject::namespace()` during signing
-    ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
-    ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // For non-generic subject types with a single namespace:
-    /// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>);
-    ///
-    /// // For protocols with generic subject types:
-    /// impl_certificate_bls12381_threshold!(Subject<'a, D>, Namespace);
-    /// ```
-    #[macro_export]
-    macro_rules! impl_certificate_bls12381_threshold {
-        ($subject:ty, $namespace:ty) => {
-            /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
-            ///
-            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-            /// scheme instances share a consistent ordering.
-            #[cfg(feature = "mocks")]
-            #[allow(dead_code)]
-            pub fn fixture<V, R>(
-                rng: &mut R,
-                namespace: &[u8],
-                n: u32,
-            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
-            where
-                V: $crate::bls12381::primitives::variant::Variant,
-                R: rand::RngCore + rand::CryptoRng,
-            {
-                $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
-                    rng,
-                    namespace,
-                    n,
-                    Scheme::signer,
-                    Scheme::verifier,
-                )
-            }
+/// Certificate for BLS12-381 threshold signatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Certificate<V: Variant> {
+    /// The recovered threshold signature.
+    pub signature: Lazy<V::Signature>,
+}
 
-            /// BLS12-381 threshold signature scheme wrapper.
-            #[derive(Clone, Debug)]
-            pub struct Scheme<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > {
-                generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
-            }
-
-            impl<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > Scheme<P, V> {
-                /// Creates a new signer instance with a private share and evaluated public polynomial.
-                pub fn signer(
-                    namespace: &[u8],
-                    participants: commonware_utils::ordered::Set<P>,
-                    polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-                    share: $crate::bls12381::primitives::group::Share,
-                ) -> Option<Self> {
-                    Some(Self {
-                        generic: $crate::bls12381::certificate::threshold::Generic::signer(
-                            namespace,
-                            participants,
-                            polynomial,
-                            share,
-                        )?,
-                    })
-                }
-
-                /// Creates a verifier that can authenticate partial signatures.
-                pub fn verifier(
-                    namespace: &[u8],
-                    participants: commonware_utils::ordered::Set<P>,
-                    polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-                ) -> Self {
-                    Self {
-                        generic: $crate::bls12381::certificate::threshold::Generic::verifier(
-                            namespace,
-                            participants,
-                            polynomial,
-                        ),
-                    }
-                }
-
-                /// Creates a lightweight verifier that only checks recovered certificates.
-                pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
-                    Self {
-                        generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
-                            namespace,
-                            identity,
-                        ),
-                    }
-                }
-
-                /// Returns the public identity of the committee (constant across reshares).
-                pub fn identity(&self) -> &V::Public {
-                    self.generic.identity()
-                }
-
-                /// Returns the local share if this instance can generate partial signatures.
-                pub const fn share(&self) -> Option<&$crate::bls12381::primitives::group::Share> {
-                    self.generic.share()
-                }
-            }
-
-            impl<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > $crate::certificate::Scheme for Scheme<P, V> {
-                type Subject<'a, D: $crate::Digest> = $subject;
-                type PublicKey = P;
-                type Signature = V::Signature;
-                type Certificate = V::Signature;
-
-                fn me(&self) -> Option<commonware_utils::Participant> {
-                    self.generic.me()
-                }
-
-                fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-                    self.generic.participants()
-                }
-
-                fn sign<D: $crate::Digest>(
-                    &self,
-                    subject: Self::Subject<'_, D>,
-                ) -> Option<$crate::certificate::Attestation<Self>> {
-                    self.generic.sign::<_, D>(subject)
-                }
-
-                fn verify_attestation<R, D>(
-                    &self,
-                    _rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    attestation: &$crate::certificate::Attestation<Self>,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                {
-                    self.generic
-                        .verify_attestation::<_, D>(subject, attestation)
-                }
-
-                fn verify_attestations<R, D, I>(
-                    &self,
-                    rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    attestations: I,
-                    strategy: &impl commonware_parallel::Strategy,
-                ) -> $crate::certificate::Verification<Self>
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                {
-                    self.generic
-                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
-                }
-
-                fn assemble<I, M>(
-                    &self,
-                    attestations: I,
-                    strategy: &impl commonware_parallel::Strategy,
-                ) -> Option<Self::Certificate>
-                where
-                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic.assemble::<Self, _, _, M>(attestations, strategy)
-                }
-
-                fn verify_certificate<R, D, M>(
-                    &self,
-                    rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    certificate: &Self::Certificate,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic
-                        .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
-                }
-
-                fn verify_certificates<'a, R, D, I, M>(
-                    &self,
-                    rng: &mut R,
-                    certificates: I,
-                    strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic
-                        .verify_certificates::<Self, _, D, _, _, M>(rng, certificates, strategy)
-                }
-
-                fn is_attributable() -> bool {
-                    $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_attributable()
-                }
-
-                fn is_batchable() -> bool {
-                    $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
-                }
-
-                fn certificate_codec_config(
-                    &self,
-                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    self.generic.certificate_codec_config()
-                }
-
-                fn certificate_codec_config_unbounded(
-                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
-                }
-            }
-        };
+impl<V: Variant> Certificate<V> {
+    /// Creates a new certificate from a recovered signature.
+    pub fn new(signature: V::Signature) -> Self {
+        Self {
+            signature: Lazy::from(signature),
+        }
     }
+
+    /// Attempts to get the decoded signature.
+    ///
+    /// Returns `None` if the signature fails to decode.
+    pub fn get(&self) -> Option<&V::Signature> {
+        self.signature.get()
+    }
+}
+
+impl<V: Variant> Write for Certificate<V> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.signature.write(writer);
+    }
+}
+
+impl<V: Variant> Read for Certificate<V> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let signature = Lazy::<V::Signature>::read(reader)?;
+        Ok(Self { signature })
+    }
+}
+
+impl<V: Variant> FixedSize for Certificate<V> {
+    const SIZE: usize = V::Signature::SIZE;
+}
+
+#[cfg(feature = "arbitrary")]
+impl<V: Variant> arbitrary::Arbitrary<'_> for Certificate<V>
+where
+    V::Signature: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            signature: Lazy::from(u.arbitrary::<V::Signature>()?),
+        })
+    }
+}
+
+/// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
+///
+/// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+/// implementation, and a `fixture` function for testing.
+///
+/// # Parameters
+///
+/// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
+///   in the subject type to bind to the GAT lifetime and digest type parameters.
+///
+/// - `$namespace`: The namespace type that implements [`Namespace`].
+///   This type pre-computes and stores any protocol-specific namespace bytes derived from
+///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
+///   to create the namespace, then passes it to `Subject::namespace()` during signing
+///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
+///   For protocols with multiple message types, a custom struct can pre-compute all variants.
+///
+/// # Example
+/// ```ignore
+/// // For non-generic subject types with a single namespace:
+/// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>);
+///
+/// // For protocols with generic subject types:
+/// impl_certificate_bls12381_threshold!(Subject<'a, D>, Namespace);
+/// ```
+#[macro_export]
+macro_rules! impl_certificate_bls12381_threshold {
+    ($subject:ty, $namespace:ty) => {
+        /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
+        ///
+        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+        /// scheme instances share a consistent ordering.
+        #[cfg(feature = "mocks")]
+        #[allow(dead_code)]
+        pub fn fixture<V, R>(
+            rng: &mut R,
+            namespace: &[u8],
+            n: u32,
+        ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+        where
+            V: $crate::bls12381::primitives::variant::Variant,
+            R: rand::RngCore + rand::CryptoRng,
+        {
+            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+                rng,
+                namespace,
+                n,
+                Scheme::signer,
+                Scheme::verifier,
+            )
+        }
+
+        /// BLS12-381 threshold signature scheme wrapper.
+        #[derive(Clone, Debug)]
+        pub struct Scheme<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > {
+            generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
+        }
+
+        impl<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > Scheme<P, V> {
+            /// Creates a new signer instance with a private share and evaluated public polynomial.
+            pub fn signer(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<P>,
+                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                share: $crate::bls12381::primitives::group::Share,
+            ) -> Option<Self> {
+                Some(Self {
+                    generic: $crate::bls12381::certificate::threshold::Generic::signer(
+                        namespace,
+                        participants,
+                        polynomial,
+                        share,
+                    )?,
+                })
+            }
+
+            /// Creates a verifier that can authenticate partial signatures.
+            pub fn verifier(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<P>,
+                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+            ) -> Self {
+                Self {
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier(
+                        namespace,
+                        participants,
+                        polynomial,
+                    ),
+                }
+            }
+
+            /// Creates a lightweight verifier that only checks recovered certificates.
+            pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
+                Self {
+                    generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
+                        namespace,
+                        identity,
+                    ),
+                }
+            }
+
+            /// Returns the public identity of the committee (constant across reshares).
+            pub fn identity(&self) -> &V::Public {
+                self.generic.identity()
+            }
+
+            /// Returns the local share if this instance can generate partial signatures.
+            pub const fn share(&self) -> Option<&$crate::bls12381::primitives::group::Share> {
+                self.generic.share()
+            }
+        }
+
+        impl<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > $crate::certificate::Scheme for Scheme<P, V> {
+            type Subject<'a, D: $crate::Digest> = $subject;
+            type PublicKey = P;
+            type Signature = V::Signature;
+            type Certificate = $crate::bls12381::certificate::threshold::Certificate<V>;
+
+            fn me(&self) -> Option<commonware_utils::Participant> {
+                self.generic.me()
+            }
+
+            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+                self.generic.participants()
+            }
+
+            fn sign<D: $crate::Digest>(
+                &self,
+                subject: Self::Subject<'_, D>,
+            ) -> Option<$crate::certificate::Attestation<Self>> {
+                self.generic.sign::<_, D>(subject)
+            }
+
+            fn verify_attestation<R, D>(
+                &self,
+                _rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestation: &$crate::certificate::Attestation<Self>,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+            {
+                self.generic
+                    .verify_attestation::<_, D>(subject, attestation)
+            }
+
+            fn verify_attestations<R, D, I>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestations: I,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> $crate::certificate::Verification<Self>
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I::IntoIter: Send
+            {
+                self.generic
+                    .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
+            }
+
+            fn assemble<I, M>(
+                &self,
+                attestations: I,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> Option<Self::Certificate>
+            where
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I::IntoIter: Send,
+                M: commonware_utils::Faults,
+            {
+                self.generic.assemble::<Self, _, _, M>(attestations, strategy)
+            }
+
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+            }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, _, M>(rng, certificates, strategy)
+            }
+
+            fn is_attributable() -> bool {
+                $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_attributable()
+            }
+
+            fn is_batchable() -> bool {
+                $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded(
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
+            }
+        }
+    };
 }
 
 #[cfg(test)]
@@ -646,7 +721,6 @@ mod tests {
         },
         certificate::Scheme as _,
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
-        impl_certificate_bls12381_threshold,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
@@ -800,7 +874,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signature
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -923,7 +997,7 @@ mod tests {
         ));
 
         // Corrupted certificate fails
-        let corrupted = V::Signature::zero();
+        let corrupted = Certificate::new(V::Signature::zero());
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             TestSubject {
@@ -960,7 +1034,7 @@ mod tests {
             .assemble::<_, N3f1>(attestations, &Sequential)
             .unwrap();
         let encoded = certificate.encode();
-        let decoded = V::Signature::decode(encoded).expect("decode certificate");
+        let decoded = Certificate::<V>::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
 
@@ -1076,7 +1150,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1] = V::Signature::zero();
+        certificates[1] = Certificate::new(V::Signature::zero());
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
             (
@@ -1402,12 +1476,22 @@ mod tests {
         let expected = sign_message::<V>(share, NAMESPACE, MESSAGE);
 
         assert_eq!(signature.signer, share.index);
-        assert_eq!(signature.signature, expected.value);
+        assert_eq!(signature.signature.get().unwrap(), &expected.value);
     }
 
     #[test]
     fn test_sign_vote_partial_matches_share_variants() {
         sign_vote_partial_matches_share::<MinPk>();
         sign_vote_partial_matches_share::<MinSig>();
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Certificate<MinSig>>,
+        }
     }
 }

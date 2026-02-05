@@ -1,6 +1,5 @@
-use crate::{mocks, Error};
-use bytes::{Buf, BufMut};
-use futures::{channel::mpsc, SinkExt as _, StreamExt as _};
+use crate::{mocks, Error, IoBufs};
+use commonware_utils::channel::mpsc;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -17,8 +16,8 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: impl Buf + Send) -> Result<(), Error> {
-        self.sender.send(msg).await.map_err(|_| Error::SendFailed)
+    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.sender.send(buf).await.map_err(|_| Error::SendFailed)
     }
 }
 
@@ -28,8 +27,12 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, buf: impl BufMut + Send) -> Result<(), Error> {
-        self.receiver.recv(buf).await.map_err(|_| Error::RecvFailed)
+    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+        self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
+    }
+
+    fn peek(&self, max_len: u64) -> &[u8] {
+        self.receiver.peek(max_len)
     }
 }
 
@@ -44,7 +47,7 @@ impl crate::Listener for Listener {
     type Stream = Stream;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
         Ok((socket, Sink { sender }, Stream { receiver }))
     }
 
@@ -99,7 +102,7 @@ impl crate::Network for Network {
         }
 
         // Bind the socket
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         listeners.insert(socket, sender);
         Ok(Listener {
             address: socket,
@@ -119,7 +122,7 @@ impl crate::Network for Network {
         };
 
         // Get listener
-        let mut sender = {
+        let sender = {
             let listeners = self.listeners.lock().unwrap();
             let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
             sender.clone()
@@ -130,7 +133,6 @@ impl crate::Network for Network {
         let (listener_sender, listener_receiver) = mocks::Channel::init();
         sender
             .send((dialer, dialer_sender, listener_receiver))
-            .await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {

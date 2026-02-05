@@ -12,10 +12,9 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_utils::channels::fallible::{AsyncFallibleExt, OneshotExt};
-use futures::{
-    channel::{mpsc, oneshot},
-    StreamExt,
+use commonware_utils::channel::{
+    fallible::{AsyncFallibleExt, OneshotExt},
+    mpsc, oneshot,
 };
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
@@ -41,6 +40,7 @@ pub enum Message<D: Digest, P: PublicKey> {
         response: oneshot::Sender<bool>,
     },
     Certify {
+        round: Round,
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -98,10 +98,11 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn certify(&mut self, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send_lossy(Message::Certify {
+                round,
                 payload,
                 response: tx,
             })
@@ -221,6 +222,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         self.fail_verification = fail;
     }
 
+    #[cfg(not(feature = "fuzz"))]
     fn panic(&self, msg: &str) -> ! {
         panic!("[{:?}] {}", self.me, msg);
     }
@@ -274,15 +276,35 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
 
         // Verify contents
-        let (parsed_round, parent, _) =
-            <(Round, H::Digest, u64)>::decode(&mut contents).expect("invalid payload");
+        let Ok((parsed_round, parent, _)) = <(Round, H::Digest, u64)>::decode(&mut contents) else {
+            #[cfg(feature = "fuzz")]
+            {
+                // During fuzzing, return false for invalid payloads
+                return false;
+            }
+            #[cfg(not(feature = "fuzz"))]
+            panic!("[{:?}] invalid payload", self.me);
+        };
+
         if parsed_round != context.round {
+            #[cfg(feature = "fuzz")]
+            {
+                // During fuzzing, return false for round mismatches
+                return false;
+            }
+            #[cfg(not(feature = "fuzz"))]
             self.panic(&format!(
                 "invalid round (in payload): {} != {}",
                 parsed_round, context.round
             ));
         }
         if parent != context.parent.1 {
+            #[cfg(feature = "fuzz")]
+            {
+                // During fuzzing, return false for parent mismatches
+                return false;
+            }
+            #[cfg(not(feature = "fuzz"))]
             self.panic(&format!(
                 "invalid parent (in payload): {:?} != {:?}",
                 parent, context.parent.1
@@ -333,11 +355,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             on_stopped => {
                 debug!("context shutdown, stopping application");
             },
-            message = self.mailbox.next() => {
-                let message = match message {
-                    Some(message) => message,
-                    None => break,
-                };
+            Some(message) = self.mailbox.recv() else break => {
                 match message {
                     Message::Genesis { epoch, response } => {
                         let digest = self.genesis(epoch);
@@ -347,7 +365,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
-                    Message::Verify { context, payload, response } => {
+                    Message::Verify {
+                        context,
+                        payload,
+                        response,
+                    } => {
                         if let Some(contents) = seen.get(&payload) {
                             let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);
@@ -358,7 +380,11 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                                 .push((context, response));
                         }
                     }
-                    Message::Certify { payload, response } => {
+                    Message::Certify {
+                        round: _,
+                        payload,
+                        response,
+                    } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
                         // If certify returns None (Cancel mode), drop the sender without
                         // responding, causing the receiver to return Err(Canceled).
@@ -371,9 +397,8 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                     }
                 }
             },
-            broadcast = self.broadcast.next() => {
+            Some((digest, contents)) = self.broadcast.recv() else break => {
                 // Record digest for future use
-                let (digest, contents) = broadcast.expect("broadcast closed");
                 seen.insert(digest, contents.clone());
 
                 // Check if we have a waiter
@@ -383,7 +408,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         sender.send_lossy(verified);
                     }
                 }
-            }
+            },
         }
     }
 }

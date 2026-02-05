@@ -18,9 +18,11 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    Clock, Error, Execution, Handle, Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
+    Spawner as _, StreamOf, METRICS_PREFIX,
 };
-use commonware_macros::select;
+use commonware_macros::{select, stability};
+#[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
@@ -30,6 +32,7 @@ use prometheus_client::{
     registry::{Metric, Registry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
+#[stability(BETA)]
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     borrow::Cow,
@@ -280,12 +283,16 @@ impl crate::Runner for Runner {
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
-                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_storage");
+                let iouring_registry =
+                    runtime_registry.sub_registry_with_prefix("iouring_storage");
                 let storage = MeteredStorage::new(
-                    IoUringStorage::start(IoUringConfig {
-                        storage_directory: self.cfg.storage_directory.clone(),
-                        iouring_config: Default::default(),
-                    }, iouring_registry),
+                    IoUringStorage::start(
+                        IoUringConfig {
+                            storage_directory: self.cfg.storage_directory.clone(),
+                            iouring_config: Default::default(),
+                        },
+                        iouring_registry,
+                    ),
                     runtime_registry,
                 );
             } else {
@@ -299,10 +306,21 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            BufferPoolConfig::for_network(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
-                let iouring_registry = runtime_registry.sub_registry_with_prefix("iouring_network");
+                let iouring_registry =
+                    runtime_registry.sub_registry_with_prefix("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     iouring_config: iouring::Config {
@@ -316,15 +334,21 @@ impl crate::Runner for Runner {
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
-                    IoUringNetwork::start(config, iouring_registry).unwrap(),
-                runtime_registry,
-            );
-        } else {
-            let config = TokioNetworkConfig::default().with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
+                    IoUringNetwork::start(
+                        config,
+                        iouring_registry,
+                        network_buffer_pool.clone(),
+                    )
+                    .unwrap(),
+                    runtime_registry,
+                );
+            } else {
+                let config = TokioNetworkConfig::default()
+                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
                 let network = MeteredNetwork::new(
-                    TokioNetwork::from(config),
+                    TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,
                 );
             }
@@ -351,6 +375,8 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
+            network_buffer_pool,
+            storage_buffer_pool,
             tree: Tree::root(),
             execution: Execution::default(),
             instrumented: false,
@@ -387,6 +413,8 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
+    network_buffer_pool: BufferPool,
+    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
     instrumented: bool,
@@ -401,7 +429,8 @@ impl Clone for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-
+            network_buffer_pool: self.network_buffer_pool.clone(),
+            storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree: child,
             execution: Execution::default(),
             instrumented: false,
@@ -515,9 +544,7 @@ impl crate::Spawner for Context {
                 result.map_err(|_| Error::Closed)?;
                 Ok(())
             },
-            _ = timeout_future => {
-                Err(Error::Timeout)
-            }
+            _ = timeout_future => Err(Error::Timeout),
         }
     }
 
@@ -526,8 +553,12 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::RayonPoolSpawner for Context {
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError> {
+#[stability(BETA)]
+impl crate::ThreadPooler for Context {
+    fn create_thread_pool(
+        &self,
+        concurrency: NonZeroUsize,
+    ) -> Result<ThreadPool, ThreadPoolBuildError> {
         ThreadPoolBuilder::new()
             .num_threads(concurrency.get())
             .spawn_handler(move |thread| {
@@ -710,5 +741,15 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
+    }
+}
+
+impl crate::BufferPooler for Context {
+    fn network_buffer_pool(&self) -> &BufferPool {
+        &self.network_buffer_pool
+    }
+
+    fn storage_buffer_pool(&self) -> &BufferPool {
+        &self.storage_buffer_pool
     }
 }

@@ -8,6 +8,7 @@ use commonware_storage::{
     qmdb::{
         self,
         immutable::{self, Config},
+        store::LogStore,
         Durable, Merkleized,
     },
 };
@@ -36,7 +37,7 @@ pub fn create_config() -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZU16!(1024), NZUsize!(10)),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::new(NZU16!(1024), NZUsize!(10)),
     }
 }
 
@@ -116,12 +117,14 @@ where
         self.root()
     }
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    fn size(&self) -> Location {
+        LogStore::bounds(self).end
     }
 
-    fn lower_bound(&self) -> Location {
-        self.oldest_retained_loc()
+    fn inactivity_floor(&self) -> Location {
+        // For Immutable databases, all retained operations are active,
+        // so the inactivity floor equals the pruning boundary.
+        LogStore::bounds(self).start
     }
 
     fn historical_proof(

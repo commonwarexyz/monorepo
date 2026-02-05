@@ -74,8 +74,8 @@ pub struct Config<C> {
     /// Partition for the glob value storage.
     pub value_partition: String,
 
-    /// Buffer pool for index journal caching.
-    pub index_buffer_pool: commonware_runtime::buffer::PoolRef,
+    /// Page cache for index journal caching.
+    pub index_page_cache: commonware_runtime::buffer::paged::CacheRef,
 
     /// Write buffer size for the index journal.
     pub index_write_buffer: NonZeroUsize,
@@ -109,7 +109,7 @@ impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E,
         // Initialize both journals
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
-            buffer_pool: cfg.index_buffer_pool,
+            page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
         };
         let index = FixedJournal::init(context.with_label("index"), index_cfg).await?;
@@ -443,11 +443,12 @@ impl<E: Storage + Metrics, I: Record + Send + Sync, V: CodecShared> Oversized<E,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Buf, BufMut};
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::PoolRef, deterministic, Blob as _, Metrics, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner,
+    };
     use commonware_utils::{NZUsize, NZU16};
 
     /// Convert offset + size to byte end position (for truncation tests).
@@ -516,7 +517,7 @@ mod tests {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
-            index_buffer_pool: PoolRef::new(NZU16!(64), NZUsize!(8)),
+            index_page_cache: CacheRef::new(NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -910,7 +911,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -946,7 +947,7 @@ mod tests {
             // Last page CRC starts at offset 160 - 12 = 148
             assert_eq!(size, 160);
             let last_page_crc_offset = size - 12;
-            blob.write_at(vec![0xFF; 12], last_page_crc_offset)
+            blob.write_at(last_page_crc_offset, vec![0xFF; 12])
                 .await
                 .expect("Failed to corrupt");
             blob.sync().await.expect("Failed to sync");
@@ -1446,7 +1447,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1727,7 +1728,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -2394,7 +2395,7 @@ mod tests {
 
             // Write 100 bytes of garbage (simulating partial/failed value write)
             let garbage = vec![0xDE; 100];
-            blob.write_at(garbage, size)
+            blob.write_at(size, garbage)
                 .await
                 .expect("Failed to write garbage");
             blob.sync().await.expect("Failed to sync");
@@ -2452,7 +2453,7 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_buffer_pool: PoolRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
+                index_page_cache: CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8)),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -2503,7 +2504,7 @@ mod tests {
             // Write the complete physical page: entry_data + crc_record
             let mut page = entry_data;
             page.extend_from_slice(&crc_record);
-            blob.write_at(page, 0)
+            blob.write_at(0, page)
                 .await
                 .expect("Failed to write corrupted page");
             blob.sync().await.expect("Failed to sync");

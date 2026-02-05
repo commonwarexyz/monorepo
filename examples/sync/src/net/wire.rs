@@ -1,9 +1,9 @@
 use crate::net::{ErrorResponse, RequestId};
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::sync::Target,

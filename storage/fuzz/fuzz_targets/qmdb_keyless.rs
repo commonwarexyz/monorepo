@@ -2,11 +2,12 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
         keyless::{Config, Keyless},
+        store::LogStore as _,
         verify_proof,
     },
 };
@@ -135,7 +136,7 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         thread_pool: None,
-        buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -166,7 +167,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.op_count();
+                    let op_count = db.bounds().end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
@@ -193,7 +194,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.op_count();
+                    let _ = db.bounds().end;
                 }
 
                 Operation::LastCommitLoc => {
@@ -201,7 +202,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.oldest_retained_loc();
+                    let _ = db.bounds().start;
                 }
 
                 Operation::Root => {
@@ -214,7 +215,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.op_count();
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }
@@ -237,7 +238,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.op_count();
+                    let op_count = db.bounds().end;
                     if op_count == 0 {
                         continue;
                     }

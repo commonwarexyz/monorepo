@@ -30,7 +30,7 @@ impl<K> Poly<K> {
             .expect("Impossible: polynomial length not in 1..=u32::MAX")
     }
 
-    fn len_usize(&self) -> usize {
+    const fn len_usize(&self) -> usize {
         self.coeffs.len().get()
     }
 
@@ -252,31 +252,31 @@ impl<K: Additive> Object for Poly<K> {}
 
 // SECTION: implementing Additive
 
-impl<'a, K: Additive> AddAssign<&'a Poly<K>> for Poly<K> {
-    fn add_assign(&mut self, rhs: &'a Poly<K>) {
+impl<'a, K: Additive> AddAssign<&'a Self> for Poly<K> {
+    fn add_assign(&mut self, rhs: &'a Self) {
         self.merge_with(rhs, |a, b| *a += b);
     }
 }
 
-impl<'a, K: Additive> Add<&'a Poly<K>> for Poly<K> {
+impl<'a, K: Additive> Add<&'a Self> for Poly<K> {
     type Output = Self;
 
-    fn add(mut self, rhs: &'a Poly<K>) -> Self::Output {
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
         self += rhs;
         self
     }
 }
 
-impl<'a, K: Additive> SubAssign<&'a Poly<K>> for Poly<K> {
-    fn sub_assign(&mut self, rhs: &'a Poly<K>) {
+impl<'a, K: Additive> SubAssign<&'a Self> for Poly<K> {
+    fn sub_assign(&mut self, rhs: &'a Self) {
         self.merge_with(rhs, |a, b| *a -= b);
     }
 }
 
-impl<'a, K: Additive> Sub<&'a Poly<K>> for Poly<K> {
+impl<'a, K: Additive> Sub<&'a Self> for Poly<K> {
     type Output = Self;
 
-    fn sub(mut self, rhs: &'a Poly<K>) -> Self::Output {
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
         self -= rhs;
         self
     }
@@ -344,7 +344,7 @@ impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
                 K::msm(row, scalars, strategy)
             },
         );
-        Poly::from_iter_unchecked(coeffs)
+        Self::from_iter_unchecked(coeffs)
     }
 }
 
@@ -415,25 +415,59 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     /// than once, then it has the same evaluation point.
     pub fn new(points: impl IntoIterator<Item = (I, F)>) -> Self {
         let points = Map::from_iter_dedup(points);
-        let weights = points
-            .iter_pairs()
-            .map(|(i, w_i)| {
-                let mut top_i = F::one();
-                let mut bot_i = F::one();
-                for (j, w_j) in points.iter_pairs() {
-                    if i == j {
-                        continue;
-                    }
-                    top_i *= w_j;
-                    bot_i *= &(w_j.clone() - w_i);
+        let n = points.len();
+        if n == 0 {
+            return Self { weights: points };
+        }
+
+        // Compute W = product of all w_i
+        // Compute c_i = w_i * product((w_j - w_i) for j != i)
+        let values = points.values();
+        let zero = F::zero();
+        let mut total_product = F::one();
+        let mut c = Vec::with_capacity(n);
+        for (i, w_i) in values.iter().enumerate() {
+            // If evaluation point is zero, L_i(0) = 1 for this point and 0 for all others.
+            if w_i == &zero {
+                let mut out = points;
+                for (j, w) in out.values_mut().iter_mut().enumerate() {
+                    *w = if j == i { F::one() } else { F::zero() };
                 }
-                top_i * &bot_i.inv()
-            })
-            .collect::<Vec<_>>();
-        // Avoid re-sorting by using the memory of points.
+                return Self { weights: out };
+            }
+
+            // Accumulate c_i = w_i * product((w_j - w_i) for j != i) for batch inversion.
+            total_product *= w_i;
+            let mut c_i = w_i.clone();
+            for w_j in values
+                .iter()
+                .enumerate()
+                .filter_map(|(j, v)| (j != i).then_some(v))
+            {
+                c_i *= &(w_j.clone() - w_i);
+            }
+            c.push(c_i);
+        }
+
+        // Batch inversion using Montgomery's trick to compute W/c_i for all i
+        // Step 1: Compute prefix products (prefix[i] = c[0] * ... * c[i-1])
+        let mut prefix = Vec::with_capacity(n + 1);
+        prefix.push(F::one());
+        let mut acc = F::one();
+        for c_i in &c {
+            acc *= c_i;
+            prefix.push(acc.clone());
+        }
+
+        // Step 2: Single inversion, multiplied by W
+        let mut inv_acc = total_product * &prefix[n].inv();
+
+        // Step 3: Compute weights directly into output
         let mut out = points;
-        for (out_i, weight_i) in out.values_mut().iter_mut().zip(weights.into_iter()) {
-            *out_i = weight_i;
+        let out_vals = out.values_mut();
+        for i in (0..n).rev() {
+            out_vals[i] = inv_acc.clone() * &prefix[i];
+            inv_acc *= &c[i];
         }
         Self { weights: out }
     }
@@ -458,6 +492,7 @@ mod test {
     use super::*;
     use crate::test::{F, G};
     use commonware_codec::Encode;
+    use commonware_parallel::Sequential;
     use proptest::{
         prelude::{Arbitrary, BoxedStrategy, Strategy as _},
         prop_assume, proptest,
@@ -471,7 +506,7 @@ mod test {
         fn arbitrary_with(size: Self::Parameters) -> Self::Strategy {
             let nonempty_size = if size.start() == 0 { size + 1 } else { size };
             proptest::collection::vec(F::arbitrary(), nonempty_size)
-                .prop_map(Poly::from_iter_unchecked)
+                .prop_map(Self::from_iter_unchecked)
                 .boxed()
         }
     }
@@ -532,13 +567,11 @@ mod test {
 
         #[test]
         fn test_eval_msm(f: Poly<F>, x: F) {
-            use commonware_parallel::Sequential;
             assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
         }
 
         #[test]
         fn test_interpolate(f: Poly<F>) {
-            use commonware_parallel::Sequential;
             // Make sure this isn't the zero polynomial.
             prop_assume!(f != Poly::zero());
             prop_assume!(f.required().get() < F::MAX as u32);
@@ -549,6 +582,32 @@ mod test {
             assert_eq!(recovered.as_ref(), Some(f.constant()));
             points.pop();
             assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), &Sequential).is_none());
+        }
+
+        #[test]
+        fn test_interpolate_with_zero_point(f: Poly<F>) {
+            // Use 0, 1, 2, ... as evaluation points (first point is zero)
+            prop_assume!(f != Poly::zero());
+            prop_assume!(f.required().get() < F::MAX as u32);
+            let points: Vec<_> = (0..f.required().get()).map(|i| F::from(i as u8)).collect();
+            let interpolator = Interpolator::new(points.iter().copied().enumerate());
+            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+            let recovered = interpolator.interpolate(&evals, &Sequential);
+            assert_eq!(recovered.as_ref(), Some(f.constant()));
+        }
+
+        #[test]
+        fn test_interpolate_with_zero_point_middle(f: Poly<F>) {
+            // Use 1, 2, ..., 0 as evaluation points (zero at last position)
+            prop_assume!(f != Poly::zero());
+            prop_assume!(f.required().get() >= 2);
+            prop_assume!(f.required().get() < F::MAX as u32);
+            let n = f.required().get();
+            let points: Vec<_> = (1..n).map(|i| F::from(i as u8)).chain(core::iter::once(F::zero())).collect();
+            let interpolator = Interpolator::new(points.iter().copied().enumerate());
+            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+            let recovered = interpolator.interpolate(&evals, &Sequential);
+            assert_eq!(recovered.as_ref(), Some(f.constant()));
         }
 
         #[test]

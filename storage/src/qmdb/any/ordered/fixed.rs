@@ -55,8 +55,11 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         let mut log = init_fixed_authenticated_log(context.clone(), cfg).await?;
         if log.size() == 0 {
             warn!("Authenticated log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+            let mut dirty_log = log.into_dirty();
+            dirty_log
+                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await?;
+            log = dirty_log.merkleize();
             log.sync().await?;
         }
 
@@ -68,14 +71,15 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
         mmr::StandardHasher as Standard,
         qmdb::{
-            any::ordered::Update, store::batch_tests, verify_proof, Durable, Merkleized,
-            NonDurable, Unmerkleized,
+            any::ordered::Update,
+            store::{batch_tests, LogStore},
+            verify_proof, Durable, Merkleized, NonDurable, Unmerkleized,
         },
         translator::{OneCap, TwoCap},
     };
@@ -83,7 +87,7 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::PoolRef,
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
         Runner as _,
     };
@@ -109,14 +113,14 @@ mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Type aliases for concrete [Db] types used in these unit tests.
-    type CleanAnyTest =
+    pub(crate) type CleanAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-    type MutableAnyTest =
+    pub(crate) type MutableAnyTest =
         Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
     /// Return an `Any` database initialized with a fixed config.
@@ -126,11 +130,11 @@ mod test {
             .unwrap()
     }
 
-    fn create_test_config(seed: u64) -> Config<TwoCap> {
+    pub(crate) fn create_test_config(seed: u64) -> Config<TwoCap> {
         create_generic_test_config::<TwoCap>(seed, TwoCap)
     }
 
-    fn create_generic_test_config<T: Translator>(seed: u64, t: T) -> Config<T> {
+    pub(crate) fn create_generic_test_config<T: Translator>(seed: u64, t: T) -> Config<T> {
         Config {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
@@ -141,12 +145,12 @@ mod test {
             log_write_buffer: NZUsize!(64),
             translator: t,
             thread_pool: None,
-            buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create a test database with unique partition names
-    async fn create_test_db(mut context: Context) -> CleanAnyTest {
+    pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed);
         CleanAnyTest::init(context, config).await.unwrap()
@@ -155,13 +159,13 @@ mod test {
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
-    fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
         create_test_ops_seeded(n, 0)
     }
 
     /// Create n random operations using a specific seed. Use different seeds
     /// when you need non-overlapping keys in the same test.
-    fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -184,7 +188,7 @@ mod test {
     }
 
     /// Applies the given operations to the database.
-    async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(db: &mut MutableAnyTest, ops: Vec<Operation<Digest, Digest>>) {
         for op in ops {
             match op {
                 Operation::Update(data) => {
@@ -327,9 +331,9 @@ mod test {
                 map.remove(&k);
             }
 
-            assert_eq!(db.op_count(), 2620);
+            assert_eq!(db.bounds().end, 2620);
             assert_eq!(db.inactivity_floor_loc(), 0);
-            assert_eq!(db.op_count(), 2620);
+            assert_eq!(db.bounds().end, 2620);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
@@ -337,7 +341,7 @@ mod test {
             let mut db = db.into_merkleized();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.op_count(), 4241);
+            assert_eq!(db.bounds().end, 4241);
             assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -347,7 +351,7 @@ mod test {
             drop(db);
             let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.op_count(), 4241);
+            assert_eq!(db.bounds().end, 4241);
             assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -367,8 +371,8 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = NZU64!(4);
-            let end_loc = db.op_count();
-            let start_pos = db.log.mmr.pruned_to_pos();
+            let end_loc = db.size();
+            let start_pos = db.log.mmr.bounds().start;
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor via commit and make sure historical inactive operations
             // are still provable.
@@ -408,12 +412,12 @@ mod test {
             let mut db = db.into_merkleized();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             let root = db.root();
-            let op_count = db.op_count();
+            let op_count = db.bounds().end;
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -430,7 +434,7 @@ mod test {
             apply_more_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("third")).await;
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -439,7 +443,7 @@ mod test {
             apply_more_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("fourth")).await;
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -448,7 +452,7 @@ mod test {
             apply_more_ops(&mut db).await;
             apply_more_ops(&mut db).await;
             let db = open_db(context.with_label("fifth")).await;
-            assert_eq!(db.op_count(), op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -456,7 +460,7 @@ mod test {
             apply_more_ops(&mut db).await;
             let _ = db.commit(None).await.unwrap();
             let db = open_db(context.with_label("sixth")).await;
-            assert!(db.op_count() > op_count);
+            assert!(db.bounds().end > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
 
@@ -476,7 +480,7 @@ mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             async fn apply_ops(db: &mut MutableAnyTest) {
@@ -492,7 +496,7 @@ mod test {
             apply_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("third")).await;
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // Repeat, drop without cleanup again.
@@ -500,7 +504,7 @@ mod test {
             apply_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("fourth")).await;
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -509,7 +513,7 @@ mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             let db = open_db(context.with_label("fifth")).await;
-            assert_eq!(db.op_count(), 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -517,7 +521,7 @@ mod test {
             apply_ops(&mut db).await;
             let _ = db.commit(None).await.unwrap();
             let db = open_db(context.with_label("sixth")).await;
-            assert!(db.op_count() > 1);
+            assert!(db.bounds().end > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -622,7 +626,7 @@ mod test {
             let db = db.into_merkleized();
             let mut hasher = Standard::<Sha256>::new();
             let root_hash = db.root();
-            let original_op_count = db.op_count();
+            let original_op_count = db.bounds().end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -762,7 +766,7 @@ mod test {
             let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
 
             // Now keep adding operations and make sure we can still generate a historical proof that matches the original.
-            let historical_size = db.op_count();
+            let historical_size = db.bounds().end;
 
             let mut db = db.into_mutable();
             for i in 1..10 {
@@ -1009,5 +1013,38 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_any_ordered_fixed_batch() {
         batch_tests::test_batch(|ctx| async move { create_test_db(ctx).await.into_mutable() });
+    }
+
+    // FromSyncTestable implementation for from_sync_result tests
+    mod from_sync_testable {
+        use super::*;
+        use crate::{
+            mmr::{iterator::nodes_to_pin, journaled::Mmr, mem::Clean, Position},
+            qmdb::any::sync::tests::FromSyncTestable,
+        };
+        use futures::future::join_all;
+
+        type TestMmr = Mmr<deterministic::Context, Digest, Clean<Digest>>;
+
+        impl FromSyncTestable for CleanAnyTest {
+            type Mmr = TestMmr;
+
+            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+                (self.log.mmr, self.log.journal)
+            }
+
+            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
+                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+                    .await
+                    .into_iter()
+                    .map(|n| n.unwrap().unwrap())
+                    .collect()
+            }
+
+            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes();
+                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
+            }
+        }
     }
 }

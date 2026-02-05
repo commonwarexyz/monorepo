@@ -14,732 +14,774 @@
 //!
 //! # Status
 //!
-//! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
+//! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use bytes::{Buf, BufMut};
-use commonware_macros::select;
-use commonware_parallel::{Rayon, ThreadPool};
-use commonware_utils::StableBuf;
-use prometheus_client::registry::Metric;
-use rayon::ThreadPoolBuildError;
-use std::{
-    future::Future,
-    io::Error as IoError,
-    net::SocketAddr,
-    num::NonZeroUsize,
-    time::{Duration, SystemTime},
-};
-use thiserror::Error;
+use commonware_macros::stability_scope;
 
 #[macro_use]
 mod macros;
 
-pub mod deterministic;
-pub mod mocks;
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
-        pub mod tokio;
-        pub mod benchmarks;
-    }
-}
 mod network;
 mod process;
 mod storage;
-pub mod telemetry;
-pub mod utils;
-pub use utils::*;
-#[cfg(any(feature = "iouring-storage", feature = "iouring-network"))]
-mod iouring;
 
-/// Prefix for runtime metrics.
-const METRICS_PREFIX: &str = "runtime";
+stability_scope!(ALPHA {
+    pub mod deterministic;
+    pub mod mocks;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    pub mod benchmarks;
+});
+stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
+    mod iouring;
+});
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    pub mod tokio;
+});
+stability_scope!(BETA {
+    use commonware_macros::select;
+    use commonware_parallel::{Rayon, ThreadPool};
+    use iobuf::PoolError;
+    use prometheus_client::registry::Metric;
+    use rayon::ThreadPoolBuildError;
+    use std::{
+        future::Future,
+        io::Error as IoError,
+        net::SocketAddr,
+        num::NonZeroUsize,
+        time::{Duration, SystemTime},
+    };
+    use thiserror::Error;
 
-/// Default [`Blob`] version used when no version is specified via [`Storage::open`].
-pub const DEFAULT_BLOB_VERSION: u16 = 0;
+    /// Prefix for runtime metrics.
+    pub(crate) const METRICS_PREFIX: &str = "runtime";
 
-/// Errors that can occur when interacting with the runtime.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("exited")]
-    Exited,
-    #[error("closed")]
-    Closed,
-    #[error("timeout")]
-    Timeout,
-    #[error("bind failed")]
-    BindFailed,
-    #[error("connection failed")]
-    ConnectionFailed,
-    #[error("write failed")]
-    WriteFailed,
-    #[error("read failed")]
-    ReadFailed,
-    #[error("send failed")]
-    SendFailed,
-    #[error("recv failed")]
-    RecvFailed,
-    #[error("dns resolution failed: {0}")]
-    ResolveFailed(String),
-    #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
-    PartitionNameInvalid(String),
-    #[error("partition creation failed: {0}")]
-    PartitionCreationFailed(String),
-    #[error("partition missing: {0}")]
-    PartitionMissing(String),
-    #[error("partition corrupt: {0}")]
-    PartitionCorrupt(String),
-    #[error("blob open failed: {0}/{1} error: {2}")]
-    BlobOpenFailed(String, String, IoError),
-    #[error("blob missing: {0}/{1}")]
-    BlobMissing(String, String),
-    #[error("blob resize failed: {0}/{1} error: {2}")]
-    BlobResizeFailed(String, String, IoError),
-    #[error("blob sync failed: {0}/{1} error: {2}")]
-    BlobSyncFailed(String, String, IoError),
-    #[error("blob insufficient length")]
-    BlobInsufficientLength,
-    #[error("blob corrupt: {0}/{1} reason: {2}")]
-    BlobCorrupt(String, String, String),
-    #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
-    BlobVersionMismatch {
-        expected: std::ops::RangeInclusive<u16>,
-        found: u16,
-    },
-    #[error("invalid or missing checksum")]
-    InvalidChecksum,
-    #[error("offset overflow")]
-    OffsetOverflow,
-    #[error("immutable blob")]
-    ImmutableBlob,
-    #[error("io error: {0}")]
-    Io(#[from] IoError),
-}
+    /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
+    pub use bytes::{Buf, BufMut};
+    /// Re-export of [governor::Quota] for rate limiting configuration.
+    pub use governor::Quota;
 
-/// Interface that any task scheduler must implement to start
-/// running tasks.
-pub trait Runner {
-    /// Context defines the environment available to tasks.
-    /// Example of possible services provided by the context include:
-    /// - [Clock] for time-based operations
-    /// - [Network] for network operations
-    /// - [Storage] for storage operations
-    type Context;
+    pub mod iobuf;
+    pub use iobuf::{BufferPool, BufferPoolConfig, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
-    /// Start running a root task.
-    ///
-    /// When this function returns, all spawned tasks will be canceled. If clean
-    /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
-    /// [Spawner::stopped] to coordinate clean shutdown.
-    fn start<F, Fut>(self, f: F) -> Fut::Output
-    where
-        F: FnOnce(Self::Context) -> Fut,
-        Fut: Future;
-}
+    pub mod utils;
+    pub use utils::*;
 
-/// Interface that any task scheduler must implement to spawn tasks.
-pub trait Spawner: Clone + Send + Sync + 'static {
-    /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
-    ///
-    /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
-    /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
-    /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
-    /// [`Spawner::dedicated`] instead.
-    ///
-    /// The shared executor with `blocking == false` is the default spawn mode.
-    fn shared(self, blocking: bool) -> Self;
+    pub mod telemetry;
 
-    /// Return a [`Spawner`] that runs tasks on a dedicated thread when the runtime supports it.
-    ///
-    /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
-    /// shared executor.
-    ///
-    /// This is not the default behavior. See [`Spawner::shared`] for more information.
-    fn dedicated(self) -> Self;
+    /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
+    pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
-    /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
-    fn instrumented(self) -> Self;
-
-    /// Spawn a task with the current context.
-    ///
-    /// Unlike directly awaiting a future, the task starts running immediately even if the caller
-    /// never awaits the returned [`Handle`].
-    ///
-    /// # Mandatory Supervision
-    ///
-    /// All tasks are supervised. When a parent task finishes or is aborted, all its descendants are aborted.
-    ///
-    /// Spawn consumes the current task and provides a new child context to the spawned task. Likewise, cloning
-    /// a context (either via [`Clone::clone`] or [`Metrics::with_label`]) returns a child context.
-    ///
-    /// ```txt
-    /// ctx_a
-    ///   |
-    ///   +-- clone() ---> ctx_c
-    ///   |                  |
-    ///   |                  +-- spawn() ---> Task C (ctx_d)
-    ///   |
-    ///   +-- spawn() ---> Task A (ctx_b)
-    ///                              |
-    ///                              +-- spawn() ---> Task B (ctx_e)
-    ///
-    /// Task A finishes or aborts --> Task B and Task C are aborted
-    /// ```
-    ///
-    /// # Spawn Configuration
-    ///
-    /// When a context is cloned (either via [`Clone::clone`] or [`Metrics::with_label`]) or provided via
-    /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`] or [`Spawner::shared`] is reset.
-    ///
-    /// Child tasks should assume they start from a clean configuration without needing to inspect how their
-    /// parent was configured.
-    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
-    where
-        F: FnOnce(Self) -> Fut + Send + 'static,
-        Fut: Future<Output = T> + Send + 'static,
-        T: Send + 'static;
-
-    /// Signals the runtime to stop execution and waits for all outstanding tasks
-    /// to perform any required cleanup and exit.
-    ///
-    /// This method does not actually kill any tasks but rather signals to them, using
-    /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
-    /// It then waits for all [signal::Signal] references to be dropped before returning.
-    ///
-    /// ## Multiple Stop Calls
-    ///
-    /// This method is idempotent and safe to call multiple times concurrently (on
-    /// different instances of the same context since it consumes `self`). The first
-    /// call initiates shutdown with the provided `value`, and all subsequent calls
-    /// will wait for the same completion regardless of their `value` parameter, i.e.
-    /// the original `value` from the first call is preserved.
-    ///
-    /// ## Timeout
-    ///
-    /// If a timeout is provided, the method will return an error if all [signal::Signal]
-    /// references have not been dropped within the specified duration.
-    fn stop(
-        self,
-        value: i32,
-        timeout: Option<Duration>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
-    /// any task.
-    ///
-    /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
-    /// immediately. The [signal::Signal] returned will always resolve to the value of the
-    /// first [Spawner::stop] call.
-    fn stopped(&self) -> signal::Signal;
-}
-
-/// Trait for creating [rayon]-compatible thread pools with each worker thread
-/// placed on dedicated threads via [Spawner].
-pub trait RayonPoolSpawner: Spawner + Metrics {
-    /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
-    ///
-    /// # Arguments
-    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
-    ///
-    /// # Returns
-    /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
-    /// be built.
-    fn create_pool(&self, concurrency: NonZeroUsize) -> Result<ThreadPool, ThreadPoolBuildError>;
-
-    /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
-    ///
-    /// # Arguments
-    /// - `concurrency`: The number of tasks to execute concurrently in the pool.
-    ///
-    /// # Returns
-    /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
-    /// built.
-    fn create_strategy(&self, concurrency: NonZeroUsize) -> Result<Rayon, ThreadPoolBuildError> {
-        self.create_pool(concurrency).map(Rayon::with_pool)
-    }
-}
-
-/// Interface to register and encode metrics.
-pub trait Metrics: Clone + Send + Sync + 'static {
-    /// Get the current label of the context.
-    fn label(&self) -> String;
-
-    /// Create a new instance of `Metrics` with the given label appended to the end
-    /// of the current `Metrics` label.
-    ///
-    /// This is commonly used to create a nested context for `register`.
-    ///
-    /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is not permitted for
-    /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
-    fn with_label(&self, label: &str) -> Self;
-
-    /// Create a new instance of `Metrics` with an additional attribute (key-value pair) applied
-    /// to all metrics registered in this context and any child contexts.
-    ///
-    /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
-    /// a key-value pair that appears as a separate dimension in the metric output. This is
-    /// useful for instrumenting n-ary data structures in a way that is easy to manage downstream.
-    ///
-    /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
-    ///
-    /// # Labeling Children
-    ///
-    /// Attributes apply to the entire subtree of contexts. When you call `with_attribute`, the
-    /// label is automatically added to all metrics registered in that context and any child
-    /// contexts created via `with_label`:
-    ///
-    /// ```text
-    /// context
-    ///   |-- with_label("orchestrator")
-    ///         |-- with_attribute("epoch", "5")
-    ///               |-- counter: votes        -> orchestrator_votes{epoch="5"}
-    ///               |-- counter: proposals    -> orchestrator_proposals{epoch="5"}
-    ///               |-- with_label("engine")
-    ///                     |-- gauge: height   -> orchestrator_engine_height{epoch="5"}
-    /// ```
-    ///
-    /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
-    /// names with dynamic values like `orchestrator_epoch_5_votes`.
-    ///
-    /// _Using attributes does not reduce cardinality (N epochs still means N time series).
-    /// Attributes just make metrics easier to query, filter, and aggregate._
-    ///
-    /// # Family Label Conflicts
-    ///
-    /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
-    /// If a conflict occurs, the encoded output will contain duplicate labels (e.g., `{env="prod",env="staging"}`),
-    /// which is invalid Prometheus format and may cause scraping issues.
-    ///
-    /// ```ignore
-    /// #[derive(EncodeLabelSet)]
-    /// struct Labels { env: String }
-    ///
-    /// // BAD: attribute "env" conflicts with Family field "env"
-    /// let ctx = context.with_attribute("env", "prod");
-    /// let family: Family<Labels, Counter> = Family::default();
-    /// ctx.register("requests", "help", family);
-    /// // Produces invalid: requests_total{env="prod",env="staging"}
-    ///
-    /// // GOOD: use distinct names
-    /// let ctx = context.with_attribute("region", "us_east");
-    /// // Produces valid: requests_total{region="us_east",env="staging"}
-    /// ```
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Instead of creating epoch-specific metric names:
-    /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
-    /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
-    ///
-    /// // Use attributes to add epoch as a label dimension:
-    /// let ctx = context.with_label("consensus_engine").with_attribute("epoch", epoch);
-    /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
-    /// ```
-    ///
-    /// Multiple attributes can be chained:
-    /// ```ignore
-    /// let ctx = context
-    ///     .with_label("engine")
-    ///     .with_attribute("region", "us_east")
-    ///     .with_attribute("instance", "i1");
-    /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
-    /// ```
-    ///
-    /// # Querying The Latest Attribute
-    ///
-    /// To query the latest attribute value dynamically, create a gauge to track the current value:
-    /// ```ignore
-    /// // Create a gauge to track the current epoch
-    /// let latest_epoch = Gauge::<i64>::default();
-    /// context.with_label("orchestrator").register("latest_epoch", "current epoch", latest_epoch.clone());
-    /// latest_epoch.set(current_epoch);
-    /// // Produces: orchestrator_latest_epoch 5
-    /// ```
-    ///
-    /// Then create a dashboard variable `$latest_epoch` with query `max(orchestrator_latest_epoch)`
-    /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
-
-    /// Prefix the given label with the current context's label.
-    ///
-    /// Unlike `with_label`, this method does not create a new context.
-    fn scoped_label(&self, label: &str) -> String {
-        let label = if self.label().is_empty() {
-            label.to_string()
-        } else {
-            format!("{}_{}", self.label(), label)
-        };
-        assert!(
-            !label.starts_with(METRICS_PREFIX),
-            "using runtime label is not allowed"
-        );
-        label
+    /// Errors that can occur when interacting with the runtime.
+    #[derive(Error, Debug)]
+    pub enum Error {
+        #[error("exited")]
+        Exited,
+        #[error("closed")]
+        Closed,
+        #[error("timeout")]
+        Timeout,
+        #[error("bind failed")]
+        BindFailed,
+        #[error("connection failed")]
+        ConnectionFailed,
+        #[error("write failed")]
+        WriteFailed,
+        #[error("read failed")]
+        ReadFailed,
+        #[error("send failed")]
+        SendFailed,
+        #[error("recv failed")]
+        RecvFailed,
+        #[error("dns resolution failed: {0}")]
+        ResolveFailed(String),
+        #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
+        PartitionNameInvalid(String),
+        #[error("partition creation failed: {0}")]
+        PartitionCreationFailed(String),
+        #[error("partition missing: {0}")]
+        PartitionMissing(String),
+        #[error("partition corrupt: {0}")]
+        PartitionCorrupt(String),
+        #[error("blob open failed: {0}/{1} error: {2}")]
+        BlobOpenFailed(String, String, IoError),
+        #[error("blob missing: {0}/{1}")]
+        BlobMissing(String, String),
+        #[error("blob resize failed: {0}/{1} error: {2}")]
+        BlobResizeFailed(String, String, IoError),
+        #[error("blob sync failed: {0}/{1} error: {2}")]
+        BlobSyncFailed(String, String, IoError),
+        #[error("blob insufficient length")]
+        BlobInsufficientLength,
+        #[error("blob corrupt: {0}/{1} reason: {2}")]
+        BlobCorrupt(String, String, String),
+        #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
+        BlobVersionMismatch {
+            expected: std::ops::RangeInclusive<u16>,
+            found: u16,
+        },
+        #[error("invalid or missing checksum")]
+        InvalidChecksum,
+        #[error("offset overflow")]
+        OffsetOverflow,
+        #[error("immutable blob")]
+        ImmutableBlob,
+        #[error("io error: {0}")]
+        Io(#[from] IoError),
+        #[error("buffer pool: {0}")]
+        Pool(#[from] PoolError),
     }
 
-    /// Register a metric with the runtime.
-    ///
-    /// Any registered metric will include (as a prefix) the label of the current context.
-    ///
-    /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+    /// Interface that any task scheduler must implement to start
+    /// running tasks.
+    pub trait Runner {
+        /// Context defines the environment available to tasks.
+        /// Example of possible services provided by the context include:
+        /// - [Clock] for time-based operations
+        /// - [Network] for network operations
+        /// - [Storage] for storage operations
+        type Context;
 
-    /// Encode all metrics into a buffer.
-    ///
-    /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-    /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
-    /// by using `with_label` to create new context instances (ensures all context instances are
-    /// namespaced).
-    fn encode(&self) -> String;
-}
-
-/// Re-export of [governor::Quota] for rate limiting configuration.
-pub use governor::Quota;
-
-/// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
-///
-/// This is a convenience type alias for creating single-entity rate limiters.
-/// For per-key rate limiting, use [KeyedRateLimiter].
-pub type RateLimiter<C> = governor::RateLimiter<
-    governor::state::NotKeyed,
-    governor::state::InMemoryState,
-    C,
-    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
->;
-
-/// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
-///
-/// This is a convenience type alias for creating per-peer rate limiters
-/// using governor's [HashMapStateStore].
-///
-/// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
-pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
-    K,
-    governor::state::keyed::HashMapStateStore<K>,
-    C,
-    governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
->;
-
-/// Interface that any task scheduler must implement to provide
-/// time-based operations.
-///
-/// It is necessary to mock time to provide deterministic execution
-/// of arbitrary tasks.
-pub trait Clock:
-    governor::clock::Clock<Instant = SystemTime>
-    + governor::clock::ReasonablyRealtime
-    + Clone
-    + Send
-    + Sync
-    + 'static
-{
-    /// Returns the current time.
-    fn current(&self) -> SystemTime;
-
-    /// Sleep for the given duration.
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
-
-    /// Sleep until the given deadline.
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
-
-    /// Await a future with a timeout, returning `Error::Timeout` if it expires.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    /// use commonware_runtime::{deterministic, Error, Runner, Clock};
-    ///
-    /// let executor = deterministic::Runner::default();
-    /// executor.start(|context| async move {
-    ///     match context
-    ///         .timeout(Duration::from_millis(100), async { 42 })
-    ///         .await
-    ///     {
-    ///         Ok(value) => assert_eq!(value, 42),
-    ///         Err(Error::Timeout) => panic!("should not timeout"),
-    ///         Err(e) => panic!("unexpected error: {:?}", e),
-    ///     }
-    /// });
-    /// ```
-    fn timeout<F, T>(
-        &self,
-        duration: Duration,
-        future: F,
-    ) -> impl Future<Output = Result<T, Error>> + Send + '_
-    where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
-    {
-        async move {
-            select! {
-                result = future => {
-                    Ok(result)
-                },
-                _ = self.sleep(duration) => {
-                    Err(Error::Timeout)
-                },
-            }
-        }
-    }
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "external")] {
-        /// Interface that runtimes can implement to constrain the execution latency of a future.
-        pub trait Pacer: Clock + Clone + Send + Sync + 'static {
-            /// Defer completion of a future until a specified `latency` has elapsed. If the future is
-            /// not yet ready at the desired time of completion, the runtime will block until the future
-            /// is ready.
-            ///
-            /// In [crate::deterministic], this is used to ensure interactions with external systems can
-            /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
-            /// multiple runtimes to be tested with no code changes).
-            ///
-            /// # Setting Latency
-            ///
-            /// `pace` is not meant to be a time penalty applied to awaited futures and should be set to
-            /// the expected resolution latency of the future. To better explore the possible behavior of an
-            /// application, users can set latency to a randomly chosen value in the range of
-            /// `[expected latency / 2, expected latency * 2]`.
-            ///
-            /// # Warning
-            ///
-            /// Because `pace` blocks if the future is not ready, it is important that the future's completion
-            /// doesn't require anything in the current thread to complete (or else it will deadlock).
-            fn pace<'a, F, T>(
-                &'a self,
-                latency: Duration,
-                future: F,
-            ) -> impl Future<Output = T> + Send + 'a
-            where
-                F: Future<Output = T> + Send + 'a,
-                T: Send + 'a;
-        }
-
-        /// Extension trait that makes it more ergonomic to use [Pacer].
+        /// Start running a root task.
         ///
-        /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
-        /// runtime should delay completion relative to the clock.
-        pub trait FutureExt: Future + Send + Sized {
-            /// Delay completion of the future until a specified `latency` on `pacer`.
-            fn pace<'a, E>(
-                self,
-                pacer: &'a E,
-                latency: Duration,
-            ) -> impl Future<Output = Self::Output> + Send + 'a
-            where
-                E: Pacer + 'a,
-                Self: Send + 'a,
-                Self::Output: Send + 'a,
-            {
-                pacer.pace(latency, self)
+        /// When this function returns, all spawned tasks will be canceled. If clean
+        /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
+        /// [Spawner::stopped] to coordinate clean shutdown.
+        fn start<F, Fut>(self, f: F) -> Fut::Output
+        where
+            F: FnOnce(Self::Context) -> Fut,
+            Fut: Future;
+    }
+
+    /// Interface that any task scheduler must implement to spawn tasks.
+    pub trait Spawner: Clone + Send + Sync + 'static {
+        /// Return a [`Spawner`] that schedules tasks onto the runtime's shared executor.
+        ///
+        /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
+        /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
+        /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
+        /// [`Spawner::dedicated`] instead.
+        ///
+        /// The shared executor with `blocking == false` is the default spawn mode.
+        fn shared(self, blocking: bool) -> Self;
+
+        /// Return a [`Spawner`] that runs tasks on a dedicated thread when the runtime supports it.
+        ///
+        /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
+        /// shared executor.
+        ///
+        /// This is not the default behavior. See [`Spawner::shared`] for more information.
+        fn dedicated(self) -> Self;
+
+        /// Return a [`Spawner`] that instruments the next spawned task with the label of the spawning context.
+        fn instrumented(self) -> Self;
+
+        /// Spawn a task with the current context.
+        ///
+        /// Unlike directly awaiting a future, the task starts running immediately even if the caller
+        /// never awaits the returned [`Handle`].
+        ///
+        /// # Mandatory Supervision
+        ///
+        /// All tasks are supervised. When a parent task finishes or is aborted, all its descendants are aborted.
+        ///
+        /// Spawn consumes the current task and provides a new child context to the spawned task. Likewise, cloning
+        /// a context (either via [`Clone::clone`] or [`Metrics::with_label`]) returns a child context.
+        ///
+        /// ```txt
+        /// ctx_a
+        ///   |
+        ///   +-- clone() ---> ctx_c
+        ///   |                  |
+        ///   |                  +-- spawn() ---> Task C (ctx_d)
+        ///   |
+        ///   +-- spawn() ---> Task A (ctx_b)
+        ///                              |
+        ///                              +-- spawn() ---> Task B (ctx_e)
+        ///
+        /// Task A finishes or aborts --> Task B and Task C are aborted
+        /// ```
+        ///
+        /// # Spawn Configuration
+        ///
+        /// When a context is cloned (either via [`Clone::clone`] or [`Metrics::with_label`]) or provided via
+        /// [`Spawner::spawn`], any configuration made via [`Spawner::dedicated`] or [`Spawner::shared`] is reset.
+        ///
+        /// Child tasks should assume they start from a clean configuration without needing to inspect how their
+        /// parent was configured.
+        fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+        where
+            F: FnOnce(Self) -> Fut + Send + 'static,
+            Fut: Future<Output = T> + Send + 'static,
+            T: Send + 'static;
+
+        /// Signals the runtime to stop execution and waits for all outstanding tasks
+        /// to perform any required cleanup and exit.
+        ///
+        /// This method does not actually kill any tasks but rather signals to them, using
+        /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
+        /// It then waits for all [signal::Signal] references to be dropped before returning.
+        ///
+        /// ## Multiple Stop Calls
+        ///
+        /// This method is idempotent and safe to call multiple times concurrently (on
+        /// different instances of the same context since it consumes `self`). The first
+        /// call initiates shutdown with the provided `value`, and all subsequent calls
+        /// will wait for the same completion regardless of their `value` parameter, i.e.
+        /// the original `value` from the first call is preserved.
+        ///
+        /// ## Timeout
+        ///
+        /// If a timeout is provided, the method will return an error if all [signal::Signal]
+        /// references have not been dropped within the specified duration.
+        fn stop(
+            self,
+            value: i32,
+            timeout: Option<Duration>,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
+        /// any task.
+        ///
+        /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
+        /// immediately. The [signal::Signal] returned will always resolve to the value of the
+        /// first [Spawner::stop] call.
+        fn stopped(&self) -> signal::Signal;
+    }
+
+    /// Trait for creating [rayon]-compatible thread pools with each worker thread
+    /// placed on dedicated threads via [Spawner].
+    pub trait ThreadPooler: Spawner + Metrics {
+        /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
+        ///
+        /// # Arguments
+        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+        ///
+        /// # Returns
+        /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
+        /// be built.
+        fn create_thread_pool(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<ThreadPool, ThreadPoolBuildError>;
+
+        /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
+        ///
+        /// # Arguments
+        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+        ///
+        /// # Returns
+        /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
+        /// built.
+        fn create_strategy(
+            &self,
+            concurrency: NonZeroUsize,
+        ) -> Result<Rayon, ThreadPoolBuildError> {
+            self.create_thread_pool(concurrency).map(Rayon::with_pool)
+        }
+    }
+
+    /// Interface to register and encode metrics.
+    pub trait Metrics: Clone + Send + Sync + 'static {
+        /// Get the current label of the context.
+        fn label(&self) -> String;
+
+        /// Create a new instance of `Metrics` with the given label appended to the end
+        /// of the current `Metrics` label.
+        ///
+        /// This is commonly used to create a nested context for `register`.
+        ///
+        /// Labels must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. It is not permitted for
+        /// any implementation to use `METRICS_PREFIX` as the start of a label (reserved for metrics for the runtime).
+        fn with_label(&self, label: &str) -> Self;
+
+        /// Create a new instance of `Metrics` with an additional attribute (key-value pair) applied
+        /// to all metrics registered in this context and any child contexts.
+        ///
+        /// Unlike [`Metrics::with_label`] which affects the metric name prefix, `with_attribute` adds
+        /// a key-value pair that appears as a separate dimension in the metric output. This is
+        /// useful for instrumenting n-ary data structures in a way that is easy to manage downstream.
+        ///
+        /// Keys must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`. Values can be any string.
+        ///
+        /// # Labeling Children
+        ///
+        /// Attributes apply to the entire subtree of contexts. When you call `with_attribute`, the
+        /// label is automatically added to all metrics registered in that context and any child
+        /// contexts created via `with_label`:
+        ///
+        /// ```text
+        /// context
+        ///   |-- with_label("orchestrator")
+        ///         |-- with_attribute("epoch", "5")
+        ///               |-- counter: votes        -> orchestrator_votes{epoch="5"}
+        ///               |-- counter: proposals    -> orchestrator_proposals{epoch="5"}
+        ///               |-- with_label("engine")
+        ///                     |-- gauge: height   -> orchestrator_engine_height{epoch="5"}
+        /// ```
+        ///
+        /// This pattern avoids wrapping every metric in a `Family` and avoids polluting metric
+        /// names with dynamic values like `orchestrator_epoch_5_votes`.
+        ///
+        /// _Using attributes does not reduce cardinality (N epochs still means N time series).
+        /// Attributes just make metrics easier to query, filter, and aggregate._
+        ///
+        /// # Family Label Conflicts
+        ///
+        /// When using `Family` metrics, avoid using attribute keys that match the Family's label field names.
+        /// If a conflict occurs, the encoded output will contain duplicate labels (e.g., `{env="prod",env="staging"}`),
+        /// which is invalid Prometheus format and may cause scraping issues.
+        ///
+        /// ```ignore
+        /// #[derive(EncodeLabelSet)]
+        /// struct Labels { env: String }
+        ///
+        /// // BAD: attribute "env" conflicts with Family field "env"
+        /// let ctx = context.with_attribute("env", "prod");
+        /// let family: Family<Labels, Counter> = Family::default();
+        /// ctx.register("requests", "help", family);
+        /// // Produces invalid: requests_total{env="prod",env="staging"}
+        ///
+        /// // GOOD: use distinct names
+        /// let ctx = context.with_attribute("region", "us_east");
+        /// // Produces valid: requests_total{region="us_east",env="staging"}
+        /// ```
+        ///
+        /// # Example
+        ///
+        /// ```ignore
+        /// // Instead of creating epoch-specific metric names:
+        /// let ctx = context.with_label(&format!("consensus_engine_{}", epoch));
+        /// // Produces: consensus_engine_5_votes_total, consensus_engine_6_votes_total, ...
+        ///
+        /// // Use attributes to add epoch as a label dimension:
+        /// let ctx = context.with_label("consensus_engine").with_attribute("epoch", epoch);
+        /// // Produces: consensus_engine_votes_total{epoch="5"}, consensus_engine_votes_total{epoch="6"}, ...
+        /// ```
+        ///
+        /// Multiple attributes can be chained:
+        /// ```ignore
+        /// let ctx = context
+        ///     .with_label("engine")
+        ///     .with_attribute("region", "us_east")
+        ///     .with_attribute("instance", "i1");
+        /// // Produces: engine_requests_total{region="us_east",instance="i1"} 42
+        /// ```
+        ///
+        /// # Querying The Latest Attribute
+        ///
+        /// To query the latest attribute value dynamically, create a gauge to track the current value:
+        /// ```ignore
+        /// // Create a gauge to track the current epoch
+        /// let latest_epoch = Gauge::<i64>::default();
+        /// context.with_label("orchestrator").register("latest_epoch", "current epoch", latest_epoch.clone());
+        /// latest_epoch.set(current_epoch);
+        /// // Produces: orchestrator_latest_epoch 5
+        /// ```
+        ///
+        /// Then create a dashboard variable `$latest_epoch` with query `max(orchestrator_latest_epoch)`
+        /// and use it in panel queries: `consensus_engine_votes_total{epoch="$latest_epoch"}`
+        fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self;
+
+        /// Prefix the given label with the current context's label.
+        ///
+        /// Unlike `with_label`, this method does not create a new context.
+        fn scoped_label(&self, label: &str) -> String {
+            let label = if self.label().is_empty() {
+                label.to_string()
+            } else {
+                format!("{}_{}", self.label(), label)
+            };
+            assert!(
+                !label.starts_with(METRICS_PREFIX),
+                "using runtime label is not allowed"
+            );
+            label
+        }
+
+        /// Register a metric with the runtime.
+        ///
+        /// Any registered metric will include (as a prefix) the label of the current context.
+        ///
+        /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+        fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric);
+
+        /// Encode all metrics into a buffer.
+        ///
+        /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
+        /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
+        /// by using `with_label` to create new context instances (ensures all context instances are
+        /// namespaced).
+        fn encode(&self) -> String;
+    }
+
+    /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
+    ///
+    /// This is a convenience type alias for creating single-entity rate limiters.
+    /// For per-key rate limiting, use [KeyedRateLimiter].
+    pub type RateLimiter<C> = governor::RateLimiter<
+        governor::state::NotKeyed,
+        governor::state::InMemoryState,
+        C,
+        governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+    >;
+
+    /// A rate limiter keyed by `K` using the provided [governor::clock::Clock] `C`.
+    ///
+    /// This is a convenience type alias for creating per-peer rate limiters
+    /// using governor's [HashMapStateStore].
+    ///
+    /// [HashMapStateStore]: governor::state::keyed::HashMapStateStore
+    pub type KeyedRateLimiter<K, C> = governor::RateLimiter<
+        K,
+        governor::state::keyed::HashMapStateStore<K>,
+        C,
+        governor::middleware::NoOpMiddleware<<C as governor::clock::Clock>::Instant>,
+    >;
+
+    /// Interface that any task scheduler must implement to provide
+    /// time-based operations.
+    ///
+    /// It is necessary to mock time to provide deterministic execution
+    /// of arbitrary tasks.
+    pub trait Clock:
+        governor::clock::Clock<Instant = SystemTime>
+        + governor::clock::ReasonablyRealtime
+        + Clone
+        + Send
+        + Sync
+        + 'static
+    {
+        /// Returns the current time.
+        fn current(&self) -> SystemTime;
+
+        /// Sleep for the given duration.
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+
+        /// Sleep until the given deadline.
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+
+        /// Await a future with a timeout, returning `Error::Timeout` if it expires.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use std::time::Duration;
+        /// use commonware_runtime::{deterministic, Error, Runner, Clock};
+        ///
+        /// let executor = deterministic::Runner::default();
+        /// executor.start(|context| async move {
+        ///     match context
+        ///         .timeout(Duration::from_millis(100), async { 42 })
+        ///         .await
+        ///     {
+        ///         Ok(value) => assert_eq!(value, 42),
+        ///         Err(Error::Timeout) => panic!("should not timeout"),
+        ///         Err(e) => panic!("unexpected error: {:?}", e),
+        ///     }
+        /// });
+        /// ```
+        fn timeout<F, T>(
+            &self,
+            duration: Duration,
+            future: F,
+        ) -> impl Future<Output = Result<T, Error>> + Send + '_
+        where
+            F: Future<Output = T> + Send + 'static,
+            T: Send + 'static,
+        {
+            async move {
+                select! {
+                    result = future => Ok(result),
+                    _ = self.sleep(duration) => Err(Error::Timeout),
+                }
+            }
+        }
+    }
+
+    /// Syntactic sugar for the type of [Sink] used by a given [Network] N.
+    pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
+
+    /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
+    pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
+
+    /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
+    pub type ListenerOf<N> = <N as crate::Network>::Listener;
+
+    /// Interface that any runtime must implement to create
+    /// network connections.
+    pub trait Network: Clone + Send + Sync + 'static {
+        /// The type of [Listener] that's returned when binding to a socket.
+        /// Accepting a connection returns a [Sink] and [Stream] which are defined
+        /// by the [Listener] and used to send and receive data over the connection.
+        type Listener: Listener;
+
+        /// Bind to the given socket address.
+        fn bind(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
+
+        /// Dial the given socket address.
+        fn dial(
+            &self,
+            socket: SocketAddr,
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
+    }
+
+    /// Interface for DNS resolution.
+    pub trait Resolver: Clone + Send + Sync + 'static {
+        /// Resolve a hostname to IP addresses.
+        ///
+        /// Returns a list of IP addresses that the hostname resolves to.
+        fn resolve(
+            &self,
+            host: &str,
+        ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
+    }
+
+    /// Interface that any runtime must implement to handle
+    /// incoming network connections.
+    pub trait Listener: Sync + Send + 'static {
+        /// The type of [Sink] that's returned when accepting a connection.
+        /// This is used to send data to the remote connection.
+        type Sink: Sink;
+        /// The type of [Stream] that's returned when accepting a connection.
+        /// This is used to receive data from the remote connection.
+        type Stream: Stream;
+
+        /// Accept an incoming connection.
+        fn accept(
+            &mut self,
+        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+
+        /// Returns the local address of the listener.
+        fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
+    }
+
+    /// Interface that any runtime must implement to send
+    /// messages over a network connection.
+    pub trait Sink: Sync + Send + 'static {
+        /// Send a message to the sink.
+        ///
+        /// # Warning
+        ///
+        /// If the sink returns an error, part of the message may still be delivered.
+        fn send(
+            &mut self,
+            buf: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+
+    /// Interface that any runtime must implement to receive
+    /// messages over a network connection.
+    pub trait Stream: Sync + Send + 'static {
+        /// Receive exactly `len` bytes from the stream.
+        ///
+        /// The runtime allocates the buffer and returns it as `IoBufs`.
+        ///
+        /// # Warning
+        ///
+        /// If the stream returns an error, partially read data may be discarded.
+        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+
+        /// Peek at buffered data without consuming.
+        ///
+        /// Returns up to `max_len` bytes from the internal buffer, or an empty slice
+        /// if no data is currently buffered. This does not perform any I/O or block.
+        ///
+        /// This is useful e.g. for parsing length prefixes without committing to a read
+        /// or paying the cost of async.
+        fn peek(&self, max_len: u64) -> &[u8];
+    }
+
+    /// Interface to interact with storage.
+    ///
+    /// To support storage implementations that enable concurrent reads and
+    /// writes, blobs are responsible for maintaining synchronization.
+    ///
+    /// Storage can be backed by a local filesystem, cloud storage, etc.
+    ///
+    /// # Partition Names
+    ///
+    /// Partition names must be non-empty and contain only ASCII alphanumeric
+    /// characters, dashes (`-`), or underscores (`_`). Names containing other
+    /// characters (e.g., `/`, `.`, spaces) will return an error.
+    pub trait Storage: Clone + Send + Sync + 'static {
+        /// The readable/writeable storage buffer that can be opened by this Storage.
+        type Blob: Blob;
+
+        /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
+        /// in the versions range. The blob version is omitted from the return value.
+        fn open(
+            &self,
+            partition: &str,
+            name: &[u8],
+        ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
+            async move {
+                let (blob, size, _) = self
+                    .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
+                    .await?;
+                Ok((blob, size))
             }
         }
 
-        impl<F> FutureExt for F where F: Future + Send {}
+        /// Open an existing blob in a given partition or create a new one, returning
+        /// the blob and its length.
+        ///
+        /// Multiple instances of the same blob can be opened concurrently, however,
+        /// writing to the same blob concurrently may lead to undefined behavior.
+        ///
+        /// An Ok result indicates the blob is durably created (or already exists).
+        ///
+        /// # Versions
+        ///
+        /// Blobs are versioned. If the blob's version is not in `versions`, returns
+        /// [Error::BlobVersionMismatch].
+        ///
+        /// # Returns
+        ///
+        /// A tuple of (blob, logical_size, blob_version).
+        fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+
+        /// Remove a blob from a given partition.
+        ///
+        /// If no `name` is provided, the entire partition is removed.
+        ///
+        /// An Ok result indicates the blob is durably removed.
+        fn remove(
+            &self,
+            partition: &str,
+            name: Option<&[u8]>,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Return all blobs in a given partition.
+        fn scan(&self, partition: &str)
+            -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
-}
 
-/// Syntactic sugar for the type of [Sink] used by a given [Network] N.
-pub type SinkOf<N> = <<N as Network>::Listener as Listener>::Sink;
-
-/// Syntactic sugar for the type of [Stream] used by a given [Network] N.
-pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
-
-/// Syntactic sugar for the type of [Listener] used by a given [Network] N.
-pub type ListenerOf<N> = <N as crate::Network>::Listener;
-
-/// Interface that any runtime must implement to create
-/// network connections.
-pub trait Network: Clone + Send + Sync + 'static {
-    /// The type of [Listener] that's returned when binding to a socket.
-    /// Accepting a connection returns a [Sink] and [Stream] which are defined
-    /// by the [Listener] and used to send and receive data over the connection.
-    type Listener: Listener;
-
-    /// Bind to the given socket address.
-    fn bind(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
-
-    /// Dial the given socket address.
-    fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
-}
-
-/// Interface for DNS resolution.
-pub trait Resolver: Clone + Send + Sync + 'static {
-    /// Resolve a hostname to IP addresses.
+    /// Interface to read and write to a blob.
     ///
-    /// Returns a list of IP addresses that the hostname resolves to.
-    fn resolve(
-        &self,
-        host: &str,
-    ) -> impl Future<Output = Result<Vec<std::net::IpAddr>, Error>> + Send;
-}
-
-/// Interface that any runtime must implement to handle
-/// incoming network connections.
-pub trait Listener: Sync + Send + 'static {
-    /// The type of [Sink] that's returned when accepting a connection.
-    /// This is used to send data to the remote connection.
-    type Sink: Sink;
-    /// The type of [Stream] that's returned when accepting a connection.
-    /// This is used to receive data from the remote connection.
-    type Stream: Stream;
-
-    /// Accept an incoming connection.
-    fn accept(
-        &mut self,
-    ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
-
-    /// Returns the local address of the listener.
-    fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
-}
-
-/// Interface that any runtime must implement to send
-/// messages over a network connection.
-pub trait Sink: Sync + Send + 'static {
-    /// Send a message to the sink.
+    /// To support blob implementations that enable concurrent reads and
+    /// writes, blobs are responsible for maintaining synchronization.
     ///
-    /// # Warning
+    /// Cloning a blob is similar to wrapping a single file descriptor in
+    /// a lock whereas opening a new blob (of the same name) is similar to
+    /// opening a new file descriptor. If multiple blobs are opened with the same
+    /// name, they are not expected to coordinate access to underlying storage
+    /// and writing to both is undefined behavior.
     ///
-    /// If the sink returns an error, part of the message may still be delivered.
-    fn send(&mut self, msg: impl Buf + Send) -> impl Future<Output = Result<(), Error>> + Send;
-}
+    /// When a blob is dropped, any unsynced changes may be discarded. Implementations
+    /// may attempt to sync during drop but errors will go unhandled. Call `sync`
+    /// before dropping to ensure all changes are durably persisted.
+    #[allow(clippy::len_without_is_empty)]
+    pub trait Blob: Clone + Send + Sync + 'static {
+        /// Read into caller-provided buffer(s) at the given offset.
+        ///
+        /// The caller provides the buffer, and the implementation fills it with data
+        /// read from the blob starting at `offset`. Returns the same buffer, filled
+        /// with data.
+        ///
+        /// # Contract
+        ///
+        /// - The output `IoBufsMut` is the same as the input, with data filled from offset
+        /// - The total bytes read equals the total initialized length of the input buffer(s)
+        fn read_at(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-/// Interface that any runtime must implement to receive
-/// messages over a network connection.
-pub trait Stream: Sync + Send + 'static {
-    /// Receive a message from the stream, storing it in the given buffer.
-    /// Reads exactly the number of bytes that fit in the buffer.
+        /// Write `buf` to the blob at the given offset.
+        fn write_at(
+            &self,
+            offset: u64,
+            buf: impl Into<IoBufs> + Send,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Resize the blob to the given length.
+        ///
+        /// If the length is greater than the current length, the blob is extended with zeros.
+        /// If the length is less than the current length, the blob is resized.
+        fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Ensure all pending data is durably persisted.
+        fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+
+    /// Interface that any runtime must implement to provide buffer pools.
+    pub trait BufferPooler: Clone + Send + Sync + 'static {
+        /// Returns the network [BufferPool].
+        fn network_buffer_pool(&self) -> &BufferPool;
+
+        /// Returns the storage [BufferPool].
+        fn storage_buffer_pool(&self) -> &BufferPool;
+    }
+});
+stability_scope!(ALPHA, cfg(feature = "external") {
+    /// Interface that runtimes can implement to constrain the execution latency of a future.
+    pub trait Pacer: Clock + Clone + Send + Sync + 'static {
+        /// Defer completion of a future until a specified `latency` has elapsed. If the future is
+        /// not yet ready at the desired time of completion, the runtime will block until the future
+        /// is ready.
+        ///
+        /// In [crate::deterministic], this is used to ensure interactions with external systems can
+        /// be interacted with deterministically. In [crate::tokio], this is a no-op (allows
+        /// multiple runtimes to be tested with no code changes).
+        ///
+        /// # Setting Latency
+        ///
+        /// `pace` is not meant to be a time penalty applied to awaited futures and should be set to
+        /// the expected resolution latency of the future. To better explore the possible behavior of an
+        /// application, users can set latency to a randomly chosen value in the range of
+        /// `[expected latency / 2, expected latency * 2]`.
+        ///
+        /// # Warning
+        ///
+        /// Because `pace` blocks if the future is not ready, it is important that the future's completion
+        /// doesn't require anything in the current thread to complete (or else it will deadlock).
+        fn pace<'a, F, T>(
+            &'a self,
+            latency: Duration,
+            future: F,
+        ) -> impl Future<Output = T> + Send + 'a
+        where
+            F: Future<Output = T> + Send + 'a,
+            T: Send + 'a;
+    }
+
+    /// Extension trait that makes it more ergonomic to use [Pacer].
     ///
-    /// # Warning
-    ///
-    /// If the stream returns an error, partially read data may be discarded.
-    fn recv(&mut self, buf: impl BufMut + Send) -> impl Future<Output = Result<(), Error>> + Send;
-}
-
-/// Interface to interact with storage.
-///
-/// To support storage implementations that enable concurrent reads and
-/// writes, blobs are responsible for maintaining synchronization.
-///
-/// Storage can be backed by a local filesystem, cloud storage, etc.
-///
-/// # Partition Names
-///
-/// Partition names must be non-empty and contain only ASCII alphanumeric
-/// characters, dashes (`-`), or underscores (`_`). Names containing other
-/// characters (e.g., `/`, `.`, spaces) will return an error.
-pub trait Storage: Clone + Send + Sync + 'static {
-    /// The readable/writeable storage buffer that can be opened by this Storage.
-    type Blob: Blob;
-
-    /// [`Storage::open_versioned`] with [`DEFAULT_BLOB_VERSION`] as the only value
-    /// in the versions range. The blob version is omitted from the return value.
-    fn open(
-        &self,
-        partition: &str,
-        name: &[u8],
-    ) -> impl Future<Output = Result<(Self::Blob, u64), Error>> + Send {
-        async move {
-            let (blob, size, _) = self
-                .open_versioned(partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION)
-                .await?;
-            Ok((blob, size))
+    /// This inverts the call-site of [`Pacer::pace`] by letting the future itself request how the
+    /// runtime should delay completion relative to the clock.
+    pub trait FutureExt: Future + Send + Sized {
+        /// Delay completion of the future until a specified `latency` on `pacer`.
+        fn pace<'a, E>(
+            self,
+            pacer: &'a E,
+            latency: Duration,
+        ) -> impl Future<Output = Self::Output> + Send + 'a
+        where
+            E: Pacer + 'a,
+            Self: Send + 'a,
+            Self::Output: Send + 'a,
+        {
+            pacer.pace(latency, self)
         }
     }
 
-    /// Open an existing blob in a given partition or create a new one, returning
-    /// the blob and its length.
-    ///
-    /// Multiple instances of the same blob can be opened concurrently, however,
-    /// writing to the same blob concurrently may lead to undefined behavior.
-    ///
-    /// An Ok result indicates the blob is durably created (or already exists).
-    ///
-    /// # Versions
-    ///
-    /// Blobs are versioned. If the blob's version is not in `versions`, returns
-    /// [Error::BlobVersionMismatch].
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (blob, logical_size, blob_version).
-    fn open_versioned(
-        &self,
-        partition: &str,
-        name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
-
-    /// Remove a blob from a given partition.
-    ///
-    /// If no `name` is provided, the entire partition is removed.
-    ///
-    /// An Ok result indicates the blob is durably removed.
-    fn remove(
-        &self,
-        partition: &str,
-        name: Option<&[u8]>,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Return all blobs in a given partition.
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
-}
-
-/// Interface to read and write to a blob.
-///
-/// To support blob implementations that enable concurrent reads and
-/// writes, blobs are responsible for maintaining synchronization.
-///
-/// Cloning a blob is similar to wrapping a single file descriptor in
-/// a lock whereas opening a new blob (of the same name) is similar to
-/// opening a new file descriptor. If multiple blobs are opened with the same
-/// name, they are not expected to coordinate access to underlying storage
-/// and writing to both is undefined behavior.
-///
-/// When a blob is dropped, any unsynced changes may be discarded. Implementations
-/// may attempt to sync during drop but errors will go unhandled. Call `sync`
-/// before dropping to ensure all changes are durably persisted.
-#[allow(clippy::len_without_is_empty)]
-pub trait Blob: Clone + Send + Sync + 'static {
-    /// Read from the blob at the given offset.
-    ///
-    /// `read_at` does not return the number of bytes read because it
-    /// only returns once the entire buffer has been filled.
-    fn read_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> impl Future<Output = Result<StableBuf, Error>> + Send;
-
-    /// Write `buf` to the blob at the given offset.
-    fn write_at(
-        &self,
-        buf: impl Into<StableBuf> + Send,
-        offset: u64,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Resize the blob to the given length.
-    ///
-    /// If the length is greater than the current length, the blob is extended with zeros.
-    /// If the length is less than the current length, the blob is resized.
-    fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Ensure all pending data is durably persisted.
-    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
-}
+    impl<F> FutureExt for F where F: Future + Send {}
+});
 
 #[cfg(test)]
 mod tests {
@@ -747,11 +789,13 @@ mod tests {
     use crate::telemetry::traces::collector::TraceStorage;
     use bytes::Bytes;
     use commonware_macros::{select, test_collect_traces};
-    use commonware_utils::NZUsize;
-    use futures::{
+    use commonware_utils::{
         channel::{mpsc, oneshot},
+        NZUsize,
+    };
+    use futures::{
         future::{pending, ready},
-        join, pin_mut, FutureExt, SinkExt, StreamExt,
+        join, pin_mut, FutureExt,
     };
     use prometheus_client::{
         encoding::EncodeLabelSet,
@@ -1011,10 +1055,10 @@ mod tests {
     {
         runner.start(|context| async move {
             // Should hit timeout
-            let (mut sender, mut receiver) = mpsc::unbounded();
+            let (sender, mut receiver) = mpsc::unbounded_channel();
             for _ in 0..2 {
                 select! {
-                    v = receiver.next() => {
+                    v = receiver.recv() => {
                         panic!("unexpected value: {v:?}");
                     },
                     _ = context.sleep(Duration::from_millis(100)) => {
@@ -1024,15 +1068,15 @@ mod tests {
             }
 
             // Populate channel
-            sender.send(0).await.unwrap();
-            sender.send(1).await.unwrap();
+            sender.send(0).unwrap();
+            sender.send(1).unwrap();
 
             // Prefer not reading channel without losing messages
             select! {
                 _ = async {} => {
                     // Skip reading from channel even though populated
                 },
-                v = receiver.next() => {
+                v = receiver.recv() => {
                     panic!("unexpected value: {v:?}");
                 },
             };
@@ -1043,7 +1087,7 @@ mod tests {
                     _ = context.sleep(Duration::from_millis(100)) => {
                         panic!("timeout");
                     },
-                    v = receiver.next() => {
+                    v = receiver.recv() => {
                         assert_eq!(v.unwrap(), i);
                     },
                 };
@@ -1068,7 +1112,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(Vec::from(data), 0)
+            blob.write_at(0, data)
                 .await
                 .expect("Failed to write to blob");
 
@@ -1077,10 +1121,10 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(vec![0; data.len()], 0)
+                .read_at(0, IoBufMut::zeroed(data.len()))
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.as_ref(), data);
+            assert_eq!(read.coalesce(), data);
 
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
@@ -1101,10 +1145,10 @@ mod tests {
 
             // Read data part of message back
             let read = blob
-                .read_at(vec![0u8; 7], 7)
+                .read_at(7, IoBufMut::zeroed(7))
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read.as_ref(), b"Storage");
+            assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
@@ -1151,41 +1195,43 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(Vec::from(data1), 0)
+            blob.write_at(0, data1)
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(Vec::from(data2), 5)
+            blob.write_at(5, data2)
                 .await
                 .expect("Failed to write data2");
 
             // Read data back
             let read = blob
-                .read_at(vec![0u8; 10], 0)
+                .read_at(0, IoBufMut::zeroed(10))
                 .await
                 .expect("Failed to read data");
+            let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(vec![0u8; 10], 10).await;
+            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(Vec::from(data3), 5)
+            blob.write_at(5, data3)
                 .await
                 .expect("Failed to write data3");
 
             // Read data back
             let read = blob
-                .read_at(vec![0u8; 10], 0)
+                .read_at(0, IoBufMut::zeroed(10))
                 .await
                 .expect("Failed to read data");
+            let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(vec![0u8; 10], 10).await;
+            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
             assert!(result.is_err());
         });
     }
@@ -1205,7 +1251,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             let data = b"some data";
-            blob.write_at(data.to_vec(), 0)
+            blob.write_at(0, data.to_vec())
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
@@ -1226,15 +1272,15 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), data);
+            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
             let extended_part = blob
-                .read_at(vec![0; data.len()], data.len() as u64)
+                .read_at(data.len() as u64, IoBufMut::zeroed(data.len()))
                 .await
                 .unwrap();
-            assert_eq!(extended_part.as_ref(), vec![0; data.len()].as_slice());
+            assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
             blob.resize(data.len() as u64).await.unwrap();
@@ -1245,8 +1291,8 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(vec![0; data.len()], 0).await.unwrap();
-            assert_eq!(read_buf.as_ref(), data);
+            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
     }
@@ -1269,10 +1315,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(Vec::from(data1), 0)
+                blob.write_at(0, data1)
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(Vec::from(data2), 5 + additional as u64)
+                blob.write_at(5 + additional as u64, data2)
                     .await
                     .expect("Failed to write data2");
 
@@ -1290,9 +1336,10 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(vec![0u8; 10 + additional], 0)
+                    .read_at(0, IoBufMut::zeroed(10 + additional))
                     .await
                     .expect("Failed to read data");
+                let read = read.coalesce();
                 assert_eq!(&read.as_ref()[..5], b"Hello");
                 assert_eq!(&read.as_ref()[5 + additional..], b"World");
             }
@@ -1314,17 +1361,17 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(vec![0u8; 10], 0).await;
+            let result = blob.read_at(0, IoBufMut::zeroed(10)).await;
             assert!(result.is_err());
 
             // Write data to the blob
             let data = b"Hello, Storage!".to_vec();
-            blob.write_at(data, 0)
+            blob.write_at(0, data)
                 .await
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(vec![0u8; 20], 0).await;
+            let result = blob.read_at(0, IoBufMut::zeroed(20)).await;
             assert!(result.is_err());
         })
     }
@@ -1345,7 +1392,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(Vec::from(data), 0)
+            blob.write_at(0, data)
                 .await
                 .expect("Failed to write to blob");
 
@@ -1355,22 +1402,24 @@ mod tests {
             // Read data from the blob in clone
             let check1 = context.with_label("check1").spawn({
                 let blob = blob.clone();
+                let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(vec![0u8; data.len()], 0)
+                        .read_at(0, IoBufMut::zeroed(data_len))
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read.as_ref(), data);
+                    assert_eq!(read.coalesce(), data);
                 }
             });
             let check2 = context.with_label("check2").spawn({
                 let blob = blob.clone();
+                let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(vec![0; data.len()], 0)
+                        .read_at(0, IoBufMut::zeroed(data_len))
                         .await
                         .expect("Failed to read from blob");
-                    assert_eq!(read.as_ref(), data);
+                    assert_eq!(read.coalesce(), data);
                 }
             });
 
@@ -1381,10 +1430,10 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(vec![0; data.len()], 0)
+                .read_at(0, IoBufMut::zeroed(data.len()))
                 .await
                 .expect("Failed to read from blob");
-            assert_eq!(read.as_ref(), data);
+            assert_eq!(read.coalesce(), data);
 
             // Drop the blob
             drop(blob);
@@ -1445,7 +1494,7 @@ mod tests {
             let task = |cleanup_duration: Duration| {
                 let context = context.clone();
                 let counter = counter.clone();
-                let mut started_tx = started_tx.clone();
+                let started_tx = started_tx.clone();
                 context.spawn(move |context| async move {
                     // Wait for signal to be acquired
                     let mut signal = context.stopped();
@@ -1468,7 +1517,7 @@ mod tests {
 
             // Give tasks time to start
             for _ in 0..3 {
-                started_rx.next().await.unwrap();
+                started_rx.recv().await.unwrap();
             }
 
             // Stop and verify all cleanup completed
@@ -1734,7 +1783,7 @@ mod tests {
 
             // Spawn tasks
             let handles = Arc::new(Mutex::new(Vec::new()));
-            let (mut initialized_tx, mut initialized_rx) = mpsc::channel(9);
+            let (initialized_tx, mut initialized_rx) = mpsc::channel(9);
             let root_task = context.spawn({
                 let handles = handles.clone();
                 move |_| async move {
@@ -1742,7 +1791,7 @@ mod tests {
                     {
                         let handle = context.spawn({
                             let handles = handles.clone();
-                            let mut initialized_tx = initialized_tx.clone();
+                            let initialized_tx = initialized_tx.clone();
                             move |_| async move {
                                 for grandchild in grandchildren {
                                     let handle = grandchild.spawn(|_| async {
@@ -1765,7 +1814,7 @@ mod tests {
 
             // Wait for tasks to initialize
             for _ in 0..9 {
-                initialized_rx.next().await.unwrap();
+                initialized_rx.recv().await.unwrap();
             }
 
             // Verify we have all 9 handles (3 children + 6 grandchildren)
@@ -1998,22 +2047,22 @@ mod tests {
                 let dropper = dropper.clone();
                 move |context| async move {
                     // Create tasks with circular dependencies through channels
-                    let (mut setup_tx, mut setup_rx) = mpsc::unbounded::<()>();
-                    let (mut tx1, mut rx1) = mpsc::unbounded::<()>();
-                    let (mut tx2, mut rx2) = mpsc::unbounded::<()>();
+                    let (setup_tx, mut setup_rx) = mpsc::unbounded_channel::<()>();
+                    let (tx1, mut rx1) = mpsc::unbounded_channel::<()>();
+                    let (tx2, mut rx2) = mpsc::unbounded_channel::<()>();
 
                     // Task 1 holds tx2 and waits on rx1
                     context.with_label("task1").spawn({
-                        let mut setup_tx = setup_tx.clone();
+                        let setup_tx = setup_tx.clone();
                         let dropper = dropper.clone();
                         move |_| async move {
                             // Setup deadlock and mark ready
-                            tx2.send(()).await.unwrap();
-                            rx1.next().await.unwrap();
-                            setup_tx.send(()).await.unwrap();
+                            tx2.send(()).unwrap();
+                            rx1.recv().await.unwrap();
+                            setup_tx.send(()).unwrap();
 
                             // Wait forever
-                            while rx1.next().await.is_some() {}
+                            while rx1.recv().await.is_some() {}
                             drop(tx2);
                             drop(dropper);
                         }
@@ -2022,19 +2071,19 @@ mod tests {
                     // Task 2 holds tx1 and waits on rx2
                     context.with_label("task2").spawn(move |_| async move {
                         // Setup deadlock and mark ready
-                        tx1.send(()).await.unwrap();
-                        rx2.next().await.unwrap();
-                        setup_tx.send(()).await.unwrap();
+                        tx1.send(()).unwrap();
+                        rx2.recv().await.unwrap();
+                        setup_tx.send(()).unwrap();
 
                         // Wait forever
-                        while rx2.next().await.is_some() {}
+                        while rx2.recv().await.is_some() {}
                         drop(tx1);
                         drop(dropper);
                     });
 
                     // Wait for tasks to start
-                    setup_rx.next().await.unwrap();
-                    setup_rx.next().await.unwrap();
+                    setup_rx.recv().await.unwrap();
+                    setup_rx.recv().await.unwrap();
                 }
             });
 
@@ -3296,15 +3345,15 @@ mod tests {
             async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
                 let mut line = Vec::new();
                 loop {
-                    let mut byte = [0u8; 1];
-                    stream.recv(&mut byte[..]).await?;
-                    if byte[0] == b'\n' {
+                    let received = stream.recv(1).await?;
+                    let byte = received.coalesce().as_ref()[0];
+                    if byte == b'\n' {
                         if line.last() == Some(&b'\r') {
                             line.pop(); // Remove trailing \r
                         }
                         break;
                     }
-                    line.push(byte[0]);
+                    line.push(byte);
                 }
                 String::from_utf8(line).map_err(|_| Error::ReadFailed)
             }
@@ -3330,9 +3379,8 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let mut read = vec![0; content_length];
-                stream.recv(&mut read[..]).await?;
-                String::from_utf8(read).map_err(|_| Error::ReadFailed)
+                let received = stream.recv(content_length as u64).await?;
+                String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
             }
 
             // Simulate a client connecting to the server
@@ -3395,11 +3443,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_tokio() {
+    fn test_create_thread_pool_tokio() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .create_thread_pool(NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3412,11 +3463,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_pool_deterministic() {
+    fn test_create_thread_pool_deterministic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a thread pool with 4 threads
-            let pool = context.with_label("pool").create_pool(NZUsize!(4)).unwrap();
+            let pool = context
+                .with_label("pool")
+                .create_thread_pool(NZUsize!(4))
+                .unwrap();
 
             // Create a vector of numbers
             let v: Vec<_> = (0..10000).collect();
@@ -3426,5 +3480,42 @@ mod tests {
                 assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
             });
         });
+    }
+
+    fn test_buffer_pooler<R: Runner>(runner: R)
+    where
+        R::Context: BufferPooler,
+    {
+        runner.start(|context| async move {
+            // Verify network pool is accessible and works (cache-line aligned)
+            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
+            assert!(net_buf.capacity() >= 1024);
+
+            // Verify storage pool is accessible and works (page-aligned)
+            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
+            assert!(storage_buf.capacity() >= 4096);
+
+            // Verify pools have expected configurations
+            assert_eq!(
+                context.network_buffer_pool().config().max_per_class.get(),
+                4096
+            );
+            assert_eq!(
+                context.storage_buffer_pool().config().max_per_class.get(),
+                32
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_buffer_pooler() {
+        let runner = deterministic::Runner::default();
+        test_buffer_pooler(runner);
+    }
+
+    #[test]
+    fn test_tokio_buffer_pooler() {
+        let runner = tokio::Runner::default();
+        test_buffer_pooler(runner);
     }
 }

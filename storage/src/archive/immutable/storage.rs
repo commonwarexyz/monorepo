@@ -4,9 +4,8 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
-use bytes::{Buf, BufMut};
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
@@ -128,7 +127,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
                 key_write_buffer: cfg.freezer_key_write_buffer,
-                key_buffer_pool: cfg.freezer_key_buffer_pool,
+                key_page_cache: cfg.freezer_key_page_cache,
                 value_partition: cfg.freezer_value_partition,
                 value_compression: cfg.freezer_value_compression,
                 value_write_buffer: cfg.freezer_value_write_buffer,

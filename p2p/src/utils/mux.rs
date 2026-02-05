@@ -9,14 +9,13 @@
 //!   even if the muxer is already running.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
-use bytes::{Buf, Bytes};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, ContextCell, Handle, Spawner};
-use commonware_utils::channels::fallible::FallibleExt;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+use commonware_runtime::{spawn_cell, BufMut, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
+use commonware_utils::channel::{
+    fallible::FallibleExt,
+    mpsc::{self, error::TrySendError},
+    oneshot,
 };
 use std::{collections::HashMap, fmt::Debug, time::SystemTime};
 use thiserror::Error;
@@ -34,9 +33,9 @@ pub enum Error {
 }
 
 /// Parse a muxed message into its subchannel and payload.
-pub fn parse(mut bytes: Bytes) -> Result<(Channel, Bytes), CodecError> {
-    let subchannel: Channel = UInt::read(&mut bytes)?.into();
-    Ok((subchannel, bytes))
+pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
+    let subchannel: Channel = UInt::read(&mut buf)?.into();
+    Ok((subchannel, buf))
 }
 
 /// Control messages for the [Muxer].
@@ -82,7 +81,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
         receiver: R,
         mailbox_size: usize,
     ) -> MuxerBuilder<E, S, R> {
-        let (control_tx, control_rx) = mpsc::unbounded();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mux = Self {
             context: ContextCell::new(context),
             sender,
@@ -118,28 +117,25 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
             },
             // Prefer control messages because network messages will
             // already block when full (providing backpressure).
-            control = self.control_rx.next() => {
-                match control {
-                    Some(Control::Register { subchannel, sender }) => {
-                        // If the subchannel is already registered, drop the sender.
-                        if self.routes.contains_key(&subchannel) {
-                            continue;
-                        }
-
-                        // Otherwise, create a new subchannel and send the receiver to the caller.
-                        let (tx, rx) = mpsc::channel(self.mailbox_size);
-                        self.routes.insert(subchannel, tx);
-                        let _ = sender.send(rx);
-                    },
-                    Some(Control::Deregister { subchannel }) => {
-                        // Remove the route.
-                        self.routes.remove(&subchannel);
-                    },
-                    None => {
-                        // If the control channel is closed, we can shut down since there must
-                        // be no more registrations, and all receivers must have been dropped.
-                        return Ok(());
+            Some(control) = self.control_rx.recv() else {
+                // If the control channel is closed, we can shut down since there must
+                // be no more registrations, and all receivers must have been dropped.
+                return Ok(());
+            } => match control {
+                Control::Register { subchannel, sender } => {
+                    // If the subchannel is already registered, drop the sender.
+                    if self.routes.contains_key(&subchannel) {
+                        continue;
                     }
+
+                    // Otherwise, create a new subchannel and send the receiver to the caller.
+                    let (tx, rx) = mpsc::channel(self.mailbox_size);
+                    self.routes.insert(subchannel, tx);
+                    let _ = sender.send(rx);
+                }
+                Control::Deregister { subchannel } => {
+                    // Remove the route.
+                    self.routes.remove(&subchannel);
                 }
             },
             // Process network messages.
@@ -172,7 +168,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                 // to avoid head-of-line blocking when one subchannel is slow.
                 if let Err(e) = sender.try_send((pk, bytes)) {
                     // Check if the channel is disconnected (receiver dropped)
-                    if e.is_disconnected() {
+                    if matches!(e, TrySendError::Closed(_)) {
                         // Remove the route for the subchannel.
                         self.routes.remove(&subchannel);
                         debug!(?subchannel, "subchannel receiver dropped, removing route");
@@ -181,7 +177,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Muxer<E, S, R> {
                         debug!(?subchannel, "subchannel full, dropping message");
                     }
                 }
-            }
+            },
         }
 
         Ok(())
@@ -210,7 +206,6 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
                 subchannel,
                 sender: tx,
             })
-            .await
             .map_err(|_| Error::Closed)?;
         let receiver = rx.await.map_err(|_| Error::AlreadyRegistered(subchannel))?;
 
@@ -262,7 +257,7 @@ impl<R: Receiver> Receiver for SubReceiver<R> {
     type PublicKey = R::PublicKey;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
-        self.receiver.next().await.ok_or(Error::RecvFailed)
+        self.receiver.recv().await.ok_or(Error::RecvFailed)
     }
 }
 
@@ -304,7 +299,7 @@ impl<S: Sender> GlobalSender<S> {
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
-        payload: impl Buf + Send,
+        payload: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         match self.check(recipients).await {
@@ -357,13 +352,16 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
 
     async fn send(
         self,
-        message: impl Buf + Send,
+        message: impl Into<IoBufMut> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
-        self.inner
-            .send(subchannel.encode().chain(message), priority)
-            .await
+        let subchannel_bytes = subchannel.encode();
+        let message = message.into();
+        let mut combined = IoBufMut::with_capacity(subchannel_bytes.len() + message.len());
+        combined.put_slice(subchannel_bytes.as_ref());
+        combined.put_slice(message.as_ref());
+        self.inner.send(combined, priority).await
     }
 }
 
@@ -511,13 +509,12 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
         Recipients,
     };
-    use bytes::Bytes;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Quota, Runner};
+    use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
     use std::{num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
@@ -608,7 +605,7 @@ mod tests {
     /// Send a burst of messages to a list of senders.
     async fn send_burst<S: Sender>(txs: &mut [SubSender<S>], count: usize) {
         for i in 0..count {
-            let payload = Bytes::from(vec![i as u8]);
+            let payload = IoBuf::from(vec![i as u8]);
             for tx in txs.iter_mut() {
                 let _ = tx
                     .send(Recipients::All, payload.clone(), false)
@@ -654,7 +651,7 @@ mod tests {
                     res.expect("should have received message");
                     count_std += 1;
                 },
-                res = backup_rx.next() => {
+                res = backup_rx.recv() => {
                     res.expect("should have received message");
                     count_backup += 1;
                 },
@@ -683,7 +680,7 @@ mod tests {
             let (mut sub_tx2, _) = handle2.register(7).await.unwrap();
 
             // Send and receive
-            let payload = Bytes::from_static(b"hello");
+            let payload = IoBuf::from(b"hello");
             let _ = sub_tx2
                 .send(Recipients::One(pk1.clone()), payload.clone(), false)
                 .await
@@ -711,8 +708,8 @@ mod tests {
             let (mut tx2_a, _) = handle2.register(10).await.unwrap();
             let (mut tx2_b, _) = handle2.register(20).await.unwrap();
 
-            let payload_a = Bytes::from_static(b"A");
-            let payload_b = Bytes::from_static(b"B");
+            let payload_a = IoBuf::from(b"A");
+            let payload_b = IoBuf::from(b"B");
             let _ = tx2_a
                 .send(Recipients::One(pk1.clone()), payload_a.clone(), false)
                 .await
@@ -867,18 +864,18 @@ mod tests {
             send_burst(&mut [tx1], 1).await;
 
             // Get the message from pk2's backup channel and respond.
-            let (subchannel, (from, _)) = backup2.next().await.unwrap();
+            let (subchannel, (from, _)) = backup2.recv().await.unwrap();
             assert_eq!(subchannel, 1);
             assert_eq!(from, pk1);
             global_sender2
-                .send(subchannel, Recipients::One(pk1), &b"TEST"[..], true)
+                .send(subchannel, Recipients::One(pk1), b"TEST", true)
                 .await
                 .unwrap();
 
             // Receive the response with pk1's receiver.
             let (from, bytes) = rx1.recv().await.unwrap();
             assert_eq!(from, pk2);
-            assert_eq!(bytes.as_ref(), b"TEST");
+            assert_eq!(bytes, b"TEST");
         });
     }
 

@@ -220,9 +220,17 @@ where
     fn elect(
         &self,
         round: Round,
-        certificate: Option<&bls12381_threshold_vrf::Signature<V>>,
+        certificate: Option<&bls12381_threshold_vrf::Certificate<V>>,
     ) -> Participant {
-        Random::select_leader::<V>(round, self.n, certificate.map(|c| c.seed_signature))
+        Random::select_leader::<V>(
+            round,
+            self.n,
+            certificate.map(|c| {
+                c.get()
+                    .expect("verified certificate must decode")
+                    .seed_signature
+            }),
+        )
     }
 }
 
@@ -418,7 +426,7 @@ mod tests {
         } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-        let quorum = N3f1::quorum_from_slice(&schemes) as usize;
+        let quorum = N3f1::quorum(schemes.len()) as usize;
 
         // Create certificate for round (1, 2)
         let round1 = Round::new(Epoch::new(1), View::new(2));
@@ -539,7 +547,7 @@ mod tests {
                 } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
                 let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
-                let quorum = N3f1::quorum_from_slice(&schemes) as usize;
+                let quorum = N3f1::quorum(schemes.len()) as usize;
 
                 // Generate deterministic round parameters
                 let epoch = rng.gen_range(0..1000);

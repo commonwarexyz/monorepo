@@ -5,10 +5,9 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_resolver::{p2p::Producer, Consumer};
-use commonware_utils::Span;
-use futures::{
+use commonware_utils::{
     channel::{mpsc, oneshot},
-    SinkExt,
+    Span,
 };
 use std::{
     fmt::{Debug, Display},
@@ -270,16 +269,19 @@ mod tests {
     use super::*;
     use crate::{
         marshal::mocks::block::Block as TestBlock,
+        simplex::types::Context,
         types::{Epoch, View},
     };
     use commonware_codec::{Encode, ReadExt};
     use commonware_cryptography::{
+        ed25519::PublicKey,
         sha256::{Digest as Sha256Digest, Sha256},
         Hasher as _,
     };
     use std::collections::BTreeSet;
 
-    type B = TestBlock<Sha256Digest>;
+    type Ctx = Context<Sha256Digest, PublicKey>;
+    type B = TestBlock<Sha256Digest, Ctx>;
 
     #[test]
     fn test_subject_block_encoding() {

@@ -2,6 +2,7 @@ set positional-arguments := true
 
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
+rustfmt := env("RUSTFMT", "rustfmt")
 
 alias f := fix-fmt
 alias l := lint
@@ -18,19 +19,19 @@ build *args='':
     cargo build $@
 
 # Runs pre-flight lints + tests before making a pull-request
-pre-pr: lint test-docs test
+pre-pr: lint test-docs test check-stability
 
 # Fixes the formatting of the workspace
-fix-fmt:
-    cargo {{ nightly_version }} fmt --all
+fix-fmt *args='':
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2021 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
-   find . -name Cargo.toml -type f -print0 | xargs -0 -n1 ./.github/scripts/lint_cargo_toml.py
+    find . -name Cargo.toml -type f -print0 | xargs -0 -n1 ./.github/scripts/lint_cargo_toml.py
 
 # Check the formatting of the workspace
 check-fmt:
-    cargo {{ nightly_version }} fmt --all -- --check
+    just fix-fmt --check
 
 # Run clippy lints
 clippy *args='':
@@ -93,3 +94,63 @@ test-conformance *args='':
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+
+# Packages to exclude from stability checks (examples, fuzz targets)
+stability_excludes := "--exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-reshare --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
+
+# Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
+# ALPHA (level 0) is the default state and doesn't require a cfg flag.
+# Examples: just check-stability, just check-stability 3, just check-stability DELTA, just check-stability GAMMA -p commonware-cryptography
+check-stability *args='':
+    #!/usr/bin/env bash
+    all_args="{{ args }}"
+    level=""
+    extra_args=""
+    # Level names in order (index 0-4)
+    LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
+    # Convert name to index by iterating the array
+    name_to_num() {
+        for i in "${!LEVEL_NAMES[@]}"; do
+            if [ "${LEVEL_NAMES[$i]}" = "$1" ]; then
+                echo "$i"
+                return
+            fi
+        done
+    }
+    # Check if first arg is a level (number 1-4 or name)
+    first_arg="${all_args%% *}"
+    if [[ "$first_arg" =~ ^[1-4]$ ]]; then
+        level="$first_arg"
+        extra_args="${all_args#* }"
+        if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
+    else
+        num=$(name_to_num "$first_arg")
+        if [ -n "$num" ]; then
+            if [ "$num" = "0" ]; then
+                echo "Error: ALPHA is the default stability level (no cfg flag needed)."
+                echo "Use 'cargo build' directly or specify BETA/GAMMA/DELTA/EPSILON."
+                exit 1
+            fi
+            level="$num"
+            extra_args="${all_args#* }"
+            if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
+        else
+            extra_args="$all_args"
+        fi
+    fi
+    # Create level-specific wrapper symlinks so Cargo sees different fingerprints
+    mkdir -p target/stability-wrappers
+    for name in "${LEVEL_NAMES[@]:1}"; do
+        ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
+    done
+    if [ -z "$level" ]; then
+        for name in "${LEVEL_NAMES[@]:1}"; do
+            echo "Checking commonware_stability_${name}..."
+            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+        done
+        echo "All stability levels pass!"
+    else
+        echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
+    fi
+

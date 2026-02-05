@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::PoolRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
@@ -30,7 +30,7 @@ enum JournalOperation {
     Rewind {
         size: u64,
     },
-    OldestRetainedPos,
+    Bounds,
     Prune {
         min_pos: u64,
     },
@@ -63,7 +63,7 @@ fn fuzz(input: FuzzInput) {
             partition: "fixed_journal_operations_fuzz_test".to_string(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            buffer_pool: PoolRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -104,8 +104,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                JournalOperation::OldestRetainedPos => {
-                    let _pos = journal.oldest_retained_pos();
+                JournalOperation::Bounds => {
+                    let _bounds = journal.bounds();
                 }
 
                 JournalOperation::Prune { min_pos } => {
@@ -147,7 +147,8 @@ fn fuzz(input: FuzzInput) {
                     restarts += 1;
                     // Reset tracking variables to match recovered state
                     journal_size = journal.size();
-                    oldest_retained_pos = journal.oldest_retained_pos().unwrap_or(0);
+                    let bounds = journal.bounds();
+                    oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
                 }
 
                 JournalOperation::Destroy => {

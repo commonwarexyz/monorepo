@@ -14,9 +14,10 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
+    Spawner, StreamOf,
 };
-use commonware_stream::{dial, Config as StreamConfig};
+use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::seq::SliceRandom;
@@ -64,7 +65,11 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<
+        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
+        C: Signer,
+    > Actor<E, C>
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
         context.register(
@@ -168,10 +173,7 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
             },
             _ = self.context.sleep_until(dial_deadline) => {
                 // Update the deadline.
-                dial_deadline = dial_deadline.add_jittered(
-                    &mut self.context,
-                    self.dial_frequency,
-                );
+                dial_deadline = dial_deadline.add_jittered(&mut self.context, self.dial_frequency);
 
                 // Pop the queue until we can reserve a peer.
                 // If a peer is reserved, attempt to dial it.
@@ -181,14 +183,13 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
                         continue;
                     };
                     self.dial_peer(reservation, &mut supervisor).await;
+                    break;
                 }
             },
             _ = self.context.sleep_until(query_deadline) => {
                 // Update the deadline.
-                query_deadline = query_deadline.add_jittered(
-                    &mut self.context,
-                    self.query_frequency,
-                );
+                query_deadline =
+                    query_deadline.add_jittered(&mut self.context, self.query_frequency);
 
                 // Only update the queue if it is empty.
                 if self.queue.is_empty() {
@@ -199,5 +200,107 @@ impl<E: Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics, C: Signe
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        authenticated::discovery::actors::tracker::{ingress::Releaser, Metadata},
+        Ingress,
+    };
+    use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
+    use commonware_macros::select;
+    use commonware_runtime::{deterministic, Clock, Runner};
+    use commonware_stream::encrypted::Config as StreamConfig;
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::Duration,
+    };
+
+    fn test_stream_config(signing_key: PrivateKey) -> StreamConfig<PrivateKey> {
+        StreamConfig {
+            signing_key,
+            namespace: b"test".to_vec(),
+            max_message_size: 1024,
+            handshake_timeout: Duration::from_secs(5),
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(10),
+        }
+    }
+
+    #[test]
+    fn test_dialer_dials_one_peer_per_tick() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(100);
+
+            let dialer_cfg = Config {
+                stream_cfg: test_stream_config(signer),
+                dial_frequency,
+                query_frequency: Duration::from_secs(60),
+                allow_private_ips: true,
+            };
+
+            let dialer = Actor::new(context.with_label("dialer"), dialer_cfg);
+
+            let (tracker_mailbox, mut tracker_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            // Create a releaser for reservations
+            let (releaser_mailbox, _releaser_rx) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+            let releaser = Releaser::new(releaser_mailbox);
+
+            // Generate 10 peers
+            let peers: Vec<PublicKey> = (0..10)
+                .map(|i| PrivateKey::from_seed(i).public_key())
+                .collect();
+
+            // Create a supervisor that just drops spawn messages
+            let (supervisor, mut supervisor_rx) =
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
+            context
+                .with_label("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            // Start the dialer
+            let _handle = dialer.start(tracker_mailbox, supervisor);
+
+            // Handle messages until deadline, counting dial attempts
+            let mut dial_count = 0;
+            let deadline = context.current() + dial_frequency * 3;
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => match msg {
+                        Some(tracker::Message::Dialable { responder }) => {
+                            let _ = responder.send(peers.clone());
+                        }
+                        Some(tracker::Message::Dial {
+                            public_key,
+                            reservation,
+                        }) => {
+                            dial_count += 1;
+                            let ingress: Ingress =
+                                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8000).into();
+                            let metadata = Metadata::Dialer(public_key, ingress);
+                            let res = tracker::Reservation::new(metadata, releaser.clone());
+                            let _ = reservation.send(Some(res));
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            // Should have dialed ~3 peers (one per tick), not all 10 at once
+            assert!(
+                (2..=4).contains(&dial_count),
+                "expected 2-4 dial attempts (one per tick), got {}",
+                dial_count
+            );
+        });
     }
 }

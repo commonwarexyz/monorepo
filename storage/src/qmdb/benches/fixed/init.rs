@@ -4,13 +4,14 @@
 use crate::fixed::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered_fixed, get_any_ordered_variable,
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
-    get_current_unordered_fixed, variable_any_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb,
-    UCurrentDb, UFixedDb, UVAnyDb, Variant, THREADS, VARIANTS,
+    get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
+    variable_any_cfg, variable_current_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb, OVCurrentDb,
+    UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, THREADS, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    RayonPoolSpawner, Runner as _,
+    Runner as _, ThreadPooler,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -83,6 +84,14 @@ fn bench_fixed_init(c: &mut Criterion) {
                             let db = get_any_ordered_variable(ctx.clone()).await;
                             setup_db(db, elements, operations).await;
                         }
+                        Variant::CurrentUnorderedVariable => {
+                            let db = get_current_unordered_variable(ctx.clone()).await;
+                            setup_db(db, elements, operations).await;
+                        }
+                        Variant::CurrentOrderedVariable => {
+                            let db = get_current_ordered_variable(ctx.clone()).await;
+                            setup_db(db, elements, operations).await;
+                        }
                     }
                 });
 
@@ -99,10 +108,11 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.create_pool(THREADS).unwrap();
+                            let pool = ctx.create_thread_pool(THREADS).unwrap();
                             let any_cfg = any_cfg(pool.clone());
                             let current_cfg = current_cfg(pool.clone());
-                            let variable_any_cfg = variable_any_cfg(pool);
+                            let variable_any_cfg = variable_any_cfg(pool.clone());
+                            let variable_current_cfg = variable_current_cfg(pool);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
@@ -110,39 +120,57 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyOrderedFixed => {
                                         let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentUnorderedFixed => {
                                         let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::CurrentOrderedFixed => {
                                         let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyUnorderedVariable => {
                                         let db =
                                             UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                     Variant::AnyOrderedVariable => {
                                         let db =
                                             OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.op_count(), 0);
+                                        assert_ne!(db.bounds().end, 0);
+                                    }
+                                    Variant::CurrentUnorderedVariable => {
+                                        let db = UVCurrentDb::init(
+                                            ctx.clone(),
+                                            variable_current_cfg.clone(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                        assert_ne!(db.bounds().end, 0);
+                                    }
+                                    Variant::CurrentOrderedVariable => {
+                                        let db = OVCurrentDb::init(
+                                            ctx.clone(),
+                                            variable_current_cfg.clone(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                        assert_ne!(db.bounds().end, 0);
                                     }
                                 }
                             }
@@ -177,6 +205,14 @@ fn bench_fixed_init(c: &mut Criterion) {
                         }
                         Variant::AnyOrderedVariable => {
                             let db = get_any_ordered_variable(ctx.clone()).await;
+                            db.destroy().await.unwrap();
+                        }
+                        Variant::CurrentUnorderedVariable => {
+                            let db = get_current_unordered_variable(ctx.clone()).await;
+                            db.destroy().await.unwrap();
+                        }
+                        Variant::CurrentOrderedVariable => {
+                            let db = get_current_ordered_variable(ctx.clone()).await;
                             db.destroy().await.unwrap();
                         }
                     }

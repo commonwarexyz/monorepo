@@ -15,12 +15,15 @@ use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::StaticManager, Blocker, Receiver, Sender};
+use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channels::fallible::OneshotExt, ordered::Quorum, sequence::U64};
-use futures::{channel::mpsc, StreamExt};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc},
+    ordered::Quorum,
+    sequence::U64,
+};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
@@ -104,7 +107,7 @@ impl<
         let (resolver_engine, mut resolver) = p2p::Engine::new(
             self.context.with_label("resolver"),
             p2p::Config {
-                manager: StaticManager::new(self.epoch.get(), participants),
+                provider: StaticProvider::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
                 consumer: handler.clone(),
                 producer: handler,
@@ -127,25 +130,22 @@ impl<
             _ = &mut resolver_task => {
                 break;
             },
-            mailbox = self.mailbox_receiver.next() => {
-                let Some(message) = mailbox else {
-                    break;
-                };
+            Some(message) = self.mailbox_receiver.recv() else break => {
                 match message {
                     MailboxMessage::Certificate(certificate) => {
                         // Certificates from mailbox have no associated request view
                         self.state.handle(certificate, None, &mut resolver).await;
                     }
                     MailboxMessage::Certified { view, success } => {
-                        self.state.handle_certified(view, success, &mut resolver).await;
+                        self.state
+                            .handle_certified(view, success, &mut resolver)
+                            .await;
                     }
                 }
             },
-            handler = handler_rx.next() => {
-                let Some(message) = handler else {
-                    break;
-                };
-                self.handle_resolver(message, &mut voter, &mut resolver).await;
+            Some(message) = handler_rx.recv() else break => {
+                self.handle_resolver(message, &mut voter, &mut resolver)
+                    .await;
             },
         }
     }

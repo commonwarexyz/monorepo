@@ -112,8 +112,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    #[allow(clippy::type_complexity)]
     /// Returns the leader key and proposal when the view is ready for verification.
+    #[allow(clippy::type_complexity)]
     pub fn should_verify(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
@@ -467,6 +467,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
+
         self.broadcast_notarize = true;
         self.proposal.proposal()
     }
@@ -482,11 +483,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Even if we've already seen a finalization, we still broadcast our finalize vote
         // in case it is useful (in the worst case it lets others observe we are alive).
 
-        // If we haven't broadcast our notarize vote and notarization certificate, return None.
-        if !self.broadcast_notarize || !self.broadcast_notarization {
-            return None;
-        }
-
         // If we don't have a verified proposal, return None.
         //
         // This check prevents us from voting for a proposal if we have observed equivocation (where
@@ -495,6 +491,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         if self.proposal.status() != ProposalStatus::Verified {
             return None;
         }
+
+        // If there doesn't exist a notarization certificate, return None.
+        self.notarization.as_ref()?;
 
         // If we haven't certified the proposal, return None.
         if !self.is_certified() {
@@ -1032,5 +1031,49 @@ mod tests {
         // Certification result arrives after abort (race condition).
         // This should not panic - the result is simply ignored.
         round.certified(true);
+    }
+
+    #[test]
+    fn construct_finalize_requires_notarization() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
+
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.verified());
+
+        // Construct notarize succeeds
+        assert!(round.construct_notarize().is_some());
+
+        // Certify the proposal before notarization. This should never happen in
+        // practice (we only call certify after notarization) but ensures the
+        // notarization check is functional.
+        round.certified(true);
+
+        // Construct finalize fails without notarization (even though certified)
+        assert!(round.construct_finalize().is_none());
+
+        // Add notarization
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
+        let (added, _) = round.add_notarization(notarization);
+        assert!(added);
+
+        // Now construct finalize succeeds
+        assert!(round.construct_finalize().is_some());
     }
 }

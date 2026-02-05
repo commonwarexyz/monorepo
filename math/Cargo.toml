@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
 documentation = "https://docs.rs/commonware-math"
 
+[lints]
+workspace = true
+
 [features]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -22,6 +25,7 @@ test_strategies = [ "dep:proptest", "std" ]
 std = [
 	"bytes/std",
 	"commonware-codec/std",
+	"commonware-macros/std",
 	"commonware-parallel/std",
 	"commonware-utils/std",
 	"rand_core/std",
@@ -31,6 +35,7 @@ std = [
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-macros.workspace = true
 commonware-parallel.workspace = true
 commonware-utils.workspace = true
 proptest = { workspace = true, optional = true }
@@ -44,3 +49,4 @@ rand_chacha.workspace = true
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]

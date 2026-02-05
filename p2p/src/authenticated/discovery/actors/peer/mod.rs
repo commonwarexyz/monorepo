@@ -34,11 +34,11 @@ pub enum Error {
     #[error("peer killed: {0}")]
     PeerKilled(String),
     #[error("send failed: {0}")]
-    SendFailed(commonware_stream::Error),
+    SendFailed(commonware_stream::encrypted::Error),
     #[error("peer disconnected")]
     PeerDisconnected,
     #[error("receive failed: {0}")]
-    ReceiveFailed(commonware_stream::Error),
+    ReceiveFailed(commonware_stream::encrypted::Error),
     #[error("decode failed: {0}")]
     DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]

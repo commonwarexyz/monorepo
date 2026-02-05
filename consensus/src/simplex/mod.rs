@@ -20,6 +20,12 @@
 //!
 //! ## Protocol Description
 //!
+//! ### Genesis
+//!
+//! Genesis (view 0) is implicitly finalized. There is no finalization certificate for genesis;
+//! the digest returned by [`Automaton::genesis`](crate::Automaton::genesis) serves as the initial
+//! finalized state. Voting begins at view 1, with the first proposal referencing genesis as its parent.
+//!
 //! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
@@ -32,15 +38,17 @@
 //!
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
-//! * If the container's parent `c_parent` is notarized at `v_parent` and we have nullifications for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
+//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
 //! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
-//! * Enter `v+1`
+//! * Attempt to certify `c` (see [Certification](#certification))
+//!     * On success: broadcast `finalize(c,v)` (if have not broadcast `nullify(v)`) and enter `v+1`
+//!     * On failure: broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
@@ -62,9 +70,10 @@
 //!
 //! ### Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
-//! latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! This means that a new participant joining consensus will immediately jump ahead on the previous
+//! view's nullification or finalization and begin participating in consensus at the current view.
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -77,6 +86,11 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+//! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
+//!   timeout to fire).
+//! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
+//!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
+//!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
 //!
 //! ## Architecture
 //!
@@ -221,14 +235,17 @@
 //! ## Certification
 //!
 //! After a payload is notarized, the application can optionally delay or prevent finalization via the
-//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. This is particularly useful for systems that employ
-//! erasure coding, where participants may want to wait until they have received enough shards to reconstruct
-//! and validate the full block before voting to finalize.
+//! [`CertifiableAutomaton::certify`](crate::CertifiableAutomaton::certify) method. By default, `certify`
+//! returns `true` for all payloads, meaning finalization proceeds immediately after notarization.
 //!
-//! If `certify` returns `false`, the participant will not broadcast a `finalize` vote for the payload.
-//! Because finalization requires `2f+1` `finalize` votes, a payload will only be finalized if a quorum
-//! of participants certify it. By default, `certify` returns `true` for all payloads, meaning finalization
-//! proceeds immediately after notarization.
+//! Customizing `certify` is useful for systems that employ erasure coding, where participants may want
+//! to wait until they have received enough shards to reconstruct and validate the full block before
+//! voting to finalize.
+//!
+//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload and enters the
+//! next view. If `certify` returns `false`, the participant broadcasts `nullify` for the view instead (treating
+//! it as an immediate timeout), and will refuse to build upon the proposal or notarize proposals that build upon it.
+//! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
@@ -259,9 +276,11 @@ cfg_if::cfg_if! {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
 
 /// The minimum view we are tracking both in-memory and on-disk.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
     last_finalized.saturating_sub(activity_timeout)
 }
@@ -269,6 +288,7 @@ pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View
 /// Whether or not a view is interesting to us. This is a function
 /// of both `min_active` and whether or not the view is too far
 /// in the future (based on the view we are currently in).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn interesting(
     activity_timeout: ViewDelta,
     last_finalized: View,
@@ -321,7 +341,6 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
@@ -337,11 +356,12 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::PoolRef, count_running_tasks, deterministic, Clock, Metrics, Quota, Runner, Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
+        Runner, Spawner,
     };
     use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
-    use futures::{future::join_all, StreamExt};
+    use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -554,6 +574,20 @@ mod tests {
         }
     }
 
+    /// Counts lines where all patterns match and the trailing value is non-zero.
+    fn count_nonzero_metric_lines(encoded: &str, patterns: &[&str]) -> u32 {
+        encoded
+            .lines()
+            .filter(|line| patterns.iter().all(|p| line.contains(p)))
+            .filter(|line| {
+                line.split_whitespace()
+                    .last()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|n| n > 0)
+            })
+            .count() as u32
+    }
+
     fn all_online<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -651,7 +685,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -668,7 +702,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -921,7 +955,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -938,7 +972,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1090,7 +1124,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1107,7 +1141,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < required_containers {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -1136,7 +1170,7 @@ mod tests {
                             }
                         }
                         true
-                    }
+                    },
                 };
 
                 // Ensure no blocked connections
@@ -1282,7 +1316,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1299,7 +1333,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1402,7 +1436,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1415,7 +1449,7 @@ mod tests {
             // Wait for new engine to finalize required
             let (mut latest, mut monitor) = reporter.subscribe().await;
             while latest < required_containers {
-                latest = monitor.next().await.expect("event missing");
+                latest = monitor.recv().await.expect("event missing");
             }
 
             // Ensure no blocked connections
@@ -1545,7 +1579,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1562,7 +1596,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1657,35 +1691,16 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty());
 
-            // Ensure we are skipping views
+            // Ensure online nodes are recording skips/nullifications for the offline leader
             let encoded = context.encode();
-            let lines = encoded.lines();
-            let mut skipped_views = 0;
-            let mut nodes_skipping = 0;
-            for line in lines {
-                if line.contains("_skipped_views_total") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let Some(number_str) = parts.last() {
-                        if let Ok(number) = number_str.parse::<u64>() {
-                            if number > 0 {
-                                nodes_skipping += 1;
-                            }
-                            if number > skipped_views {
-                                skipped_views = number;
-                            }
-                        }
-                    }
-                }
+            let peer_label = format!("peer=\"{}\"", offline);
+            for metric in ["_skips_per_leader", "_nullifications_per_leader"] {
+                assert_eq!(
+                    count_nonzero_metric_lines(&encoded, &[metric, &peer_label]),
+                    n - 1,
+                    "expected all online nodes to record {metric} for offline leader"
+                );
             }
-            assert!(
-                skipped_views > 0,
-                "expected skipped views to be greater than 0"
-            );
-            assert_eq!(
-                nodes_skipping,
-                n - 1,
-                "expected all online nodes to be skipping views"
-            );
         });
     }
 
@@ -1809,7 +1824,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1826,7 +1841,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -1988,7 +2003,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2009,9 +2024,9 @@ mod tests {
                         .spawn(move |context| async move {
                             select! {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.next() => {
+                                _done = monitor.recv() => {
                                     panic!("engine should not notarize or finalize anything");
-                                }
+                                },
                             }
                         }),
                 );
@@ -2048,7 +2063,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2204,7 +2219,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2221,7 +2236,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2247,9 +2262,9 @@ mod tests {
                         .spawn(move |context| async move {
                             select! {
                                 _timeout = context.sleep(Duration::from_secs(60)) => {},
-                                _done = monitor.next() => {
+                                _done = monitor.recv() => {
                                     panic!("engine should not notarize or finalize anything");
-                                }
+                                },
                             }
                         }),
                 );
@@ -2272,7 +2287,7 @@ mod tests {
                 let required = latest.saturating_add(ViewDelta::new(required_containers.get()));
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2417,7 +2432,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2434,7 +2449,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2684,7 +2699,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2697,7 +2712,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -2873,7 +2888,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -2888,7 +2903,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3054,7 +3069,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3067,7 +3082,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3231,7 +3246,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
@@ -3244,7 +3259,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3265,7 +3280,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 2) {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3321,7 +3336,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -3332,7 +3347,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < View::new(required_containers.get() * 3) {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3555,7 +3570,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3568,7 +3583,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3724,7 +3739,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3737,7 +3752,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -3907,7 +3922,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3920,7 +3935,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4059,7 +4074,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4076,7 +4091,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4238,7 +4253,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4463,7 +4478,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4480,7 +4495,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }
@@ -4709,7 +4724,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine =
                         Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
@@ -4910,7 +4925,7 @@ mod tests {
                     finalizers.push(context.with_label("resume_finalizer").spawn(
                         move |_| async move {
                             while latest < target {
-                                latest = monitor.next().await.expect("event missing");
+                                latest = monitor.recv().await.expect("event missing");
                             }
                         },
                     ));
@@ -5046,7 +5061,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5196,7 +5211,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5219,7 +5234,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5241,7 +5256,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5292,7 +5307,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
@@ -5303,7 +5318,7 @@ mod tests {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
                     finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                         while latest < target {
-                            latest = monitor.next().await.expect("event missing");
+                            latest = monitor.recv().await.expect("event missing");
                         }
                     }));
                 }
@@ -5600,7 +5615,7 @@ mod tests {
                 // Create forwarder closures for votes
                 let make_vote_forwarder = || {
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         let (primary, secondary) =
                             strategy.partitions(msg.view(), participants.as_ref());
@@ -5614,7 +5629,7 @@ mod tests {
                 let make_certificate_forwarder = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |origin: SplitOrigin, _: &Recipients<_>, message: &Bytes| {
+                    move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         let (primary, secondary) =
@@ -5626,12 +5641,12 @@ mod tests {
                     }
                 };
                 let make_drop_forwarder =
-                    || move |_: SplitOrigin, _: &Recipients<_>, _: &Bytes| None;
+                    || move |_: SplitOrigin, _: &Recipients<_>, _: &IoBuf| None;
 
                 // Create router closures for votes
                 let make_vote_router = || {
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
                     }
@@ -5640,7 +5655,7 @@ mod tests {
                 let make_certificate_router = || {
                     let codec = schemes[idx].certificate_codec_config();
                     let participants = participants.clone();
-                    move |(sender, message): &(_, Bytes)| {
+                    move |(sender, message): &(_, IoBuf)| {
                         let msg: Certificate<S, D> =
                             Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
                         strategy.route(msg.view(), sender, participants.as_ref())
@@ -5736,7 +5751,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
@@ -5793,7 +5808,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5809,7 +5824,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
-                        latest = monitor.next().await.expect("event missing");
+                        latest = monitor.recv().await.expect("event missing");
                     }
                 }));
             }

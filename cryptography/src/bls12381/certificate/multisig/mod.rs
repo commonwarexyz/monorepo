@@ -18,7 +18,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{types::lazy::Lazy, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{BiMap, Quorum, Set},
@@ -111,7 +111,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: *index,
-            signature,
+            signature: signature.into(),
         })
     }
 
@@ -129,12 +129,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
+        let Some(sig) = attestation.signature.get() else {
+            return false;
+        };
 
         ops::verify_message::<V>(
             public_key,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &attestation.signature,
+            sig,
         )
         .is_ok()
     }
@@ -153,20 +156,26 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRngCore,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
+        I::IntoIter: Send,
         T: Strategy,
     {
-        let mut invalid = BTreeSet::new();
-        let mut candidates = Vec::new();
-        let mut entries = Vec::new();
-        for attestation in attestations.into_iter() {
-            let Some(public_key) = self.participants.value(attestation.signer.into()) else {
-                invalid.insert(attestation.signer);
-                continue;
-            };
-
-            entries.push((*public_key, attestation.signature));
-            candidates.push(attestation);
-        }
+        let (filtered, failures) =
+            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+                let signer = attestation.signer;
+                let value = self
+                    .participants
+                    .value(signer.into())
+                    .and_then(|public_key| {
+                        attestation
+                            .signature
+                            .get()
+                            .cloned()
+                            .map(|signature| (attestation, (*public_key, signature)))
+                    });
+                (signer, value)
+            });
+        let mut invalid: BTreeSet<_> = failures.into_iter().collect();
+        let (candidates, entries): (Vec<_>, Vec<_>) = filtered.into_iter().unzip();
 
         // If there are no candidates to verify, return before doing any work.
         if candidates.is_empty() {
@@ -211,7 +220,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             if usize::from(signer) >= self.participants.len() {
                 return None;
             }
-
+            let signature = signature.get().cloned()?;
             entries.push((signer, signature));
         }
         if entries.len() < self.participants.quorum::<M>() as usize {
@@ -223,7 +232,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let signers = Signers::from(self.participants.len(), signers);
         let signature = aggregate::combine_signatures::<V, _>(signatures.iter());
 
-        Some(Certificate { signers, signature })
+        Some(Certificate {
+            signers,
+            signature: Lazy::from(signature),
+        })
     }
 
     /// Verifies a certificate.
@@ -261,12 +273,15 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         // Verify the aggregate signature.
+        let Some(signature) = certificate.signature.get() else {
+            return false;
+        };
         let agg_public = aggregate::combine_public_keys::<V, _>(&publics);
         aggregate::verify_same_message::<V>(
             &agg_public,
             subject.namespace(&self.namespace),
             &subject.message(),
-            &certificate.signature,
+            signature,
         )
         .is_ok()
     }
@@ -313,7 +328,7 @@ pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
     /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: aggregate::Signature<V>,
+    pub signature: Lazy<aggregate::Signature<V>>,
 }
 
 impl<V: Variant> Write for Certificate<V> {
@@ -341,7 +356,7 @@ impl<V: Variant> Read for Certificate<V> {
             ));
         }
 
-        let signature = aggregate::Signature::read(reader)?;
+        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
 
         Ok(Self { signers, signature })
     }
@@ -355,224 +370,226 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
         let signature = aggregate::Signature::arbitrary(u)?;
-        Ok(Self { signers, signature })
+        Ok(Self {
+            signers,
+            signature: Lazy::from(signature),
+        })
     }
 }
 
-mod macros {
-    /// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
-    ///
-    /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-    /// implementation, and a `fixture` function for testing.
-    ///
-    /// # Parameters
-    ///
-    /// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
-    ///   in the subject type to bind to the GAT lifetime and digest type parameters.
-    ///
-    /// - `$namespace`: The namespace type that implements [`Namespace`](crate::certificate::Namespace).
-    ///   This type pre-computes and stores any protocol-specific namespace bytes derived from
-    ///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
-    ///   to create the namespace, then passes it to `Subject::namespace()` during signing
-    ///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
-    ///   For protocols with multiple message types, a custom struct can pre-compute all variants.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // For non-generic subject types with a single namespace:
-    /// impl_certificate_bls12381_multisig!(MySubject, Vec<u8>);
-    ///
-    /// // For protocols with generic subject types:
-    /// impl_certificate_bls12381_multisig!(Subject<'a, D>, Namespace);
-    /// ```
-    #[macro_export]
-    macro_rules! impl_certificate_bls12381_multisig {
-        ($subject:ty, $namespace:ty) => {
-            /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
-            ///
-            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-            /// scheme instances share a consistent ordering.
-            #[cfg(feature = "mocks")]
-            #[allow(dead_code)]
-            pub fn fixture<V, R>(
-                rng: &mut R,
+/// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
+///
+/// This macro creates a complete wrapper struct with constructors, `Scheme` trait
+/// implementation, and a `fixture` function for testing.
+///
+/// # Parameters
+///
+/// - `$subject`: The subject type used as `Scheme::Subject<'a, D>`. Use `'a` and `D`
+///   in the subject type to bind to the GAT lifetime and digest type parameters.
+///
+/// - `$namespace`: The namespace type that implements [`Namespace`].
+///   This type pre-computes and stores any protocol-specific namespace bytes derived from
+///   a base namespace. The scheme calls `$namespace::derive(base)` at construction time
+///   to create the namespace, then passes it to `Subject::namespace()` during signing
+///   and verification. For simple protocols with only a base namespace, `Vec<u8>` can be used directly.
+///   For protocols with multiple message types, a custom struct can pre-compute all variants.
+///
+/// # Example
+/// ```ignore
+/// // For non-generic subject types with a single namespace:
+/// impl_certificate_bls12381_multisig!(MySubject, Vec<u8>);
+///
+/// // For protocols with generic subject types:
+/// impl_certificate_bls12381_multisig!(Subject<'a, D>, Namespace);
+/// ```
+#[macro_export]
+macro_rules! impl_certificate_bls12381_multisig {
+    ($subject:ty, $namespace:ty) => {
+        /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
+        ///
+        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+        /// scheme instances share a consistent ordering.
+        #[cfg(feature = "mocks")]
+        #[allow(dead_code)]
+        pub fn fixture<V, R>(
+            rng: &mut R,
+            namespace: &[u8],
+            n: u32,
+        ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+        where
+            V: $crate::bls12381::primitives::variant::Variant,
+            R: rand::RngCore + rand::CryptoRng,
+        {
+            $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
+                rng,
+                namespace,
+                n,
+                Scheme::signer,
+                Scheme::verifier,
+            )
+        }
+
+        /// BLS12-381 multi-signature signing scheme wrapper.
+        #[derive(Clone, Debug)]
+        pub struct Scheme<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > {
+            generic: $crate::bls12381::certificate::multisig::Generic<P, V, $namespace>,
+        }
+
+        impl<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > Scheme<P, V> {
+            /// Creates a new scheme instance with the provided key material.
+            pub fn signer(
                 namespace: &[u8],
-                n: u32,
-            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+                participants: commonware_utils::ordered::BiMap<P, V::Public>,
+                private_key: $crate::bls12381::primitives::group::Private,
+            ) -> Option<Self> {
+                Some(Self {
+                    generic: $crate::bls12381::certificate::multisig::Generic::signer(
+                        namespace,
+                        participants,
+                        private_key,
+                    )?,
+                })
+            }
+
+            /// Builds a verifier that can authenticate signatures and certificates.
+            pub fn verifier(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::BiMap<P, V::Public>,
+            ) -> Self {
+                Self {
+                    generic: $crate::bls12381::certificate::multisig::Generic::verifier(
+                        namespace,
+                        participants,
+                    ),
+                }
+            }
+        }
+
+        impl<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > $crate::certificate::Scheme for Scheme<P, V> {
+            type Subject<'a, D: $crate::Digest> = $subject;
+            type PublicKey = P;
+            type Signature = V::Signature;
+            type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
+
+            fn me(&self) -> Option<commonware_utils::Participant> {
+                self.generic.me()
+            }
+
+            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+                self.generic.participants()
+            }
+
+            fn sign<D: $crate::Digest>(
+                &self,
+                subject: Self::Subject<'_, D>,
+            ) -> Option<$crate::certificate::Attestation<Self>> {
+                self.generic.sign::<_, D>(subject)
+            }
+
+            fn verify_attestation<R, D>(
+                &self,
+                _rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestation: &$crate::certificate::Attestation<Self>,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
             where
-                V: $crate::bls12381::primitives::variant::Variant,
-                R: rand::RngCore + rand::CryptoRng,
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
             {
-                $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
-                    rng,
-                    namespace,
-                    n,
-                    Scheme::signer,
-                    Scheme::verifier,
-                )
+                self.generic
+                    .verify_attestation::<_, D>(subject, attestation)
             }
 
-            /// BLS12-381 multi-signature signing scheme wrapper.
-            #[derive(Clone, Debug)]
-            pub struct Scheme<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > {
-                generic: $crate::bls12381::certificate::multisig::Generic<P, V, $namespace>,
+            fn verify_attestations<R, D, I>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                attestations: I,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> $crate::certificate::Verification<Self>
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I::IntoIter: Send
+            {
+                self.generic
+                    .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
             }
 
-            impl<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > Scheme<P, V> {
-                /// Creates a new scheme instance with the provided key material.
-                pub fn signer(
-                    namespace: &[u8],
-                    participants: commonware_utils::ordered::BiMap<P, V::Public>,
-                    private_key: $crate::bls12381::primitives::group::Private,
-                ) -> Option<Self> {
-                    Some(Self {
-                        generic: $crate::bls12381::certificate::multisig::Generic::signer(
-                            namespace,
-                            participants,
-                            private_key,
-                        )?,
-                    })
-                }
-
-                /// Builds a verifier that can authenticate signatures and certificates.
-                pub fn verifier(
-                    namespace: &[u8],
-                    participants: commonware_utils::ordered::BiMap<P, V::Public>,
-                ) -> Self {
-                    Self {
-                        generic: $crate::bls12381::certificate::multisig::Generic::verifier(
-                            namespace,
-                            participants,
-                        ),
-                    }
-                }
+            fn assemble<I, M>(
+                &self,
+                attestations: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> Option<Self::Certificate>
+            where
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                M: commonware_utils::Faults,
+            {
+                self.generic.assemble::<Self, _, M>(attestations)
             }
 
-            impl<
-                P: $crate::PublicKey,
-                V: $crate::bls12381::primitives::variant::Variant,
-            > $crate::certificate::Scheme for Scheme<P, V> {
-                type Subject<'a, D: $crate::Digest> = $subject;
-                type PublicKey = P;
-                type Signature = V::Signature;
-                type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
-
-                fn me(&self) -> Option<commonware_utils::Participant> {
-                    self.generic.me()
-                }
-
-                fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-                    self.generic.participants()
-                }
-
-                fn sign<D: $crate::Digest>(
-                    &self,
-                    subject: Self::Subject<'_, D>,
-                ) -> Option<$crate::certificate::Attestation<Self>> {
-                    self.generic.sign::<_, D>(subject)
-                }
-
-                fn verify_attestation<R, D>(
-                    &self,
-                    _rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    attestation: &$crate::certificate::Attestation<Self>,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                {
-                    self.generic
-                        .verify_attestation::<_, D>(subject, attestation)
-                }
-
-                fn verify_attestations<R, D, I>(
-                    &self,
-                    rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    attestations: I,
-                    strategy: &impl commonware_parallel::Strategy,
-                ) -> $crate::certificate::Verification<Self>
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                {
-                    self.generic
-                        .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
-                }
-
-                fn assemble<I, M>(
-                    &self,
-                    attestations: I,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> Option<Self::Certificate>
-                where
-                    I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic.assemble::<Self, _, M>(attestations)
-                }
-
-                fn verify_certificate<R, D, M>(
-                    &self,
-                    rng: &mut R,
-                    subject: Self::Subject<'_, D>,
-                    certificate: &Self::Certificate,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic
-                        .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
-                }
-
-                fn verify_certificates<'a, R, D, I, M>(
-                    &self,
-                    rng: &mut R,
-                    certificates: I,
-                    _strategy: &impl commonware_parallel::Strategy,
-                ) -> bool
-                where
-                    R: rand_core::CryptoRngCore,
-                    D: $crate::Digest,
-                    I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                    M: commonware_utils::Faults,
-                {
-                    self.generic
-                        .verify_certificates::<Self, _, D, _, M>(rng, certificates)
-                }
-
-                fn is_attributable() -> bool {
-                    $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_attributable()
-                }
-
-                fn is_batchable() -> bool {
-                    $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
-                }
-
-                fn certificate_codec_config(
-                    &self,
-                ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    self.generic.certificate_codec_config()
-                }
-
-                fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                    $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
-                }
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
             }
-        };
-    }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+            }
+
+            fn is_attributable() -> bool {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_attributable()
+            }
+
+            fn is_batchable() -> bool {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
+            }
+        }
+    };
 }
 
 #[cfg(test)]
@@ -586,7 +603,6 @@ mod tests {
         },
         certificate::{Attestation, Scheme as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
-        impl_certificate_bls12381_multisig,
         sha256::Digest as Sha256Digest,
         Signer as _,
     };
@@ -752,7 +768,7 @@ mod tests {
 
         // Test: Corrupt one attestation - invalid signature
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -909,7 +925,7 @@ mod tests {
 
         // Corrupted certificate fails
         let mut corrupted = certificate;
-        corrupted.signature = aggregate::Signature::zero();
+        corrupted.signature = Lazy::from(aggregate::Signature::zero());
         assert!(!verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             TestSubject {
@@ -1176,7 +1192,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1].signature = aggregate::Signature::zero();
+        certificates[1].signature = Lazy::from(aggregate::Signature::zero());
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
             (
@@ -1386,15 +1402,17 @@ mod tests {
         let delta = V::Signature::generator() * &random_scalar;
         let forged_attestation1: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation1.signer,
-            signature: attestation1.signature - &delta,
+            signature: (*attestation1.signature.get().unwrap() - &delta).into(),
         };
         let forged_attestation2: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation2.signer,
-            signature: attestation2.signature + &delta,
+            signature: (*attestation2.signature.get().unwrap() + &delta).into(),
         };
 
-        let forged_sum = forged_attestation1.signature + &forged_attestation2.signature;
-        let valid_sum = attestation1.signature + &attestation2.signature;
+        let forged_sum = *forged_attestation1.signature.get().unwrap()
+            + forged_attestation2.signature.get().unwrap();
+        let valid_sum =
+            *attestation1.signature.get().unwrap() + attestation2.signature.get().unwrap();
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         let verification = schemes[0].verify_attestations::<_, Sha256Digest, _>(

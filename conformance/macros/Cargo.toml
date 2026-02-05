@@ -8,6 +8,7 @@ description = "Augment the development of commonware-conformance with procedural
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/conformance/macros"
+documentation = "https://docs.rs/commonware-conformance-macros"
 
 [lib]
 proc-macro = true

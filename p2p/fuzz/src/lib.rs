@@ -1,5 +1,4 @@
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
@@ -7,11 +6,11 @@ use commonware_p2p::{
         discovery,
         lookup::{self, Network as LookupNetwork},
     },
-    Address, Blocker, Channel, Manager, Receiver, Recipients, Sender,
+    Address, AddressableManager, Blocker, Channel, Manager, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     deterministic::{self, Context},
-    Clock, Handle, Metrics, Quota, Runner,
+    Clock, Handle, IoBuf, Metrics, Quota, Runner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
@@ -261,7 +260,7 @@ impl NetworkScheme for Discovery {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.update(index as u64, subset).await;
+            oracle.track(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -290,7 +289,7 @@ impl NetworkScheme for Discovery {
             .map(|&id| topo.peers[id as usize].public_key.clone())
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.update(index, peer_pks).await;
+        let _ = oracle.track(index, peer_pks).await;
     }
 }
 
@@ -333,7 +332,7 @@ impl NetworkScheme for Lookup {
         // Register all peers for indices 0..TRACKED_PEER_SETS
         for index in 0..peer.topo.tracked_peer_sets {
             oracle
-                .update(
+                .track(
                     index as u64,
                     peer_list
                         .clone()
@@ -352,7 +351,7 @@ impl NetworkScheme for Lookup {
                 .cloned()
                 .try_collect()
                 .expect("public keys are unique");
-            oracle.update(index as u64, subset).await;
+            oracle.track(index as u64, subset).await;
         }
 
         let quota = Quota::per_second(NZU32!(100));
@@ -384,7 +383,7 @@ impl NetworkScheme for Lookup {
             })
             .try_collect()
             .expect("public keys are unique");
-        let _ = oracle.update(index, peer_list).await;
+        let _ = oracle.track(index, peer_list).await;
     }
 }
 
@@ -465,7 +464,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
 
         // Track expected messages: (to_idx, from_idx) -> queue of messages
         // Messages are sent with the same priority, ensuring FIFO delivery per sender-receiver pair
-        let mut expected_msgs: HashMap<(u8, u8), VecDeque<Bytes>> = HashMap::new();
+        let mut expected_msgs: HashMap<(u8, u8), VecDeque<IoBuf>> = HashMap::new();
 
         // Track which receivers have pending messages from which senders
         // Receiver index -> set of sender indices that have pending messages for this receiver
@@ -487,7 +486,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];
                     context.fill(&mut bytes[..]);
-                    let message = Bytes::from(bytes);
+                    let message = IoBuf::from(bytes);
 
                     // Select random recipients (excluding sender)
                     let mut available: Vec<_> = (0..peers.len())
@@ -572,7 +571,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                 };
 
                                 // Find message in expected queue
-                                if let Some(pos) = queue.iter().position(|m| m == &message) {
+                                if let Some(pos) = queue.iter().position(|m| *m == message) {
                                     // Remove all messages up to and including this one
                                     // Messages before it were implicitly dropped, this one is received
                                     for _ in 0..=pos {

@@ -1,6 +1,6 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
+use commonware_utils::channel::oneshot;
 use futures::{
-    channel::oneshot,
     future::{select, Either},
     pin_mut,
     stream::{AbortHandle, Abortable},
@@ -184,6 +184,7 @@ impl Panicker {
     }
 
     /// Returns whether the [Panicker] is configured to catch panics.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) const fn catch(&self) -> bool {
         self.catch
     }

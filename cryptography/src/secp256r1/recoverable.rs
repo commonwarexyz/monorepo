@@ -695,7 +695,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Signature>,
+            CodecConformance<Signature> => 1024,
         }
     }
 }
