@@ -4,7 +4,7 @@ use crate::{
     types::{CodingCommitment, Height},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{
     sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
@@ -141,12 +141,12 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
     }
 
     /// Returns true if the inner shard is strong.
-    pub fn is_strong(&self) -> bool {
+    pub const fn is_strong(&self) -> bool {
         matches!(self.inner, DistributionShard::Strong(_))
     }
 
     /// Returns true if the inner shard is weak.
-    pub fn is_weak(&self) -> bool {
+    pub const fn is_weak(&self) -> bool {
         matches!(self.inner, DistributionShard::Weak(_))
     }
 
@@ -179,15 +179,6 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
             DistributionShard::Weak(reshard),
         ))
     }
-
-    /// Returns the UUID of a shard with the given commitment and index.
-    #[inline]
-    pub fn uuid(commitment: CodingCommitment, index: usize) -> H::Digest {
-        let mut buf = [0u8; CodingCommitment::SIZE + u32::SIZE];
-        buf[..commitment.encode_size()].copy_from_slice(&commitment);
-        buf[commitment.encode_size()..].copy_from_slice((index as u32).to_le_bytes().as_ref());
-        H::hash(&buf)
-    }
 }
 
 impl<C: Scheme, H: Hasher> Clone for Shard<C, H> {
@@ -214,14 +205,6 @@ impl<C: Scheme, H: Hasher> Committable for Shard<C, H> {
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
-    }
-}
-
-impl<C: Scheme, H: Hasher> Digestible for Shard<C, H> {
-    type Digest = H::Digest;
-
-    fn digest(&self) -> Self::Digest {
-        Self::uuid(self.commitment, self.index)
     }
 }
 

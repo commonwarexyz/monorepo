@@ -7,7 +7,7 @@ use crate::{
         core::{BlockBuffer, Variant},
     },
     types::CodingCommitment,
-    CertifiableBlock, Scheme,
+    CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Digestible, PublicKey};
@@ -28,7 +28,6 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
     type Block = CodedBlock<B, C>;
     type StoredBlock = StoredCodedBlock<B, C>;
     type Commitment = CodingCommitment;
-    type Recipients = Vec<P>;
 
     fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         commitment.block_digest()
@@ -39,10 +38,9 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
     }
 }
 
-impl<B, S, C, P> BlockBuffer<Coding<B, C, P>> for shards::Mailbox<B, S, C, P>
+impl<B, C, P> BlockBuffer<Coding<B, C, P>> for shards::Mailbox<B, C, P>
 where
     B: CertifiableBlock,
-    S: Scheme,
     C: CodingScheme,
     P: PublicKey,
 {
@@ -61,7 +59,7 @@ where
         &mut self,
         commitment: CodingCommitment,
     ) -> Option<Self::CachedBlock> {
-        self.try_reconstruct(commitment).await.ok().flatten()
+        self.get(commitment).await
     }
 
     async fn subscribe_by_digest(
@@ -79,10 +77,10 @@ where
     }
 
     async fn finalized(&mut self, commitment: CodingCommitment) {
-        self.finalized(commitment).await;
+        self.durable(commitment).await;
     }
 
-    async fn proposed(&mut self, block: CodedBlock<B, C>, recipients: Vec<P>) {
-        self.proposed(block, recipients).await;
+    async fn proposed(&mut self, block: CodedBlock<B, C>) {
+        self.proposed(block).await;
     }
 }

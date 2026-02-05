@@ -190,17 +190,7 @@ impl<
                     responder,
                 } => {
                     trace!("mailbox: subscribe");
-                    self.handle_subscribe(peer, commitment, digest, responder, true)
-                        .await;
-                }
-                Message::SubscribeNew {
-                    peer,
-                    commitment,
-                    digest,
-                    responder,
-                } => {
-                    trace!("mailbox: subscribe new");
-                    self.handle_subscribe(peer, commitment, digest, responder, false)
+                    self.handle_subscribe(peer, commitment, digest, responder)
                         .await;
                 }
                 Message::Get {
@@ -312,23 +302,20 @@ impl<
 
     /// Handles a `subscribe` request from the application.
     ///
-    /// If the message is already in the cache and `check_cache` is true, the responder is
-    /// immediately sent the message. Otherwise, the responder is stored in the waiters list.
+    /// If the message is already in the cache, the responder is immediately sent the message.
+    /// Otherwise, the responder is stored in the waiters list.
     async fn handle_subscribe(
         &mut self,
         peer: Option<P>,
         commitment: M::Commitment,
         digest: Option<M::Digest>,
         responder: oneshot::Sender<M>,
-        check_cache: bool,
     ) {
-        if check_cache {
-            // Check if the message is already in the cache
-            let mut items = self.find_messages(&peer, commitment, digest, false);
-            if let Some(item) = items.pop() {
-                self.respond_subscribe(responder, item);
-                return;
-            }
+        // Check if the message is already in the cache
+        let mut items = self.find_messages(&peer, commitment, digest, false);
+        if let Some(item) = items.pop() {
+            self.respond_subscribe(responder, item);
+            return;
         }
 
         // Store the responder

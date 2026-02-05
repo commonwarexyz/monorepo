@@ -109,7 +109,7 @@ where
     pub marshal:
         core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
-    pub shards: shards::Mailbox<B, Z::Scheme, C, <Z::Scheme as CertificateScheme>::PublicKey>,
+    pub shards: shards::Mailbox<B, C, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
     pub scheme_provider: Z,
     /// Strategy for parallel operations.
@@ -138,7 +138,7 @@ where
     context: E,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
-    shards: shards::Mailbox<B, Z::Scheme, C, <Z::Scheme as CertificateScheme>::PublicKey>,
+    shards: shards::Mailbox<B, C, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
@@ -744,9 +744,9 @@ where
             .insert((round, block_digest), task);
 
         match scheme.me() {
-            Some(me) => {
+            Some(_) => {
                 // Subscribe to shard validity. The subscription completes when a valid shard arrives.
-                let validity_rx = self.shards.subscribe_shard_validity(payload, me).await;
+                let validity_rx = self.shards.subscribe_shard(payload).await;
                 let (tx, rx) = oneshot::channel();
                 self.context.clone().spawn(|_| async move {
                     if validity_rx.await.is_ok() {
@@ -902,12 +902,7 @@ where
             "requested broadcast of built block"
         );
 
-        let scheme = self
-            .scheme_provider
-            .scoped(round.epoch())
-            .expect("missing scheme for epoch");
-        let peers = scheme.participants().iter().cloned().collect();
-        self.shards.proposed(block, peers).await;
+        self.shards.proposed(block).await;
     }
 }
 

@@ -7,7 +7,7 @@ use crate::{
     marshal::{
         coding::{
             shards,
-            types::{coding_config_for_participants, CodedBlock, Shard},
+            types::{coding_config_for_participants, CodedBlock},
             Coding,
         },
         config::Config,
@@ -28,7 +28,7 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+    certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
@@ -43,7 +43,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, Participant, NZU16, NZU64};
+use commonware_utils::{ordered::Quorum, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -217,7 +217,6 @@ pub trait TestHarness: 'static + Sized {
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-        participants: &[K],
     ) -> impl Future<Output = ()> + Send;
 
     /// Mark a block as verified.
@@ -279,7 +278,6 @@ pub trait TestHarness: 'static + Sized {
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &Self::TestBlock,
-        participants: &[K],
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -460,13 +458,8 @@ impl TestHarness for StandardHarness {
         block.height()
     }
 
-    async fn propose(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &B,
-        _participants: &[K],
-    ) {
-        handle.mailbox.proposed(round, block.clone(), ()).await;
+    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
+        handle.mailbox.proposed(round, block.clone()).await;
     }
 
     async fn verify(
@@ -618,12 +611,7 @@ impl TestHarness for StandardHarness {
         (mailbox, (), application)
     }
 
-    async fn verify_for_prune(
-        handle: &mut ValidatorHandle<Self>,
-        round: Round,
-        block: &B,
-        _participants: &[K],
-    ) {
+    async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
         handle.mailbox.verified(round, block.clone()).await;
     }
 }
@@ -636,7 +624,7 @@ impl TestHarness for StandardHarness {
 pub struct CodingHarness;
 
 type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, K>;
-type ShardsMailbox = shards::Mailbox<CodingB, S, ReedSolomon<Sha256>, K>;
+type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, K>;
 
 /// Genesis blocks use a special coding config that doesn't actually encode.
 pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
@@ -673,7 +661,7 @@ impl TestHarness for CodingHarness {
         provider: P,
     ) -> ValidatorSetup<Self> {
         let config = Config {
-            provider,
+            provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
@@ -702,23 +690,6 @@ impl TestHarness for CodingHarness {
             priority_responses: false,
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
-
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
-        };
-        let (broadcast_engine, buffer) =
-            buffered::Engine::<_, _, Shard<ReedSolomon<Sha256>, Sha256>>::new(
-                context.clone(),
-                broadcast_config,
-            );
-        let network = control.register(2, TEST_QUOTA).await.unwrap();
-        broadcast_engine.start(network);
 
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
@@ -801,9 +772,22 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (shard_engine, shard_mailbox) =
-            shards::Engine::new(context.clone(), buffer, (), config.mailbox_size, Sequential);
-        shard_engine.start();
+        let scheme = provider.all().unwrap();
+        let shard_config: shards::Config<_, _, _, Sha256, _, _> = shards::Config {
+            me: scheme.participants().index(&validator),
+            participants: scheme.participants().clone(),
+            blocker: oracle.control(validator.clone()),
+            shard_codec_cfg: CodecConfig {
+                maximum_shard_size: 1024 * 1024,
+            },
+            block_codec_cfg: (),
+            strategy: Sequential,
+            mailbox_size: 10,
+            state_ttl: Duration::from_secs(30),
+        };
+        let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
+        let network = control.register(2, TEST_QUOTA).await.unwrap();
+        shard_engine.start(network);
 
         let (actor, mailbox, height) = Actor::init(
             context.clone(),
@@ -865,13 +849,9 @@ impl TestHarness for CodingHarness {
         handle: &mut ValidatorHandle<Self>,
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>>,
-        participants: &[K],
     ) {
         // Notify the marshal which handles caching and shard broadcast
-        handle
-            .mailbox
-            .proposed(round, block.clone(), participants.to_vec())
-            .await;
+        handle.mailbox.proposed(round, block.clone()).await;
     }
 
     async fn verify(
@@ -881,11 +861,8 @@ impl TestHarness for CodingHarness {
         all_handles: &mut [ValidatorHandle<Self>],
     ) {
         // Ask each peer to validate their received shards
-        for (i, h) in all_handles.iter_mut().enumerate() {
-            let _recv = h
-                .extra
-                .subscribe_shard_validity(block.commitment(), Participant::new(i as u32))
-                .await;
+        for h in all_handles.iter_mut() {
+            let _recv = h.extra.subscribe_shard(block.commitment()).await;
         }
     }
 
@@ -948,7 +925,7 @@ impl TestHarness for CodingHarness {
         let control = oracle.control(validator.clone());
         let provider = ConstantProvider::new(schemes[0].clone());
         let config = Config {
-            provider,
+            provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
@@ -977,31 +954,22 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: CodecConfig {
+        let scheme = provider.all().unwrap();
+        let shard_config: shards::Config<_, _, _, Sha256, _, _> = shards::Config {
+            me: scheme.participants().index(&validator),
+            participants: scheme.participants().clone(),
+            blocker: oracle.control(validator.clone()),
+            shard_codec_cfg: CodecConfig {
                 maximum_shard_size: 1024 * 1024,
             },
+            block_codec_cfg: (),
+            strategy: Sequential,
+            mailbox_size: 10,
+            state_ttl: Duration::from_secs(30),
         };
-        let (broadcast_engine, buffer) =
-            buffered::Engine::<_, _, Shard<ReedSolomon<Sha256>, Sha256>>::new(
-                context.clone(),
-                broadcast_config,
-            );
+        let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();
-        broadcast_engine.start(network);
-
-        let (shard_engine, shard_mailbox) = shards::Engine::<_, S, _, _, CodingB, K, _>::new(
-            context.clone(),
-            buffer,
-            (),
-            config.mailbox_size,
-            Sequential,
-        );
-        shard_engine.start();
+        shard_engine.start(network);
 
         let finalizations_by_height = prunable::Archive::init(
             context.with_label("finalizations_by_height"),
@@ -1056,12 +1024,8 @@ impl TestHarness for CodingHarness {
         handle: &mut ValidatorHandle<Self>,
         _round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>>,
-        participants: &[K],
     ) {
-        handle
-            .extra
-            .proposed(block.clone(), participants.to_vec())
-            .await;
+        handle.extra.proposed(block.clone()).await;
     }
 }
 
@@ -1132,7 +1096,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
             let actor_index: usize = (height.get() % (NUM_VALIDATORS as u64)) as usize;
             let mut handle = handles[actor_index].clone();
-            H::propose(&mut handle, round, block, &participants).await;
+            H::propose(&mut handle, round, block).await;
             H::verify(&mut handle, round, block, &mut handles).await;
 
             context.sleep(link.latency).await;
@@ -1263,7 +1227,7 @@ pub fn sync_height_floor<H: TestHarness>() {
 
             let actor_index: usize = (height.get() % (applications.len() as u64)) as usize;
             let mut handle = handles[actor_index].clone();
-            H::propose(&mut handle, round, block, &participants).await;
+            H::propose(&mut handle, round, block).await;
             H::verify(&mut handle, round, block, &mut handles).await;
 
             context.sleep(LINK.latency).await;
@@ -1410,7 +1374,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
                 mailbox: mailbox.clone(),
                 extra: extra.clone(),
             };
-            H::verify_for_prune(&mut handle, round, &block, &participants).await;
+            H::verify_for_prune(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -1557,13 +1521,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             .subscribe_by_digest(Some(Round::new(Epoch::zero(), View::new(1))), digest)
             .await;
 
-        H::propose(
-            &mut handle,
-            Round::new(Epoch::zero(), View::new(1)),
-            &block,
-            &participants,
-        )
-        .await;
+        H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
         H::verify(
             &mut handle,
             Round::new(Epoch::zero(), View::new(1)),
@@ -1644,7 +1602,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
-            H::propose(&mut handle, round, block, &participants).await;
+            H::propose(&mut handle, round, block).await;
             H::verify(&mut handle, round, block, &mut handles).await;
 
             let proposal = Proposal {
@@ -1725,7 +1683,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
-            H::propose(&mut handle, round, block, &participants).await;
+            H::propose(&mut handle, round, block).await;
             H::verify(&mut handle, round, block, &mut handles).await;
 
             let proposal = Proposal {
@@ -1809,7 +1767,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(1)),
             &block1,
-            &participants,
         )
         .await;
         context.sleep(Duration::from_millis(20)).await;
@@ -1823,7 +1780,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(2)),
             &block2,
-            &participants,
         )
         .await;
         H::verify(
@@ -1850,7 +1806,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(3)),
             &block3,
-            &participants,
         )
         .await;
         H::verify(
@@ -1880,7 +1835,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(4)),
             &block4,
-            &participants,
         )
         .await;
         H::verify(
@@ -1909,7 +1863,6 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             &mut handle,
             Round::new(Epoch::zero(), View::new(5)),
             &block5,
-            &participants,
         )
         .await;
         H::verify(
@@ -1963,7 +1916,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
         let commitment = H::commitment(&block);
         let round = Round::new(Epoch::zero(), View::new(1));
 
-        H::propose(&mut handle, round, &block, &participants).await;
+        H::propose(&mut handle, round, &block).await;
         context.sleep(LINK.latency).await;
 
         let proposal = Proposal {
@@ -2034,7 +1987,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
 
-            H::propose(&mut handle, round, &block, &participants).await;
+            H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -2107,7 +2060,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
 
-            H::propose(&mut handle, round, &block, &participants).await;
+            H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -2179,7 +2132,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
         let commitment = H::commitment(&block);
         let round = Round::new(Epoch::zero(), View::new(1));
 
-        H::propose(&mut handle, round, &block, &participants).await;
+        H::propose(&mut handle, round, &block).await;
         context.sleep(LINK.latency).await;
 
         let proposal = Proposal {
@@ -2240,7 +2193,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
 
-            H::propose(&mut handle, round, &block, &participants).await;
+            H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -2330,7 +2283,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::new(0), View::new(i));
 
-            H::propose(&mut handle0, round, &block, &participants).await;
+            H::propose(&mut handle0, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -2414,7 +2367,7 @@ pub fn ancestry_stream<H: TestHarness>() {
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
 
-            H::propose(&mut handle, round, &block, &participants).await;
+            H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -2476,13 +2429,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Both validators receive the block
         for handle in handles.iter_mut() {
-            H::propose(
-                handle,
-                Round::new(Epoch::new(0), View::new(1)),
-                &block,
-                &participants,
-            )
-            .await;
+            H::propose(handle, Round::new(Epoch::new(0), View::new(1)), &block).await;
         }
         context.sleep(LINK.latency).await;
 
@@ -2607,7 +2554,7 @@ pub fn init_processed_height<H: TestHarness>() {
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
 
-            H::propose(&mut handle, round, &block, &participants).await;
+            H::propose(&mut handle, round, &block).await;
             context.sleep(LINK.latency).await;
 
             let proposal = Proposal {
@@ -2676,13 +2623,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
         let commitment = H::commitment(&block);
 
         // Broadcast the block
-        H::propose(
-            &mut handle,
-            Round::new(Epoch::new(0), View::new(1)),
-            &block,
-            &participants,
-        )
-        .await;
+        H::propose(&mut handle, Round::new(Epoch::new(0), View::new(1)), &block).await;
 
         // Ensure the block is cached and retrievable
         handle

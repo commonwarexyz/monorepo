@@ -208,7 +208,7 @@ mod tests {
             let parent_digest = parent.digest();
             marshal
                 .clone()
-                .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone(), ())
+                .proposed(Round::new(Epoch::new(0), View::new(1)), parent.clone())
                 .await;
 
             // Block A at view 5 (height 2)
@@ -220,7 +220,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
             let commitment_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a.clone(), ()).await;
+            marshal.clone().proposed(round_a, block_a.clone()).await;
 
             // Block B at view 10 (height 2, different block same height)
             let round_b = Round::new(Epoch::new(0), View::new(10));
@@ -231,7 +231,7 @@ mod tests {
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
             let commitment_b = block_b.digest();
-            marshal.clone().proposed(round_b, block_b.clone(), ()).await;
+            marshal.clone().proposed(round_b, block_b.clone()).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -337,7 +337,7 @@ mod tests {
             // Make the boundary block available for subscription
             marshal
                 .clone()
-                .proposed(boundary_round, boundary_block.clone(), ())
+                .proposed(boundary_round, boundary_block.clone())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -382,7 +382,7 @@ mod tests {
             // Make the non-boundary block available
             marshal
                 .clone()
-                .proposed(non_boundary_round, non_boundary_block.clone(), ())
+                .proposed(non_boundary_round, non_boundary_block.clone())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -513,7 +513,7 @@ mod tests {
             let parent_digest = parent.digest();
             marshal
                 .clone()
-                .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone(), ())
+                .proposed(Round::new(Epoch::zero(), View::new(19)), parent.clone())
                 .await;
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
@@ -532,7 +532,7 @@ mod tests {
             let block_commitment = block.digest();
             marshal
                 .clone()
-                .proposed(unsupported_round, block.clone(), ())
+                .proposed(unsupported_round, block.clone())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -615,7 +615,6 @@ mod tests {
                 .proposed(
                     Round::new(Epoch::new(1), View::new(35)),
                     malicious_block.clone(),
-                    (),
                 )
                 .await;
 
@@ -659,7 +658,6 @@ mod tests {
                 .proposed(
                     Round::new(Epoch::new(1), View::new(22)),
                     malicious_block.clone(),
-                    (),
                 )
                 .await;
 
@@ -738,7 +736,7 @@ mod tests {
             let parent_commitment = parent.digest();
             marshal
                 .clone()
-                .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone(), ())
+                .proposed(Round::new(Epoch::zero(), View::new(1)), parent.clone())
                 .await;
 
             // Build a block with context A (embedded in the block).
@@ -750,7 +748,7 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
             let commitment_a = block_a.digest();
-            marshal.clone().proposed(round_a, block_a, ()).await;
+            marshal.clone().proposed(round_a, block_a).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
