@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, Signer};
+use commonware_cryptography::{ed25519::PrivateKey, handshake::TAG_SIZE, Signer};
 use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner};
 use commonware_stream::{
     encrypted::{dial, listen, Config, Error, Receiver, Sender},
@@ -12,6 +12,7 @@ use std::time::Duration;
 
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
+const MAX_CIPHERTEXT_SIZE: u32 = MAX_MESSAGE_SIZE + TAG_SIZE as u32;
 
 #[derive(Debug)]
 enum Direction {
@@ -216,9 +217,16 @@ fn fuzz(input: FuzzInput) {
         // Importantly, make sure that if we've gotten to this point, no data corruption
         // has happened!
         assert!(!sent_corrupted_data);
+        let mut stream_corrupted = false;
         for msg in messages {
             match msg {
                 Message::Authenticated(direction, data) => {
+                    if stream_corrupted {
+                        continue;
+                    }
+                    if data.is_empty() || data.len() > MAX_MESSAGE_SIZE as usize {
+                        continue;
+                    }
                     let (sender, a_in, a_out, receiver): (
                         &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
@@ -239,12 +247,18 @@ fn fuzz(input: FuzzInput) {
                         ),
                     };
                     sender.send(data.clone()).await.unwrap();
-                    let frame = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, frame, MAX_MESSAGE_SIZE).await.unwrap();
+                    let frame = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    send_frame(a_out, frame, MAX_CIPHERTEXT_SIZE).await.unwrap();
                     let data2 = receiver.recv().await.unwrap();
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
                 }
                 Message::Unauthenticated(direction, data) => {
+                    if stream_corrupted {
+                        continue;
+                    }
+                    if data.len() > MAX_CIPHERTEXT_SIZE as usize {
+                        continue;
+                    }
                     let (sender, a_in, a_out, receiver): (
                         &mut Sender<mocks::Sink>,
                         &mut mocks::Stream,
@@ -264,11 +278,13 @@ fn fuzz(input: FuzzInput) {
                             &mut d_receiver,
                         ),
                     };
-                    sender.send(Vec::new()).await.unwrap();
-                    let _ = recv_frame(a_in, MAX_MESSAGE_SIZE).await.unwrap();
-                    send_frame(a_out, data, MAX_MESSAGE_SIZE).await.unwrap();
+                    sender.send(vec![0u8]).await.unwrap();
+                    let _ = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap();
                     let res = receiver.recv().await;
                     assert!(res.is_err());
+                    // After unauthenticated injection, the stream state is corrupted.
+                    stream_corrupted = true;
                 }
             }
         }
