@@ -63,6 +63,26 @@ cargo doc --open
 
 In CI, we enforce that any object of some level must rely on objects with the same or higher level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
 
+## Graduation Day
+
+Here are some of the primitive dialects we now consider `BETA` (wire and storage format stable):
+
+* **codec**
+* **runtime::tokio**
+* **parallel::rayon**
+* **math::poly**
+* **cryptography::ed25519**
+* **cryptography::bls12381**
+* **stream::encrypted**
+* **p2p::authenticated::discovery**
+* **p2p::authenticated::lookup**
+* **broadcast::buffered**
+* **resolver::p2p**
+* **storage::journal**
+* **storage::archive**
+* **consensus::simplex**
+* **consensus::marshal**
+
 ## Move Fast And (Sometimes) Break Things
 
 
