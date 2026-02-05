@@ -200,10 +200,10 @@ impl RecvCipher {
     /// is a simple (and safe) way to handle this scenario.
     #[inline]
     pub fn recv_in_place(&mut self, encrypted_data: &mut [u8]) -> Result<usize, Error> {
+        let nonce = self.nonce.inc()?;
         if encrypted_data.len() < TAG_SIZE {
             return Err(Error::DecryptionFailed);
         }
-        let nonce = self.nonce.inc()?;
         self.inner
             .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
     }
@@ -339,5 +339,38 @@ mod tests {
         // Use in-place recv on allocating send data
         let plaintext_len = recv.recv_in_place(&mut ciphertext).unwrap();
         assert_eq!(&ciphertext[..plaintext_len], plaintext);
+    }
+
+    #[test]
+    fn test_nonce_sync_after_truncated_recv() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        // Send message (sender nonce: 0 -> 1)
+        let ciphertext = send.send(b"message 1").unwrap();
+
+        // Receiver gets truncated buffer (recv nonce: 0 -> 1)
+        let mut truncated = vec![0u8; TAG_SIZE - 1];
+        assert!(recv.recv_in_place(&mut truncated).is_err());
+
+        // Original ciphertext (nonce 0) no longer decrypts because recv nonce advanced to 1
+        assert!(recv.recv(&ciphertext).is_err());
+    }
+
+    #[test]
+    fn test_nonce_sync_after_corrupted_recv() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        // Send message (sender nonce: 0 -> 1)
+        let ciphertext = send.send(b"message 1").unwrap();
+
+        // Corrupt a copy (valid length, bad content)
+        let mut corrupted = ciphertext.clone();
+        corrupted[0] ^= 0xFF;
+        assert!(recv.recv_in_place(&mut corrupted).is_err());
+
+        // Original ciphertext (nonce 0) no longer decrypts because recv nonce advanced to 1
+        assert!(recv.recv(&ciphertext).is_err());
     }
 }
