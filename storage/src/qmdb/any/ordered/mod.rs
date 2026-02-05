@@ -1050,32 +1050,30 @@ mod test {
 
     /// Helper trait for testing Any databases with FixedBytes<4> keys.
     /// Used for edge case tests that require specific key patterns.
-    pub(crate) trait TestableAnyDb<V>:
-        CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
+    pub(crate) trait FixedBytesDb:
+        CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = Digest, Digest = Digest>
     {
     }
-
-    impl<T, V> TestableAnyDb<V> for T where
-        T: CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = V, Digest = Digest>
+    impl<T> FixedBytesDb for T where
+        T: CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = Digest, Digest = Digest>
     {
     }
 
     /// Helper trait for testing Any databases with Digest keys.
     /// Used for generic tests that can be shared with partitioned variants.
-    pub(crate) trait DigestTestableAnyDb<V>:
-        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+    pub(crate) trait DigestDb:
+        CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>
     {
     }
-
-    impl<T, V> DigestTestableAnyDb<V> for T where
-        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+    impl<T> DigestDb for T where
+        T: CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>
     {
     }
 
     /// Test an empty database with Digest keys.
     ///
     /// This function is pub(crate) so partitioned variants can call it.
-    pub(crate) async fn test_digest_ordered_any_db_empty<D: DigestTestableAnyDb<Digest>>(
+    pub(crate) async fn test_digest_ordered_any_db_empty<D: DigestDb>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -1127,7 +1125,7 @@ mod test {
     /// Test basic CRUD and commit behavior with Digest keys.
     ///
     /// This function is pub(crate) so partitioned variants can call it.
-    pub(crate) async fn test_digest_ordered_any_db_basic<D: DigestTestableAnyDb<Digest>>(
+    pub(crate) async fn test_digest_ordered_any_db_basic<D: DigestDb>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -1255,7 +1253,7 @@ mod test {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_ordered_any_db_empty<D: TestableAnyDb<Digest>>(
+    pub(crate) async fn test_ordered_any_db_empty<D: FixedBytesDb>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -1307,7 +1305,7 @@ mod test {
         db.into_merkleized().await.unwrap().destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_ordered_any_db_basic<D: TestableAnyDb<Digest>>(
+    pub(crate) async fn test_ordered_any_db_basic<D: FixedBytesDb>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
@@ -1419,9 +1417,7 @@ mod test {
 
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
-    pub(crate) async fn test_ordered_any_update_collision_edge_case<D: TestableAnyDb<Digest>>(
-        db: D,
-    ) {
+    pub(crate) async fn test_ordered_any_update_collision_edge_case<D: FixedBytesDb>(db: D) {
         // This DB uses a TwoCap so we use equivalent two byte prefixes for each key to ensure
         // collisions.
         let key1 = FixedBytes::from([0xFFu8, 0xFFu8, 5u8, 5u8]);
