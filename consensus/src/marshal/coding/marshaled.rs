@@ -58,10 +58,10 @@ use crate::{
             types::{coding_config_for_participants, context_hash, CodedBlock},
             Coding,
         },
-        core, Update,
+        core, is_at_epoch_boundary, Update,
     },
     simplex::{scheme::Scheme, types::Context},
-    types::{CodingCommitment, Epoch, Epocher, Height, Round},
+    types::{CodingCommitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
 };
@@ -758,22 +758,13 @@ where
             None => {
                 // If we are not participating, there's no shard to verify; just accept the proposal.
                 //
-                // Later, when certifying, we will be waiting for a quorum of shard validities
-                // that we won't contribute to, but we will still be able to recover the block.
+                // Later, when certifying, we will wait to receive the block from the network.
                 let (tx, rx) = oneshot::channel();
                 tx.send_lossy(true);
                 rx
             }
         }
     }
-}
-
-/// Returns true if the block is at an epoch boundary (last block in its epoch).
-///
-/// This is used to validate re-proposals, which are only allowed for boundary blocks.
-#[inline]
-fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
-    epocher.last(epoch).is_some_and(|last| last == block_height)
 }
 
 impl<E, A, B, C, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, Z, S, ES>

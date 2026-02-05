@@ -50,9 +50,7 @@ where
         &mut self,
         _digest: <CodedBlock<B, C> as Digestible>::Digest,
     ) -> Option<Self::CachedBlock> {
-        // With only a digest, we cannot reconstruct from shards because we don't have the coding commitment.
-        // The caller should check cache/archives instead.
-        None
+        self.get_by_digest(_digest).await
     }
 
     async fn find_by_commitment(
@@ -73,7 +71,7 @@ where
         &mut self,
         commitment: CodingCommitment,
     ) -> oneshot::Receiver<Self::CachedBlock> {
-        self.subscribe_block_by_commitment(commitment).await
+        self.subscribe_block(commitment).await
     }
 
     async fn finalized(&mut self, commitment: CodingCommitment) {

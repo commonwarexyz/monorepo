@@ -136,7 +136,10 @@
 //! proposer's message arrives, which would otherwise cause us to block the
 //! proposer.
 
-use super::mailbox::{Mailbox, Message};
+use super::{
+    mailbox::{Mailbox, Message},
+    metrics::{Peer, ShardMetrics},
+};
 use crate::{
     marshal::coding::types::{CodedBlock, DistributionShard, Shard},
     types::CodingCommitment,
@@ -160,7 +163,6 @@ use commonware_utils::{
     ordered::{Quorum, Set},
     Participant,
 };
-use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use rayon::iter::Either;
 use std::{
@@ -293,8 +295,8 @@ where
     block_subscriptions:
         BTreeMap<Either<CodingCommitment, B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>>,
 
-    erasure_decode_duration: Gauge,
-    reconstructed_blocks_count: Gauge,
+    /// Metrics for the shard engine.
+    metrics: ShardMetrics,
 }
 
 impl<E, X, C, H, B, P, T> Engine<E, X, C, H, B, P, T>
@@ -309,19 +311,7 @@ where
 {
     /// Create a new [Engine] with the given configuration.
     pub fn new(context: E, config: Config<P, X, C, H, B, T>) -> (Self, Mailbox<B, C, P>) {
-        let erasure_decode_duration = Gauge::default();
-        context.register(
-            "erasure_decode_duration",
-            "Duration of erasure decoding in milliseconds",
-            erasure_decode_duration.clone(),
-        );
-        let reconstructed_blocks_count = Gauge::default();
-        context.register(
-            "reconstructed_blocks_count",
-            "Number of blocks in the reconstructed blocks cache",
-            reconstructed_blocks_count.clone(),
-        );
-
+        let metrics = ShardMetrics::new(&context, &config.participants);
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -338,8 +328,7 @@ where
                 reconstructed_blocks: BTreeMap::new(),
                 shard_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
-                erasure_decode_duration,
-                reconstructed_blocks_count,
+                metrics,
             },
             Mailbox::new(sender),
         )
@@ -373,6 +362,8 @@ where
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
+                // Prune stale reconstruction states.
+                self.prune_stale_states();
             },
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
@@ -382,11 +373,12 @@ where
                 return;
             } => {
                 match message {
-                    Message::UpdateParticipants { participants } => {
+                    Message::UpdateParticipants { me, participants } => {
+                        self.me = participants.index(&me);
                         self.participants = participants;
 
                         // Clear reconstruction state and subscriptions
-                        self.state.clear();
+                        self.update_state(|s| s.clear());
                         self.shard_subscriptions.clear();
                         self.block_subscriptions.clear();
 
@@ -395,8 +387,15 @@ where
                     Message::Proposed { block } => {
                         self.broadcast_shards(&mut sender, block).await;
                     },
-                    Message::Get { commitment, response } => {
+                    Message::GetByCommitment { commitment, response } => {
                         let block = self.reconstructed_blocks.get(&commitment).cloned();
+                        response.send_lossy(block);
+                    },
+                    Message::GetByDigest { digest, response } => {
+                        let block = self.reconstructed_blocks
+                            .iter()
+                            .find_map(|(_, b)| (b.digest() == digest).then_some(b))
+                            .cloned();
                         response.send_lossy(block);
                     },
                     Message::SubscribeShard { commitment, response } => {
@@ -440,8 +439,8 @@ where
                     continue;
                 }
 
-                // Prune states that haven't been updated within the TTL.
-                self.prune_stale_states();
+                // Track shard receipt per peer.
+                self.metrics.shards_received.get_or_create(&Peer::new(&peer)).inc();
 
                 // Insert the shard into the reconstruction state.
                 let commitment = shard.commitment();
@@ -461,10 +460,13 @@ where
                     ).await;
 
                     if let Some(reshard) = state.take_reshard() {
-                        self.notify_shard_subscribers(commitment).await;
                         self.broadcast_reshard(&mut sender, reshard).await;
+                        self.notify_shard_subscribers(commitment).await;
                     }
                 }
+
+                // Sync state count after potential state creation.
+                let _ = self.metrics.reconstruction_states_count.try_set(self.state.len());
 
                 // Attempt to reconstruct the block.
                 match self.try_reconstruct(commitment).await {
@@ -475,7 +477,7 @@ where
                             height = %block.height(),
                             "successfully reconstructed block from shards"
                         );
-                        self.state.remove(&commitment);
+                        self.update_state(|s| s.remove(&commitment));
                         self.notify_block_subscribers(block).await;
                     }
                     Ok(None) => {
@@ -483,7 +485,8 @@ where
                     }
                     Err(err) => {
                         warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
-                        self.state.remove(&commitment);
+                        self.update_state(|s| s.remove(&commitment));
+                        self.metrics.reconstruction_failures_total.inc();
                     }
                 }
             }
@@ -529,6 +532,7 @@ where
         )
         .map_err(ReconstructionError::CodingRecovery)?;
         let _ = self
+            .metrics
             .erasure_decode_duration
             .try_set(start.elapsed().as_millis());
 
@@ -545,6 +549,7 @@ where
         let block = Arc::new(CodedBlock::new_trusted(inner, commitment));
 
         self.update_reconstructed_blocks(|b| b.insert(commitment, Arc::clone(&block)));
+        self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
     }
 
@@ -553,8 +558,10 @@ where
     async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        block: CodedBlock<B, C>,
+        mut block: CodedBlock<B, C>,
     ) {
+        assert_eq!(block.shards(&self.strategy).len(), self.participants.len());
+
         // Cache the block so we don't have to reconstruct it again.
         let commitment = block.commitment();
         self.update_reconstructed_blocks(|b| b.insert(commitment, Arc::new(block.clone())));
@@ -679,15 +686,19 @@ where
     /// the consensus timeout, so stale entries can be safely removed.
     fn prune_stale_states(&mut self) {
         let now = self.context.current();
+        let ttl = self.state_ttl;
         let before = self.state.len();
-        self.state.retain(|_, state| {
-            now.duration_since(state.last_updated)
-                .map(|elapsed| elapsed < self.state_ttl)
-                .unwrap_or(true) // Keep if clock went backwards (shouldn't happen)
+        self.update_state(|s| {
+            s.retain(|_, state| {
+                now.duration_since(state.last_updated)
+                    .map(|elapsed| elapsed < ttl)
+                    .unwrap_or(true) // Keep if clock went backwards (shouldn't happen)
+            });
         });
         let pruned = before - self.state.len();
         if pruned > 0 {
             debug!(pruned, "pruned stale reconstruction states");
+            self.metrics.stale_states_pruned_total.inc_by(pruned as u64);
         }
     }
 
@@ -710,11 +721,27 @@ where
     fn update_reconstructed_blocks<U>(
         &mut self,
         f: impl FnOnce(&mut BTreeMap<CodingCommitment, Arc<CodedBlock<B, C>>>) -> U,
-    ) {
-        f(&mut self.reconstructed_blocks);
+    ) -> U {
+        let result = f(&mut self.reconstructed_blocks);
         let _ = self
+            .metrics
             .reconstructed_blocks_count
             .try_set(self.reconstructed_blocks.len());
+        result
+    }
+
+    /// Updates the reconstruction state via the provided closure and then
+    /// syncs the reconstruction states count metric.
+    fn update_state<U>(
+        &mut self,
+        f: impl FnOnce(&mut BTreeMap<CodingCommitment, ReconstructionState<P, C, H>>) -> U,
+    ) -> U {
+        let result = f(&mut self.state);
+        let _ = self
+            .metrics
+            .reconstruction_states_count
+            .try_set(self.state.len());
+        result
     }
 }
 
@@ -799,7 +826,8 @@ where
             self.contributed = BitMap::zeroes(participants.len() as u64);
         }
 
-        let before = self.checked_shards.len();
+        let before = self.checked_shards.len() + self.pending_shards.len();
+
         if shard.is_strong() {
             self.insert_shard(me, sender, shard, strategy, blocker)
                 .await;
@@ -809,7 +837,7 @@ where
         }
 
         // Only update timestamp when we actually made progress.
-        if self.checked_shards.len() > before {
+        if self.checked_shards.len() + self.pending_shards.len() > before {
             self.last_updated = now;
         }
     }
@@ -843,7 +871,7 @@ where
             .expect("shard index impossibly out of bounds");
 
         let DistributionShard::Strong(shard_data) = shard.into_inner() else {
-            panic!("insert_strong_shard called with non-strong shard");
+            panic!("insert_shard called with non-strong shard");
         };
 
         let Some(me) = me else {
@@ -950,7 +978,7 @@ where
         };
 
         let DistributionShard::Weak(shard_data) = shard.into_inner() else {
-            panic!("insert_strong_shard called with non-strong shard");
+            panic!("insert_reshard called with strong shard");
         };
         let Ok(checked) = C::check(
             &commitment.config(),
@@ -1255,10 +1283,7 @@ mod tests {
             let digest = coded_block.digest();
 
             // Subscribe before broadcasting.
-            let commitment_sub = peers[1]
-                .mailbox
-                .subscribe_block_by_commitment(commitment)
-                .await;
+            let commitment_sub = peers[1].mailbox.subscribe_block(commitment).await;
             let digest_sub = peers[2].mailbox.subscribe_block_by_digest(digest).await;
 
             peers[0].mailbox.proposed(coded_block.clone()).await;
@@ -1598,12 +1623,13 @@ mod tests {
                 // The on_start handler will prune stale states before processing.
                 // After pruning, the reconstruction state (including contributed bitmap)
                 // is gone, so sending the same reshard again should NOT block peer 1.
+                peers[1].mailbox.get(coded_block.commitment()).await;
+                context.sleep(config.link.latency * 2).await;
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), reshard_bytes, true)
                     .await
                     .expect("send failed");
-                context.sleep(config.link.latency * 2).await;
 
                 // If state was pruned, the reshard is treated as new (not duplicate),
                 // so peer 1 should NOT be blocked.
@@ -1741,7 +1767,7 @@ mod tests {
                 context.sleep(config.link.latency * 2).await;
 
                 // Create a subscription that should be cleared.
-                let sub = peers[0].mailbox.subscribe_block_by_commitment(commitment).await;
+                let sub = peers[0].mailbox.subscribe_block(commitment).await;
 
                 // Send UpdateParticipants to clear state.
                 // Use a new participant set (same keys, just triggers the clear).
@@ -1749,7 +1775,7 @@ mod tests {
                     Set::from_iter_dedup(peers.iter().map(|p| p.public_key.clone()));
                 peers[0]
                     .mailbox
-                    .update_participants(new_participants)
+                    .update_participants(peer0_pk.clone(), new_participants)
                     .await;
 
                 // Give time for the message to be processed.
@@ -1844,7 +1870,10 @@ mod tests {
                 // Update participants to exclude peer 3.
                 let new_participants: Set<P> =
                     Set::from_iter_dedup(peers.iter().take(3).map(|p| p.public_key.clone()));
-                peers[0].mailbox.update_participants(new_participants).await;
+                peers[0]
+                    .mailbox
+                    .update_participants(peer0_pk.clone(), new_participants)
+                    .await;
 
                 context.sleep(Duration::from_millis(10)).await;
 

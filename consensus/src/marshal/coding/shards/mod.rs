@@ -19,5 +19,7 @@
 mod mailbox;
 pub use mailbox::{Mailbox, Message};
 
+mod metrics;
+
 mod engine;
 pub use engine::{Config, Engine, ReconstructionError};

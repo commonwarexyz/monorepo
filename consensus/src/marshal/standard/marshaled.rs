@@ -51,11 +51,7 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    marshal::{ancestry::AncestorStream, core::Mailbox, standard::Standard, Update},
-    simplex::types::Context,
-    types::{Epoch, Epocher, Height, Round},
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
-    Reporter, VerifyingApplication,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter, VerifyingApplication, marshal::{Update, ancestry::AncestorStream, core::Mailbox, is_at_epoch_boundary, standard::Standard}, simplex::types::Context, types::{Epoch, Epocher, Round}
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
@@ -707,14 +703,6 @@ where
         }
         self.application.report(update).await
     }
-}
-
-/// Returns true if the block is at an epoch boundary (last block in its epoch).
-///
-/// This is used to validate re-proposals, which are only allowed for boundary blocks.
-#[inline]
-fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
-    epocher.last(epoch).is_some_and(|last| last == block_height)
 }
 
 /// Fetches the parent block given its digest and optional round.
