@@ -15,7 +15,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream, TcpOptions,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -113,7 +113,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         Ok(())
     }
 
-    pub async fn run<O: Sink, I: Stream>(
+    pub async fn run<O: Sink + TcpOptions, I: Stream>(
         mut self,
         peer: C,
         greeting: types::Info<C>,
@@ -174,7 +174,11 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                                     metrics::Message::new_peers(&peer),
                                     types::Payload::Peers(peers),
                                 ),
-                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                                Message::Kill => {
+                                    // Set linger to 0 to send RST instead of FIN on close
+                                    conn_sender.set_linger(Some(Duration::ZERO));
+                                    return Err(Error::PeerKilled(peer.to_string()));
+                                }
                             };
                             Self::send_payload(
                                 &mut conn_sender,

@@ -9,7 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream, TcpOptions,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -101,7 +101,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         Ok(())
     }
 
-    pub async fn run<Si: Sink, St: Stream>(
+    pub async fn run<Si: Sink + TcpOptions, St: Stream>(
         mut self,
         peer: C,
         (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
@@ -151,7 +151,11 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                         Some(msg) = self.control.recv() else {
                             return Err(Error::PeerDisconnected);
                         } => match msg {
-                            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                            Message::Kill => {
+                                // Set linger to 0 to send RST instead of FIN on close
+                                conn_sender.set_linger(Some(Duration::ZERO));
+                                return Err(Error::PeerKilled(peer.to_string()));
+                            }
                         },
                         msg_high = self.high.recv() => {
                             // Data is already pre-encoded, just forward to stream

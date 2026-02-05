@@ -300,6 +300,15 @@ pub struct Sender<O> {
     pool: BufferPool,
 }
 
+impl<O> Sender<O> {
+    /// Returns a reference to the underlying sink.
+    ///
+    /// This is useful for accessing transport-specific options (e.g., TCP socket options).
+    pub const fn sink(&self) -> &O {
+        &self.sink
+    }
+}
+
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
     ///
@@ -337,6 +346,16 @@ impl<O: Sink> Sender<O> {
             },
         )
         .await
+    }
+}
+
+impl<O: commonware_runtime::TcpOptions> commonware_runtime::TcpOptions for Sender<O> {
+    fn set_linger(&self, duration: Option<std::time::Duration>) {
+        self.sink.set_linger(duration);
+    }
+
+    fn set_nodelay(&self, nodelay: bool) -> Result<(), RuntimeError> {
+        self.sink.set_nodelay(nodelay)
     }
 }
 
