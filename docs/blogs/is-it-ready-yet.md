@@ -28,7 +28,6 @@ While building with different teams, however, this approach proved insufficient:
 
 **Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable," it must remain supported indefinitely. If we need to make a significant change, it must be backwards-compatible or introduced in a new crate. There is no `2.x` for a primitive.
 
-
 ## Tiered Stability and Calendar Versioning
 
 We've broken stability into the following levels:
