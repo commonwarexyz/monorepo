@@ -523,4 +523,42 @@ mod tests {
     fn search_haystack_depth_10() {
         search_haystack(10);
     }
+
+    #[test]
+    #[should_panic(expected = "MINIFUZZ_BRANCH = 0x")]
+    fn reproduce_failure() {
+        super::Builder::default()
+            .with_reproduce("0x0000000000000000000000a0")
+            .test(|u| {
+                let v: u8 = u.arbitrary()?;
+                assert_ne!(v, 42);
+                Ok(())
+            });
+    }
+
+    #[test]
+    #[should_panic(expected = "<not displayable>")]
+    fn panic_non_displayable() {
+        struct NonDisplayable;
+        super::Builder::default()
+            .with_search_limit(1)
+            .with_seed(0)
+            .test(|_u| {
+                std::panic::panic_any(NonDisplayable);
+            });
+    }
+
+    #[test]
+    #[should_panic(expected = "MINIFUZZ_BRANCH = 0x")]
+    fn min_iterations_overrides_search_time() {
+        super::Builder::default()
+            .with_search_time(std::time::Duration::ZERO)
+            .with_min_iterations(1000)
+            .with_seed(0)
+            .test(|u| {
+                let v: u8 = u.arbitrary()?;
+                assert_ne!(v, 42);
+                Ok(())
+            });
+    }
 }
