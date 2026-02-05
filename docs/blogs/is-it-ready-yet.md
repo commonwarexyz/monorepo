@@ -18,15 +18,15 @@ Today, we are sharing our approach to stability, explaining how we enforce consi
 
 ## Solving a "Solved" Problem
 
-The obvious approach to tracking stability is [semantic versioning](https://semver.org/): break each primitive into its own crate, use `0.x` for unstable and `1.0+` for stable, bump versions according to the rules, and gate experimental features behind an `unstable` flag.
+The obvious approach to tracking stability is [semantic versioning](https://semver.org/): break each primitive into its own crate, use `0.x` for unstable and `1.0+` for stable, bump major versions for breaking changes, and gate experimental features behind an `unstable` flag.
 
-While working with different teams building high-stakes systems, we found this approach insufficient. When a subtle breaking change means a network halt or loss of funds, "stable" needs to mean more than "API won't change." We identified three gaps:
+While building with different teams, however, this approach fell short:
 
-**Compatibility is unclear.** With many crates versioned independently, tested combinations become ambiguous. `consensus-simplex@1.1.3` may compile with `storage-journal@2.3.45`, but that doesn't mean they've been tested together.
+**Compatibility is unclear.** With many crates versioned independently, it is not clear what combinations have been tested together. `consensus-simplex@1.1.3` "should" work with `storage-journal@2.3.45` if it compiles, however, in a world where a wrong guess means a network halt or loss of funds, it is not good enough.
 
-**Risk assessment is too coarse.** Binary "stable" vs "unstable" doesn't capture the spectrum of readiness. A brand-new algorithm and a battle-tested one might both be `1.0`. Documentation exists to explain the nuance, but few read it before depending on something.
+**Coarse readiness prevents rapid iteration.** Binary "stable" vs "unstable" doesn't capture the spectrum of readiness and slows down development. A brand-new algorithm and a battle-tested one might both be `1.0`. Documentation exists to explain the nuance, but few read it before depending on something.
 
-**No long-term support guarantee.** Semver defines how versions change, not how long they're supported. For infrastructure that runs for years, knowing that wire formats won't break in 6 months matters as much as API stability.
+**Long-Term Support is not apparent.** We take a Linux-like approach to stability: once something is marked as "stable", it should remain supported indefinitely. If a significant breaking change is desired, it must be introduced in a new crate.
 
 ## Tiered Stability and Calendar Versioning
 
