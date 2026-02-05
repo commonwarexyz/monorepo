@@ -229,10 +229,6 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
-    /// Register a set of authorized peers at a given index.
-    ///
-    /// The index should be strictly managed (ideally matching the epoch
-    /// of the consensus engine) and must be monotonically increasing.
     async fn update(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
         self.sender.0.send_lossy(Message::Register { index, peers });
     }

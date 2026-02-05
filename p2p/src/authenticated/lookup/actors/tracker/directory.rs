@@ -140,11 +140,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Stores a new peer set.
     ///
-    /// Returns `Some((deleted_peers, address_changed_peers))` on success, where:
+    /// Returns `Some((deleted_peers, changed_peers))` on success, where:
     /// - `deleted_peers`: peers removed due to max_sets eviction
-    /// - `address_changed_peers`: existing peers whose addresses were updated
+    /// - `changed_peers`: existing peers whose addresses were updated
     ///
-    /// The caller should sever connections for `address_changed_peers` since those
+    /// The caller should sever connections for `changed_peers` since those
     /// connections were established to the old address and must be replaced.
     ///
     /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
@@ -164,13 +164,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
-        let mut address_changed_peers = Vec::new();
+        let mut changed_peers = Vec::new();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
-                        address_changed_peers.push(peer.clone());
+                        changed_peers.push(peer.clone());
                     }
                     entry
                 }
@@ -204,7 +204,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // future peer set additions.
         self.rate_limiter.retain_recent();
 
-        Some((deleted_peers, address_changed_peers))
+        Some((deleted_peers, changed_peers))
     }
 
     /// Update a tracked peer's address.

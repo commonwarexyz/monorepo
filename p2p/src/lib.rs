@@ -214,10 +214,7 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
-    /// Base trait for reading peer set information.
-    ///
-    /// Provides read-only access to peer sets. Components that only need to
-    /// track peer membership (without updating it) should accept `impl Provider`.
+    /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
@@ -242,34 +239,30 @@ stability_scope!(BETA {
         > + Send;
     }
 
-    /// Interface for networks where peers discover each other dynamically.
-    ///
-    /// Use this when peer addresses are discovered via gossip rather than
-    /// provided by the application.
+    /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
-        /// Update the peer set membership.
+        /// Register a peer set with the given ID and peers.
         ///
-        /// The peer set ID should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing.
-        fn update(
+        /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
+        ///
+        /// For good connectivity, all peers must register the same peer sets at the same ID.
+        fn register(
             &mut self,
             id: u64,
             peers: Set<Self::PublicKey>,
         ) -> impl Future<Output = ()> + Send;
     }
 
-    /// Interface for networks where peer addresses are provided by the application.
-    ///
-    /// Use this when the application knows peer addresses upfront (e.g., from
-    /// a staking registry).
+    /// Interface for managing peer set membership (where peer addresses are known).
     pub trait AddressableManager: Provider {
-        /// Register a peer set with addresses.
+        /// Register a peer set with the given ID and peer<PublicKey, Address> pairs.
         ///
-        /// The peer set ID should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing.
+        /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are registered.
         ///
-        /// The addresses are used for dialing peers and validating incoming connections.
-        fn update(
+        /// For good connectivity, all peers must register the same peer sets at the same ID.
+        fn register(
             &mut self,
             id: u64,
             peers: Map<Self::PublicKey, Address>,
@@ -281,8 +274,6 @@ stability_scope!(BETA {
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address
-        ///
-        /// Peers that are not tracked or have unchanged addresses are silently skipped.
         fn overwrite(
             &mut self,
             peers: Map<Self::PublicKey, Address>,

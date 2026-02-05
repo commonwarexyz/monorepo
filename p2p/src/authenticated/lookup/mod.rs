@@ -25,7 +25,8 @@
 //!   monotonically increasing index. Use this when the peer set composition changes (peers added/removed).
 //! - [`AddressableManager::overwrite`](crate::AddressableManager::overwrite): Update multiple
 //!   peers' addresses in-place without creating a new peer set. Use this when only peer IPs change but
-//!   the peer set composition stays the same. Untracked or unchanged peers are silently skipped.
+//!   the peer set composition stays the same. Untracked or unchanged peers are silently skipped (so the application doesn't
+//!   need to track what their last submitted peer set was).
 //!
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
 //! peer sets will be rejected.
