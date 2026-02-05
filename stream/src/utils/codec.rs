@@ -181,6 +181,41 @@ mod tests {
     }
 
     #[test]
+    fn test_send_frame_with_closure_error() {
+        let (mut sink, _) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let result = send_frame_with(&mut sink, 10, MAX_MESSAGE_SIZE, |_prefix| {
+                Err(Error::HandshakeError(
+                    commonware_cryptography::handshake::Error::EncryptionFailed,
+                ))
+            })
+            .await;
+            assert!(matches!(&result, Err(Error::HandshakeError(_))));
+        });
+    }
+
+    #[test]
+    fn test_send_frame_with_too_large() {
+        let (mut sink, _) = mocks::Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let result = send_frame_with(
+                &mut sink,
+                MAX_MESSAGE_SIZE as usize + 1,
+                MAX_MESSAGE_SIZE,
+                |_prefix| unreachable!(),
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(Error::SendTooLarge(n)) if *n == MAX_MESSAGE_SIZE as usize + 1)
+            );
+        });
+    }
+
+    #[test]
     fn test_send_frame_too_large() {
         let (mut sink, _) = mocks::Channel::init();
 
