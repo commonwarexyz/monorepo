@@ -139,14 +139,19 @@ jobs:
         tool: just@1.43.0
     - name: Ensure corpus directory exists
       run: mkdir -p ${{ matrix.fuzz_dir }}/corpus
+    - name: Compute fuzz corpus cache key prefix
+      id: fuzz-corpus-cache-key
+      run: |
+        sanitized_fuzz_dir="$(echo "${{ matrix.fuzz_dir }}" | tr '/' '-')"
+        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}" >> "$GITHUB_OUTPUT"
     - name: Restore fuzz corpus
       id: fuzz-corpus-restore
       uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ${{ matrix.fuzz_dir }}/corpus
-        key: ${{ runner.os }}-fuzz-corpus-${{ replace(matrix.fuzz_dir, '/', '-') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        key: ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
-          ${{ runner.os }}-fuzz-corpus-${{ replace(matrix.fuzz_dir, '/', '-') }}-
+          ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-
     - name: Test all targets
       run: just fuzz ${{ matrix.fuzz_dir }} 60
     - name: Save fuzz corpus
