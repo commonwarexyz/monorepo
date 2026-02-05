@@ -362,8 +362,6 @@ const COSET_SHIFT: Scalar = Scalar(blst_fr {
     ],
 });
 
-
-
 /// A point on the BLS12-381 G1 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
@@ -810,8 +808,6 @@ impl FieldNTT for Scalar {
     fn coset_shift() -> Self {
         COSET_SHIFT
     }
-
-
 
     fn div_2(&self) -> Self {
         self.clone() * &TWO_INV
