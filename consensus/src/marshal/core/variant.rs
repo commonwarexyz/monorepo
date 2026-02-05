@@ -37,9 +37,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Computes the consensus commitment for a block.
     ///
-    /// The commitment is what validators sign over during consensus. For the standard
-    /// variant this is just the block digest; for the coding variant it is a composite
-    /// of the block digest, coding digest, context hash, and coding config.
+    /// The commitment is what validators sign over during consensus.
     fn commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Extracts the block digest from a consensus commitment.

@@ -1,7 +1,7 @@
 use crate::types::Height;
 use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, Codec, EncodeSize, Error, Read, ReadExt, Write};
-use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
+use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
 
 /// A mock block type for testing that stores consensus context.
@@ -101,18 +101,6 @@ impl<D: Digest, C: Clone + Send + Sync + 'static> Digestible for Block<D, C> {
     type Digest = D;
 
     fn digest(&self) -> D {
-        self.digest
-    }
-}
-
-/// Implements [`Committable`] for use with the standard variant's broadcast layer.
-///
-/// The commitment is the block digest, matching the standard variant's expectation
-/// that `Commitment == Digest`.
-impl<D: Digest, C: Clone + Send + Sync + 'static> Committable for Block<D, C> {
-    type Commitment = D;
-
-    fn commitment(&self) -> D {
         self.digest
     }
 }

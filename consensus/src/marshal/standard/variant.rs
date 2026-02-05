@@ -8,7 +8,7 @@ use crate::{
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
-use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 
@@ -42,13 +42,13 @@ where
 
 impl<B, K> BlockBuffer<Standard<B>> for buffered::Mailbox<K, B>
 where
-    B: Block + Committable<Commitment = <B as Digestible>::Digest>,
+    B: Block,
     K: PublicKey,
 {
     type CachedBlock = B;
 
     async fn find_by_digest(&mut self, digest: B::Digest) -> Option<Self::CachedBlock> {
-        self.get(None, digest, None).await.into_iter().next()
+        self.get(digest).await
     }
 
     async fn find_by_commitment(&mut self, commitment: B::Digest) -> Option<Self::CachedBlock> {
@@ -60,7 +60,7 @@ where
         digest: B::Digest,
     ) -> oneshot::Receiver<Self::CachedBlock> {
         let (tx, rx) = oneshot::channel();
-        self.subscribe_prepared(None, digest, None, tx).await;
+        self.subscribe_prepared(digest, tx).await;
         rx
     }
 
