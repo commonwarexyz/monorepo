@@ -19,16 +19,23 @@ where
     P: PublicKey,
 {
     /// A request to update the participant set.
-    UpdateParticipants { participants: Set<P> },
+    UpdateParticipants { me: P, participants: Set<P> },
     /// A request to broadcast a proposed [`CodedBlock`] to all peers.
     Proposed {
         /// The erasure coded block.
         block: CodedBlock<B, C>,
     },
     /// A request to get a reconstructed block, if available.
-    Get {
+    GetByCommitment {
         /// The [`CodingCommitment`] of the block to get.
         commitment: CodingCommitment,
+        /// The response channel.
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C>>>>,
+    },
+    /// A request to get a reconstructed block by its digest, if available.
+    GetByDigest {
+        /// The digest of the block to get.
+        digest: B::Digest,
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C>>>>,
     },
@@ -88,8 +95,8 @@ where
     }
 
     /// Update the participant set.
-    pub async fn update_participants(&mut self, participants: Set<P>) {
-        let msg = Message::UpdateParticipants { participants };
+    pub async fn update_participants(&mut self, me: P, participants: Set<P>) {
+        let msg = Message::UpdateParticipants { me, participants };
         self.sender.send_lossy(msg).await;
     }
 
@@ -102,8 +109,19 @@ where
     /// Request a reconstructed block by its [`CodingCommitment`].
     pub async fn get(&mut self, commitment: CodingCommitment) -> Option<Arc<CodedBlock<B, C>>> {
         self.sender
-            .request(|tx| Message::Get {
+            .request(|tx| Message::GetByCommitment {
                 commitment,
+                response: tx,
+            })
+            .await
+            .flatten()
+    }
+
+    /// Request a reconstructed block by its digest.
+    pub async fn get_by_digest(&mut self, digest: B::Digest) -> Option<Arc<CodedBlock<B, C>>> {
+        self.sender
+            .request(|tx| Message::GetByDigest {
+                digest,
                 response: tx,
             })
             .await
@@ -122,7 +140,7 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`CodingCommitment`].
-    pub async fn subscribe_block_by_commitment(
+    pub async fn subscribe_block(
         &mut self,
         commitment: CodingCommitment,
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
