@@ -21,10 +21,10 @@ Today, we are sharing our approach to stability, explaining how we enforce consi
 The obvious approach to tracking stability is to break each primitive (and primitive dialect) into its own crate and to apply [semantic versioning](https://semver.org/). `1.0` means stable. `0.x` means unstable. Major bump is breaking changes. Minor bump is breaking API. Patch bump is bug fixes. Hide new features that are still in development behind an `unstable` feature flag. End blog here?
 
 While working with different teams, we found that this approach didn't cut it. In an environment where a subtle breaking change means a network halt or a loss of funds, we opted to take a more "paranoid" approach. The root issues:
-* With many crates all versioned independently, (tested) compatibility is no longer obvious. While `consensus-simplex@1.1.3` may compile with `storage-journal@2.3.45` and "should" work, it doesn't mean the combination has been tested together.
-* Dependency risk is difficult to assess when things are coarsely broken into "stable" and "unstable". Often wrapped with documents that few people read, it is pretty easy to incorporate functionality once "unstable" is permitted that is a lot more "unstable" than you expected.
-* Feature flags are viral. If your crate depends on `commonware-consensus` and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. This becomes unwieldy fast.
-* Doesn't imply anything about backwards-compatibility. Once something is considered "stable", it should remain supported indefinitely. This is equivalent to one major version that doesn't get incremented.
+- With many crates all versioned independently, (tested) compatibility is no longer obvious. While `consensus-simplex@1.1.3` may compile with `storage-journal@2.3.45` and "should" work, it doesn't mean the combination has been tested together.
+- Dependency risk is difficult to assess when things are coarsely broken into "stable" and "unstable". Often wrapped with documents that few people read, it is pretty easy to incorporate functionality once "unstable" is permitted that is a lot more "unstable" than you expected.
+- Feature flags are viral. If your crate depends on `commonware-consensus` and you want access to an unstable API in `commonware-cryptography`, then `commonware-consensus` needs to expose and forward that feature. Every intermediate crate in the dependency chain needs to opt in. This becomes unwieldy fast.
+- Doesn't imply anything about backwards-compatibility. Once something is considered "stable", it should remain supported indefinitely. This is equivalent to one major version that doesn't get incremented.
 
 ## Tiered Stability and Calendar Versioning
 
