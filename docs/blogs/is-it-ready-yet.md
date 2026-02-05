@@ -1,7 +1,7 @@
 ---
 title: "Is it ready yet?"
 description: "How compiler-enforced stability levels help you know what's production-ready in the Commonware Library."
-date: "February 5rd, 2026"
+date: "February 5th, 2026"
 published-time: "2026-02-05T00:00:00Z"
 modified-time: "2026-02-05T00:00:00Z"
 author: "Patrick O'Grady"
