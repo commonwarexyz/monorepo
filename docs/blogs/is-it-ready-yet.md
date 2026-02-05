@@ -7,7 +7,7 @@ modified-time: "2026-02-05T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/is-it-ready-yet"
-image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
+image: "https://commonware.xyz/imgs/is-it-ready-yet.png"
 ---
 
 The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home to 17 primitives and over 50 primitive dialects (cryptography::bls12381, cryptography::ed25519, etc.), with [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) and [1500 daily benchmarks](https://commonware.xyz/benchmarks.html).
@@ -65,6 +65,8 @@ cargo doc --open
 ### Testing Consistency
 
 In CI, we enforce that any object of some level must rely on objects with the same or higher level. If something is marked BETA, you can trust that its entire dependency chain within the library is BETA or higher.
+
+![Figure 1: The stability levels are enforced by the compiler](/imgs/is-it-ready-yet.png)
 
 ## Graduation Day
 
