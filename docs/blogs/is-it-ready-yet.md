@@ -90,7 +90,7 @@ Here are some of the primitive dialects we now consider `BETA` (wire and storage
 
 ## Is BETA Safe for Production?
 
-As noted above, we've taken a thorough approach to testing with our [deterministic runtime](https://commonware.xyz/blogs/commonware-runtime) and average [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository.
+As noted above, we've taken a thorough approach to testing with our [deterministic runtime](/blogs/commonware-runtime.html) and average [93% test coverage](https://app.codecov.io/gh/commonwarexyz/monorepo) across the repository.
 
 We've been running the items above on our benchmarking blockchain, [Alto](https://github.com/commonwarexyz/alto), for about 10 months.
 
