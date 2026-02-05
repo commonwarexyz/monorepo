@@ -14,7 +14,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota,
-    Resolver, Spawner,
+    Resolver, SinkOf, Spawner, TcpOptions,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
@@ -47,6 +47,8 @@ impl<
         E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
         C: Signer,
     > Network<E, C>
+where
+    SinkOf<E>: TcpOptions,
 {
     /// Create a new instance of an `authenticated` network.
     ///

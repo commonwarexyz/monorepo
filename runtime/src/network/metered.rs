@@ -61,9 +61,15 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
     }
+}
 
+impl<S: crate::Sink + crate::TcpOptions> crate::TcpOptions for Sink<S> {
     fn set_linger(&self, duration: Option<Duration>) {
         self.inner.set_linger(duration);
+    }
+
+    fn set_nodelay(&self, nodelay: bool) -> Result<(), crate::Error> {
+        self.inner.set_nodelay(nodelay)
     }
 }
 

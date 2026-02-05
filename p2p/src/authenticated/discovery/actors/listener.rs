@@ -9,13 +9,13 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics,
-    Network, Quota, SinkOf, Spawner, StreamOf,
+    Network, Quota, SinkOf, Spawner, StreamOf, TcpOptions,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use prometheus_client::metrics::counter::Counter;
 use rand_core::CryptoRngCore;
-use std::{net::SocketAddr, num::NonZeroU32};
+use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 use tracing::debug;
 
 /// Subnet mask of `/24` for IPv4 and `/48` for IPv6 networks.
@@ -49,7 +49,10 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C>
+where
+    SinkOf<E>: TcpOptions,
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
@@ -186,6 +189,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
+                    sink.set_linger(Some(Duration::ZERO));
                     continue;
                 }
 
@@ -215,6 +219,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
+                    sink.set_linger(Some(Duration::ZERO));
                     continue;
                 }
 
@@ -222,6 +227,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
+                    sink.set_linger(Some(Duration::ZERO));
                     continue;
                 };
 

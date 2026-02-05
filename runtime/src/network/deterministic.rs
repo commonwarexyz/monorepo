@@ -19,9 +19,18 @@ impl crate::Sink for Sink {
     async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.sender.send(buf).await.map_err(|_| Error::SendFailed)
     }
+}
 
+// Implement TcpOptions as no-ops for deterministic network.
+// This allows testing TCP-based code without special handling.
+impl crate::TcpOptions for Sink {
     fn set_linger(&self, _duration: Option<std::time::Duration>) {
         // No-op for simulated network
+    }
+
+    fn set_nodelay(&self, _nodelay: bool) -> Result<(), Error> {
+        // No-op for simulated network
+        Ok(())
     }
 }
 

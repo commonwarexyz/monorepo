@@ -320,13 +320,22 @@ impl crate::Sink for Sink {
         }
         Ok(())
     }
+}
 
+impl crate::TcpOptions for Sink {
     fn set_linger(&self, duration: Option<Duration>) {
         // Use socket2's SockRef to set linger on the underlying socket
         let socket = SockRef::from(&*self.fd);
         if let Err(err) = socket.set_linger(duration) {
             warn!(?err, "failed to set SO_LINGER");
         }
+    }
+
+    fn set_nodelay(&self, nodelay: bool) -> Result<(), crate::Error> {
+        let socket = SockRef::from(&*self.fd);
+        socket
+            .set_nodelay(nodelay)
+            .map_err(|_| crate::Error::WriteFailed)
     }
 }
 

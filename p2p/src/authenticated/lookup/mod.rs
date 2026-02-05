@@ -190,7 +190,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
         count_running_tasks, deterministic, tokio, BufferPooler, Clock, Metrics,
-        Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        Network as RNetwork, Quota, Resolver, Runner, SinkOf, Spawner, TcpOptions,
     };
     use commonware_utils::{
         channel::mpsc,
@@ -235,13 +235,11 @@ mod tests {
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
-        max_message_size: u32,
-        base_port: u16,
-        n: usize,
-        mode: Mode,
-    ) {
+    async fn run_network<E>(context: E, max_message_size: u32, base_port: u16, n: usize, mode: Mode)
+    where
+        E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+        SinkOf<E>: TcpOptions,
+    {
         // Create peers
         let mut peers_and_sks = Vec::new();
         for i in 0..n {

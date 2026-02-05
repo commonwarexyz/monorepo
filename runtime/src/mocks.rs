@@ -97,9 +97,18 @@ impl SinkTrait for Sink {
         os_send.send(data).map_err(|_| Error::SendFailed)?;
         Ok(())
     }
+}
 
+// Implement TcpOptions as no-ops for mock channel.
+// This allows testing TCP-based code without special handling.
+impl crate::TcpOptions for Sink {
     fn set_linger(&self, _duration: Option<std::time::Duration>) {
         // No-op for mock channel
+    }
+
+    fn set_nodelay(&self, _nodelay: bool) -> Result<(), Error> {
+        // No-op for mock channel
+        Ok(())
     }
 }
 
