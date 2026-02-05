@@ -14,7 +14,7 @@ The [Commonware Library](https://github.com/commonwarexyz/monorepo) is now home 
 
 The only number that probably matters to you, however, is how many are ready to use.
 
-Today, we are sharing our approach to stability, explaining how we enforce consistent stability with the compiler, and graduate a large number of primitives to [BETA](https://github.com/commonwarexyz/monorepo#stability).
+Today, we are sharing our approach to stability, explaining how we enforce consistent stability with the compiler, and graduating a large number of primitives to [BETA](https://github.com/commonwarexyz/monorepo#stability).
 
 ## Solving a "Solved" Problem
 
