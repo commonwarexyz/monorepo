@@ -10,14 +10,17 @@ url: "https://commonware.xyz/blogs/is-it-ready-yet"
 image: "https://commonware.xyz/imgs/is-it-ready-yet-card.png"
 ---
 
-The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has 17 primitives and over 50 primitive dialects (cryptography/bls12381, cryptography/ed25519, etc.).
+The [Commonware Library](https://github.com/commonwarexyz/monorepo) now has 17 primitives and over 50 primitive dialects (cryptography/bls12381, cryptography/ed25519, etc.). The number that matters, however, is how many are ready for production.
 
+Have been working with Asymmetric Research for almost a year now: https://x.com/_patrickogrady/status/1915407345414492497?s=20
 
 What really matters, however, is how many you can use in your network today.
 
 Today, we're graduating a large number of these primitives from [ALPHA](https://github.com/commonwarexyz/monorepo#stability) to [BETA](https://github.com/commonwarexyz/monorepo#stability). -> "Can I use in prod?"
 
-## Solving a Solved Problem
+## Solving a "Solved" Problem
+
+To communicate stability, the obvious choice is to use semantic versioning.
 
 Some primitives have been running on [Alto](https://github.com/commonwarexyz/alto) for over a year. Others were integrated last week.
 
