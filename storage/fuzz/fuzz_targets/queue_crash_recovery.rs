@@ -15,7 +15,10 @@ use commonware_storage::{
     Persistable,
 };
 use libfuzzer_sys::fuzz_target;
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+};
 
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
@@ -103,9 +106,9 @@ struct FuzzInput {
 /// in-memory but not pruned will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
-    /// Items that were successfully enqueued and committed.
+    /// Items that were successfully enqueued and committed (position -> value).
     /// Each enqueue() does append + commit, so successful enqueues are durable.
-    committed: Vec<u8>,
+    committed: BTreeMap<u64, u8>,
 
     /// Items that were enqueued but the operation may have failed.
     pending: Vec<u8>,
@@ -124,7 +127,7 @@ struct RecoveryState {
 impl RecoveryState {
     fn new(items_per_section: u64) -> Self {
         Self {
-            committed: Vec::new(),
+            committed: BTreeMap::new(),
             pending: Vec::new(),
             synced_ack_floor: 0,
             current_ack_floor: 0,
@@ -132,12 +135,9 @@ impl RecoveryState {
         }
     }
 
-    fn enqueue_succeeded(&mut self, value: u8) {
-        // Enqueue does append + commit, so success means it's durable.
-        // Move any pending items to committed (they must have succeeded too),
-        // then add the new item.
-        self.committed.append(&mut self.pending);
-        self.committed.push(value);
+    fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
+        // Enqueue does append + commit, so success means it's durable at `pos`.
+        self.committed.insert(pos, value);
     }
 
     fn enqueue_failed(&mut self, value: u8) {
@@ -152,8 +152,7 @@ impl RecoveryState {
     }
 
     fn sync_succeeded(&mut self, ack_floor: u64) {
-        // Sync succeeded: pruning happened at current ack_floor
-        self.committed.append(&mut self.pending);
+        // Sync succeeded: pruning happened at current ack_floor.
         self.current_ack_floor = ack_floor;
         self.synced_ack_floor = ack_floor;
     }
@@ -209,8 +208,8 @@ async fn run_operations(
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
                 match queue.enqueue(item).await {
-                    Ok(_pos) => {
-                        state.enqueue_succeeded(*value);
+                    Ok(pos) => {
+                        state.enqueue_succeeded(pos, *value);
                     }
                     Err(_) => {
                         // Enqueue failed - item may or may not be persisted
@@ -313,8 +312,8 @@ async fn verify_recovery(
         dequeued_count += 1;
 
         // Verify item content if we know what it should be
-        if (pos as usize) < state.committed.len() {
-            let expected = make_item(state.committed[pos as usize]);
+        if let Some(value) = state.committed.get(&pos) {
+            let expected = make_item(*value);
             assert_eq!(
                 item, expected,
                 "item at position {} has wrong content after recovery",
