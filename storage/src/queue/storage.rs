@@ -1182,6 +1182,38 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_ack_up_to_past_read_pos() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_ack_up_to_past_read_pos");
+            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            for i in 0..10u8 {
+                queue.enqueue(vec![i]).await.unwrap();
+            }
+
+            // Read only 3 items
+            for _ in 0..3 {
+                queue.dequeue().await.unwrap();
+            }
+            assert_eq!(queue.read_position(), 3);
+
+            // Batch ack past read position
+            queue.ack_up_to(7).unwrap();
+            assert_eq!(queue.ack_floor(), 7);
+
+            // Dequeue should skip 3-6 and return 7
+            let (pos, item) = queue.dequeue().await.unwrap().unwrap();
+            assert_eq!(pos, 7);
+            assert_eq!(item, vec![7]);
+
+            queue.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
