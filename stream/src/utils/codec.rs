@@ -34,7 +34,7 @@ pub(crate) async fn send_frame_with<S: Sink>(
 /// The varint length prefix is prepended to the buffer(s), which results in a
 /// chunked `IoBufs`.
 ///
-/// Returns an error if the message is too large or the stream is closed.
+/// Returns an error if the message is too large or the sink is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
     buf: impl Into<IoBufs> + Send,
