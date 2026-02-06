@@ -21,7 +21,7 @@ arbitrary = [
 	"dep:commonware-test",
 	"std",
 ]
-default = [ "fuzz", "std" ]
+default = [ "std" ]
 std = [
 	"bytes/std",
 	"commonware-codec/std",
@@ -30,7 +30,7 @@ std = [
 	"commonware-utils/std",
 	"rand_core/std",
 ]
-fuzz = [ "arbitrary/derive", "dep:arbitrary", "std" ]
+fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
