@@ -792,7 +792,7 @@ where
         let result = f(&mut self.reconstructed_blocks);
         let _ = self
             .metrics
-            .reconstructed_blocks_count
+            .reconstructed_blocks_cache_count
             .try_set(self.reconstructed_blocks.len());
         result
     }

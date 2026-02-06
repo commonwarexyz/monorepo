@@ -26,7 +26,7 @@ pub struct ShardMetrics {
     /// Duration of erasure decoding in milliseconds.
     pub erasure_decode_duration: Gauge,
     /// Number of blocks in the reconstructed blocks cache.
-    pub reconstructed_blocks_count: Gauge,
+    pub reconstructed_blocks_cache_count: Gauge,
     /// Number of active reconstruction states.
     pub reconstruction_states_count: Gauge,
     /// Number of shards received per peer.
@@ -43,7 +43,7 @@ impl ShardMetrics {
     /// Create and register metrics with the given context.
     pub fn new<P: Array>(context: &impl MetricsTrait, participants: &Set<P>) -> Self {
         let erasure_decode_duration = Gauge::default();
-        let reconstructed_blocks_count = Gauge::default();
+        let reconstructed_blocks_cache_count = Gauge::default();
         let reconstruction_states_count = Gauge::default();
         let shards_received = Family::<Peer, Counter>::default();
         let blocks_reconstructed_total = Counter::default();
@@ -55,9 +55,9 @@ impl ShardMetrics {
             erasure_decode_duration.clone(),
         );
         context.register(
-            "reconstructed_blocks_count",
+            "reconstructed_blocks_cache_count",
             "Number of blocks in the reconstructed blocks cache",
-            reconstructed_blocks_count.clone(),
+            reconstructed_blocks_cache_count.clone(),
         );
         context.register(
             "reconstruction_states_count",
@@ -92,7 +92,7 @@ impl ShardMetrics {
 
         Self {
             erasure_decode_duration,
-            reconstructed_blocks_count,
+            reconstructed_blocks_cache_count,
             reconstruction_states_count,
             shards_received,
             blocks_reconstructed_total,
