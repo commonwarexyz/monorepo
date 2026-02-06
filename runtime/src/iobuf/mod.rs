@@ -293,8 +293,9 @@ impl IoBufMut {
     ///
     /// Caller must initialize all `len` bytes before the buffer is read.
     pub(crate) unsafe fn prepare_read(&mut self, len: usize) -> Result<(), crate::Error> {
-        if len > self.capacity() {
-            return Err(crate::Error::BufferTooSmall);
+        let capacity = self.capacity();
+        if len > capacity {
+            return Err(crate::Error::BufferTooSmall { capacity, len });
         }
         if len != self.len() {
             self.set_len(len);
@@ -887,8 +888,9 @@ impl IoBufsMut {
     ///
     /// Caller must initialize all `len` bytes before the buffer is read.
     pub(crate) unsafe fn prepare_read(&mut self, len: usize) -> Result<(), crate::Error> {
-        if len > self.capacity() {
-            return Err(crate::Error::BufferTooSmall);
+        let capacity = self.capacity();
+        if len > capacity {
+            return Err(crate::Error::BufferTooSmall { capacity, len });
         }
         if len != self.len() {
             match self {
@@ -1680,7 +1682,10 @@ mod tests {
             let mut buf = IoBufMut::with_capacity(8);
             assert!(matches!(
                 buf.prepare_read(9),
-                Err(crate::Error::BufferTooSmall)
+                Err(crate::Error::BufferTooSmall {
+                    capacity: 8,
+                    len: 9
+                })
             ));
             assert_eq!(buf.len(), 0);
         }
@@ -2217,7 +2222,10 @@ mod tests {
                 IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
             assert!(matches!(
                 bufs.prepare_read(9),
-                Err(crate::Error::BufferTooSmall)
+                Err(crate::Error::BufferTooSmall {
+                    capacity: 8,
+                    len: 9
+                })
             ));
 
             // Zero length on chunked

@@ -127,8 +127,8 @@ stability_scope!(BETA {
         },
         #[error("invalid or missing checksum")]
         InvalidChecksum,
-        #[error("buffer too small")]
-        BufferTooSmall,
+        #[error("buffer too small: capacity={capacity}, len={len}")]
+        BufferTooSmall { capacity: usize, len: usize },
         #[error("offset overflow")]
         OffsetOverflow,
         #[error("immutable blob")]

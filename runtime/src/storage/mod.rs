@@ -854,7 +854,13 @@ pub(crate) mod tests {
         let buf = IoBufMut::with_capacity(5);
         let result = blob.read_at_buf(0, 11, buf).await;
         assert!(
-            matches!(result, Err(crate::Error::BufferTooSmall)),
+            matches!(
+                result,
+                Err(crate::Error::BufferTooSmall {
+                    capacity: 5,
+                    len: 11
+                })
+            ),
             "Expected BufferTooSmall, got: {result:?}"
         );
 
@@ -864,7 +870,13 @@ pub(crate) mod tests {
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         let result = blob.read_at_buf(0, 11, bufs).await;
         assert!(
-            matches!(result, Err(crate::Error::BufferTooSmall)),
+            matches!(
+                result,
+                Err(crate::Error::BufferTooSmall {
+                    capacity: 8,
+                    len: 11
+                })
+            ),
             "Expected BufferTooSmall for chunked, got: {result:?}"
         );
     }
