@@ -12,9 +12,8 @@ set -euo pipefail
 
 STABILITY_CFG="commonware_stability_RESERVED"
 
-# Crates to skip (examples, fuzz crates, internal tooling)
-# deployer is skipped because it has heavy AWS SDK dependencies
-SKIP_REGEX="commonware-bridge|commonware-chat|commonware-estimator|commonware-flood|commonware-log|commonware-sync|commonware-reshare|commonware-conformance|commonware-deployer|-fuzz$|-macros$"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/stability_config.sh"
 
 # Items to ignore (#[macro_export] macros can't be inside stability_scope due to Rust limitations)
 IGNORE_ITEMS="NZDuration|NZU8|NZU16|NZU32|NZU64|NZUsize"
