@@ -66,7 +66,9 @@ pub mod tests {
             let k1: C::Key = TestKey::from_seed(0);
             let v1: <C as LogStore>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
-            db.write_batch([(k1, Some(v1.clone()))].into_iter()).await.unwrap();
+            db.write_batch([(k1, Some(v1.clone()))].into_iter())
+                .await
+                .unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, range) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();

@@ -238,8 +238,6 @@ where
     Ok(None)
 }
 
-
-
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
 ///

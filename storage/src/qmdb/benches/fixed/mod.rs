@@ -268,11 +268,15 @@ where
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            db.write_batch([(rand_key, None)].into_iter()).await.unwrap();
+            db.write_batch([(rand_key, None)].into_iter())
+                .await
+                .unwrap();
             continue;
         }
         let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.write_batch([(rand_key, Some(v))].into_iter()).await.unwrap();
+        db.write_batch([(rand_key, Some(v))].into_iter())
+            .await
+            .unwrap();
         if let Some(freq) = commit_frequency {
             if rng.next_u32() % freq == 0 {
                 let (durable, _) = db.commit(None).await.unwrap();

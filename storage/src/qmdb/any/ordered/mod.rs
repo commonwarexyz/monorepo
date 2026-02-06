@@ -747,12 +747,16 @@ mod test {
 
         let mut db = db.into_mutable();
         assert!(db.get(&key1).await.unwrap().is_none());
-        db.write_batch([(key1, Some(val1))].into_iter()).await.unwrap();
+        db.write_batch([(key1, Some(val1))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
         assert!(db.get(&key2).await.unwrap().is_none());
-        db.write_batch([(key2, Some(val2))].into_iter()).await.unwrap();
+        db.write_batch([(key2, Some(val2))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
@@ -761,10 +765,14 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        db.write_batch([(key1, Some(new_val))].into_iter()).await.unwrap();
+        db.write_batch([(key1, Some(new_val))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        db.write_batch([(key2, Some(new_val))].into_iter()).await.unwrap();
+        db.write_batch([(key2, Some(new_val))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
@@ -816,11 +824,19 @@ mod test {
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
-        db.write_batch([(key1, Some(val1))].into_iter()).await.unwrap();
-        db.write_batch([(key2, Some(val2))].into_iter()).await.unwrap();
+        db.write_batch([(key1, Some(val1))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key2, Some(val2))].into_iter())
+            .await
+            .unwrap();
         db.write_batch([(key1, None)].into_iter()).await.unwrap();
-        db.write_batch([(key2, Some(val1))].into_iter()).await.unwrap();
-        db.write_batch([(key1, Some(val2))].into_iter()).await.unwrap();
+        db.write_batch([(key2, Some(val1))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key1, Some(val2))].into_iter())
+            .await
+            .unwrap();
 
         let db = db
             .commit(None)
@@ -930,24 +946,34 @@ mod test {
 
         let mut db = db.into_mutable();
         assert!(db.get(&key1).await.unwrap().is_none());
-        db.write_batch([(key1.clone(), Some(val1))].into_iter()).await.unwrap();
+        db.write_batch([(key1.clone(), Some(val1))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
         assert!(db.get(&key2).await.unwrap().is_none());
-        db.write_batch([(key2.clone(), Some(val2))].into_iter()).await.unwrap();
+        db.write_batch([(key2.clone(), Some(val2))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
-        db.write_batch([(key1.clone(), None)].into_iter()).await.unwrap();
+        db.write_batch([(key1.clone(), None)].into_iter())
+            .await
+            .unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        db.write_batch([(key1.clone(), Some(new_val))].into_iter()).await.unwrap();
+        db.write_batch([(key1.clone(), Some(new_val))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        db.write_batch([(key2.clone(), Some(new_val))].into_iter()).await.unwrap();
+        db.write_batch([(key2.clone(), Some(new_val))].into_iter())
+            .await
+            .unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
@@ -961,9 +987,13 @@ mod test {
 
         // Delete all keys.
         assert!(db.get(&key1).await.unwrap().is_some());
-        db.write_batch([(key1.clone(), None)].into_iter()).await.unwrap();
+        db.write_batch([(key1.clone(), None)].into_iter())
+            .await
+            .unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
-        db.write_batch([(key2.clone(), None)].into_iter()).await.unwrap();
+        db.write_batch([(key2.clone(), None)].into_iter())
+            .await
+            .unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
@@ -993,11 +1023,21 @@ mod test {
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
-        db.write_batch([(key1.clone(), Some(val1))].into_iter()).await.unwrap();
-        db.write_batch([(key2.clone(), Some(val2))].into_iter()).await.unwrap();
-        db.write_batch([(key1.clone(), None)].into_iter()).await.unwrap();
-        db.write_batch([(key2.clone(), Some(val1))].into_iter()).await.unwrap();
-        db.write_batch([(key1.clone(), Some(val2))].into_iter()).await.unwrap();
+        db.write_batch([(key1.clone(), Some(val1))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key2.clone(), Some(val2))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key1.clone(), None)].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key2.clone(), Some(val1))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key1.clone(), Some(val2))].into_iter())
+            .await
+            .unwrap();
 
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -1038,9 +1078,15 @@ mod test {
         let val = Sha256::fill(1u8);
 
         let mut db = db.into_mutable();
-        db.write_batch([(key1.clone(), Some(val))].into_iter()).await.unwrap();
-        db.write_batch([(key2.clone(), Some(val))].into_iter()).await.unwrap();
-        db.write_batch([(key3.clone(), Some(val))].into_iter()).await.unwrap();
+        db.write_batch([(key1.clone(), Some(val))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key2.clone(), Some(val))].into_iter())
+            .await
+            .unwrap();
+        db.write_batch([(key3.clone(), Some(val))].into_iter())
+            .await
+            .unwrap();
 
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);

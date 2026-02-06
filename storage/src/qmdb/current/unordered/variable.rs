@@ -511,7 +511,10 @@ mod test {
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
                 let mut dirty_db = db.into_mutable();
-                dirty_db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+                dirty_db
+                    .write_batch([(k, Some(v))].into_iter())
+                    .await
+                    .unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (durable_db, _) = dirty_db.commit(None).await.unwrap();
                 db = durable_db.into_merkleized().await.unwrap();

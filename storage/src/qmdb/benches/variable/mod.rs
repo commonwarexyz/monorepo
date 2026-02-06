@@ -182,7 +182,10 @@ where
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        assert!(db.write_batch([(rand_key, Some(v))].into_iter()).await.is_ok());
+        assert!(db
+            .write_batch([(rand_key, Some(v))].into_iter())
+            .await
+            .is_ok());
         if rng.next_u32() % commit_frequency == 0 {
             let (durable, _) = db.commit(None).await.unwrap();
             db = durable.into_mutable();

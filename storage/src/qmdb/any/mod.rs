@@ -313,26 +313,20 @@ pub(crate) mod test {
         let mut db = db.into_mutable();
 
         assert!(db.get(&Sha256::fill(1u8)).await.unwrap().is_none());
-        db.write_batch(
-            [(Sha256::fill(1u8), Some(Sha256::fill(2u8)))].into_iter(),
-        )
-        .await
-        .unwrap();
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(2u8)))].into_iter())
+            .await
+            .unwrap();
         assert!(db.get(&Sha256::fill(3u8)).await.unwrap().is_none());
-        db.write_batch(
-            [(Sha256::fill(3u8), Some(Sha256::fill(4u8)))].into_iter(),
-        )
-        .await
-        .unwrap();
+        db.write_batch([(Sha256::fill(3u8), Some(Sha256::fill(4u8)))].into_iter())
+            .await
+            .unwrap();
         let (clean_db, _) = db.commit(None).await.unwrap();
         let mut db = clean_db.into_mutable();
 
         // Updating an existing key should make steps non-zero.
-        db.write_batch(
-            [(Sha256::fill(1u8), Some(Sha256::fill(5u8)))].into_iter(),
-        )
-        .await
-        .unwrap();
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(5u8)))].into_iter())
+            .await
+            .unwrap();
         let steps = db.steps();
         assert_ne!(steps, 0);
 

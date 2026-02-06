@@ -10,8 +10,8 @@ use crate::{
         },
         build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as OperationTrait},
-        update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
-        Merkleized, NonDurable, Unmerkleized,
+        update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
+        NonDurable, Unmerkleized,
     },
 };
 #[cfg(any(test, feature = "test-traits"))]
@@ -458,7 +458,9 @@ pub(super) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v.clone()))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v.clone()))].into_iter())
+                .await
+                .unwrap();
             map.insert(k, v);
         }
 
@@ -469,7 +471,9 @@ pub(super) mod test {
             }
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v.clone()))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v.clone()))].into_iter())
+                .await
+                .unwrap();
             map.insert(k, v);
         }
 
