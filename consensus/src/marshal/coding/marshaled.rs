@@ -849,15 +849,37 @@ where
                     },
                 };
 
-                // Use the block's embedded context for verification, passing the prefetched
-                // block to avoid fetching it again inside deferred_verify.
+                // Re-proposal detection for certify path: we don't have the consensus
+                // context, only the block's embedded context from original proposal.
+                // Infer re-proposal from:
+                // 1. Block is at epoch boundary (only boundary blocks can be re-proposed)
+                // 2. Certification round's view > embedded context's view (re-proposals
+                //    retain their original embedded context, so a later view indicates
+                //    the block was re-proposed)
+                // 3. Same epoch (re-proposals don't cross epoch boundaries)
                 let embedded_context = block.context();
+                let is_reproposal = is_at_epoch_boundary(
+                    &marshaled.epocher,
+                    block.height(),
+                    embedded_context.round.epoch(),
+                ) && round.view() > embedded_context.round.view()
+                    && round.epoch() == embedded_context.round.epoch();
+                if is_reproposal {
+                    // NOTE: It is possible that, during crash recovery, we call
+                    // `marshal.verified` twice for the same block. That function is
+                    // idempotent, so this is safe.
+                    marshaled.marshal.verified(round, block).await;
+                    tx.send_lossy(true);
+                    return;
+                }
 
                 // Inform the shard engine of an externally proposed commitment.
                 shards
                     .external_proposed(payload, embedded_context.leader.clone())
                     .await;
 
+                // Use the block's embedded context for verification, passing the
+                // prefetched block to avoid fetching it again inside deferred_verify.
                 let verify_rx = marshaled
                     .deferred_verify(embedded_context, payload, Some(block))
                     .await;
