@@ -530,11 +530,10 @@ impl<F: FieldNTT> NTTPolynomial<F> {
                     }
                     // We need to combine the two doing an actual multiplication.
                     (true, true) => {
-                        debug_assert_eq!(scratch.len(), 0);
-                        scratch.resize(new_polynomial_size, F::zero());
                         let slice = &mut polynomials[start..start + new_polynomial_size];
-
                         let lg_p_size = polynomial_size.ilog2();
+
+                        // Scale the roots of the right side by w.
                         let mut w_j = F::one();
                         for j in 0..polynomial_size {
                             let index =
@@ -543,32 +542,62 @@ impl<F: FieldNTT> NTTPolynomial<F> {
                             w_j *= &w_inv;
                         }
 
-                        // Expand the right side to occupy all of scratch.
-                        // Clear the right side.
-                        for j in 0..polynomial_size {
-                            scratch[2 * j] = slice[polynomial_size + j].clone();
-                            slice[polynomial_size + j] = F::zero();
-                        }
+                        // For small polynomials, naive multiplication is faster than NTT.
+                        // The threshold is chosen empirically based on benchmarks.
+                        if polynomial_size <= 16 {
+                            // Naive polynomial multiplication.
+                            // Left poly is in slice[0..polynomial_size] (bit-reversed order)
+                            // Right poly is in slice[polynomial_size..] (bit-reversed order)
+                            // Result goes into slice (bit-reversed order)
+                            debug_assert_eq!(scratch.len(), 0);
+                            scratch.resize(new_polynomial_size, F::zero());
+                            let lg_new = new_polynomial_size.ilog2();
 
-                        // Expand the left side to occupy the entire space.
-                        // The right side has been cleared above.
-                        for j in (0..polynomial_size).rev() {
-                            slice.swap(j, 2 * j);
-                        }
+                            // Convolve directly, accounting for bit-reversed storage
+                            for i in 0..polynomial_size {
+                                let li = reverse_bits(lg_p_size, i as u64) as usize;
+                                for j in 0..polynomial_size {
+                                    let rj = polynomial_size
+                                        + reverse_bits(lg_p_size, j as u64) as usize;
+                                    let dst = reverse_bits(lg_new, (i + j) as u64) as usize;
+                                    scratch[dst] += &(slice[li].clone() * &slice[rj]);
+                                }
+                            }
 
-                        // Multiply the polynomials together, by first evaluating each of them,
-                        // then multiplying their evaluations, producing (f * g) evaluated over
-                        // the domain, which we can then interpolate back.
-                        ntt::<true, F, _>(
-                            new_polynomial_size,
-                            1,
-                            &mut Column { data: &mut scratch },
-                        );
-                        ntt::<true, F, _>(new_polynomial_size, 1, &mut Column { data: slice });
-                        for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
-                            *p_i *= &s_i;
+                            slice.clone_from_slice(&scratch);
+                            scratch.clear();
+                        } else {
+                            // NTT-based multiplication for larger polynomials
+                            debug_assert_eq!(scratch.len(), 0);
+                            scratch.resize(new_polynomial_size, F::zero());
+
+                            // Expand the right side to occupy all of scratch.
+                            // Clear the right side.
+                            for j in 0..polynomial_size {
+                                scratch[2 * j] = slice[polynomial_size + j].clone();
+                                slice[polynomial_size + j] = F::zero();
+                            }
+
+                            // Expand the left side to occupy the entire space.
+                            // The right side has been cleared above.
+                            for j in (0..polynomial_size).rev() {
+                                slice.swap(j, 2 * j);
+                            }
+
+                            // Multiply the polynomials together, by first evaluating each of them,
+                            // then multiplying their evaluations, producing (f * g) evaluated over
+                            // the domain, which we can then interpolate back.
+                            ntt::<true, F, _>(
+                                new_polynomial_size,
+                                1,
+                                &mut Column { data: &mut scratch },
+                            );
+                            ntt::<true, F, _>(new_polynomial_size, 1, &mut Column { data: slice });
+                            for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
+                                *p_i *= &s_i;
+                            }
+                            ntt::<false, F, _>(new_polynomial_size, 1, &mut Column { data: slice })
                         }
-                        ntt::<false, F, _>(new_polynomial_size, 1, &mut Column { data: slice })
                     }
                 }
                 // If there was a polynomial on the left or the right, then on the next iteration
@@ -1045,16 +1074,39 @@ pub fn lagrange_coefficients<F: FieldNTT>(
 
     let w = F::root_of_unity(lg_size).expect("domain too large for NTT");
 
-    let mut out = Vec::with_capacity(num_present);
+    // Collect indices and denominators for batch inversion
+    let mut indices = Vec::with_capacity(num_present);
+    let mut denoms = Vec::with_capacity(num_present);
+
     let mut neg_w_i = -F::one();
     for i in 0..size as u32 {
         if present.get(u64::from(i)) {
             let vp_prime_at_w_i = derivative_evals[(i as usize, 0)].clone();
-            let denom = neg_w_i.clone() * &vp_prime_at_w_i;
-            out.push((i, vp_at_zero.clone() * &denom.inv()));
+            denoms.push(neg_w_i.clone() * &vp_prime_at_w_i);
+            indices.push(i);
         }
         neg_w_i *= &w;
     }
+
+    // Batch inversion using Montgomery's trick: t inversions -> 1 inversion + O(t) muls
+    let m = denoms.len();
+    let mut prefix = Vec::with_capacity(m + 1);
+    prefix.push(F::one());
+    for d in &denoms {
+        let next = prefix.last().unwrap().clone() * d;
+        prefix.push(next);
+    }
+
+    let mut inv_acc = prefix[m].inv();
+
+    // Build output in reverse order, then reverse
+    let mut out = Vec::with_capacity(m);
+    for j in (0..m).rev() {
+        let denom_inv = inv_acc.clone() * &prefix[j];
+        inv_acc *= &denoms[j];
+        out.push((indices[j], vp_at_zero.clone() * &denom_inv));
+    }
+    out.reverse();
     out
 }
 
