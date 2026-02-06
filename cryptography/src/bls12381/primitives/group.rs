@@ -362,6 +362,18 @@ const COSET_SHIFT: Scalar = Scalar(blst_fr {
     ],
 });
 
+/// The inverse of [`COSET_SHIFT`] (i.e. 7^-1 mod r) in Montgomery form.
+///
+/// Computed via `COSET_SHIFT.inv()`.
+const COSET_SHIFT_INV: Scalar = Scalar(blst_fr {
+    l: [
+        0xdb6d_b6da_db6d_b6dc,
+        0xe6b5_824a_db6c_c6da,
+        0xf8b3_56e0_0581_0db9,
+        0x66d0_f1e6_60ec_4796,
+    ],
+});
+
 /// A point on the BLS12-381 G1 curve.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
@@ -807,6 +819,10 @@ impl FieldNTT for Scalar {
 
     fn coset_shift() -> Self {
         COSET_SHIFT
+    }
+
+    fn coset_shift_inv() -> Self {
+        COSET_SHIFT_INV
     }
 
     fn div_2(&self) -> Self {
