@@ -298,7 +298,10 @@ pub(crate) mod tests {
         test_resize_then_open(&storage).await;
         test_partition_name_validation(&storage).await;
         test_blob_version_mismatch(&storage).await;
-        test_read_at_returns_same_buffer(&storage).await;
+        test_read_zero_length(&storage).await;
+        test_read_at_buf_returns_same_buffer(&storage).await;
+        test_read_at_buf_insufficient_capacity(&storage).await;
+        test_read_at_buf_larger_capacity(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -455,10 +458,17 @@ pub(crate) mod tests {
 
         // Attempt to read beyond the written data
         let result = blob.read_at(6, 10).await;
-
         assert!(
             result.is_err(),
             "Reading beyond written data should return an error"
+        );
+
+        // Same check via read_at_buf
+        let buf = IoBufMut::with_capacity(10);
+        let result = blob.read_at_buf(6, 10, buf).await;
+        assert!(
+            result.is_err(),
+            "read_at_buf beyond written data should return an error"
         );
     }
 
@@ -571,6 +581,14 @@ pub(crate) mod tests {
         assert!(
             result.is_err(),
             "Reading from an empty blob should return an error"
+        );
+
+        // Same check via read_at_buf
+        let buf = IoBufMut::with_capacity(1);
+        let result = blob.read_at_buf(0, 1, buf).await;
+        assert!(
+            result.is_err(),
+            "read_at_buf from an empty blob should return an error"
         );
     }
 
@@ -732,8 +750,31 @@ pub(crate) mod tests {
         );
     }
 
-    /// Test that read_at returns the same buffer that was passed in (contract verification).
-    async fn test_read_at_returns_same_buffer<S>(storage: &S)
+    /// Test that read_at with zero length returns an empty buffer.
+    async fn test_read_zero_length<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_zero_len", b"blob")
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"hello").await.unwrap();
+
+        // read_at with len=0 should succeed and return empty
+        let output = blob.read_at(0, 0).await.unwrap();
+        assert_eq!(output.len(), 0);
+
+        // read_at_buf with len=0 should also succeed
+        let buf = IoBufMut::with_capacity(16);
+        let output = blob.read_at_buf(0, 0, buf).await.unwrap();
+        assert_eq!(output.len(), 0);
+    }
+
+    /// Test that read_at_buf returns the same buffer that was passed in (contract verification).
+    async fn test_read_at_buf_returns_same_buffer<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
@@ -794,5 +835,64 @@ pub(crate) mod tests {
             }
             _ => panic!("Expected Chunked variant"),
         }
+    }
+
+    /// Test that read_at_buf returns BufferTooSmall when capacity < len.
+    async fn test_read_at_buf_insufficient_capacity<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_buf_capacity", b"blob")
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        // Buffer with capacity 5, request 11 bytes
+        let buf = IoBufMut::with_capacity(5);
+        let result = blob.read_at_buf(0, 11, buf).await;
+        assert!(
+            matches!(result, Err(crate::Error::BufferTooSmall)),
+            "Expected BufferTooSmall, got: {result:?}"
+        );
+
+        // Chunked buffers with total capacity 8, request 11 bytes
+        let buf1 = IoBufMut::with_capacity(4);
+        let buf2 = IoBufMut::with_capacity(4);
+        let bufs = IoBufsMut::from(vec![buf1, buf2]);
+        let result = blob.read_at_buf(0, 11, bufs).await;
+        assert!(
+            matches!(result, Err(crate::Error::BufferTooSmall)),
+            "Expected BufferTooSmall for chunked, got: {result:?}"
+        );
+    }
+
+    /// Test that read_at_buf works when buffer capacity exceeds len.
+    async fn test_read_at_buf_larger_capacity<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_buf_large_cap", b"blob")
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        // Buffer with capacity 64, request only 11 bytes
+        let buf = IoBufMut::with_capacity(64);
+        assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
+        let output = blob.read_at_buf(0, 11, buf).await.unwrap();
+        assert_eq!(output.len(), 11);
+        assert_eq!(output.coalesce(), b"hello world");
+
+        // Buffer with capacity 64, request only 5 bytes (partial read)
+        let buf = IoBufMut::with_capacity(64);
+        let output = blob.read_at_buf(0, 5, buf).await.unwrap();
+        assert_eq!(output.len(), 5);
+        assert_eq!(output.coalesce(), b"hello");
     }
 }
