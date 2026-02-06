@@ -257,7 +257,7 @@ where
                     self.send_random_vote(&mut vote_sender).await;
                     self.send_random_message(&mut cert_sender).await;
                     self.send_random_message(&mut resolver_sender).await;
-                }
+                },
             }
         }
     }

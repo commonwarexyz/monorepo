@@ -1261,7 +1261,7 @@ mod harnesses {
         type Db = crate::qmdb::any::ordered::fixed::test::CleanAnyTest;
 
         fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::ordered::fixed::test::create_test_config(suffix.parse().unwrap_or(0))
+            crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
         fn clone_config(
@@ -1369,9 +1369,7 @@ mod harnesses {
         type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
 
         fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::unordered::fixed::test::create_test_config(
-                suffix.parse().unwrap_or(0),
-            )
+            crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
         fn clone_config(

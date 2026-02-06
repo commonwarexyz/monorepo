@@ -234,7 +234,7 @@ mod tests {
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
             public_key: validator.clone(),
-            manager: oracle.manager(),
+            provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
             initial: Duration::from_secs(1),
@@ -475,7 +475,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager
-                .update(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
                 let (application, actor, _processed_height) = setup_validator(
@@ -625,7 +625,7 @@ mod tests {
             // Register the initial peer set.
             let mut manager = oracle.manager();
             manager
-                .update(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate().skip(1) {
                 let (application, actor, _processed_height) = setup_validator(
@@ -831,7 +831,7 @@ mod tests {
                     let backfill = control.register(0, TEST_QUOTA).await.unwrap();
                     let resolver_cfg = resolver::Config {
                         public_key: validator.clone(),
-                        manager: oracle_manager,
+                        provider: oracle_manager,
                         blocker: control.clone(),
                         mailbox_size: config.mailbox_size,
                         initial: Duration::from_secs(1),
@@ -1695,7 +1695,7 @@ mod tests {
             // Register the initial peer set
             let mut manager = oracle.manager();
             manager
-                .update(0, participants.clone().try_into().unwrap())
+                .track(0, participants.clone().try_into().unwrap())
                 .await;
 
             // Set up two validators

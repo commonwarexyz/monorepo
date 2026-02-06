@@ -1,6 +1,6 @@
 //! AWS S3 SDK function wrappers for caching deployer artifacts
 
-use crate::aws::{deployer_directory, Error};
+use crate::aws::{deployer_directory, Error, InstanceConfig};
 use aws_config::BehaviorVersion;
 pub use aws_config::Region;
 use aws_sdk_s3::{
@@ -12,8 +12,16 @@ use aws_sdk_s3::{
     Client as S3Client,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
-use futures::stream::{self, StreamExt, TryStreamExt};
-use std::{collections::HashMap, io::Read, path::Path, time::Duration};
+use futures::{
+    future::try_join_all,
+    stream::{self, StreamExt, TryStreamExt},
+};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    io::Read,
+    path::Path,
+    time::Duration,
+};
 use tracing::{debug, info};
 
 /// File name for the bucket config (stores the S3 bucket name).
@@ -440,4 +448,137 @@ pub fn is_no_such_bucket_error(error: &Error) -> bool {
         }
         _ => false,
     }
+}
+
+/// Result of uploading instance files to S3
+pub struct InstanceFileUrls {
+    /// Map from instance name to binary pre-signed URL
+    pub binary_urls: HashMap<String, String>,
+    /// Map from instance name to config pre-signed URL
+    pub config_urls: HashMap<String, String>,
+}
+
+/// Uploads binary and config files for instances to S3 with digest-based deduplication.
+///
+/// This function:
+/// 1. Collects unique binary and config paths across all instances
+/// 2. Computes SHA256 digests for deduplication
+/// 3. Uploads unique files to S3 concurrently
+/// 4. Returns pre-signed URLs mapped by instance name
+///
+/// Files with identical content are uploaded only once, reducing bandwidth and storage.
+pub async fn upload_instance_files(
+    client: &S3Client,
+    bucket: &str,
+    tag: &str,
+    instances: &[InstanceConfig],
+) -> Result<InstanceFileUrls, Error> {
+    // Collect unique binary and config paths (dedup before hashing)
+    let mut unique_binary_paths: BTreeSet<String> = BTreeSet::new();
+    let mut unique_config_paths: BTreeSet<String> = BTreeSet::new();
+    for instance in instances {
+        unique_binary_paths.insert(instance.binary.clone());
+        unique_config_paths.insert(instance.config.clone());
+    }
+
+    // Compute digests concurrently for unique files only
+    let unique_paths: Vec<String> = unique_binary_paths
+        .iter()
+        .chain(unique_config_paths.iter())
+        .cloned()
+        .collect();
+    info!(count = unique_paths.len(), "computing file digests");
+    let path_to_digest = hash_files(unique_paths).await?;
+
+    // Build dedup maps from digests
+    let mut binary_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
+    let mut config_digests: BTreeMap<String, String> = BTreeMap::new(); // digest -> path
+    let mut instance_binary_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
+    let mut instance_config_digest: HashMap<String, String> = HashMap::new(); // instance -> digest
+    for instance in instances {
+        let binary_digest = path_to_digest[&instance.binary].clone();
+        let config_digest = path_to_digest[&instance.config].clone();
+        binary_digests.insert(binary_digest.clone(), instance.binary.clone());
+        config_digests.insert(config_digest.clone(), instance.config.clone());
+        instance_binary_digest.insert(instance.name.clone(), binary_digest);
+        instance_config_digest.insert(instance.name.clone(), config_digest);
+    }
+
+    // Upload unique binaries and configs to S3 (deduplicated by digest)
+    let (binary_digest_to_url, config_digest_to_url): (
+        HashMap<String, String>,
+        HashMap<String, String>,
+    ) = tokio::try_join!(
+        async {
+            Ok::<_, Error>(
+                try_join_all(binary_digests.iter().map(|(digest, path)| {
+                    let client = client.clone();
+                    let bucket = bucket.to_string();
+                    let digest = digest.clone();
+                    let key = super::services::binary_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_and_presign(
+                            &client,
+                            &bucket,
+                            &key,
+                            UploadSource::File(path.as_ref()),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+        async {
+            Ok::<_, Error>(
+                try_join_all(config_digests.iter().map(|(digest, path)| {
+                    let client = client.clone();
+                    let bucket = bucket.to_string();
+                    let digest = digest.clone();
+                    let key = super::services::config_s3_key(tag, &digest);
+                    let path = path.clone();
+                    async move {
+                        let url = cache_and_presign(
+                            &client,
+                            &bucket,
+                            &key,
+                            UploadSource::File(path.as_ref()),
+                            PRESIGN_DURATION,
+                        )
+                        .await?;
+                        Ok::<_, Error>((digest, url))
+                    }
+                }))
+                .await?
+                .into_iter()
+                .collect(),
+            )
+        },
+    )?;
+
+    // Map instance names to URLs via their digests
+    let mut binary_urls: HashMap<String, String> = HashMap::new();
+    let mut config_urls: HashMap<String, String> = HashMap::new();
+    for instance in instances {
+        let binary_digest = &instance_binary_digest[&instance.name];
+        let config_digest = &instance_config_digest[&instance.name];
+        binary_urls.insert(
+            instance.name.clone(),
+            binary_digest_to_url[binary_digest].clone(),
+        );
+        config_urls.insert(
+            instance.name.clone(),
+            config_digest_to_url[config_digest].clone(),
+        );
+    }
+
+    Ok(InstanceFileUrls {
+        binary_urls,
+        config_urls,
+    })
 }

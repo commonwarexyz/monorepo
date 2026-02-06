@@ -114,7 +114,7 @@ impl<
     pub async fn add_network(&mut self, sender: S::PublicKey, message: Vote<S, D>) -> bool {
         // Check if sender is a participant
         let Some(index) = self.participants.index(&sender) else {
-            warn!(?sender, "blocking peer");
+            warn!(?sender, "blocking peer for unknown participant");
             self.blocker.block(sender).await;
             return false;
         };
@@ -124,7 +124,7 @@ impl<
             Vote::Notarize(notarize) => {
                 // Verify sender is signer
                 if index != notarize.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for notarize signer mismatch");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -158,7 +158,7 @@ impl<
             Vote::Nullify(nullify) => {
                 // Verify sender is signer
                 if index != nullify.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for nullify signer mismatch");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -169,7 +169,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for nullify after finalize");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -178,7 +178,7 @@ impl<
                 match self.pending_votes.nullify(index) {
                     Some(previous) => {
                         if previous != &nullify {
-                            warn!(?sender, "blocking peer");
+                            warn!(?sender, "blocking peer for conflicting nullify");
                             self.blocker.block(sender).await;
                         }
                         false
@@ -196,7 +196,7 @@ impl<
             Vote::Finalize(finalize) => {
                 // Verify sender is signer
                 if index != finalize.signer() {
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for finalize signer mismatch");
                     self.blocker.block(sender).await;
                     return false;
                 }
@@ -207,7 +207,7 @@ impl<
                     self.reporter
                         .report(Activity::NullifyFinalize(activity))
                         .await;
-                    warn!(?sender, "blocking peer");
+                    warn!(?sender, "blocking peer for finalize after nullify");
                     self.blocker.block(sender).await;
                     return false;
                 }

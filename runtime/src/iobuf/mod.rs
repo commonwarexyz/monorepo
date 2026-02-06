@@ -486,6 +486,9 @@ impl From<BytesMut> for IoBufMut {
 }
 
 impl From<Bytes> for IoBufMut {
+    /// Zero-copy if `bytes` is unique for the entire original buffer (refcount is 1),
+    /// copies otherwise. Always copies if the `Bytes` was constructed via `from_owner` or
+    /// `from_static`.
     fn from(bytes: Bytes) -> Self {
         Self {
             inner: IoBufMutInner::Owned(BytesMut::from(bytes)),
@@ -494,6 +497,8 @@ impl From<Bytes> for IoBufMut {
 }
 
 impl From<IoBuf> for IoBufMut {
+    /// Zero-copy if `buf` is unique for the entire original buffer (refcount is 1),
+    /// copies otherwise. Always copies for pooled buffers and static slices.
     fn from(buf: IoBuf) -> Self {
         Self::from(buf.inner)
     }
@@ -581,6 +586,27 @@ impl IoBufs {
         match self {
             Self::Single(buf) => buf,
             Self::Chunked(_) => self.copy_to_bytes(self.remaining()).into(),
+        }
+    }
+
+    /// Coalesce all remaining bytes into a single contiguous `IoBuf`, using the pool
+    /// for allocation if multiple buffers need to be merged.
+    ///
+    /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
+    pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBuf {
+        match self {
+            Self::Single(buf) => buf,
+            Self::Chunked(bufs) => {
+                let total_len: usize = bufs
+                    .iter()
+                    .map(|b| b.remaining())
+                    .fold(0, usize::saturating_add);
+                let mut result = pool.alloc(total_len);
+                for buf in bufs {
+                    result.put_slice(buf.as_ref());
+                }
+                result.freeze()
+            }
         }
     }
 }
@@ -774,15 +800,53 @@ impl IoBufsMut {
         }
     }
 
-    /// Coalesce all buffers into a single contiguous `IoBufMut`.
-    ///
-    /// Zero-copy if only one buffer. Copies if multiple buffers.
-    pub fn coalesce(self) -> IoBufMut {
+    fn coalesce_with<F>(self, allocate: F) -> IoBufMut
+    where
+        F: FnOnce(usize) -> IoBufMut,
+    {
         match self {
             Self::Single(buf) => buf,
             Self::Chunked(bufs) => {
                 let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = IoBufMut::with_capacity(total_len);
+                let mut result = allocate(total_len);
+                for buf in bufs {
+                    result.put_slice(buf.as_ref());
+                }
+                result
+            }
+        }
+    }
+
+    /// Coalesce all buffers into a single contiguous `IoBufMut`.
+    ///
+    /// Zero-copy if only one buffer. Copies if multiple buffers.
+    pub fn coalesce(self) -> IoBufMut {
+        self.coalesce_with(IoBufMut::with_capacity)
+    }
+
+    /// Coalesce all buffers into a single contiguous `IoBufMut`, using the pool
+    /// for allocation if multiple buffers need to be merged.
+    ///
+    /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
+    pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBufMut {
+        self.coalesce_with(|len| pool.alloc(len))
+    }
+
+    /// Coalesce all buffers into a single contiguous `IoBufMut` with extra
+    /// capacity, using the pool for allocation.
+    ///
+    /// Zero-copy if single buffer with sufficient spare capacity.
+    pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
+        match self {
+            Self::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
+            Self::Single(buf) => {
+                let mut result = pool.alloc(buf.len() + extra);
+                result.put_slice(buf.as_ref());
+                result
+            }
+            Self::Chunked(bufs) => {
+                let total: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
+                let mut result = pool.alloc(total + extra);
                 for buf in bufs {
                     result.put_slice(buf.as_ref());
                 }
@@ -1195,6 +1259,56 @@ mod tests {
         assert_eq!(bufs.len(), 8);
 
         assert_eq!(bufs.coalesce(), b"lo world");
+    }
+
+    #[test]
+    fn test_iobufs_coalesce_with_pool() {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let pool_config = BufferPoolConfig {
+                    max_per_class: commonware_utils::NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+            } else {
+                let pool_config = BufferPoolConfig::for_network();
+            }
+        }
+        let mut registry = prometheus_client::registry::Registry::default();
+        let pool = BufferPool::new(pool_config, &mut registry);
+
+        // Single buffer: zero-copy (same pointer)
+        let buf = IoBuf::from(vec![1u8, 2, 3, 4, 5]);
+        let original_ptr = buf.as_ptr();
+        let bufs = IoBufs::from(buf);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, [1, 2, 3, 4, 5]);
+        assert_eq!(coalesced.as_ptr(), original_ptr);
+
+        // Multiple buffers: merged using pool
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::from(b" world"));
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello world");
+
+        // Multiple buffers after advance: only remaining data coalesced
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::from(b" world"));
+        bufs.advance(3);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"lo world");
+
+        // Empty buffers in the middle
+        let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
+        bufs.append(IoBuf::default());
+        bufs.append(IoBuf::from(b" world"));
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello world");
+
+        // Empty IoBufs
+        let bufs = IoBufs::default();
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert!(coalesced.is_empty());
     }
 
     #[test]
@@ -1908,6 +2022,54 @@ mod tests {
 
         // Coalesce should only include second buffer's data
         assert_eq!(bufs.coalesce(), b" world");
+    }
+
+    #[test]
+    fn test_iobufsmut_coalesce_with_pool() {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri
+                let pool_config = BufferPoolConfig {
+                    max_per_class: commonware_utils::NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+            } else {
+                let pool_config = BufferPoolConfig::for_network();
+            }
+        }
+        let mut registry = prometheus_client::registry::Registry::default();
+        let pool = BufferPool::new(pool_config, &mut registry);
+
+        // Single buffer: zero-copy (same pointer)
+        let mut buf = IoBufMut::from(b"hello");
+        let original_ptr = buf.as_mut_ptr();
+        let bufs = IoBufsMut::from(buf);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello");
+        assert_eq!(coalesced.as_ref().as_ptr(), original_ptr);
+
+        // Multiple buffers: merged using pool
+        let bufs = IoBufsMut::from(vec![IoBufMut::from(b"hello"), IoBufMut::from(b" world")]);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"hello world");
+        assert!(coalesced.is_pooled());
+
+        // With extra capacity: zero-copy if sufficient spare capacity
+        let mut buf = IoBufMut::with_capacity(100);
+        buf.put_slice(b"hello");
+        let original_ptr = buf.as_mut_ptr();
+        let bufs = IoBufsMut::from(buf);
+        let coalesced = bufs.coalesce_with_pool_extra(&pool, 10);
+        assert_eq!(coalesced, b"hello");
+        assert_eq!(coalesced.as_ref().as_ptr(), original_ptr);
+
+        // With extra capacity: reallocates if insufficient
+        let mut buf = IoBufMut::with_capacity(5);
+        buf.put_slice(b"hello");
+        let bufs = IoBufsMut::from(buf);
+        let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
+        assert_eq!(coalesced, b"hello");
+        assert!(coalesced.capacity() >= 105);
     }
 
     #[cfg(feature = "arbitrary")]

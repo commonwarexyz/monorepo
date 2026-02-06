@@ -446,28 +446,15 @@ pub(super) mod test {
         kv::{Deletable as _, Gettable as _, Updatable as _},
         mmr::StandardHasher,
         qmdb::{
-            any::test::{fixed_db_config, variable_db_config},
             store::{LogStore, MerkleizedStore},
             verify_proof,
         },
-        translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
-    use commonware_runtime::{
-        deterministic::{Context, Runner},
-        Runner as _,
-    };
+    use commonware_runtime::deterministic::Context;
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
-
-    /// A type alias for the concrete [fixed::Db] type used in these unit tests.
-    type FixedDb = fixed::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
-
-    /// A type alias for the concrete [variable::Db] type used in these unit tests.
-    type VariableDb =
-        variable::Db<Context, Digest, Digest, Sha256, TwoCap, Merkleized<Sha256>, Durable>;
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:
@@ -480,25 +467,11 @@ pub(super) mod test {
     {
     }
 
-    /// Return an `Any` database initialized with a fixed config.
-    pub(crate) async fn open_fixed_db(context: Context) -> FixedDb {
-        FixedDb::init(context, fixed_db_config("partition"))
-            .await
-            .unwrap()
-    }
-
-    /// Return an `Any` database initialized with a variable config.
-    pub(crate) async fn open_variable_db(context: Context) -> VariableDb {
-        VariableDb::init(context, variable_db_config("partition"))
-            .await
-            .unwrap()
-    }
-
     /// Test an empty database.
     ///
     /// The `reopen_db` closure receives a unique index for each invocation to enable
     /// unique metric labels (the deterministic runtime panics on duplicates).
-    async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
+    pub(crate) async fn test_any_db_empty<D: TestableAnyDb<Digest>>(
         mut db: D,
         mut reopen_db: impl FnMut(usize) -> Pin<Box<dyn std::future::Future<Output = D> + Send>>,
     ) {
@@ -566,34 +539,6 @@ pub(super) mod test {
 
         let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_fixed_db_empty() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            let db = open_fixed_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_fixed_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_variable_db_empty() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_empty(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_variable_db(ctx))
-            })
-            .await;
-        });
     }
 
     pub(crate) async fn test_any_db_build_and_authenticate<
@@ -822,227 +767,6 @@ pub(super) mod test {
         let root = db.root();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
         assert_eq!(db.root(), root);
-
-        db.destroy().await.unwrap();
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_fixed_db_basic() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            let db = open_fixed_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_basic(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_fixed_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_any_variable_db_basic() {
-        let executor = Runner::default();
-        executor.start(|context| async move {
-            let db = open_variable_db(context.with_label("db_0")).await;
-            let ctx = context.clone();
-            test_any_db_basic(db, move |idx| {
-                let ctx = ctx.with_label(&format!("db_{}", idx + 1));
-                Box::pin(open_variable_db(ctx))
-            })
-            .await;
-        });
-    }
-
-    /// Test recovery on non-empty db.
-    pub(crate) async fn test_any_db_non_empty_recovery<D: TestableAnyDb<V>, V: Clone>(
-        context: Context,
-        db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-        make_value: impl Fn(u64) -> V,
-    ) {
-        const ELEMENTS: u64 = 1000;
-
-        let mut db = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
-        }
-        let mut db = db
-            .commit(None)
-            .await
-            .unwrap()
-            .0
-            .into_merkleized()
-            .await
-            .unwrap();
-        db.prune(db.inactivity_floor_loc()).await.unwrap();
-        let root = db.root();
-        let op_count = db.bounds().end;
-        let inactivity_floor_loc = db.inactivity_floor_loc();
-
-        let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.bounds().end, op_count);
-        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.bounds().end, op_count);
-        assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
-        assert_eq!(db.root(), root);
-
-        let mut dirty = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            dirty.update(k, v).await.unwrap();
-        }
-        let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.bounds().end, op_count);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for _ in 0..3 {
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value((i + 1) * 10000);
-                db.update(k, v).await.unwrap();
-            }
-        }
-        let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.bounds().end, op_count);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let _ = db.commit(None).await.unwrap();
-        let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.bounds().end > op_count);
-        assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
-        assert_ne!(db.root(), root);
-
-        db.destroy().await.unwrap();
-    }
-
-    /// Test recovery on empty db.
-    pub(crate) async fn test_any_db_empty_recovery<D: TestableAnyDb<V>, V: Clone>(
-        context: Context,
-        db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-        make_value: impl Fn(u64) -> V,
-    ) {
-        let root = db.root();
-
-        let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.bounds().end, 1);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.bounds().end, 1);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        drop(db);
-        let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.bounds().end, 1);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for _ in 0..3 {
-            for i in 0u64..1000 {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = make_value((i + 1) * 10000);
-                db.update(k, v).await.unwrap();
-            }
-        }
-        drop(db);
-        let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.bounds().end, 1);
-        assert_eq!(db.root(), root);
-
-        let mut db = db.into_mutable();
-        for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = db
-            .commit(None)
-            .await
-            .unwrap()
-            .0
-            .into_merkleized()
-            .await
-            .unwrap();
-        drop(db);
-        let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.bounds().end > 1);
-        assert_ne!(db.root(), root);
-
-        db.destroy().await.unwrap();
-    }
-
-    /// Test making multiple commits, one of which deletes a key from a previous commit.
-    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<D: TestableAnyDb<V>, V>(
-        context: Context,
-        db: D,
-        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
-        make_value: impl Fn(u64) -> V,
-    ) where
-        V: Clone + Eq + std::fmt::Debug,
-    {
-        let mut map = HashMap::<Digest, V>::default();
-        const ELEMENTS: u64 = 10;
-        let metadata_value = make_value(42);
-        let mut db = db.into_mutable();
-        let key_at = |j: u64, i: u64| Sha256::hash(&(j * 1000 + i).to_be_bytes());
-        for j in 0u64..ELEMENTS {
-            for i in 0u64..ELEMENTS {
-                let k = key_at(j, i);
-                let v = make_value(i * 1000);
-                db.update(k, v.clone()).await.unwrap();
-                map.insert(k, v);
-            }
-            let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
-            db = clean_db.into_merkleized().await.unwrap().into_mutable();
-        }
-        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
-        let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
-
-        db.delete(k).await.unwrap();
-        let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_merkleized().await.unwrap();
-        assert_eq!(db.get_metadata().await.unwrap(), None);
-        assert!(db.get(&k).await.unwrap().is_none());
-
-        let root = db.root();
-        drop(db);
-        let db = reopen_db(context.with_label("reopened")).await;
-        assert_eq!(root, db.root());
-        assert_eq!(db.get_metadata().await.unwrap(), None);
-        assert!(db.get(&k).await.unwrap().is_none());
 
         db.destroy().await.unwrap();
     }

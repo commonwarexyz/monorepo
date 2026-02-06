@@ -4,8 +4,8 @@ use commonware_macros::stability_scope;
 
 stability_scope!(ALPHA {
     pub mod audited;
-    pub mod memory;
     pub mod faulty;
+    pub mod memory;
 });
 stability_scope!(ALPHA, cfg(feature = "iouring-storage") {
     pub mod iouring;
