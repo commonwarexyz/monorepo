@@ -89,65 +89,43 @@
 //! For each [`CodingCommitment`], the engine maintains a [`ReconstructionState`]:
 //!
 //! ```text
-//!    +------------------+
-//!    |  Initial State   |
-//!    | (no shards,      |
-//!    |  leader unknown) |
-//!    +------------------+
-//!           |       |
-//!           |       | Receive strong shard
-//!           |       | (buffered in pending_strong_shards)
-//!           |       |
-//!           |       | Receive weak shard
-//!           |       | (buffered in pending_shards)
-//!           |       v
-//!           |  +------------------+
-//!           |  | Buffering        |
-//!           |  | (awaiting leader |
-//!           |  |  + strong shard) |
-//!           |  +------------------+
-//!           |       |
-//!           +-------+
-//!                   |
-//!                   | ExternalProposed (leader identity)
-//!                   v
-//!    +------------------+
-//!    | Leader Known     |
-//!    | (drain buffered  |
-//!    |  strong shards)  |
-//!    +------------------+
-//!             |
-//!             | Leader's strong shard verified (C::weaken)
-//!             v
-//!    +------------------+
-//!    | Has Checking     |<----+
-//!    | Data             |     |
-//!    +------------------+     |
-//!             |               |
-//!             | Drain any     | Receive weak shard
-//!             | pending       | (validated with checking data)
-//!             | weak shards   |
-//!             v               |
-//!    +------------------+     |
-//!    | Accumulating     |-----+
-//!    | Checked Shards   |
-//!    +------------------+
-//!             |
-//!             | checked_shards.len() >= minimum_shards
-//!             v
-//!    +------------------+
-//!    | Reconstruction   |
-//!    | Attempt          |
-//!    +------------------+
-//!             |
-//!        +----+----+
-//!        |         |
-//!        v         v
-//!    Success    Failure
-//!        |         |
-//!        v         v
-//!    Cache      Remove
-//!    Block      State
+//!    +----------------------+
+//!    | AwaitingLeader       |
+//!    | - buffer strong/weak |
+//!    +----------------------+
+//!               |
+//!               | ExternalProposed(leader)
+//!               v
+//!    +----------------------+
+//!    | AwaitingStrong       |
+//!    | - leader known       |
+//!    | - buffer weak        |
+//!    +----------------------+
+//!               |
+//!               | leader strong shard passes C::weaken
+//!               v
+//!    +----------------------+
+//!    | Ready                |
+//!    | - has checking_data  |
+//!    | - validate weak via  |
+//!    |   C::check           |
+//!    +----------------------+
+//!               |
+//!               | checked_shards.len() >= minimum_shards
+//!               v
+//!    +----------------------+
+//!    | Reconstruction        |
+//!    | Attempt               |
+//!    +----------------------+
+//!               |
+//!          +----+----+
+//!          |         |
+//!          v         v
+//!       Success    Failure
+//!          |         |
+//!          v         v
+//!       Cache      Remove
+//!       Block      State
 //! ```
 //!
 //! # Peer Validation and Blocking Rules
@@ -162,6 +140,9 @@
 //! - Each participant may only contribute ONE weak shard per commitment.
 //!
 //! Peers violating these rules are blocked via the [`Blocker`] trait.
+//! Validation and blocking rules are applied while a commitment is actively
+//! tracked in reconstruction state. Once a block is already reconstructed and
+//! cached, additional shards for that commitment are ignored.
 //!
 //! Note: Strong shards are only accepted from the leader. If the leader is not
 //! yet known, strong shards are buffered until consensus signals the leader via
@@ -395,6 +376,8 @@ where
         select_loop! {
             self.context,
             on_start => {
+                self.sync_metrics();
+
                 // Clean up closed subscriptions.
                 self.block_subscriptions.retain(|_, subscribers| {
                     subscribers.retain(|tx| !tx.is_closed());
@@ -420,7 +403,7 @@ where
                         self.participants = participants;
 
                         // Clear reconstruction state and subscriptions
-                        self.update_state(|s| s.clear());
+                        self.state.clear();
                         self.shard_subscriptions.clear();
                         self.block_subscriptions.clear();
 
@@ -430,22 +413,8 @@ where
                         self.broadcast_shards(&mut sender, block).await;
                     },
                     Message::ExternalProposed { commitment, leader } => {
-                        if self.reconstructed_blocks.contains_key(&commitment) {
-                            continue;
-                        }
-                        let Some(me) = self.me.as_ref().copied() else {
-                            continue;
-                        };
-                        self.state
-                            .entry(commitment)
-                            .or_default()
-                            .set_leader(
-                                leader,
-                                &me,
-                                &self.strategy,
-                                &mut self.blocker,
-                            ).await;
-                        self.try_advance(&mut sender, commitment).await;
+                        self.handle_external_proposal(&mut sender, commitment, leader)
+                            .await;
                     },
                     Message::GetByCommitment { commitment, response } => {
                         let block = self.reconstructed_blocks.get(&commitment).cloned();
@@ -482,13 +451,6 @@ where
                 debug!("receiver closed, stopping shard engine");
                 return;
             } => {
-                // Block peers that are not participants.
-                if self.participants.index(&peer).is_none() {
-                    warn!(?peer, "shard sent by non-participant, blocking peer");
-                    self.blocker.block(peer).await;
-                    continue;
-                }
-
                 // Track shard receipt per peer.
                 self.metrics.shards_received.get_or_create(&Peer::new(&peer)).inc();
 
@@ -496,21 +458,27 @@ where
                 let commitment = shard.commitment();
                 if !self.reconstructed_blocks.contains_key(&commitment) {
                     let now = self.context.current();
-                    let state = self.state
-                        .entry(shard.commitment())
-                        .or_default();
-                    state.insert(
-                        self.me.as_ref(),
-                        peer,
-                        shard,
-                        &self.participants,
-                        &self.strategy,
-                        &mut self.blocker,
-                        now,
-                    ).await;
-
+                    let state = self
+                        .state
+                        .entry(commitment)
+                        .or_insert_with(|| ReconstructionState::new(now));
+                    let progressed = state
+                        .on_network_shard(
+                            peer,
+                            shard,
+                            InsertCtx {
+                                me: self.me.as_ref(),
+                                participants: &self.participants,
+                                strategy: &self.strategy,
+                                now,
+                            },
+                            &mut self.blocker,
+                        )
+                        .await;
+                    if progressed {
+                        self.try_advance(&mut sender, commitment).await;
+                    }
                 }
-                self.try_advance(&mut sender, commitment).await;
             }
         }
     }
@@ -534,12 +502,12 @@ where
         let Some(state) = self.state.get(&commitment) else {
             return Ok(None);
         };
-        if state.checked_shards.len() < commitment.config().minimum_shards as usize {
+        if state.checked_shards().len() < usize::from(commitment.config().minimum_shards) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
         }
 
-        let Some(checking_data) = &state.checking_data else {
+        let Some(checking_data) = state.checking_data() else {
             unreachable!("checked shards cannot be present without checking data");
         };
 
@@ -549,7 +517,7 @@ where
             &commitment.config(),
             &commitment.coding_digest(),
             checking_data.clone(),
-            state.checked_shards.as_slice(),
+            state.checked_shards(),
             &self.strategy,
         )
         .map_err(ReconstructionError::CodingRecovery)?;
@@ -570,9 +538,42 @@ where
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
         let block = Arc::new(CodedBlock::new_trusted(inner, commitment));
 
-        self.update_reconstructed_blocks(|b| b.insert(commitment, Arc::clone(&block)));
+        self.reconstructed_blocks
+            .insert(commitment, Arc::clone(&block));
         self.metrics.blocks_reconstructed_total.inc();
         Ok(Some(block))
+    }
+
+    /// Handles leader announcements for a commitment and advances reconstruction.
+    #[inline]
+    async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        commitment: CodingCommitment,
+        leader: P,
+    ) {
+        if self.reconstructed_blocks.contains_key(&commitment) {
+            return;
+        }
+        if self.participants.index(&leader).is_none() {
+            warn!(?leader, %commitment, "leader update for non-participant, ignoring");
+            return;
+        }
+        let Some(me) = self.me.as_ref().copied() else {
+            return;
+        };
+
+        let now = self.context.current();
+        let state = self
+            .state
+            .entry(commitment)
+            .or_insert_with(|| ReconstructionState::new(now));
+        let progressed = state
+            .on_leader_known(leader, &me, &self.strategy, &mut self.blocker, now)
+            .await;
+        if progressed {
+            self.try_advance(sender, commitment).await;
+        }
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] to all participants and caches the block.
@@ -586,7 +587,8 @@ where
 
         // Cache the block so we don't have to reconstruct it again.
         let commitment = block.commitment();
-        self.update_reconstructed_blocks(|b| b.insert(commitment, Arc::new(block.clone())));
+        self.reconstructed_blocks
+            .insert(commitment, Arc::new(block.clone()));
 
         // Broadcast each shard to the corresponding participant.
         for (index, peer) in self.participants.iter().enumerate() {
@@ -602,7 +604,7 @@ where
                 .await;
         }
 
-        debug!(?commitment, "broadasted shards to participants");
+        debug!(?commitment, "broadcasted shards to participants");
     }
 
     /// Broadcasts a [`Shard`] to all participants.
@@ -614,7 +616,7 @@ where
     ) {
         let commitment = shard.commitment();
         let _ = sender.send(Recipients::All, shard, true).await;
-        debug!(?commitment, "broadasted shard to all participants");
+        debug!(?commitment, "broadcasted shard to all participants");
     }
 
     /// Broadcasts any pending weak shard for the given commitment and attempts
@@ -635,11 +637,6 @@ where
             self.notify_shard_subscribers(commitment).await;
         }
 
-        let _ = self
-            .metrics
-            .reconstruction_states_count
-            .try_set(self.state.len());
-
         match self.try_reconstruct(commitment).await {
             Ok(Some(block)) => {
                 debug!(
@@ -648,7 +645,7 @@ where
                     height = %block.height(),
                     "successfully reconstructed block from shards"
                 );
-                self.update_state(|s| s.remove(&commitment));
+                self.state.remove(&commitment);
                 self.notify_block_subscribers(block).await;
             }
             Ok(None) => {
@@ -656,7 +653,7 @@ where
             }
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
-                self.update_state(|s| s.remove(&commitment));
+                self.state.remove(&commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -674,7 +671,7 @@ where
         let has_shard = self
             .state
             .get(&commitment)
-            .is_some_and(|state| state.checking_data.is_some());
+            .is_some_and(|state| state.checking_data().is_some());
         let block_reconstructed = self.reconstructed_blocks.contains_key(&commitment);
         if has_shard || block_reconstructed {
             response.send_lossy(());
@@ -755,17 +752,17 @@ where
         let now = self.context.current();
         let ttl = self.state_ttl;
         let before = self.state.len();
-        self.update_state(|s| {
-            s.retain(|_, state| {
-                now.duration_since(state.last_updated)
-                    .map(|elapsed| elapsed < ttl)
-                    .unwrap_or(true) // Keep if clock went backwards (shouldn't happen)
-            });
+        self.state.retain(|_, state| {
+            now.duration_since(state.last_updated())
+                .map(|elapsed| elapsed < ttl)
+                .unwrap_or(true) // Keep if clock went backwards (shouldn't happen)
         });
         let pruned = before - self.state.len();
         if pruned > 0 {
             debug!(pruned, "pruned stale reconstruction states");
-            self.metrics.stale_states_pruned_total.inc_by(pruned as u64);
+            self.metrics.stale_states_pruned_total.inc_by(
+                u64::try_from(pruned).expect("pruned count impossibly out of bounds"),
+            );
         }
     }
 
@@ -780,85 +777,275 @@ where
             return;
         };
 
-        self.update_reconstructed_blocks(|b| b.retain(|_, block| block.height() > height));
+        self.reconstructed_blocks
+            .retain(|_, block| block.height() > height);
     }
 
-    /// Updates the reconstructed blocks cache via the provided closure and then
-    /// syncs the reconstructed blocks count metric.
-    fn update_reconstructed_blocks<U>(
-        &mut self,
-        f: impl FnOnce(&mut BTreeMap<CodingCommitment, Arc<CodedBlock<B, C>>>) -> U,
-    ) -> U {
-        let result = f(&mut self.reconstructed_blocks);
-        let _ = self
-            .metrics
-            .reconstructed_blocks_cache_count
-            .try_set(self.reconstructed_blocks.len());
-        result
-    }
-
-    /// Updates the reconstruction state via the provided closure and then
-    /// syncs the reconstruction states count metric.
-    fn update_state<U>(
-        &mut self,
-        f: impl FnOnce(&mut BTreeMap<CodingCommitment, ReconstructionState<P, C, H>>) -> U,
-    ) -> U {
-        let result = f(&mut self.state);
+    /// Syncs gauge metrics for map sizes.
+    fn sync_metrics(&self) {
         let _ = self
             .metrics
             .reconstruction_states_count
             .try_set(self.state.len());
-        result
+        let _ = self
+            .metrics
+            .reconstructed_blocks_cache_count
+            .try_set(self.reconstructed_blocks.len());
     }
 }
 
 /// Erasure coded block reconstruction state machine.
-struct ReconstructionState<P, C, H>
+enum ReconstructionState<P, C, H>
 where
     P: PublicKey,
     C: CodingScheme,
     H: Hasher,
 {
-    /// The checking data for this commitment.
-    checking_data: Option<C::CheckingData>,
-    /// The leader of the round that this state corresponds to.
-    leader: Option<P>,
-    /// Strong shards buffered while the leader is unknown, keyed by sender.
-    /// When the leader arrives, the leader's shard is processed and all
-    /// other senders are blocked.
-    pending_strong_shards: BTreeMap<P, Shard<C, H>>,
+    /// Stage 1: leader unknown; buffer both strong and weak shards.
+    AwaitingLeader(AwaitingLeaderState<P, C, H>),
+    /// Stage 2: leader known; wait for leader strong shard, buffer weak shards.
+    AwaitingStrong(AwaitingStrongState<P, C, H>),
+    /// Stage 3: leader strong shard verified; validate weak shards immediately.
+    Ready(ReadyState<P, C, H>),
+}
+
+/// State shared across all reconstruction phases.
+struct CommonState<C, H>
+where
+    C: CodingScheme,
+    H: Hasher,
+{
     /// Our validated weak shard, ready to broadcast to other participants.
-    /// This is set when we receive and validate our own strong shard.
-    own_weak_shard: Option<Shard<C, H>>,
-    /// Shards that have been received prior to the checking data being available.
-    pending_shards: BTreeMap<P, Shard<C, H>>,
+    our_weak_shard: Option<Shard<C, H>>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a valid shard.
-    /// Bit at index `i` is set if participant `i` has contributed.
     contributed: BitMap,
     /// The last time this state was updated.
     last_updated: SystemTime,
 }
 
-impl<P, C, H> Default for ReconstructionState<P, C, H>
+/// Phase data for `ReconstructionState::AwaitingLeader`.
+///
+/// In this phase, the leader is unknown. Strong and weak shards are buffered
+/// until `on_leader_known` is called.
+struct AwaitingLeaderState<P, C, H>
 where
     P: PublicKey,
     C: CodingScheme,
     H: Hasher,
 {
-    fn default() -> Self {
+    common: CommonState<C, H>,
+    pending_strong_shards: BTreeMap<P, StrongShard<C>>,
+    pending_weak_shards: BTreeMap<P, WeakShard<C>>,
+}
+
+/// Phase data for `ReconstructionState::AwaitingStrong`.
+///
+/// In this phase, the leader is known, but checking data is not yet available.
+/// Weak shards are buffered until the leader's strong shard is verified.
+struct AwaitingStrongState<P, C, H>
+where
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
+{
+    common: CommonState<C, H>,
+    leader: P,
+    pending_weak_shards: BTreeMap<P, WeakShard<C>>,
+}
+
+/// Phase data for `ReconstructionState::Ready`.
+///
+/// In this phase, checking data is available and incoming weak shards are
+/// validated immediately.
+struct ReadyState<P, C, H>
+where
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
+{
+    common: CommonState<C, H>,
+    leader: P,
+    checking_data: C::CheckingData,
+}
+
+/// Parsed strong shard payload used by internal state-machine handlers.
+struct StrongShard<C>
+where
+    C: CodingScheme,
+{
+    commitment: CodingCommitment,
+    index: usize,
+    data: C::StrongShard,
+}
+
+/// Parsed weak shard payload used by internal state-machine handlers.
+struct WeakShard<C>
+where
+    C: CodingScheme,
+{
+    commitment: CodingCommitment,
+    index: usize,
+    data: C::WeakShard,
+}
+
+impl<C, H> CommonState<C, H>
+where
+    C: CodingScheme,
+    H: Hasher,
+{
+    /// Create a new empty common state at the provided timestamp.
+    const fn new(now: SystemTime) -> Self {
         Self {
-            checking_data: None,
-            leader: None,
-            pending_strong_shards: BTreeMap::new(),
-            own_weak_shard: None,
-            pending_shards: BTreeMap::new(),
+            our_weak_shard: None,
             checked_shards: Vec::new(),
             contributed: BitMap::new(),
-            last_updated: SystemTime::UNIX_EPOCH,
+            last_updated: now,
         }
     }
+
+    /// Lazily initialize the contributor bitmap for the participant set size.
+    fn ensure_contributed(&mut self, participants_len: usize) {
+        if self.contributed.is_empty() {
+            self.contributed = BitMap::zeroes(
+                u64::try_from(participants_len)
+                    .expect("participant count impossibly out of bounds"),
+            );
+        }
+    }
+}
+
+impl<P, C, H> AwaitingLeaderState<P, C, H>
+where
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
+{
+    /// Apply a leader update and transition into `AwaitingStrong`.
+    ///
+    /// Returns the new phase data and all buffered strong shards for replay.
+    fn on_leader_known(
+        &mut self,
+        leader: P,
+        now: SystemTime,
+    ) -> (AwaitingStrongState<P, C, H>, BTreeMap<P, StrongShard<C>>) {
+        self.common.last_updated = now;
+        let pending_strong = std::mem::take(&mut self.pending_strong_shards);
+        let pending_weak = std::mem::take(&mut self.pending_weak_shards);
+        let common = std::mem::replace(&mut self.common, CommonState::new(now));
+        (
+            AwaitingStrongState {
+                common,
+                leader,
+                pending_weak_shards: pending_weak,
+            },
+            pending_strong,
+        )
+    }
+}
+
+impl<P, C, H> AwaitingStrongState<P, C, H>
+where
+    P: PublicKey,
+    C: CodingScheme,
+    H: Hasher,
+{
+    /// Verify the leader's strong shard and transition to `Ready` on success.
+    ///
+    /// Returns `None` if verification fails (sender is blocked), otherwise the
+    /// constructed `ReadyState`.
+    async fn verify_strong_shard(
+        &mut self,
+        sender: P,
+        shard: StrongShard<C>,
+        strategy: &impl Strategy,
+        blocker: &mut impl Blocker<PublicKey = P>,
+    ) -> Option<ReadyState<P, C, H>> {
+        let StrongShard {
+            commitment,
+            index,
+            data,
+        } = shard;
+        let shard_index: u16 = index
+            .try_into()
+            .expect("shard index impossibly out of bounds");
+
+        let Ok((checking_data, checked, weak_shard_data)) = C::weaken(
+            &commitment.config(),
+            &commitment.coding_digest(),
+            shard_index,
+            data,
+        ) else {
+            warn!(?sender, "invalid strong shard received, blocking peer");
+            blocker.block(sender).await;
+            return None;
+        };
+
+        self.common.checked_shards.push(checked);
+        self.common.our_weak_shard = Some(Shard::new(
+            commitment,
+            usize::from(shard_index),
+            DistributionShard::Weak(weak_shard_data),
+        ));
+
+        let pending_weak = std::mem::take(&mut self.pending_weak_shards);
+        self.drain_pending(commitment, &checking_data, pending_weak, strategy, blocker)
+            .await;
+
+        let last_updated = self.common.last_updated;
+        let common = std::mem::replace(&mut self.common, CommonState::new(last_updated));
+        Some(ReadyState {
+            common,
+            leader: self.leader.clone(),
+            checking_data,
+        })
+    }
+
+    /// Attempts to drain pending weak shards once checking data is available.
+    async fn drain_pending(
+        &mut self,
+        commitment: CodingCommitment,
+        checking_data: &C::CheckingData,
+        pending_shards: BTreeMap<P, WeakShard<C>>,
+        strategy: &impl Strategy,
+        blocker: &mut impl Blocker<PublicKey = P>,
+    ) {
+        let (new_checked_shards, to_block) =
+            strategy.map_partition_collect_vec(pending_shards, |(peer, shard)| {
+                let shard_index = shard
+                    .index
+                    .try_into()
+                    .expect("shard index impossibly out of bounds");
+                let checked = C::check(
+                    &commitment.config(),
+                    &commitment.coding_digest(),
+                    checking_data,
+                    shard_index,
+                    shard.data,
+                );
+                (peer, checked.ok())
+            });
+
+        for peer in to_block {
+            warn!(?peer, "invalid shard received, blocking peer");
+            blocker.block(peer).await;
+        }
+
+        self.common.checked_shards.extend(new_checked_shards);
+    }
+}
+
+/// Context required for processing incoming network shards.
+struct InsertCtx<'a, P, S>
+where
+    P: PublicKey,
+    S: Strategy,
+{
+    me: Option<&'a Participant>,
+    participants: &'a Set<P>,
+    strategy: &'a S,
+    now: SystemTime,
 }
 
 impl<P, C, H> ReconstructionState<P, C, H>
@@ -867,6 +1054,61 @@ where
     C: CodingScheme,
     H: Hasher,
 {
+    /// Create an initial reconstruction state for a commitment.
+    const fn new(now: SystemTime) -> Self {
+        Self::AwaitingLeader(AwaitingLeaderState {
+            common: CommonState::new(now),
+            pending_strong_shards: BTreeMap::new(),
+            pending_weak_shards: BTreeMap::new(),
+        })
+    }
+
+    /// Access common state shared across all phases.
+    const fn common(&self) -> &CommonState<C, H> {
+        match self {
+            Self::AwaitingLeader(state) => &state.common,
+            Self::AwaitingStrong(state) => &state.common,
+            Self::Ready(state) => &state.common,
+        }
+    }
+
+    /// Mutably access common state shared across all phases.
+    const fn common_mut(&mut self) -> &mut CommonState<C, H> {
+        match self {
+            Self::AwaitingLeader(state) => &mut state.common,
+            Self::AwaitingStrong(state) => &mut state.common,
+            Self::Ready(state) => &mut state.common,
+        }
+    }
+
+    /// Return the last update time for TTL pruning.
+    const fn last_updated(&self) -> SystemTime {
+        self.common().last_updated
+    }
+
+    /// Returns checking data when the state has reached `Ready`.
+    ///
+    /// This is required to validate weak shards and reconstruct the block.
+    const fn checking_data(&self) -> Option<&C::CheckingData> {
+        match self {
+            Self::Ready(state) => Some(&state.checking_data),
+            _ => None,
+        }
+    }
+
+    /// Returns all verified shards accumulated for reconstruction.
+    ///
+    /// This slice grows as valid strong/weak shards are accepted.
+    const fn checked_shards(&self) -> &[C::CheckedShard] {
+        self.common().checked_shards.as_slice()
+    }
+
+    /// Takes the validated [`Shard`] for broadcasting to other participants.
+    /// Returns [`None`] if we haven't validated our own shard yet.
+    const fn take_weak_shard(&mut self) -> Option<Shard<C, H>> {
+        self.common_mut().our_weak_shard.take()
+    }
+
     /// Inserts a [`Shard`] into the state.
     ///
     /// ## Peer Blocking Rules
@@ -890,97 +1132,129 @@ where
     /// - MUST pass cryptographic verification via [`CodingScheme::check`].
     /// - Each participant may only contribute ONE weak shard per commitment. Duplicates
     ///   result in blocking the sender.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn insert(
+    ///
+    /// Handle an incoming network shard.
+    ///
+    /// Returns `true` only when the shard caused state progress (buffered,
+    /// validated, or transitioned), and `false` when rejected/blocked.
+    async fn on_network_shard<S, X>(
         &mut self,
-        me: Option<&Participant>,
         sender: P,
         shard: Shard<C, H>,
-        participants: &Set<P>,
-        strategy: &impl Strategy,
-        blocker: &mut impl Blocker<PublicKey = P>,
-        now: SystemTime,
-    ) {
-        if self.contributed.is_empty() {
-            self.contributed = BitMap::zeroes(participants.len() as u64);
-        }
-
-        let Some(sender_index) = participants.index(&sender) else {
+        ctx: InsertCtx<'_, P, S>,
+        blocker: &mut X,
+    ) -> bool
+    where
+        S: Strategy,
+        X: Blocker<PublicKey = P>,
+    {
+        let Some(sender_index) = ctx.participants.index(&sender) else {
             warn!(?sender, "shard sent by non-participant, blocking peer");
             blocker.block(sender).await;
-            return;
+            return false;
+        };
+        let commitment = shard.commitment();
+        let index = shard.index();
+
+        self.common_mut().ensure_contributed(ctx.participants.len());
+
+        let progressed = match shard.into_inner() {
+            DistributionShard::Strong(data) => {
+                let strong = StrongShard {
+                    commitment,
+                    index,
+                    data,
+                };
+                self.insert_strong_shard(ctx.me, sender, strong, ctx.strategy, blocker)
+                    .await
+            }
+            DistributionShard::Weak(data) => {
+                let weak = WeakShard {
+                    commitment,
+                    index,
+                    data,
+                };
+                self.insert_weak_shard(sender, sender_index, weak, blocker)
+                    .await
+            }
         };
 
-        if shard.is_strong() {
-            self.insert_shard(me, sender, shard, strategy, blocker)
-                .await;
-        } else {
-            self.insert_weak_shard(sender, sender_index, shard, blocker)
-                .await;
+        if progressed {
+            self.common_mut().last_updated = ctx.now;
         }
-
-        self.last_updated = now;
+        progressed
     }
 
     /// Sets the leader and processes any buffered strong shards.
     ///
     /// The leader's buffered shard (if present) is verified via
-    /// [`Self::verify_strong_shard`]. All other buffered senders are blocked.
-    async fn set_leader(
+    /// [`AwaitingStrongState::verify_strong_shard`]. All other buffered senders are blocked.
+    ///
+    /// Once set, the leader is immutable for this commitment. Conflicting
+    /// leader updates are ignored.
+    /// Handle leader announcement for this commitment.
+    ///
+    /// Returns `true` only when this applies a new leader and may advance
+    /// reconstruction.
+    async fn on_leader_known(
         &mut self,
         leader: P,
         me: &Participant,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) {
-        self.leader = Some(leader.clone());
+        now: SystemTime,
+    ) -> bool {
+        let applied = match self {
+            Self::AwaitingLeader(state) => {
+                let (next, pending_strong) = state.on_leader_known(leader.clone(), now);
+                *self = Self::AwaitingStrong(next);
 
-        if self.checking_data.is_some() {
-            return;
-        }
-
-        let pending = std::mem::take(&mut self.pending_strong_shards);
-        for (sender, shard) in pending {
-            if sender == leader {
-                self.contributed.set(me.get() as u64, true);
-                self.verify_strong_shard(sender, shard, strategy, blocker)
-                    .await;
-            } else {
-                warn!(
-                    ?sender,
-                    ?leader,
-                    "buffered strong shard from non-leader, blocking peer"
-                );
-                blocker.block(sender).await;
+                for (sender, shard) in pending_strong {
+                    if sender == leader {
+                        self.insert_strong_shard(Some(me), sender, shard, strategy, blocker)
+                            .await;
+                    } else {
+                        warn!(
+                            ?sender,
+                            ?leader,
+                            "buffered strong shard from non-leader, blocking peer"
+                        );
+                        blocker.block(sender).await;
+                    }
+                }
+                true
             }
-        }
-    }
+            Self::AwaitingStrong(state) => {
+                if state.leader != leader {
+                    warn!(existing = ?state.leader, ?leader, "conflicting leader update, ignoring");
+                }
+                false
+            }
+            Self::Ready(state) => {
+                if state.leader != leader {
+                    warn!(existing = ?state.leader, ?leader, "conflicting leader update, ignoring");
+                }
+                false
+            }
+        };
 
-    /// Takes the validated [`Shard`] for broadcasting to other participants.
-    /// Returns [`None`] if we haven't validated our own shard yet.
-    pub const fn take_weak_shard(&mut self) -> Option<Shard<C, H>> {
-        self.own_weak_shard.take()
+        applied
     }
 
     /// Handles a strong shard received from the network.
+    /// Insert a strong shard according to the current phase.
     ///
-    /// If the leader is not yet known, the shard is buffered. If the leader is
-    /// known, the shard is validated immediately: the sender must be the leader,
-    /// and the shard must pass cryptographic verification via [`CodingScheme::weaken`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shard` is a [`DistributionShard::Weak`].
-    async fn insert_shard(
+    /// Returns `true` only when this progresses reconstruction state.
+    async fn insert_strong_shard(
         &mut self,
         me: Option<&Participant>,
         sender: P,
-        shard: Shard<C, H>,
+        shard: StrongShard<C>,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) {
+    ) -> bool {
         let shard_index: u16 = shard
-            .index()
+            .index
             .try_into()
             .expect("shard index impossibly out of bounds");
 
@@ -990,10 +1264,14 @@ where
                 "strong shard sent to non-participant, blocking peer"
             );
             blocker.block(sender).await;
-            return;
+            return false;
         };
 
-        if shard_index != me.get() as u16 {
+        let expected_index: u16 = me
+            .get()
+            .try_into()
+            .expect("participant index impossibly out of bounds");
+        if shard_index != expected_index {
             warn!(
                 ?sender,
                 shard_index,
@@ -1001,125 +1279,83 @@ where
                 "strong shard index does not match self index, blocking peer"
             );
             blocker.block(sender).await;
-            return;
+            return false;
         }
 
-        match &self.leader {
-            None => {
-                // Leader unknown: buffer the shard for later processing.
-                if self.pending_strong_shards.contains_key(&sender) {
+        match self {
+            Self::AwaitingLeader(state) => {
+                if state.pending_strong_shards.contains_key(&sender) {
                     warn!(
                         ?sender,
                         "duplicate strong shard from participant while leader unknown, blocking peer"
                     );
                     blocker.block(sender).await;
-                    return;
+                    return false;
                 }
-                self.pending_strong_shards.insert(sender, shard);
+                state.pending_strong_shards.insert(sender, shard);
+                true
             }
-            Some(leader) => {
-                if sender != *leader {
+            Self::AwaitingStrong(state) => {
+                if sender != state.leader {
                     warn!(
                         ?sender,
-                        ?leader,
+                        leader = ?state.leader,
                         "strong shard from non-leader, blocking peer"
                     );
                     blocker.block(sender).await;
-                    return;
+                    return false;
                 }
-                if self.contributed.get(me.get() as u64) {
+                if state.common.contributed.get(u64::from(me.get())) {
                     warn!(?sender, "duplicate strong shard from leader, blocking peer");
                     blocker.block(sender).await;
-                    return;
+                    return false;
                 }
-                self.contributed.set(me.get() as u64, true);
-                self.verify_strong_shard(sender, shard, strategy, blocker)
-                    .await;
+                state.common.contributed.set(u64::from(me.get()), true);
+                if let Some(ready) = state
+                    .verify_strong_shard(sender, shard, strategy, blocker)
+                    .await
+                {
+                    *self = Self::Ready(ready);
+                    return true;
+                }
+                false
+            }
+            Self::Ready(state) => {
+                if sender != state.leader {
+                    warn!(
+                        ?sender,
+                        leader = ?state.leader,
+                        "strong shard from non-leader, blocking peer"
+                    );
+                } else {
+                    warn!(?sender, "duplicate strong shard from leader, blocking peer");
+                }
+                blocker.block(sender).await;
+                false
             }
         }
     }
 
-    /// Cryptographically verifies a strong shard and, if valid, stores the
-    /// checking data and drains any pending weak shards.
-    ///
-    /// The caller is responsible for ensuring the sender is the leader.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shard` is a [`DistributionShard::Weak`].
-    async fn verify_strong_shard(
-        &mut self,
-        sender: P,
-        shard: Shard<C, H>,
-        strategy: &impl Strategy,
-        blocker: &mut impl Blocker<PublicKey = P>,
-    ) {
-        let commitment = shard.commitment();
-        let shard_index = shard
-            .index()
-            .try_into()
-            .expect("shard index impossibly out of bounds");
-
-        let DistributionShard::Strong(shard_data) = shard.into_inner() else {
-            panic!("verify_strong_shard called with non-strong shard");
-        };
-
-        let Ok((checking_data, checked, weak_shard_data)) = C::weaken(
-            &commitment.config(),
-            &commitment.coding_digest(),
-            shard_index,
-            shard_data,
-        ) else {
-            warn!(?sender, "invalid strong shard received, blocking peer");
-            blocker.block(sender).await;
-            return;
-        };
-
-        self.checking_data = Some(checking_data);
-        self.checked_shards.push(checked);
-        self.own_weak_shard = Some(Shard::new(
-            commitment,
-            shard_index as usize,
-            DistributionShard::Weak(weak_shard_data),
-        ));
-
-        // Drain pending weak shards now that we have checking data.
-        self.drain_pending(commitment, strategy, blocker).await;
-    }
-
     /// Inserts a weak shard into the state.
+    /// Insert a weak shard according to the current phase.
     ///
-    /// The caller must have already checked (and set) the sender's `contributed`
-    /// bit via [`Self::insert`]. This method validates the shard's index and
-    /// cryptographic integrity.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shard` is a [`DistributionShard::Strong`].
+    /// Returns `true` only when this progresses reconstruction state.
     async fn insert_weak_shard(
         &mut self,
         sender: P,
         sender_index: Participant,
-        shard: Shard<C, H>,
+        shard: WeakShard<C>,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) {
-        let commitment = shard.commitment();
+    ) -> bool {
         let shard_index: u16 = shard
-            .index()
+            .index
             .try_into()
             .expect("shard index impossibly out of bounds");
-
-        if self.contributed.get(sender_index.get() as u64) {
-            warn!(
-                ?sender,
-                "duplicate weak shard from participant, blocking peer"
-            );
-            blocker.block(sender).await;
-            return;
-        }
-        self.contributed.set(sender_index.get() as u64, true);
-
-        if shard_index != sender_index.get() as u16 {
+        let expected_index: u16 = sender_index
+            .get()
+            .try_into()
+            .expect("participant index impossibly out of bounds");
+        if shard_index != expected_index {
             warn!(
                 ?sender,
                 shard_index,
@@ -1127,79 +1363,45 @@ where
                 "weak shard index does not match participant index, blocking peer"
             );
             blocker.block(sender).await;
-            return;
+            return false;
         }
 
-        let Some(checking_data) = &self.checking_data else {
-            self.pending_shards.insert(sender, shard);
-            return;
-        };
-
-        let DistributionShard::Weak(shard_data) = shard.into_inner() else {
-            panic!("insert_weak_shard called with strong shard");
-        };
-        let Ok(checked) = C::check(
-            &commitment.config(),
-            &commitment.coding_digest(),
-            checking_data,
-            shard_index,
-            shard_data,
-        ) else {
-            warn!(?sender, "invalid shard received, blocking peer");
+        if self.common().contributed.get(u64::from(sender_index.get())) {
+            warn!(
+                ?sender,
+                "duplicate weak shard from participant, blocking peer"
+            );
             blocker.block(sender).await;
-            return;
-        };
-
-        self.checked_shards.push(checked);
-    }
-
-    /// Attempts to drain any pending shards if the checking data is available, using
-    /// the provided [`Strategy`] for parallelization.
-    ///
-    /// Invalid shards will result in the sender being blocked via the provided [`Blocker`].
-    async fn drain_pending(
-        &mut self,
-        commitment: CodingCommitment,
-        strategy: &impl Strategy,
-        blocker: &mut impl Blocker<PublicKey = P>,
-    ) {
-        // We can only drain pending shards if we have the checking data.
-        let Some(checking_data) = &self.checking_data else {
-            return;
-        };
-
-        // Run through the pending shards and attempt to validate them.
-        let pending_shards = std::mem::take(&mut self.pending_shards);
-        let (checked_shards, to_block) =
-            strategy.map_partition_collect_vec(pending_shards, |(peer, shard)| {
-                let shard_index = shard
-                    .index()
-                    .try_into()
-                    .expect("shard index impossibly out of bounds");
-                let DistributionShard::Weak(shard_data) = shard.into_inner() else {
-                    // Strong shards should have been validated upon receipt.
-                    return (peer, None);
-                };
-
-                let checked = C::check(
-                    &commitment.config(),
-                    &commitment.coding_digest(),
-                    checking_data,
-                    shard_index,
-                    shard_data,
-                );
-                (peer, checked.ok())
-            });
-
-        // Block any peers that sent invalid shards.
-        for peer in to_block {
-            warn!(?peer, "invalid shard received, blocking peer");
-            blocker.block(peer).await;
+            return false;
         }
+        self.common_mut()
+            .contributed
+            .set(u64::from(sender_index.get()), true);
 
-        // Add valid shards.
-        for checked in checked_shards {
-            self.checked_shards.push(checked);
+        match self {
+            Self::AwaitingLeader(state) => {
+                state.pending_weak_shards.insert(sender, shard);
+                true
+            }
+            Self::AwaitingStrong(state) => {
+                state.pending_weak_shards.insert(sender, shard);
+                true
+            }
+            Self::Ready(state) => {
+                let Ok(checked) = C::check(
+                    &shard.commitment.config(),
+                    &shard.commitment.coding_digest(),
+                    &state.checking_data,
+                    shard_index,
+                    shard.data,
+                ) else {
+                    warn!(?sender, "invalid shard received, blocking peer");
+                    blocker.block(sender).await;
+                    return false;
+                };
+                state.common.checked_shards.push(checked);
+                true
+            }
         }
     }
 }
@@ -1833,6 +2035,150 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_conflicting_external_proposed_ignored() {
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                // Get peer 2's strong shard.
+                let peer2_index = peers[2].index.get() as usize;
+                let peer2_strong_shard = coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let strong_bytes = peer2_strong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader_a = peers[0].public_key.clone();
+                let leader_b = peers[1].public_key.clone();
+
+                // Subscribe before shards arrive so we can verify acceptance.
+                let shard_sub = peers[2].mailbox.subscribe_shard(commitment).await;
+
+                // First leader update should stick.
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment, leader_a.clone())
+                    .await;
+                // Conflicting update should be ignored.
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment, leader_b)
+                    .await;
+
+                // Original leader sends strong shard; this should still be accepted.
+                peers[0]
+                    .sender
+                    .send(
+                        Recipients::One(peer2_pk.clone()),
+                        strong_bytes.clone(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Subscription should resolve from accepted strong shard.
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("subscription did not complete after strong shard from original leader");
+                    }
+                };
+
+                // The conflicting leader should still be treated as non-leader and blocked.
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
+
+                // Original leader should not be blocked.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let leader_a_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &peers[2].public_key && b == &leader_a);
+                assert!(
+                    !leader_a_blocked,
+                    "original leader should not be blocked after conflicting leader update"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_non_participant_external_proposed_ignored() {
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                // Get peer 2's strong shard.
+                let peer2_index = peers[2].index.get() as usize;
+                let peer2_strong_shard =
+                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let strong_bytes = peer2_strong_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+                let non_participant_leader = PrivateKey::from_seed(10_000).public_key();
+
+                // Subscribe before shards arrive.
+                let shard_sub = peers[2].mailbox.subscribe_shard(commitment).await;
+
+                // A non-participant leader update should be ignored.
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment, non_participant_leader)
+                    .await;
+
+                // Leader unknown path: this strong shard should be buffered, not blocked.
+                peers[0]
+                    .sender
+                    .send(
+                        Recipients::One(peer2_pk.clone()),
+                        strong_bytes.clone(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                let blocked = oracle.blocked().await.unwrap();
+                let leader_blocked = blocked
+                    .iter()
+                    .any(|(a, b)| a == &peers[2].public_key && b == &leader);
+                assert!(
+                    !leader_blocked,
+                    "leader should not be blocked when non-participant update is ignored"
+                );
+
+                // A valid leader update should then process buffered shards and resolve subscription.
+                peers[2].mailbox.external_proposed(commitment, leader).await;
+                context.sleep(config.link.latency * 2).await;
+
+                select! {
+                    _ = shard_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("subscription did not complete after valid leader update");
+                    }
+                };
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_duplicate_weak_shard_blocks_peer() {
         // Use 10 peers so minimum_shards=4, giving us time to send duplicate before reconstruction.
         let fixture = Fixture {
@@ -2027,7 +2373,7 @@ mod tests {
                 let peer3_pk = peers[3].public_key.clone();
 
                 // Send weak shards to peer 3 BEFORE their strong shard arrives.
-                // These will be stored in pending_shards since there's no checking data yet.
+                // These will be stored in pending_weak_shards since there's no checking data yet.
                 for (i, weak_shard) in weak_shards.iter().enumerate() {
                     let sender_idx = [0, 1, 2][i];
                     let weak_shard_bytes = weak_shard.encode();
@@ -2476,7 +2822,7 @@ mod tests {
 
     #[test_traced]
     fn test_invalid_pending_weak_shard_blocked_on_drain() {
-        // Test that a weak shard buffered in pending_shards (before checking data) is
+        // Test that a weak shard buffered in pending_weak_shards (before checking data) is
         // blocked when drain_pending runs and C::check fails.
         let fixture = Fixture {
             num_peers: 10,
@@ -2506,7 +2852,7 @@ mod tests {
                 let peer3_pk = peers[3].public_key.clone();
 
                 // Send the invalid weak shard BEFORE the strong shard (no checking data yet,
-                // so it gets buffered in pending_shards).
+                // so it gets buffered in pending_weak_shards).
                 peers[1]
                     .sender
                     .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
