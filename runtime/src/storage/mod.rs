@@ -207,6 +207,7 @@ pub(crate) mod tests {
     use super::{Header, HeaderError};
     use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
+    use futures::FutureExt;
 
     #[test]
     fn test_header_fields() {
@@ -837,7 +838,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Test that read_at_buf returns BufferTooSmall when capacity < len.
+    /// Test that read_at_buf panics when buffer capacity < len.
     async fn test_read_at_buf_insufficient_capacity<S>(storage: &S)
     where
         S: Storage + Send + Sync,
@@ -850,34 +851,24 @@ pub(crate) mod tests {
 
         blob.write_at(0, b"hello world").await.unwrap();
 
-        // Buffer with capacity 5, request 11 bytes
+        // Single buffer with capacity 5, request 11 bytes
         let buf = IoBufMut::with_capacity(5);
-        let result = blob.read_at_buf(0, 11, buf).await;
+        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf))
+            .catch_unwind()
+            .await;
         assert!(
-            matches!(
-                result,
-                Err(crate::Error::BufferTooSmall {
-                    capacity: 5,
-                    len: 11
-                })
-            ),
-            "Expected BufferTooSmall, got: {result:?}"
+            result.is_err(),
+            "Expected panic for insufficient single buffer capacity"
         );
 
         // Chunked buffers with total capacity 8, request 11 bytes
-        let buf1 = IoBufMut::with_capacity(4);
-        let buf2 = IoBufMut::with_capacity(4);
-        let bufs = IoBufsMut::from(vec![buf1, buf2]);
-        let result = blob.read_at_buf(0, 11, bufs).await;
+        let bufs = IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs))
+            .catch_unwind()
+            .await;
         assert!(
-            matches!(
-                result,
-                Err(crate::Error::BufferTooSmall {
-                    capacity: 8,
-                    len: 11
-                })
-            ),
-            "Expected BufferTooSmall for chunked, got: {result:?}"
+            result.is_err(),
+            "Expected panic for insufficient chunked buffer capacity"
         );
     }
 

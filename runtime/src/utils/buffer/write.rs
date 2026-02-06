@@ -81,7 +81,7 @@ impl<B: Blob> Blob for Write<B> {
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
         // SAFETY: `len` bytes are filled via extract + blob read below.
-        unsafe { buf.prepare_read(len)? };
+        unsafe { buf.set_len(len) };
 
         // Ensure the read doesn't overflow.
         let end_offset = offset

@@ -282,7 +282,7 @@ impl crate::Blob for Blob {
     ) -> Result<IoBufsMut, Error> {
         let mut input_buf = buf.into();
         // SAFETY: `len` bytes are filled via io_uring read loop below.
-        unsafe { input_buf.prepare_read(len)? };
+        unsafe { input_buf.set_len(len) };
 
         // For single buffers, read directly into them (zero-copy).
         // For chunked buffers, use a temporary and copy to preserve the input structure.
@@ -291,7 +291,7 @@ impl crate::Blob for Blob {
             IoBufsMut::Chunked(bufs) => {
                 let mut tmp = self.pool.alloc(len);
                 // SAFETY: `len` bytes are filled via io_uring read loop below.
-                unsafe { tmp.prepare_read(len)? };
+                unsafe { tmp.set_len(len) };
                 (tmp, Some(bufs))
             }
         };
