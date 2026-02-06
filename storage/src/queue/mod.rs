@@ -54,7 +54,7 @@
 //!
 //! Acknowledged items are tracked in-memory using an "ack floor" plus ranges of acked
 //! items above the floor. When items are acked contiguously from the floor, the floor
-//! advances. Pruning happens during [`Persistable::sync`](crate::Persistable::sync) and
+//! advances. Pruning happens during [`Queue::prune`](crate::queue::Queue::prune) and
 //! removes complete sections below the ack floor.
 //!
 //! # Example
@@ -62,7 +62,7 @@
 //! ```rust
 //! use commonware_codec::RangeCfg;
 //! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
-//! use commonware_storage::{queue::{Queue, Config}, Persistable};
+//! use commonware_storage::{queue::{Queue, Config}};
 //! use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 //!
 //! let executor = deterministic::Runner::default();

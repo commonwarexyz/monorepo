@@ -1,7 +1,7 @@
 //! Queue storage implementation.
 
 use super::{metrics, Error};
-use crate::{journal::contiguous::variable, rmap::RMap, Persistable};
+use crate::{journal::contiguous::variable, rmap::RMap};
 use commonware_codec::CodecShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -54,7 +54,7 @@ pub struct Config<C> {
 ///
 /// - **Enqueue**: Durably persists the item and returns its position.
 /// - **Dequeue**: Returns unacked items in FIFO order, skipping already-acked items.
-/// - **Ack**: Marks an item as processed. Pruning happens during [Persistable::sync].
+/// - **Ack**: Marks an item as processed. Pruning happens during [Queue::prune].
 ///
 /// # Crash Recovery
 ///
@@ -211,7 +211,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Acknowledge processing of an item at the given position.
     ///
     /// After acknowledgment, the item will be skipped on dequeue. Pruning of
-    /// acknowledged items happens during [Persistable::sync].
+    /// acknowledged items happens during [Self::prune].
     ///
     /// If items are acked contiguously from the ack floor, the floor advances
     /// automatically to keep memory bounded.
@@ -269,7 +269,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     ///
     /// This is a convenience method for batch acknowledgment. It's equivalent to calling
     /// [Queue::ack] for each position in `[ack_floor, up_to)`, but more efficient as it
-    /// directly advances the ack floor. Pruning happens during [Persistable::sync].
+    /// directly advances the ack floor. Pruning happens during [Self::prune].
     ///
     /// # Arguments
     ///
@@ -360,10 +360,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
     /// Manually prune acknowledged items from storage.
     ///
-    /// Note: Pruning happens automatically during [Persistable::sync] and
-    /// [Persistable::commit]. This method is only needed if you want to force
-    /// a prune check without syncing.
-    ///
     /// Returns `true` if any data was pruned.
     ///
     /// # Errors
@@ -390,19 +386,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             "reset read position"
         );
     }
-}
-
-impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Queue<E, V> {
-    type Error = Error;
 
     /// Prune acknowledged items and commit the journal.
     ///
-    /// Enqueued items are already durable (persisted in [Queue::enqueue]). This method
-    /// prunes items below the ack floor and commits the journal state.
-    ///
-    /// Items that were acked but not pruned (i.e., ack_floor hasn't crossed a section
-    /// boundary) will be re-delivered on restart. This is at-least-once semantics.
-    async fn commit(&mut self) -> Result<(), Self::Error> {
+    /// Faster than [Self::sync] but recovery may be required on startup if a crash
+    /// occurs before the next sync.
+    pub async fn commit(&mut self) -> Result<(), Error> {
         self.journal.prune(self.ack_floor).await?;
         self.journal.commit().await?;
         Ok(())
@@ -410,17 +399,15 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Queue<E, V> {
 
     /// Prune acknowledged items and sync the journal.
     ///
-    /// Similar to [Persistable::commit] but ensures the journal doesn't require
-    /// recovery on startup.
-    ///
-    /// Items that were acked but not pruned will be re-delivered on restart.
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    /// Ensures the journal does not require recovery on startup.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.journal.prune(self.ack_floor).await?;
         self.journal.sync().await?;
         Ok(())
     }
 
-    async fn destroy(self) -> Result<(), Self::Error> {
+    /// Destroy the queue and remove all associated storage.
+    pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await?;
         Ok(())
     }

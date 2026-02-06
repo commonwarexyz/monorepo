@@ -7,7 +7,6 @@
 //! Writers can be cloned to allow multiple tasks to enqueue items concurrently.
 
 use super::{Config, Error, Queue};
-use crate::Persistable;
 use commonware_codec::CodecShared;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::channel::mpsc;
@@ -55,13 +54,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
     /// Returns the total number of items that have been enqueued.
     pub async fn size(&self) -> u64 {
         self.queue.lock().await.size()
-    }
-
-    /// Prune acknowledged items and sync the journal.
-    ///
-    /// See [Persistable::sync] for details.
-    pub async fn sync(&self) -> Result<(), Error> {
-        self.queue.lock().await.sync().await
     }
 }
 
@@ -164,11 +156,11 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
         self.queue.lock().await.reset();
     }
 
-    /// Prune acknowledged items and sync the journal.
+    /// Prune acknowledged items.
     ///
-    /// See [Persistable::sync] for details.
-    pub async fn sync(&self) -> Result<(), Error> {
-        self.queue.lock().await.sync().await
+    /// See [Queue::prune] for details.
+    pub async fn prune(&self) -> Result<bool, Error> {
+        self.queue.lock().await.prune().await
     }
 }
 
