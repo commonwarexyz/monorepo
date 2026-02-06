@@ -707,7 +707,7 @@ stability_scope!(BETA {
         /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
         /// of data read from the blob starting at `offset`.
         ///
-        /// For reusing buffers, use [`Blob::read_at_buf`].
+        /// To reuse a buffer(s), use [`Blob::read_at_buf`].
         fn read_at(
             &self,
             offset: u64,

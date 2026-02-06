@@ -286,13 +286,12 @@ impl crate::Blob for Blob {
 
         // For single buffers, read directly into them (zero-copy).
         // For chunked buffers, use a temporary and copy to preserve the input structure.
-        let buf_len = len;
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
             IoBufsMut::Chunked(bufs) => {
-                let mut tmp = self.pool.alloc(buf_len);
+                let mut tmp = self.pool.alloc(len);
                 // SAFETY: `len` bytes are filled via io_uring read loop below.
-                unsafe { tmp.prepare_read(buf_len)? };
+                unsafe { tmp.prepare_read(len)? };
                 (tmp, Some(bufs))
             }
         };
@@ -303,15 +302,15 @@ impl crate::Blob for Blob {
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        while bytes_read < buf_len {
+        while bytes_read < len {
             // Figure out how much is left to read and where to read into.
             //
             // SAFETY: IoBufMut wraps BytesMut which has stable memory addresses.
-            // `bytes_read` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_read)` stays within bounds and `buf_len - bytes_read`
+            // `bytes_read` is always < `len` due to the loop condition, so
+            // `add(bytes_read)` stays within bounds and `len - bytes_read`
             // correctly represents the remaining valid bytes.
             let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
-            let remaining_len = buf_len - bytes_read;
+            let remaining_len = len - bytes_read;
             let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read

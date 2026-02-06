@@ -95,7 +95,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let buf = buf.into();
-        self.auditor.event(b"read_at", |hasher| {
+        self.auditor.event(b"read_at_buf", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
