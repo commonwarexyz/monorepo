@@ -165,7 +165,7 @@ impl crate::Blob for Blob {
     ) -> Result<IoBufsMut, crate::Error> {
         let mut buf = buf.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
-        unsafe { buf.prepare_read(len)? };
+        unsafe { buf.set_len(len) };
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;

@@ -41,10 +41,8 @@ impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let read_fut = async {
             let mut buf = self.pool.alloc(len);
-            // SAFETY: We will write exactly `len` bytes before returning
-            // (read_exact fills the entire buffer). The buffer contents
-            // are uninitialized but we only write to it, never read.
-            unsafe { buf.prepare_read(len)? };
+            // SAFETY: `len` bytes are written by read_exact below.
+            unsafe { buf.set_len(len) };
             self.stream
                 .read_exact(buf.as_mut())
                 .await

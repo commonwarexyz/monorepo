@@ -519,7 +519,7 @@ impl<B: Blob> Append<B> {
             return Err(Error::BlobInsufficientLength);
         }
         // SAFETY: read_into below fills all `available` bytes.
-        unsafe { buf.prepare_read(available)? };
+        unsafe { buf.set_len(available) };
         self.read_into(buf.as_mut(), logical_offset).await?;
 
         Ok((buf, available))
@@ -789,7 +789,7 @@ impl<B: Blob> Blob for Append<B> {
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
         // SAFETY: `len` bytes are filled via read_into below.
-        unsafe { buf.prepare_read(len)? };
+        unsafe { buf.set_len(len) };
         match buf {
             IoBufsMut::Single(mut single) => {
                 self.read_into(single.as_mut(), logical_offset).await?;

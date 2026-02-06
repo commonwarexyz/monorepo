@@ -127,8 +127,6 @@ stability_scope!(BETA {
         },
         #[error("invalid or missing checksum")]
         InvalidChecksum,
-        #[error("buffer too small: capacity={capacity}, len={len}")]
-        BufferTooSmall { capacity: usize, len: usize },
         #[error("offset overflow")]
         OffsetOverflow,
         #[error("immutable blob")]
@@ -691,12 +689,16 @@ stability_scope!(BETA {
         /// Read `len` bytes at `offset` into caller-provided buffer(s).
         ///
         /// The caller provides the buffer(s), and the implementation fills it with
-        /// exactly `len` bytes of data read from the blob starting at `offset`. `len`
-        /// must be <= buffer capacity. Returns the same buffer(s), filled with data.
+        /// exactly `len` bytes of data read from the blob starting at `offset`.
+        /// Returns the same buffer(s), filled with data.
         ///
         /// # Contract
         ///
         /// - The output `IoBufsMut` is the same as the input, with `len` bytes filled from offset
+        ///
+        /// # Panics
+        ///
+        /// Panics if `len` exceeds the total capacity of `buf`.
         fn read_at_buf(
             &self,
             offset: u64,

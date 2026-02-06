@@ -443,10 +443,8 @@ impl Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, crate::Error> {
         let mut owned_buf = self.pool.alloc(len);
-        // SAFETY: We will write exactly `len` bytes before returning
-        // (loop continues until bytes_received == len). The buffer contents
-        // are uninitialized but we only write to it, never read.
-        unsafe { owned_buf.prepare_read(len)? };
+        // SAFETY: `len` bytes are written by the recv loop below.
+        unsafe { owned_buf.set_len(len) };
         let mut bytes_received = 0;
 
         while bytes_received < len {

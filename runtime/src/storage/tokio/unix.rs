@@ -36,7 +36,7 @@ impl crate::Blob for Blob {
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
         // SAFETY: `len` bytes are filled via read_exact below.
-        unsafe { buf.prepare_read(len)? };
+        unsafe { buf.set_len(len) };
         let file = self.file.clone();
         let pool = self.pool.clone();
         let offset = offset
@@ -52,7 +52,7 @@ impl crate::Blob for Blob {
                 // Read into a temporary buffer and copy to preserve the chunked structure
                 let mut temp = pool.alloc(len);
                 // SAFETY: `len` bytes are filled via read_exact_at below.
-                unsafe { temp.prepare_read(len)? };
+                unsafe { temp.set_len(len) };
                 file.read_exact_at(temp.as_mut(), offset)?;
                 let mut bufs = IoBufsMut::Chunked(chunks);
                 bufs.copy_from_slice(temp.as_ref());
