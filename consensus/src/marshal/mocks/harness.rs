@@ -783,7 +783,7 @@ impl TestHarness for CodingHarness {
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: 10,
-            state_ttl: Duration::from_secs(30),
+            pre_leader_buffer_size: NZUsize!(64),
         };
         let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
         let network = control.register(2, TEST_QUOTA).await.unwrap();
@@ -961,7 +961,7 @@ impl TestHarness for CodingHarness {
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: 10,
-            state_ttl: Duration::from_secs(30),
+            pre_leader_buffer_size: NZUsize!(64),
         };
         let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();

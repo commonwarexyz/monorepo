@@ -1,6 +1,10 @@
 //! Mailbox for the shard buffer engine.
 
-use crate::{marshal::coding::types::CodedBlock, types::CodingCommitment, CertifiableBlock};
+use crate::{
+    marshal::coding::types::CodedBlock,
+    types::{CodingCommitment, View},
+    CertifiableBlock,
+};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
@@ -25,12 +29,14 @@ where
         /// The erasure coded block.
         block: CodedBlock<B, C>,
     },
-    /// A notification from consensus that a [`CodingCommitment`] has been proposed by another leader.
+    /// A notification from consensus that a [`CodingCommitment`] was externally proposed.
     ExternalProposed {
         /// The [`CodingCommitment`] of the proposed block.
         commitment: CodingCommitment,
         /// The leader's public key.
         leader: P,
+        /// The view in which the commitment was proposed.
+        view: View,
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
@@ -114,8 +120,12 @@ where
     }
 
     /// Inform the engine of an externally proposed [`CodingCommitment`].
-    pub async fn external_proposed(&mut self, commitment: CodingCommitment, leader: P) {
-        let msg = Message::ExternalProposed { commitment, leader };
+    pub async fn external_proposed(&mut self, commitment: CodingCommitment, leader: P, view: View) {
+        let msg = Message::ExternalProposed {
+            commitment,
+            leader,
+            view,
+        };
         self.sender.send_lossy(msg).await;
     }
 

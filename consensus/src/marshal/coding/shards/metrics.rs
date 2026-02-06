@@ -35,8 +35,6 @@ pub struct ShardMetrics {
     pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
     pub reconstruction_failures_total: Counter,
-    /// Total number of stale reconstruction states pruned due to TTL expiry.
-    pub stale_states_pruned_total: Counter,
 }
 
 impl ShardMetrics {
@@ -50,7 +48,6 @@ impl ShardMetrics {
         let shards_received = Family::<Peer, Counter>::default();
         let blocks_reconstructed_total = Counter::default();
         let reconstruction_failures_total = Counter::default();
-        let stale_states_pruned_total = Counter::default();
         context.register(
             "erasure_decode_duration",
             "Histogram of erasure decoding duration in seconds",
@@ -81,12 +78,6 @@ impl ShardMetrics {
             "Total number of block reconstruction failures",
             reconstruction_failures_total.clone(),
         );
-        context.register(
-            "stale_states_pruned_total",
-            "Total number of stale reconstruction states pruned due to TTL expiry",
-            stale_states_pruned_total.clone(),
-        );
-
         // Pre-create counters for all participants so they appear in metrics even with zero count.
         for participant in participants.iter() {
             let _ = shards_received.get_or_create(&Peer::new(participant));
@@ -99,7 +90,6 @@ impl ShardMetrics {
             shards_received,
             blocks_reconstructed_total,
             reconstruction_failures_total,
-            stale_states_pruned_total,
         }
     }
 }
