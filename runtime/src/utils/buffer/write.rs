@@ -111,7 +111,7 @@ impl<B: Blob> Blob for Write<B> {
                 Ok(IoBufsMut::Single(single))
             }
             // For chunked buffers, read into temp and copy back to preserve structure.
-            IoBufsMut::Chunked(mut chunks) => {
+            IoBufsMut::Chunked(chunks) => {
                 let mut temp = vec![0u8; len];
                 // Extract any bytes from the buffer that overlap with the
                 // requested range, into a temporary contiguous buffer
@@ -124,13 +124,9 @@ impl<B: Blob> Blob for Write<B> {
                     temp[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 // Copy back to original chunks
-                let mut pos = 0;
-                for chunk in chunks.iter_mut() {
-                    let chunk_len = chunk.len();
-                    chunk.as_mut().copy_from_slice(&temp[pos..pos + chunk_len]);
-                    pos += chunk_len;
-                }
-                Ok(IoBufsMut::Chunked(chunks))
+                let mut bufs = IoBufsMut::Chunked(chunks);
+                bufs.copy_from_slice(&temp);
+                Ok(bufs)
             }
         }
     }

@@ -60,7 +60,7 @@ impl crate::Blob for Blob {
                     .map_err(|_| Error::ReadFailed)?;
                 Ok(IoBufsMut::Single(single))
             }
-            IoBufsMut::Chunked(mut chunks) => {
+            IoBufsMut::Chunked(chunks) => {
                 // Read into a temporary buffer and copy to preserve the chunked structure
                 let mut temp = self.pool.alloc(len);
                 // SAFETY: `len` bytes are filled via read_exact below.
@@ -68,15 +68,9 @@ impl crate::Blob for Blob {
                 file.read_exact(temp.as_mut())
                     .await
                     .map_err(|_| Error::ReadFailed)?;
-                let mut offset = 0;
-                for chunk in chunks.iter_mut() {
-                    let chunk_len = chunk.len();
-                    chunk
-                        .as_mut()
-                        .copy_from_slice(&temp.as_ref()[offset..offset + chunk_len]);
-                    offset += chunk_len;
-                }
-                Ok(IoBufsMut::Chunked(chunks))
+                let mut bufs = IoBufsMut::Chunked(chunks);
+                bufs.copy_from_slice(temp.as_ref());
+                Ok(bufs)
             }
         }
     }

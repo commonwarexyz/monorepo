@@ -795,17 +795,13 @@ impl<B: Blob> Blob for Append<B> {
                 self.read_into(single.as_mut(), logical_offset).await?;
                 Ok(IoBufsMut::Single(single))
             }
-            IoBufsMut::Chunked(mut chunks) => {
+            IoBufsMut::Chunked(chunks) => {
                 // Read into a temporary buffer and copy back to preserve structure
                 let mut temp = vec![0u8; len];
                 self.read_into(&mut temp, logical_offset).await?;
-                let mut pos = 0;
-                for chunk in chunks.iter_mut() {
-                    let chunk_len = chunk.len();
-                    chunk.as_mut().copy_from_slice(&temp[pos..pos + chunk_len]);
-                    pos += chunk_len;
-                }
-                Ok(IoBufsMut::Chunked(chunks))
+                let mut bufs = IoBufsMut::Chunked(chunks);
+                bufs.copy_from_slice(&temp);
+                Ok(bufs)
             }
         }
     }

@@ -23,7 +23,7 @@
 use super::Header;
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    BufferPool, Error, IoBufMut, IoBufs, IoBufsMut,
+    BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{
@@ -353,16 +353,11 @@ impl crate::Blob for Blob {
         // Return the same buffer structure as input
         match original_bufs {
             None => Ok(IoBufsMut::Single(io_buf)),
-            Some(mut bufs) => {
+            Some(bufs) => {
                 // Copy from temporary buffer to the original chunked buffers
-                let mut offset = 0;
-                for buf in bufs.iter_mut() {
-                    let len = buf.len();
-                    buf.as_mut()
-                        .copy_from_slice(&io_buf.as_ref()[offset..offset + len]);
-                    offset += len;
-                }
-                Ok(IoBufsMut::Chunked(bufs))
+                let mut result = IoBufsMut::Chunked(bufs);
+                result.copy_from_slice(io_buf.as_ref());
+                Ok(result)
             }
         }
     }
