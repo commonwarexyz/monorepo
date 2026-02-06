@@ -1021,10 +1021,10 @@ pub mod fuzz {
     impl<'a> Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             match u.int_in_range(0..=3)? {
-                0 => Ok(Self::NttEqNaive(arb_polynomial_vector(u, 4, 2)?)),
-                1 => Ok(Self::EvaluationThenInverse(arb_polynomial_vector(u, 4, 2)?)),
-                2 => Ok(Self::VanishingPolynomial(arb_bit_vec_not_all_0(u, 4)?)),
-                _ => Ok(Self::Recovery(arb_recovery_setup(u, 8, 8, 2)?)),
+                0 => Ok(Self::NttEqNaive(arb_polynomial_vector(u, 6, 4)?)),
+                1 => Ok(Self::EvaluationThenInverse(arb_polynomial_vector(u, 6, 4)?)),
+                2 => Ok(Self::VanishingPolynomial(arb_bit_vec_not_all_0(u, 8)?)),
+                _ => Ok(Self::Recovery(arb_recovery_setup(u, 128, 128, 4)?)),
             }
         }
     }
