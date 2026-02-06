@@ -90,10 +90,7 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(u32, u32), Error> {
     };
 
     // Slow path: fetch bytes one at a time (skipping already-decoded peek bytes)
-    let mut buf = stream
-        .recv(peeked + 1)
-        .await
-        .map_err(Error::RecvFailed)?;
+    let mut buf = stream.recv(peeked + 1).await.map_err(Error::RecvFailed)?;
     buf.advance(peeked);
 
     loop {

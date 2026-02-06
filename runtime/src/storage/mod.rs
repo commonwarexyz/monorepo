@@ -206,8 +206,8 @@ impl arbitrary::Arbitrary<'_> for Header {
 pub(crate) mod tests {
     use super::{Header, HeaderError};
     use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufsMut, Storage};
-    use futures::FutureExt;
     use commonware_codec::{DecodeExt, Encode};
+    use futures::FutureExt;
 
     #[test]
     fn test_header_fields() {
@@ -853,15 +853,23 @@ pub(crate) mod tests {
 
         // Single buffer with capacity 5, request 11 bytes
         let buf = IoBufMut::with_capacity(5);
-        let result =
-            std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf)).catch_unwind().await;
-        assert!(result.is_err(), "Expected panic for insufficient single buffer capacity");
+        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf))
+            .catch_unwind()
+            .await;
+        assert!(
+            result.is_err(),
+            "Expected panic for insufficient single buffer capacity"
+        );
 
         // Chunked buffers with total capacity 8, request 11 bytes
         let bufs = IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
-        let result =
-            std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs)).catch_unwind().await;
-        assert!(result.is_err(), "Expected panic for insufficient chunked buffer capacity");
+        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs))
+            .catch_unwind()
+            .await;
+        assert!(
+            result.is_err(),
+            "Expected panic for insufficient chunked buffer capacity"
+        );
     }
 
     /// Test that read_at_buf works when buffer capacity exceeds len.

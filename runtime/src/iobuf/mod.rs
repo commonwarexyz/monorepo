@@ -1638,7 +1638,6 @@ mod tests {
         assert_eq!(buf.len(), 0);
     }
 
-
     #[test]
     fn test_iobufsmut_buf_trait_single() {
         let mut bufs = IoBufsMut::from(IoBufMut::from(b"hello world"));

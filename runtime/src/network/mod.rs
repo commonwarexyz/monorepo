@@ -265,10 +265,7 @@ mod tests {
 
             // Receive the rest
             let rest_len = DATA.len() - 5;
-            let rest = stream
-                .recv(rest_len)
-                .await
-                .expect("Failed to receive");
+            let rest = stream.recv(rest_len).await.expect("Failed to receive");
             assert_eq!(rest.coalesce(), &DATA[5..]);
 
             // After consuming all data, peek should return empty
