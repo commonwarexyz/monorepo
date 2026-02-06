@@ -349,16 +349,6 @@ impl<O: Sink> Sender<O> {
     }
 }
 
-impl<O: commonware_runtime::TcpOptions> commonware_runtime::TcpOptions for Sender<O> {
-    fn set_linger(&self, duration: Option<std::time::Duration>) {
-        self.sink.set_linger(duration);
-    }
-
-    fn set_nodelay(&self, nodelay: bool) -> Result<(), RuntimeError> {
-        self.sink.set_nodelay(nodelay)
-    }
-}
-
 /// Receives encrypted messages from a peer.
 pub struct Receiver<I> {
     cipher: RecvCipher,

@@ -9,13 +9,13 @@ use crate::authenticated::{
         metrics,
     },
     mailbox::UnboundedMailbox,
-    Mailbox,
+    Connection, Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Spawner, StreamOf,
+    Spawner, StreamOf, TcpOptions,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
@@ -69,6 +69,8 @@ impl<
         E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
         C: Signer,
     > Actor<E, C>
+where
+    SinkOf<E>: TcpOptions,
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
@@ -143,7 +145,10 @@ impl<
                 debug!(?peer, ?ingress, "upgraded connection");
 
                 // Start peer to handle messages
-                supervisor.spawn(instance, reservation).await;
+                let (send, recv) = instance;
+                supervisor
+                    .spawn(Connection::new_tcp(send, recv), reservation)
+                    .await;
             }
         });
     }

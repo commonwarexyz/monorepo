@@ -1,7 +1,6 @@
-use crate::authenticated::{discovery::actors::tracker::Reservation, Mailbox};
+use crate::authenticated::{discovery::actors::tracker::Reservation, Connection, Mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::channel::fallible::AsyncFallibleExt;
 
 /// Messages that can be processed by the spawner actor.
@@ -11,7 +10,7 @@ pub enum Message<O: Sink, I: Stream, P: PublicKey> {
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: (Sender<O>, Receiver<I>),
+        connection: Connection<O, I>,
         /// The reservation for the peer.
         reservation: Reservation<P>,
     },
@@ -22,11 +21,7 @@ impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
     ///
     /// This may fail during shutdown if the spawner has already exited,
     /// which is harmless since no new connections need to be spawned.
-    pub async fn spawn(
-        &mut self,
-        connection: (Sender<O>, Receiver<I>),
-        reservation: Reservation<P>,
-    ) {
+    pub async fn spawn(&mut self, connection: Connection<O, I>, reservation: Reservation<P>) {
         self.0
             .send_lossy(Message::Spawn {
                 peer: reservation.metadata().public_key().clone(),
