@@ -4,7 +4,7 @@ use commonware_runtime::Metrics as MetricsTrait;
 use commonware_utils::{ordered::Set, Array};
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
 };
 
 /// Label for per-peer metrics.
@@ -23,8 +23,8 @@ impl Peer {
 
 /// Metrics for the shard engine.
 pub struct ShardMetrics {
-    /// Duration of erasure decoding in milliseconds.
-    pub erasure_decode_duration: Gauge,
+    /// Histogram of erasure decoding duration in seconds.
+    pub erasure_decode_duration: Histogram,
     /// Number of blocks in the reconstructed blocks cache.
     pub reconstructed_blocks_cache_count: Gauge,
     /// Number of active reconstruction states.
@@ -42,7 +42,9 @@ pub struct ShardMetrics {
 impl ShardMetrics {
     /// Create and register metrics with the given context.
     pub fn new<P: Array>(context: &impl MetricsTrait, participants: &Set<P>) -> Self {
-        let erasure_decode_duration = Gauge::default();
+        let erasure_decode_duration = Histogram::new([
+            3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0,
+        ]);
         let reconstructed_blocks_cache_count = Gauge::default();
         let reconstruction_states_count = Gauge::default();
         let shards_received = Family::<Peer, Counter>::default();
@@ -51,7 +53,7 @@ impl ShardMetrics {
         let stale_states_pruned_total = Counter::default();
         context.register(
             "erasure_decode_duration",
-            "Duration of erasure decoding in milliseconds",
+            "Histogram of erasure decoding duration in seconds",
             erasure_decode_duration.clone(),
         );
         context.register(

@@ -521,10 +521,9 @@ where
             &self.strategy,
         )
         .map_err(Error::CodingRecovery)?;
-        let _ = self
-            .metrics
+        self.metrics
             .erasure_decode_duration
-            .try_set(start.elapsed().as_millis());
+            .observe(start.elapsed().as_secs_f64());
 
         // Attempt to decode the block from the encoded blob
         let inner = B::read_cfg(&mut blob.as_slice(), &self.block_codec_cfg)?;

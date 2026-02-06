@@ -79,7 +79,7 @@ use futures::{
     future::{try_join, Either, Ready},
     lock::Mutex,
 };
-use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing::{debug, warn};
@@ -149,7 +149,7 @@ where
     build_duration: Gauge,
     verify_duration: Gauge,
     proposal_parent_fetch_duration: Gauge,
-    erasure_encode_duration: Gauge,
+    erasure_encode_duration: Histogram,
 }
 
 impl<E, A, B, C, Z, S, ES> Marshaled<E, A, B, C, Z, S, ES>
@@ -200,10 +200,12 @@ where
             "Time taken to fetch a parent block in the proposal process, in milliseconds",
             proposal_parent_fetch_duration.clone(),
         );
-        let erasure_encode_duration = Gauge::default();
+        let erasure_encode_duration = Histogram::new([
+            3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0,
+        ]);
         context.register(
             "erasure_encode_duration",
-            "Time taken to erasure encode a block, in milliseconds",
+            "Histogram of time taken to erasure encode a block, in seconds",
             erasure_encode_duration.clone(),
         );
 
@@ -584,7 +586,7 @@ where
 
                 let start = Instant::now();
                 let coded_block = CodedBlock::<B, C>::new(built_block, coding_config, &strategy);
-                let _ = erasure_encode_duration.try_set(start.elapsed().as_millis());
+                erasure_encode_duration.observe(start.elapsed().as_secs_f64());
 
                 let commitment = coded_block.commitment();
                 {
@@ -703,6 +705,7 @@ where
                                     "skipping re-proposal verification"
                                 );
                                 task_tx.send_lossy(false);
+                                tx.send_lossy(false);
                                 return;
                             }
                         },
@@ -723,7 +726,6 @@ where
                     // verification task for `certify`.
                     marshal.verified(round, block).await;
                     task_tx.send_lossy(true);
-
                     tx.send_lossy(true);
                 });
             return rx;

@@ -850,20 +850,16 @@ impl TestHarness for CodingHarness {
         round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>>,
     ) {
-        // Notify the marshal which handles caching and shard broadcast
         handle.mailbox.proposed(round, block.clone()).await;
     }
 
     async fn verify(
-        _handle: &mut ValidatorHandle<Self>,
-        _round: Round,
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>>,
-        all_handles: &mut [ValidatorHandle<Self>],
+        _all_handles: &mut [ValidatorHandle<Self>],
     ) {
-        // Ask each peer to validate their received shards
-        for h in all_handles.iter_mut() {
-            let _recv = h.extra.subscribe_shard(block.commitment()).await;
-        }
+        handle.mailbox.verified(round, block.clone()).await;
     }
 
     fn make_finalization(
@@ -1022,10 +1018,10 @@ impl TestHarness for CodingHarness {
 
     async fn verify_for_prune(
         handle: &mut ValidatorHandle<Self>,
-        _round: Round,
+        round: Round,
         block: &CodedBlock<CodingB, ReedSolomon<Sha256>>,
     ) {
-        handle.extra.proposed(block.clone()).await;
+        handle.mailbox.verified(round, block.clone()).await;
     }
 }
 
