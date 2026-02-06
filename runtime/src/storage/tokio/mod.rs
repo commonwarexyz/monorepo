@@ -247,7 +247,7 @@ impl crate::Storage for Storage {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
     use rand::{Rng as _, SeedableRng};
     use std::env;
 
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+        let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // Test 4: Resize with logical length
@@ -332,7 +332,7 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(0, IoBufMut::zeroed(9)).await.unwrap();
+        let read_buf = blob2.read_at(0, 9).await.unwrap();
         assert_eq!(read_buf.coalesce(), b"test data");
         drop(blob2);
 

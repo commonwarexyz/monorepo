@@ -103,14 +103,14 @@ impl<B: Blob> Read<B> {
         let mut buf = std::mem::take(&mut self.buffer);
         buf.clear();
         let buf = if buf.capacity() >= bytes_to_read {
-            // SAFETY: We just cleared the buffer and verified capacity.
-            // The bytes will be overwritten by read_at before being read.
-            unsafe { buf.set_len(bytes_to_read) };
             buf
         } else {
-            IoBufMut::zeroed(bytes_to_read)
+            IoBufMut::with_capacity(bytes_to_read)
         };
-        let read_result = self.blob.read_at(self.blob_position, buf).await?;
+        let read_result = self
+            .blob
+            .read_at_buf(self.blob_position, buf, bytes_to_read)
+            .await?;
         self.buffer = read_result.coalesce();
         self.buffer_valid_len = bytes_to_read;
 

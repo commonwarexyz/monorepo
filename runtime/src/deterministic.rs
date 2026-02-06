@@ -1609,9 +1609,7 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{
-        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
-    };
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
@@ -1776,7 +1774,7 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read.coalesce(), data);
         });
     }
@@ -2126,7 +2124,7 @@ mod tests {
                 .expect("sync should succeed with faults disabled");
 
             // Verify data persisted
-            let read_buf = blob.read_at(0, vec![0u8; 9]).await.unwrap();
+            let read_buf = blob.read_at(0, 9).await.unwrap();
             assert_eq!(read_buf.coalesce(), b"recovered");
         });
     }

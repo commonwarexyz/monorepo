@@ -257,20 +257,25 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
+    async fn read_at_buf(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
+        len: usize,
     ) -> Result<IoBufsMut, Error> {
-        let input_buf = buf.into();
+        let mut input_buf = buf.into();
+        // SAFETY: iouring.rs fills all `len` bytes via io_uring read below.
+        unsafe { input_buf.prepare_read(len)? };
 
         // For single buffers, read directly into them (zero-copy).
         // For chunked buffers, use a temporary and copy to preserve the input structure.
-        let buf_len = input_buf.len();
+        let buf_len = len;
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
-            IoBufsMut::Chunked(bufs) => (IoBufMut::zeroed(buf_len), Some(bufs)),
+            IoBufsMut::Chunked(bufs) => (IoBufMut::with_capacity(buf_len), Some(bufs)),
         };
+        // SAFETY: io_uring read loop fills all buf_len bytes below.
+        unsafe { io_buf.set_len(buf_len) };
 
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
@@ -461,7 +466,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -526,11 +531,7 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob
-            .read_at(0, IoBufMut::zeroed(data.len()))
-            .await
-            .unwrap()
-            .coalesce();
+        let read_buf = blob.read_at(0, data.len()).await.unwrap().coalesce();
         assert_eq!(read_buf, data);
 
         // Test 4: Resize with logical length
@@ -560,11 +561,7 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2
-            .read_at(0, IoBufMut::zeroed(9))
-            .await
-            .unwrap()
-            .coalesce();
+        let read_buf = blob2.read_at(0, 9).await.unwrap().coalesce();
         assert_eq!(read_buf, b"test data");
         drop(blob2);
 

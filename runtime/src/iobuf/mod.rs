@@ -855,6 +855,42 @@ impl IoBufsMut {
         }
     }
 
+    /// Returns the total capacity across all buffers.
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::Single(buf) => buf.capacity(),
+            Self::Chunked(bufs) => bufs
+                .iter()
+                .map(|b| b.capacity())
+                .fold(0, usize::saturating_add),
+        }
+    }
+
+    /// Prepares the buffer for a read operation of `len` bytes.
+    ///
+    /// # Safety
+    /// Caller must initialize all `len` bytes before the buffer is read.
+    pub(crate) unsafe fn prepare_read(&mut self, len: usize) -> Result<(), crate::Error> {
+        if len > self.capacity() {
+            return Err(crate::Error::BufferTooSmall);
+        }
+        if len != self.len() {
+            match self {
+                Self::Single(buf) => buf.set_len(len),
+                Self::Chunked(bufs) => {
+                    let mut remaining = len;
+                    for buf in bufs.iter_mut() {
+                        let cap = buf.capacity();
+                        let to_set = remaining.min(cap);
+                        buf.set_len(to_set);
+                        remaining -= to_set;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Copy data from a slice into the buffers.
     ///
     /// Panics if the slice length doesn't match the total buffer length.

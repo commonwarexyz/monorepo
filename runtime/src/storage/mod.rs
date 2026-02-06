@@ -311,7 +311,7 @@ pub(crate) mod tests {
         assert_eq!(len, 0);
 
         blob.write_at(0, b"hello world").await.unwrap();
-        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        let read = blob.read_at(0, 11).await.unwrap();
 
         assert_eq!(
             read.coalesce(),
@@ -384,7 +384,7 @@ pub(crate) mod tests {
 
         let read_task = tokio::spawn({
             let blob = blob.clone();
-            async move { blob.read_at(0, IoBufMut::zeroed(16)).await.unwrap() }
+            async move { blob.read_at(0, 16).await.unwrap() }
         });
 
         write_task.await.unwrap();
@@ -408,11 +408,7 @@ pub(crate) mod tests {
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
         blob.write_at(0, large_data.clone()).await.unwrap();
 
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(10 * 1024 * 1024))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 10 * 1024 * 1024).await.unwrap().coalesce();
 
         assert_eq!(read, large_data.as_slice(), "Large data read/write failed");
     }
@@ -435,11 +431,7 @@ pub(crate) mod tests {
         blob.write_at(8, b"overwrite").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(17))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 17).await.unwrap().coalesce();
 
         assert_eq!(
             read, b"initial overwrite",
@@ -462,7 +454,7 @@ pub(crate) mod tests {
         blob.write_at(0, b"hello").await.unwrap();
 
         // Attempt to read beyond the written data
-        let result = blob.read_at(6, IoBufMut::zeroed(10)).await;
+        let result = blob.read_at(6, 10).await;
 
         assert!(
             result.is_err(),
@@ -485,11 +477,7 @@ pub(crate) mod tests {
         blob.write_at(10_000, b"offset data").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(10_000, IoBufMut::zeroed(11))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(10_000, 11).await.unwrap().coalesce();
         assert_eq!(read, b"offset data", "Data at large offset is incorrect");
     }
 
@@ -511,11 +499,7 @@ pub(crate) mod tests {
         blob.write_at(5, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(11))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read, b"firstsecond", "Appended data is incorrect");
     }
 
@@ -532,18 +516,10 @@ pub(crate) mod tests {
         blob.write_at(10, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(5))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 5).await.unwrap().coalesce();
         assert_eq!(read, b"first", "Data at offset 0 is incorrect");
 
-        let read = blob
-            .read_at(10, IoBufMut::zeroed(6))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(10, 6).await.unwrap().coalesce();
         assert_eq!(read, b"second", "Data at offset 10 is incorrect");
     }
 
@@ -572,7 +548,7 @@ pub(crate) mod tests {
         // Read back the data in chunks
         for i in 0..num_chunks {
             let read = blob
-                .read_at((i * chunk_size) as u64, IoBufMut::zeroed(chunk_size))
+                .read_at((i * chunk_size) as u64, chunk_size)
                 .await
                 .unwrap()
                 .coalesce();
@@ -591,7 +567,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let result = blob.read_at(0, IoBufMut::zeroed(1)).await;
+        let result = blob.read_at(0, 1).await;
         assert!(
             result.is_err(),
             "Reading from an empty blob should return an error"
@@ -614,11 +590,7 @@ pub(crate) mod tests {
         blob.write_at(4, b"map").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(7))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 7).await.unwrap().coalesce();
         assert_eq!(read, b"overmap", "Overlapping writes are incorrect");
     }
 
@@ -651,11 +623,7 @@ pub(crate) mod tests {
         assert_eq!(len, 5, "Blob length after resize is incorrect");
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(5))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 5).await.unwrap().coalesce();
         assert_eq!(read, b"hello", "Resized data is incorrect");
     }
 
@@ -781,7 +749,7 @@ pub(crate) mod tests {
         // Test with single buffer - verify same buffer is returned
         let input_buf = IoBufMut::zeroed(11);
         let input_ptr = input_buf.as_ref().as_ptr();
-        let output = blob.read_at(0, input_buf).await.unwrap();
+        let output = blob.read_at_buf(0, input_buf, 11).await.unwrap();
         assert!(
             output.is_single(),
             "Single input should return single output"
@@ -801,7 +769,7 @@ pub(crate) mod tests {
         let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!input_bufs.is_single(), "Should be chunked");
 
-        let output = blob.read_at(0, input_bufs).await.unwrap();
+        let output = blob.read_at_buf(0, input_bufs, 11).await.unwrap();
         assert!(
             !output.is_single(),
             "Chunked input should return chunked output"

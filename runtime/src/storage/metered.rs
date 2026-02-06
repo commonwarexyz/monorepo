@@ -137,15 +137,15 @@ impl Drop for MetricsHandle {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
+    async fn read_at_buf(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
+        len: usize,
     ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
-        let read = self.inner.read_at(offset, buf).await?;
+        let read = self.inner.read_at_buf(offset, buf, len).await?;
         self.metrics.storage_reads.inc();
-        self.metrics.storage_read_bytes.inc_by(read.len() as u64);
+        self.metrics.storage_read_bytes.inc_by(len as u64);
         Ok(read)
     }
 
@@ -172,7 +172,7 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
-        Blob, IoBufMut, Storage as _,
+        Blob, Storage as _,
     };
     use prometheus_client::registry::Registry;
 
@@ -216,7 +216,7 @@ mod tests {
         );
 
         // Read data from the blob
-        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        let read = blob.read_at(0, 11).await.unwrap();
         assert_eq!(read.coalesce(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
@@ -313,8 +313,8 @@ mod tests {
         // Use the clones for some operations to verify they share metrics
         blob.write_at(0, b"hello").await.unwrap();
         clone1.write_at(5, b"world").await.unwrap();
-        let _ = clone1.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
-        let _ = clone2.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
+        let _ = clone1.read_at(0, 10).await.unwrap();
+        let _ = clone2.read_at(0, 10).await.unwrap();
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(

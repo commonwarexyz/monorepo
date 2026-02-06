@@ -22,25 +22,25 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
+    async fn read_at_buf(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
+        len: usize,
     ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
-        let len = buf.len();
+        let mut buf = buf.into();
+        // SAFETY: unix.rs fills all `len` bytes via read_exact_at below.
+        unsafe { buf.prepare_read(len)? };
         let file = self.file.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
         task::spawn_blocking(move || match buf {
             IoBufsMut::Single(mut single) => {
-                // Read directly into the single buffer (zero-copy)
                 file.read_exact_at(single.as_mut(), offset)?;
                 Ok(IoBufsMut::Single(single))
             }
             IoBufsMut::Chunked(mut chunks) => {
-                // Read into a temporary buffer and copy to preserve the chunked structure
                 let mut temp = vec![0u8; len];
                 file.read_exact_at(&mut temp, offset)?;
                 let mut off = 0;

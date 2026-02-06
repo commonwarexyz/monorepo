@@ -285,15 +285,16 @@ impl<B: crate::Blob> Blob<B> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
+    async fn read_at_buf(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
+        len: usize,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(Error::Io(injected_io_error()));
         }
-        self.inner.read_at(offset, buf.into()).await
+        self.inner.read_at_buf(offset, buf.into(), len).await
     }
 
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
@@ -423,10 +424,7 @@ mod tests {
         // Enable read faults
         h.config.write().unwrap().read_rate = Some(1.0);
 
-        assert!(matches!(
-            blob.read_at(0, vec![0u8; 4]).await,
-            Err(Error::Io(_))
-        ));
+        assert!(matches!(blob.read_at(0, 4).await, Err(Error::Io(_))));
     }
 
     #[tokio::test]
@@ -543,8 +541,7 @@ mod tests {
             data.len()
         );
 
-        let read_buf = vec![0u8; bytes_written];
-        let read_result = inner_blob.read_at(0, read_buf).await.unwrap();
+        let read_result = inner_blob.read_at(0, bytes_written).await.unwrap();
         assert_eq!(read_result.coalesce().as_ref(), &data[..bytes_written]);
     }
 

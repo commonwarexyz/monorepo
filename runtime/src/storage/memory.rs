@@ -147,12 +147,15 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
+    async fn read_at_buf(
         &self,
         offset: u64,
         buf: impl Into<IoBufsMut> + Send,
+        len: usize,
     ) -> Result<IoBufsMut, crate::Error> {
         let mut buf = buf.into();
+        // SAFETY: memory.rs fills all `len` bytes via copy_from_slice below.
+        unsafe { buf.prepare_read(len)? };
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -161,10 +164,10 @@ impl crate::Blob for Blob {
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let content = self.content.read().unwrap();
         let content_len = content.len();
-        if offset + buf.len() > content_len {
+        if offset + len > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        buf.copy_from_slice(&content[offset..offset + buf.len()]);
+        buf.copy_from_slice(&content[offset..offset + len]);
         Ok(buf)
     }
 
@@ -222,7 +225,7 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
 
     #[tokio::test]
     async fn test_memory_storage() {
@@ -266,7 +269,7 @@ mod tests {
         }
 
         // Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+        let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // Corrupted blob recovery (0 < raw_size < 8)
