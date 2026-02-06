@@ -505,9 +505,9 @@ impl<B: Blob> Append<B> {
     /// Returns an error if no bytes are available at the given offset.
     pub async fn read_up_to(
         &self,
+        logical_offset: u64,
         buf: impl Into<IoBufMut> + Send,
         len: usize,
-        logical_offset: u64,
     ) -> Result<(IoBufMut, usize), Error> {
         let mut buf = buf.into();
         if len == 0 {
