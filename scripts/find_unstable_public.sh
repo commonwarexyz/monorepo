@@ -191,7 +191,7 @@ while read -r crate; do
         exit_code=1
     fi
     echo ""
-done < <(get_crates "${selected_crates[@]}")
+done < <(get_crates "${selected_crates[@]+"${selected_crates[@]}"}")
 
 if [[ $exit_code -eq 0 ]]; then
     echo "All public items have stability annotations."
