@@ -15,8 +15,6 @@ STABILITY_CFG="commonware_stability_RESERVED"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/stability_helpers.sh"
 
-# Items to ignore (#[macro_export] macros can't be inside stability_scope due to Rust limitations)
-IGNORE_ITEMS="NZDuration|NZU8|NZU16|NZU32|NZU64|NZUsize"
 
 if ! command -v jq &> /dev/null; then
     echo "Error: jq is required but not installed." >&2
