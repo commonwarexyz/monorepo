@@ -22,4 +22,4 @@ pub use mailbox::{Mailbox, Message};
 mod metrics;
 
 mod engine;
-pub use engine::{Config, Engine, ReconstructionError};
+pub use engine::{Config, Engine, Error};

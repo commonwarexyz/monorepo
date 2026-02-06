@@ -674,6 +674,14 @@ where
             let block_digest: B::Digest = payload.block_digest();
             let verification_tasks = Arc::clone(&self.verification_tasks);
 
+            // Register a verification task synchronously before spawning work so
+            // `certify` can always find it (no race with task startup).
+            let (task_tx, task_rx) = oneshot::channel();
+            verification_tasks
+                .lock()
+                .await
+                .insert((round, block_digest), task_rx);
+
             let (mut tx, rx) = oneshot::channel();
             self.context
                 .with_label("verify_reproposal")
@@ -694,6 +702,7 @@ where
                                     reason = "failed to fetch block for re-proposal verification",
                                     "skipping re-proposal verification"
                                 );
+                                task_tx.send_lossy(false);
                                 return;
                             }
                         },
@@ -705,20 +714,15 @@ where
                             %last_in_epoch,
                             "re-proposal is not at epoch boundary"
                         );
+                        task_tx.send_lossy(false);
                         tx.send_lossy(false);
                         return;
                     }
 
-                    // Valid re-proposal. Notify the marshal and create a completed
+                    // Valid re-proposal. Notify the marshal and complete the
                     // verification task for `certify`.
                     marshal.verified(round, block).await;
-
-                    let (task_tx, task_rx) = oneshot::channel();
                     task_tx.send_lossy(true);
-                    verification_tasks
-                        .lock()
-                        .await
-                        .insert((round, block_digest), task_rx);
 
                     tx.send_lossy(true);
                 });

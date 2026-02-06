@@ -191,7 +191,7 @@ use tracing::{debug, warn};
 
 /// An error that can occur during reconstruction of a [`CodedBlock`] from [`Shard`]s
 #[derive(Debug, Error)]
-pub enum ReconstructionError<C: CodingScheme> {
+pub enum Error<C: CodingScheme> {
     /// An error occurred while recovering the encoded blob from the [`Shard`]s
     #[error(transparent)]
     CodingRecovery(C::Error),
@@ -489,12 +489,12 @@ where
     /// # Returns
     /// - `Ok(Some(block))` if reconstruction was successful or the block was already reconstructed.
     /// - `Ok(None)` if reconstruction could not be attempted due to insufficient checked shards.
-    /// - `Err(ReconstructionError)` if reconstruction was attempted but failed.
+    /// - `Err(_)` if reconstruction was attempted but failed.
     #[inline]
     async fn try_reconstruct(
         &mut self,
         commitment: CodingCommitment,
-    ) -> Result<Option<Arc<CodedBlock<B, C>>>, ReconstructionError<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C>>>, Error<C>> {
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(Arc::clone(block)));
         }
@@ -520,7 +520,7 @@ where
             state.checked_shards(),
             &self.strategy,
         )
-        .map_err(ReconstructionError::CodingRecovery)?;
+        .map_err(Error::CodingRecovery)?;
         let _ = self
             .metrics
             .erasure_decode_duration
@@ -531,7 +531,7 @@ where
 
         // Verify the reconstructed block's digest matches the commitment's block digest.
         if inner.digest() != commitment.block_digest() {
-            return Err(ReconstructionError::DigestMismatch);
+            return Err(Error::DigestMismatch);
         }
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
@@ -760,9 +760,9 @@ where
         let pruned = before - self.state.len();
         if pruned > 0 {
             debug!(pruned, "pruned stale reconstruction states");
-            self.metrics.stale_states_pruned_total.inc_by(
-                u64::try_from(pruned).expect("pruned count impossibly out of bounds"),
-            );
+            self.metrics
+                .stale_states_pruned_total
+                .inc_by(u64::try_from(pruned).expect("pruned count impossibly out of bounds"));
         }
     }
 
