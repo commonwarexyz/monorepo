@@ -5,7 +5,7 @@ use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
 use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
-use std::num::NonZeroU32;
+use core::num::NonZeroU32;
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
