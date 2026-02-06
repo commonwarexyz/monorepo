@@ -108,7 +108,7 @@ check-stability *args='':
     level=""
     extra_args=""
     # Build exclude flags from shared config
-    source scripts/stability_config.sh
+    source scripts/stability_helpers.sh
     excludes=$(stability_exclude_flags)
     # Level names in order (index 0-4)
     LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)

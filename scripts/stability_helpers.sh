@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared configuration for stability checks.
+# Shared helpers for stability checks.
 # Sourced by both check-stability (justfile) and find_unstable_public.sh.
 
 # Crates to exclude: examples, internal tooling, heavy external deps, fuzz targets, proc-macro crates
