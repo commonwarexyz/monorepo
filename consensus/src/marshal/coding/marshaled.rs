@@ -49,6 +49,9 @@
 //! - Genesis blocks are handled specially: epoch 0 returns the application's genesis block,
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
+//! - It is currently assumed that if a notarize vote is received, the shard that was sent
+//!   along with it was valid. The shard was sent in a separate message from the vote, so it
+//!   is possible that this will not be the case.
 
 use crate::{
     marshal::{
