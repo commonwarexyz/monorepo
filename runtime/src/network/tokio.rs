@@ -38,8 +38,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
-        let len = len as usize;
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let read_fut = async {
             let mut buf = self.pool.alloc(len);
             // SAFETY: We will write exactly `len` bytes before returning
@@ -59,8 +58,7 @@ impl crate::Stream for Stream {
             .map_err(|_| Error::Timeout)?
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
-        let max_len = max_len as usize;
+    fn peek(&self, max_len: usize) -> &[u8] {
         let buffered = self.stream.buffer();
         let len = std::cmp::min(buffered.len(), max_len);
         &buffered[..len]

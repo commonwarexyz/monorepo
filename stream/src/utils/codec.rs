@@ -60,7 +60,7 @@ pub async fn recv_frame<T: Stream>(stream: &mut T, max_message_size: u32) -> Res
     }
 
     stream
-        .recv(skip as u64 + len as u64)
+        .recv(skip as usize + len as usize)
         .await
         .map(|mut bufs| {
             bufs.advance(skip as usize);
@@ -78,7 +78,7 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(u32, u32), Error> {
 
     // Fast path: decode from peek buffer without blocking
     let peeked = {
-        let peeked = stream.peek(MAX_U32_VARINT_SIZE as u64);
+        let peeked = stream.peek(MAX_U32_VARINT_SIZE);
         for (i, byte) in peeked.iter().enumerate() {
             match decoder.feed(*byte) {
                 Ok(Some(len)) => return Ok((len, i as u32 + 1)),
@@ -91,7 +91,7 @@ async fn recv_length<T: Stream>(stream: &mut T) -> Result<(u32, u32), Error> {
 
     // Slow path: fetch bytes one at a time (skipping already-decoded peek bytes)
     let mut buf = stream
-        .recv(peeked as u64 + 1)
+        .recv(peeked + 1)
         .await
         .map_err(Error::RecvFailed)?;
     buf.advance(peeked);
@@ -175,7 +175,7 @@ mod tests {
             // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08] (2 bytes)
             let read = stream.recv(2).await.unwrap();
             assert_eq!(read.coalesce(), &[0x80, 0x08]); // 1024 as varint
-            let read = stream.recv(MAX_MESSAGE_SIZE as u64).await.unwrap();
+            let read = stream.recv(MAX_MESSAGE_SIZE as usize).await.unwrap();
             assert_eq!(read.coalesce(), buf);
         });
     }

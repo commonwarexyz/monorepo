@@ -590,7 +590,7 @@ stability_scope!(BETA {
         /// # Warning
         ///
         /// If the stream returns an error, partially read data may be discarded.
-        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+        fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 
         /// Peek at buffered data without consuming.
         ///
@@ -599,7 +599,7 @@ stability_scope!(BETA {
         ///
         /// This is useful e.g. for parsing length prefixes without committing to a read
         /// or paying the cost of async.
-        fn peek(&self, max_len: u64) -> &[u8];
+        fn peek(&self, max_len: usize) -> &[u8];
     }
 
     /// Interface to interact with storage.
@@ -3379,7 +3379,7 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let received = stream.recv(content_length as u64).await?;
+                let received = stream.recv(content_length).await?;
                 String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
             }
 

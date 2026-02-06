@@ -39,7 +39,7 @@ pub struct Stream<S: crate::Stream> {
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
         });
@@ -64,7 +64,7 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
         Ok(buf.into())
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
+    fn peek(&self, max_len: usize) -> &[u8] {
         self.inner.peek(max_len)
     }
 }
@@ -266,7 +266,7 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
-                let received = stream.recv(CLIENT_MSG.len() as u64).await.unwrap();
+                let received = stream.recv(CLIENT_MSG.len()).await.unwrap();
                 assert_eq!(received.coalesce(), CLIENT_MSG.as_bytes());
 
                 // Send response
@@ -287,7 +287,7 @@ mod tests {
                 sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
 
                 // Receive response
-                let received = stream.recv(SERVER_MSG.len() as u64).await.unwrap();
+                let received = stream.recv(SERVER_MSG.len()).await.unwrap();
                 assert_eq!(received.coalesce(), SERVER_MSG.as_bytes());
             });
             client_handles.push(handle);

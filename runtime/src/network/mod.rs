@@ -53,7 +53,7 @@ mod tests {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             let received = stream
-                .recv(CLIENT_SEND_DATA.len() as u64)
+                .recv(CLIENT_SEND_DATA.len())
                 .await
                 .expect("Failed to receive");
             assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
@@ -75,7 +75,7 @@ mod tests {
                 .expect("Failed to send data");
 
             let received = stream
-                .recv(SERVER_SEND_DATA.len() as u64)
+                .recv(SERVER_SEND_DATA.len())
                 .await
                 .expect("Failed to receive data");
             assert_eq!(received.coalesce(), SERVER_SEND_DATA);
@@ -105,7 +105,7 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
                 let received = stream
-                    .recv(CLIENT_SEND_DATA.len() as u64)
+                    .recv(CLIENT_SEND_DATA.len())
                     .await
                     .expect("Failed to receive");
                 assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
@@ -132,7 +132,7 @@ mod tests {
 
                 // Receive a message from the server
                 let received = stream
-                    .recv(SERVER_SEND_DATA.len() as u64)
+                    .recv(SERVER_SEND_DATA.len())
                     .await
                     .expect("Failed to receive data");
                 // Verify the received data
@@ -164,7 +164,7 @@ mod tests {
             // Receive and echo large data in chunks
             for _ in 0..NUM_CHUNKS {
                 let received = stream
-                    .recv(CHUNK_SIZE as u64)
+                    .recv(CHUNK_SIZE)
                     .await
                     .expect("Failed to receive chunk");
                 sink.send(received).await.expect("Failed to send chunk");
@@ -188,7 +188,7 @@ mod tests {
                     .await
                     .expect("Failed to send chunk");
                 let received = stream
-                    .recv(CHUNK_SIZE as u64)
+                    .recv(CHUNK_SIZE)
                     .await
                     .expect("Failed to receive chunk");
                 assert_eq!(received.coalesce(), &pattern[..]);
@@ -266,7 +266,7 @@ mod tests {
             // Receive the rest
             let rest_len = DATA.len() - 5;
             let rest = stream
-                .recv(rest_len as u64)
+                .recv(rest_len)
                 .await
                 .expect("Failed to receive");
             assert_eq!(rest.coalesce(), &DATA[5..]);
@@ -309,7 +309,7 @@ mod tests {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
                     for _ in 0..NUM_MESSAGES {
-                        let received = stream.recv(MESSAGE_SIZE as u64).await.unwrap();
+                        let received = stream.recv(MESSAGE_SIZE).await.unwrap();
                         sink.send(received).await.unwrap();
                     }
                 });
@@ -325,7 +325,7 @@ mod tests {
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();
-                    let received = stream.recv(MESSAGE_SIZE as u64).await.unwrap();
+                    let received = stream.recv(MESSAGE_SIZE).await.unwrap();
                     assert_eq!(received.coalesce(), &payload[..]);
                 }
             }));

@@ -441,8 +441,7 @@ impl Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, crate::Error> {
-        let len = len as usize;
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, crate::Error> {
         let mut owned_buf = self.pool.alloc(len);
         // SAFETY: We will write exactly `len` bytes before returning
         // (loop continues until bytes_received == len). The buffer contents
@@ -482,8 +481,7 @@ impl crate::Stream for Stream {
         Ok(IoBufs::from(owned_buf.freeze()))
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
-        let max_len = max_len as usize;
+    fn peek(&self, max_len: usize) -> &[u8] {
         let buffered = self.buffer_len - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]

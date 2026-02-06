@@ -27,11 +27,11 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
+    fn peek(&self, max_len: usize) -> &[u8] {
         self.receiver.peek(max_len)
     }
 }
