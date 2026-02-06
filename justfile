@@ -19,7 +19,7 @@ build *args='':
     cargo build $@
 
 # Runs pre-flight lints + tests before making a pull-request
-pre-pr: lint test-docs test check-stability
+pre-pr: lint test-docs test
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
@@ -41,8 +41,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, and features.)
-lint: check-fmt clippy check-docs check-features
+# Runs all lints (fmt, clippy, docs, features, and stability)
+lint: check-fmt clippy check-docs check-features check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
@@ -95,8 +95,9 @@ test-conformance *args='':
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
 
-# Packages to exclude from stability checks (examples, fuzz targets)
-stability_excludes := "--exclude commonware-bridge --exclude commonware-chat --exclude commonware-estimator --exclude commonware-flood --exclude commonware-log --exclude commonware-reshare --exclude commonware-sync --exclude commonware-broadcast-fuzz --exclude commonware-codec-fuzz --exclude commonware-coding-fuzz --exclude commonware-collector-fuzz --exclude commonware-consensus-fuzz --exclude commonware-cryptography-fuzz --exclude commonware-p2p-fuzz --exclude commonware-runtime-fuzz --exclude commonware-storage-fuzz --exclude commonware-stream-fuzz --exclude commonware-utils-fuzz"
+# Find public items missing stability annotations.
+unstable-public *args='':
+    ./scripts/find_unstable_public.sh {{ args }}
 
 # Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
 # ALPHA (level 0) is the default state and doesn't require a cfg flag.
@@ -106,6 +107,9 @@ check-stability *args='':
     all_args="{{ args }}"
     level=""
     extra_args=""
+    # Build exclude flags from shared config
+    source scripts/stability_helpers.sh
+    excludes=$(stability_exclude_flags)
     # Level names in order (index 0-4)
     LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
     # Convert name to index by iterating the array
@@ -146,11 +150,12 @@ check-stability *args='':
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."
-            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib {{ stability_excludes }} $extra_args || exit 1
+            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
         done
         echo "All stability levels pass!"
+        echo "Checking for unmarked public items..."
+        ./scripts/find_unstable_public.sh $extra_args
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args
     fi
-
