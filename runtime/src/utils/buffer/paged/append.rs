@@ -519,7 +519,7 @@ impl<B: Blob> Append<B> {
             return Err(Error::BlobInsufficientLength);
         }
         // SAFETY: read_into below fills all `available` bytes.
-        unsafe { buf.set_len(available) };
+        unsafe { buf.prepare_read(available)? };
         self.read_into(buf.as_mut(), logical_offset).await?;
 
         Ok((buf, available))

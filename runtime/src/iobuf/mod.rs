@@ -287,6 +287,21 @@ impl IoBufMut {
         }
     }
 
+    /// Prepares the buffer for a read operation of `len` bytes.
+    ///
+    /// # Safety
+    ///
+    /// Caller must initialize all `len` bytes before the buffer is read.
+    pub(crate) unsafe fn prepare_read(&mut self, len: usize) -> Result<(), crate::Error> {
+        if len > self.capacity() {
+            return Err(crate::Error::BufferTooSmall);
+        }
+        if len != self.len() {
+            self.set_len(len);
+        }
+        Ok(())
+    }
+
     /// Number of bytes remaining in the buffer.
     #[inline]
     pub fn len(&self) -> usize {
@@ -869,6 +884,7 @@ impl IoBufsMut {
     /// Prepares the buffer for a read operation of `len` bytes.
     ///
     /// # Safety
+    ///
     /// Caller must initialize all `len` bytes before the buffer is read.
     pub(crate) unsafe fn prepare_read(&mut self, len: usize) -> Result<(), crate::Error> {
         if len > self.capacity() {
