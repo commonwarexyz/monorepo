@@ -97,13 +97,6 @@ get_crates() {
     fi
 }
 
-# Build exclude crate list for cargo doc
-get_excluded_crates() {
-    cargo metadata --no-deps --format-version=1 2>/dev/null | \
-        jq -r '.packages[].name' | \
-        grep -E "$SKIP_REGEX" || true
-}
-
 check_json_file() {
     local json_file="$1"
     local crate_underscore
@@ -149,11 +142,7 @@ if [[ ${#selected_crates[@]} -gt 0 ]]; then
     done
 else
     # All workspace crates (with exclusions)
-    pkg_args+=("--workspace")
-    while read -r crate; do
-        [[ -z "$crate" ]] && continue
-        pkg_args+=("--exclude" "$crate")
-    done < <(get_excluded_crates)
+    read -r -a pkg_args <<< "--workspace $(stability_exclude_flags)"
 fi
 
 echo "Generating rustdoc JSON..." >&2
