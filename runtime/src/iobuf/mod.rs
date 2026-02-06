@@ -1651,6 +1651,42 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufmut_prepare_read() {
+        // SAFETY: we don't read the uninitialized bytes.
+        unsafe {
+            // Sets length
+            let mut buf = IoBufMut::with_capacity(16);
+            buf.prepare_read(10).unwrap();
+            assert_eq!(buf.len(), 10);
+
+            // Idempotent
+            buf.prepare_read(10).unwrap();
+            assert_eq!(buf.len(), 10);
+
+            // Can shrink
+            buf.prepare_read(5).unwrap();
+            assert_eq!(buf.len(), 5);
+
+            // Zero length
+            buf.prepare_read(0).unwrap();
+            assert_eq!(buf.len(), 0);
+
+            // Exact capacity succeeds
+            let mut buf = IoBufMut::with_capacity(8);
+            buf.prepare_read(8).unwrap();
+            assert_eq!(buf.len(), 8);
+
+            // One over capacity fails, length unchanged
+            let mut buf = IoBufMut::with_capacity(8);
+            assert!(matches!(
+                buf.prepare_read(9),
+                Err(crate::Error::BufferTooSmall)
+            ));
+            assert_eq!(buf.len(), 0);
+        }
+    }
+
+    #[test]
     fn test_iobufsmut_buf_trait_single() {
         let mut bufs = IoBufsMut::from(IoBufMut::from(b"hello world"));
         assert_eq!(bufs.remaining(), 11);
@@ -2122,6 +2158,74 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
         assert_eq!(coalesced, b"hello");
         assert!(coalesced.capacity() >= 105);
+    }
+
+    #[test]
+    fn test_iobufsmut_prepare_read() {
+        // SAFETY: we don't read the uninitialized bytes.
+        unsafe {
+            // Single buffer
+            let mut bufs = IoBufsMut::from(IoBufMut::with_capacity(16));
+            bufs.prepare_read(10).unwrap();
+            assert_eq!(bufs.len(), 10);
+
+            // Chunked: distributes across chunks [cap 5, cap 10], read 12 -> [5, 7]
+            let mut bufs = IoBufsMut::from(vec![
+                IoBufMut::with_capacity(5),
+                IoBufMut::with_capacity(10),
+            ]);
+            bufs.prepare_read(12).unwrap();
+            assert_eq!(bufs.len(), 12);
+            match &bufs {
+                IoBufsMut::Chunked(c) => {
+                    assert_eq!(c[0].len(), 5);
+                    assert_eq!(c[1].len(), 7);
+                }
+                _ => panic!("expected Chunked"),
+            }
+
+            // Uneven capacities [3, 20, 2], read 18 -> [3, 15, 0]
+            let mut bufs = IoBufsMut::from(vec![
+                IoBufMut::with_capacity(3),
+                IoBufMut::with_capacity(20),
+                IoBufMut::with_capacity(2),
+            ]);
+            bufs.prepare_read(18).unwrap();
+            match &bufs {
+                IoBufsMut::Chunked(c) => {
+                    assert_eq!(c[0].len(), 3);
+                    assert_eq!(c[1].len(), 15);
+                    assert_eq!(c[2].len(), 0);
+                }
+                _ => panic!("expected Chunked"),
+            }
+
+            // Exact total capacity [4, 4], read 8 -> [4, 4]
+            let mut bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+            bufs.prepare_read(8).unwrap();
+            match &bufs {
+                IoBufsMut::Chunked(c) => {
+                    assert_eq!(c[0].len(), 4);
+                    assert_eq!(c[1].len(), 4);
+                }
+                _ => panic!("expected Chunked"),
+            }
+
+            // Exceeds total capacity
+            let mut bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+            assert!(matches!(
+                bufs.prepare_read(9),
+                Err(crate::Error::BufferTooSmall)
+            ));
+
+            // Zero length on chunked
+            let mut bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+            bufs.prepare_read(0).unwrap();
+            assert_eq!(bufs.len(), 0);
+        }
     }
 
     #[cfg(feature = "arbitrary")]
