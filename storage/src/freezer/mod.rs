@@ -277,7 +277,7 @@ mod tests {
     use super::*;
     use crate::kv::tests::test_key;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, IoBufMut, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
     use std::num::NonZeroU16;
@@ -821,7 +821,7 @@ mod tests {
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
                 // Read the first entry
-                let entry_data = blob.read_at(0, IoBufMut::zeroed(24)).await.unwrap();
+                let entry_data = blob.read_at(0, 24).await.unwrap();
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt the CRC (last 4 bytes of the entry)
                 corrupted.as_mut()[20] ^= 0xFF;
