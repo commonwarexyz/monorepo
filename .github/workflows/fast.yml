@@ -372,7 +372,7 @@ jobs:
         id: toolchain
         run: |
           if [ "${{ matrix.toolchain }}" = "msrv" ]; then
-            echo "version=$(yq -oy '.workspace.package.rust-version' Cargo.toml)" >> "$GITHUB_OUTPUT"
+            echo "version=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
           else
             echo "version=${{ matrix.toolchain }}" >> "$GITHUB_OUTPUT"
           fi
