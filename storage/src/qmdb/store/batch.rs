@@ -19,7 +19,7 @@ pub mod tests {
     use commonware_utils::{test_rng, Array};
     use core::{fmt::Debug, future::Future};
     use rand::Rng;
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     pub trait TestKey: Array + Copy + Send + Sync {
         fn from_seed(seed: u64) -> Self;
@@ -313,7 +313,7 @@ pub mod tests {
 
         // Delete half of the keys at random.
         let mut rng = test_rng();
-        let mut deleted = HashSet::new();
+        let mut deleted = BTreeSet::new();
         let mut batch = db.start_batch();
         for i in 0..100 {
             if rng.gen_bool(0.5) {
