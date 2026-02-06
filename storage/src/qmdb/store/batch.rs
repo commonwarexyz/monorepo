@@ -130,7 +130,7 @@ pub mod tests {
     {
         let mut db = next_db(new_db, counter).await;
         let key = TestKey::from_seed(1);
-        db.write_batch([(key, Some(TestValue::from_seed(1)))].into_iter())
+        db.write_batch([(key, Some(TestValue::from_seed(1)))])
             .await?;
 
         let mut batch = db.start_batch();
@@ -161,7 +161,7 @@ pub mod tests {
         assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(3)));
 
         let existing = TestKey::from_seed(3);
-        db.write_batch([(existing, Some(TestValue::from_seed(4)))].into_iter())
+        db.write_batch([(existing, Some(TestValue::from_seed(4)))])
             .await?;
 
         let mut batch = db.start_batch();
@@ -180,7 +180,7 @@ pub mod tests {
     {
         let mut db = next_db(new_db, counter).await;
         let base_key = TestKey::from_seed(4);
-        db.write_batch([(base_key, Some(TestValue::from_seed(10)))].into_iter())
+        db.write_batch([(base_key, Some(TestValue::from_seed(10)))])
             .await?;
         let mut batch = db.start_batch();
         assert!(batch.delete(base_key).await?);
@@ -213,7 +213,7 @@ pub mod tests {
         batch.delete_unchecked(key).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.write_batch([(key, Some(TestValue::from_seed(13)))].into_iter())
+        db.write_batch([(key, Some(TestValue::from_seed(13)))])
             .await?;
         let mut batch = db.start_batch();
         batch.delete_unchecked(key).await?;
@@ -260,7 +260,7 @@ pub mod tests {
     {
         let mut db = next_db(new_db, counter).await;
         for i in 0..100 {
-            db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))].into_iter())
+            db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))])
                 .await?;
         }
 
@@ -305,7 +305,7 @@ pub mod tests {
         let mut db = next_db(new_db, counter).await;
         // Create 100 keys and commit them.
         for i in 0..100 {
-            db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))].into_iter())
+            db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))])
                 .await?;
         }
         let (durable, _) = db.commit(None).await?;

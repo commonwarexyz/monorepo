@@ -235,12 +235,10 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
-                    db.write_batch([(key, Some(value))].into_iter())
-                        .await
-                        .unwrap();
+                    db.write_batch([(key, Some(value))]).await.unwrap();
                 }
                 Operation::Delete(key) => {
-                    db.write_batch([(key, None)].into_iter()).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 Operation::CommitFloor(_, _) => {
                     panic!("CommitFloor not supported in apply_ops");
@@ -307,7 +305,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
@@ -545,8 +543,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut DirtyAnyTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.write_batch([(key, Some(value))].into_iter()));
-        assert_send(db.write_batch([(key, None)].into_iter()));
+        assert_send(db.write_batch([(key, Some(value))]));
+        assert_send(db.write_batch([(key, None)]));
         assert_batchable(db, key, value);
         assert_send(db.get_with_loc(&key));
     }

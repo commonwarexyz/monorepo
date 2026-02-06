@@ -131,7 +131,7 @@ where
     /// - `(key, None)` deletes the key
     pub async fn write_batch(
         &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
         let status = &mut self.status;
         self.any
@@ -185,7 +185,8 @@ where
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter::IntoIter: Send,
     {
         self.write_batch(iter).await
     }

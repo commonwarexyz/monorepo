@@ -313,18 +313,18 @@ pub(crate) mod test {
         let mut db = db.into_mutable();
 
         assert!(db.get(&Sha256::fill(1u8)).await.unwrap().is_none());
-        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(2u8)))].into_iter())
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(2u8)))])
             .await
             .unwrap();
         assert!(db.get(&Sha256::fill(3u8)).await.unwrap().is_none());
-        db.write_batch([(Sha256::fill(3u8), Some(Sha256::fill(4u8)))].into_iter())
+        db.write_batch([(Sha256::fill(3u8), Some(Sha256::fill(4u8)))])
             .await
             .unwrap();
         let (clean_db, _) = db.commit(None).await.unwrap();
         let mut db = clean_db.into_mutable();
 
         // Updating an existing key should make steps non-zero.
-        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(5u8)))].into_iter())
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(5u8)))])
             .await
             .unwrap();
         let steps = db.steps();
@@ -356,7 +356,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let mut db = db.into_merkleized().await.unwrap();
@@ -374,7 +374,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.size(), op_count);
@@ -385,7 +385,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            dirty.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            dirty.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen3")).await;
         assert_eq!(db.size(), op_count);
@@ -396,7 +396,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = make_value((i + 1) * 10000);
-                db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
         }
         let db = reopen_db(context.with_label("reopen4")).await;
@@ -407,7 +407,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let _ = db.commit(None).await.unwrap();
         let db = reopen_db(context.with_label("reopen5")).await;
@@ -437,7 +437,7 @@ pub(crate) mod test {
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.size(), 1);
@@ -447,7 +447,7 @@ pub(crate) mod test {
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         drop(db);
         let db = reopen_db(context.with_label("reopen3")).await;
@@ -459,7 +459,7 @@ pub(crate) mod test {
             for i in 0u64..1000 {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = make_value((i + 1) * 10000);
-                db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
         }
         drop(db);
@@ -471,7 +471,7 @@ pub(crate) mod test {
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -504,7 +504,7 @@ pub(crate) mod test {
         for i in 0u64..UPDATES {
             let v = make_value(i * 1000);
             last_value = Some(v.clone());
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -538,7 +538,7 @@ pub(crate) mod test {
         for i in 0u64..OPS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -571,7 +571,7 @@ pub(crate) mod test {
         for i in OPS..(OPS + 5) {
             let k = Sha256::hash(&(i + 1000).to_be_bytes()); // different keys
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -613,7 +613,7 @@ pub(crate) mod test {
         for i in 0u64..10 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -745,7 +745,7 @@ pub(crate) mod test {
         for i in 0u64..50 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -807,9 +807,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = key_at(j, i);
                 let v = make_value(i * 1000);
-                db.write_batch([(k, Some(v.clone()))].into_iter())
-                    .await
-                    .unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
                 map.insert(k, v);
             }
             let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
@@ -818,7 +816,7 @@ pub(crate) mod test {
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
-        db.write_batch([(k, None)].into_iter()).await.unwrap();
+        db.write_batch([(k, None)]).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
         let db = db.into_merkleized().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -833,8 +831,6 @@ pub(crate) mod test {
 
         db.destroy().await.unwrap();
     }
-
-    // Consolidated test that runs test_any_db_multiple_commits_delete_replayed on all 8 variants.
 
     use crate::qmdb::any::{
         ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},

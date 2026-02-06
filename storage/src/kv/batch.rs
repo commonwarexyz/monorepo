@@ -146,7 +146,8 @@ pub trait Batchable: Gettable<Key: Array, Value: CodecShared + Clone, Error = Er
     ) -> impl Future<Output = Result<(), Error>> + Send + use<'a, Self, Iter>
     where
         Self: Send,
-        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a;
+        Iter: IntoIterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+        Iter::IntoIter: Send;
 }
 
 #[cfg(test)]

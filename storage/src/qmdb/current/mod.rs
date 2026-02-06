@@ -401,7 +401,7 @@ pub mod tests {
         for i in 0u64..num_elements {
             let k = TestKey::from_seed(i);
             let v = TestValue::from_seed(rng.next_u64());
-            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
@@ -409,15 +409,11 @@ pub mod tests {
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32() % 7 == 0 {
-                db.write_batch([(rand_key, None)].into_iter())
-                    .await
-                    .unwrap();
+                db.write_batch([(rand_key, None)]).await.unwrap();
                 continue;
             }
             let v = TestValue::from_seed(rng.next_u64());
-            db.write_batch([(rand_key, Some(v))].into_iter())
-                .await
-                .unwrap();
+            db.write_batch([(rand_key, Some(v))]).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
                 let (durable_db, _) = db.commit(None).await?;
@@ -613,11 +609,11 @@ pub mod tests {
                 let value: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
 
                 db_no_pruning_mut
-                    .write_batch([(key, Some(value.clone()))].into_iter())
+                    .write_batch([(key, Some(value.clone()))])
                     .await
                     .unwrap();
                 db_pruning_mut
-                    .write_batch([(key, Some(value))].into_iter())
+                    .write_batch([(key, Some(value))])
                     .await
                     .unwrap();
 
@@ -764,9 +760,7 @@ pub mod tests {
             for i in 0u64..ELEMENTS {
                 let k: C::Key = TestKey::from_seed(i);
                 let v: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
-                db.write_batch([(k, Some(v.clone()))].into_iter())
-                    .await
-                    .unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -777,9 +771,7 @@ pub mod tests {
                 }
                 let k: C::Key = TestKey::from_seed(i);
                 let v: <C as LogStore>::Value = TestValue::from_seed((i + 1) * 10000);
-                db.write_batch([(k, Some(v.clone()))].into_iter())
-                    .await
-                    .unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -789,7 +781,7 @@ pub mod tests {
                     continue;
                 }
                 let k: C::Key = TestKey::from_seed(i);
-                db.write_batch([(k, None)].into_iter()).await.unwrap();
+                db.write_batch([(k, None)]).await.unwrap();
                 map.remove(&k);
             }
 

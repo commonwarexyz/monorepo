@@ -91,7 +91,7 @@ where
     /// the location of the operation it inactivates (if any).
     pub(crate) async fn write_batch_with_callback<F>(
         &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
         mut callback: F,
     ) -> Result<(), Error>
     where
@@ -99,6 +99,7 @@ where
     {
         // We use a BTreeMap here to collect the updates to ensure determinism in iteration order.
         let mut updates = BTreeMap::new();
+        let iter = iter.into_iter();
         let mut locations = Vec::with_capacity(iter.size_hint().0);
         for (key, value) in iter {
             let iter = self.snapshot.get(&key);
@@ -158,7 +159,7 @@ where
     /// - `(key, None)` deletes the key
     pub async fn write_batch(
         &mut self,
-        iter: impl Iterator<Item = (K, Option<V::Value>)>,
+        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
@@ -233,7 +234,8 @@ where
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter::IntoIter: Send,
     {
         self.write_batch(iter).await
     }
@@ -392,7 +394,7 @@ pub(super) mod test {
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
         let mut db = db.into_mutable();
-        db.write_batch([(k1, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(k1, Some(v1))]).await.unwrap();
         drop(db);
         let db = next_db().await;
         assert_eq!(db.bounds().end, 1);
@@ -420,7 +422,7 @@ pub(super) mod test {
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
         let mut db = db.into_mutable();
-        db.write_batch([(k1, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(k1, Some(v1))]).await.unwrap();
         for _ in 1..100 {
             let (clean_db, _) = db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
@@ -431,7 +433,7 @@ pub(super) mod test {
         }
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
-        db.write_batch([(k1, None)].into_iter()).await.unwrap();
+        db.write_batch([(k1, None)]).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.bounds().end - 1, db.inactivity_floor_loc());
@@ -458,9 +460,7 @@ pub(super) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.write_batch([(k, Some(v.clone()))].into_iter())
-                .await
-                .unwrap();
+            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             map.insert(k, v);
         }
 
@@ -471,9 +471,7 @@ pub(super) mod test {
             }
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.write_batch([(k, Some(v.clone()))].into_iter())
-                .await
-                .unwrap();
+            db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             map.insert(k, v);
         }
 
@@ -483,7 +481,7 @@ pub(super) mod test {
                 continue;
             }
             let k = Sha256::hash(&i.to_be_bytes());
-            db.write_batch([(k, None)].into_iter()).await.unwrap();
+            db.write_batch([(k, None)]).await.unwrap();
             map.remove(&k);
         }
 
@@ -558,23 +556,23 @@ pub(super) mod test {
         assert!(db.get(&d2).await.unwrap().is_none());
 
         assert!(db.get(&d1).await.unwrap().is_none());
-        db.write_batch([(d1, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(d1, Some(v1))]).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v1);
         assert!(db.get(&d2).await.unwrap().is_none());
 
         assert!(db.get(&d2).await.unwrap().is_none());
-        db.write_batch([(d2, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(d2, Some(v1))]).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v1);
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        db.write_batch([(d1, None)].into_iter()).await.unwrap();
+        db.write_batch([(d1, None)]).await.unwrap();
         assert!(db.get(&d1).await.unwrap().is_none());
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        db.write_batch([(d1, Some(v2))].into_iter()).await.unwrap();
+        db.write_batch([(d1, Some(v2))]).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        db.write_batch([(d2, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(d2, Some(v1))]).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
         assert_eq!(db.bounds().end, 6); // 4 updates, 1 deletion + initial commit.
@@ -592,9 +590,9 @@ pub(super) mod test {
 
         // Delete all keys.
         assert!(db.get(&d1).await.unwrap().is_some());
-        db.write_batch([(d1, None)].into_iter()).await.unwrap();
+        db.write_batch([(d1, None)]).await.unwrap();
         assert!(db.get(&d2).await.unwrap().is_some());
-        db.write_batch([(d2, None)].into_iter()).await.unwrap();
+        db.write_batch([(d2, None)]).await.unwrap();
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 12); // 2 new delete ops.
@@ -632,11 +630,11 @@ pub(super) mod test {
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
-        db.write_batch([(d1, Some(v1))].into_iter()).await.unwrap();
-        db.write_batch([(d2, Some(v2))].into_iter()).await.unwrap();
-        db.write_batch([(d1, None)].into_iter()).await.unwrap();
-        db.write_batch([(d2, Some(v1))].into_iter()).await.unwrap();
-        db.write_batch([(d1, Some(v2))].into_iter()).await.unwrap();
+        db.write_batch([(d1, Some(v1))]).await.unwrap();
+        db.write_batch([(d2, Some(v2))]).await.unwrap();
+        db.write_batch([(d1, None)]).await.unwrap();
+        db.write_batch([(d2, Some(v1))]).await.unwrap();
+        db.write_batch([(d1, Some(v2))]).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
         let db = db

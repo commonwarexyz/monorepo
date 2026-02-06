@@ -93,10 +93,10 @@ where
         for (i, operation) in operations.into_iter().enumerate() {
             match operation {
                 Operation::Update(Update(key, value)) => {
-                    db.write_batch([(key, Some(value))].into_iter()).await?;
+                    db.write_batch([(key, Some(value))]).await?;
                 }
                 Operation::Delete(key) => {
-                    db.write_batch([(key, None)].into_iter()).await?;
+                    db.write_batch([(key, None)]).await?;
                 }
                 Operation::CommitFloor(metadata, _) => {
                     let (durable_db, _) = db.commit(metadata).await?;

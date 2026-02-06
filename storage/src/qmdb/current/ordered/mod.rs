@@ -74,9 +74,7 @@ pub mod tests {
             let v1: <C as LogStore>::Value = TestValue::from_seed(10);
             let mut db = db.into_mutable();
             assert!(db.get(&k1).await.unwrap().is_none());
-            db.write_batch([(k1, Some(v1.clone()))].into_iter())
-                .await
-                .unwrap();
+            db.write_batch([(k1, Some(v1.clone()))]).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
@@ -96,7 +94,7 @@ pub mod tests {
 
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
-            db.write_batch([(k1, None)].into_iter()).await.unwrap();
+            db.write_batch([(k1, None)]).await.unwrap();
 
             let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
             let (db, _) = db.commit(Some(metadata.clone())).await.unwrap();
@@ -129,7 +127,7 @@ pub mod tests {
 
             // Test that we can get a non-durable root.
             let mut db = db.into_mutable();
-            db.write_batch([(k1, Some(v1))].into_iter()).await.unwrap();
+            db.write_batch([(k1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
             assert_ne!(db.root(), root3);
