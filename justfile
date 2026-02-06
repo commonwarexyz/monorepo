@@ -110,6 +110,7 @@ check-stability *args='':
     all_args="{{ args }}"
     level=""
     extra_args=""
+    unstable_public_crates=()
     # Level names in order (index 0-4)
     LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
     # Convert name to index by iterating the array
@@ -142,6 +143,26 @@ check-stability *args='':
             extra_args="$all_args"
         fi
     fi
+    # Parse package selectors so unstable-public can be scoped like cargo check.
+    if [ -n "$extra_args" ]; then
+        read -r -a parsed_args <<< "$extra_args"
+        i=0
+        while [ "$i" -lt "${#parsed_args[@]}" ]; do
+            arg="${parsed_args[$i]}"
+            case "$arg" in
+                -p|--package)
+                    i=$((i + 1))
+                    if [ "$i" -lt "${#parsed_args[@]}" ]; then
+                        unstable_public_crates+=("${parsed_args[$i]}")
+                    fi
+                    ;;
+                --package=*)
+                    unstable_public_crates+=("${arg#*=}")
+                    ;;
+            esac
+            i=$((i + 1))
+        done
+    fi
     # Create level-specific wrapper symlinks so Cargo sees different fingerprints
     mkdir -p target/stability-wrappers
     for name in "${LEVEL_NAMES[@]:1}"; do
@@ -154,9 +175,12 @@ check-stability *args='':
         done
         echo "All stability levels pass!"
         echo "Checking for unmarked public items..."
-        ./scripts/find_unstable_public.sh
+        if [ "${#unstable_public_crates[@]}" -gt 0 ]; then
+            ./scripts/find_unstable_public.sh "${unstable_public_crates[@]}"
+        else
+            ./scripts/find_unstable_public.sh
+        fi
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
         COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib {{ stability_excludes }} $extra_args
     fi
-
