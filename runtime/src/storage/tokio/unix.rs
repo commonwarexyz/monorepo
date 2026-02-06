@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Error, IoBufs, IoBufsMut};
+use crate::{BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_utils::hex;
 use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 use tokio::task;
@@ -9,19 +9,25 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
     file: Arc<File>,
+    pool: BufferPool,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File) -> Self {
+    pub fn new(partition: String, name: &[u8], file: File, pool: BufferPool) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(file),
+            pool,
         }
     }
 }
 
 impl crate::Blob for Blob {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, self.pool.alloc(len), len).await
+    }
+
     async fn read_at_buf(
         &self,
         offset: u64,

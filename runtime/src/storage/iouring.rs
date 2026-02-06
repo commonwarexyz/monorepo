@@ -23,7 +23,7 @@
 use super::Header;
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    Error, IoBufMut, IoBufs, IoBufsMut,
+    BufferPool, Error, IoBufMut, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{
@@ -74,16 +74,18 @@ pub struct Config {
 pub struct Storage {
     storage_directory: PathBuf,
     io_sender: mpsc::Sender<iouring::Op>,
+    pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(mut cfg: Config, registry: &mut Registry) -> Self {
+    pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
         let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
 
         let storage = Self {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
+            pool,
         };
         let metrics = Arc::new(iouring::Metrics::new(registry));
 
@@ -167,7 +169,13 @@ impl crate::Storage for Storage {
                 .map_err(|e| e.into_error(partition, name))?
         };
 
-        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+        let blob = Blob::new(
+            partition.into(),
+            name,
+            file,
+            self.io_sender.clone(),
+            self.pool.clone(),
+        );
         Ok((blob, logical_len, blob_version))
     }
 
@@ -227,6 +235,8 @@ pub struct Blob {
     file: Arc<File>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<iouring::Op>,
+    /// Buffer pool for read allocations
+    pool: BufferPool,
 }
 
 impl Clone for Blob {
@@ -236,6 +246,7 @@ impl Clone for Blob {
             name: self.name.clone(),
             file: self.file.clone(),
             io_sender: self.io_sender.clone(),
+            pool: self.pool.clone(),
         }
     }
 }
@@ -246,17 +257,23 @@ impl Blob {
         name: &[u8],
         file: File,
         io_sender: mpsc::Sender<iouring::Op>,
+        pool: BufferPool,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
             io_sender,
+            pool,
         }
     }
 }
 
 impl crate::Blob for Blob {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, self.pool.alloc(len), len).await
+    }
+
     async fn read_at_buf(
         &self,
         offset: u64,
@@ -466,7 +483,9 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, Storage as _};
+    use crate::{
+        storage::tests::run_storage_tests, Blob, BufferPool, BufferPoolConfig, Storage as _,
+    };
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -476,12 +495,14 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
             },
             &mut Registry::default(),
+            pool,
         );
         (storage, storage_directory)
     }

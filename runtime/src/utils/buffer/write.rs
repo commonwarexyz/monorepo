@@ -1,4 +1,4 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, Error, IoBufs, IoBufsMut, RwLock};
+use crate::{buffer::tip::Buffer, Blob, Buf, Error, IoBufMut, IoBufs, IoBufsMut, RwLock};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -68,6 +68,11 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, IoBufMut::with_capacity(len), len)
+            .await
+    }
+
     async fn read_at_buf(
         &self,
         offset: u64,

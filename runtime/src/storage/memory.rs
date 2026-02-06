@@ -147,6 +147,11 @@ impl Blob {
 }
 
 impl crate::Blob for Blob {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, crate::Error> {
+        self.read_at_buf(offset, crate::IoBufMut::with_capacity(len), len)
+            .await
+    }
+
     async fn read_at_buf(
         &self,
         offset: u64,

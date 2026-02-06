@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Error, IoBufs, IoBufsMut};
+use crate::{BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_utils::hex;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
@@ -16,19 +16,25 @@ pub struct Blob {
     // not safe to concurrently interact with. If we switched to mapping files
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
+    pool: BufferPool,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: fs::File) -> Self {
+    pub fn new(partition: String, name: &[u8], file: fs::File, pool: BufferPool) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(Mutex::new(file)),
+            pool,
         }
     }
 }
 
 impl crate::Blob for Blob {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, self.pool.alloc(len), len).await
+    }
+
     async fn read_at_buf(
         &self,
         offset: u64,

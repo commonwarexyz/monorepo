@@ -711,9 +711,7 @@ stability_scope!(BETA {
             &self,
             offset: u64,
             len: usize,
-        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send {
-            self.read_at_buf(offset, IoBufMut::with_capacity(len), len)
-        }
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Write `buf` to the blob at the given offset.
         fn write_at(

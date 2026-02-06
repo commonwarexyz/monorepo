@@ -78,6 +78,16 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.auditor.event(b"read_at", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(&offset.to_be_bytes());
+            hasher.update(&(len as u64).to_be_bytes());
+        });
+        self.inner.read_at(offset, len).await
+    }
+
     async fn read_at_buf(
         &self,
         offset: u64,
