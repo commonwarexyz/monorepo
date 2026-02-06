@@ -52,9 +52,11 @@ pub struct Config<C> {
 ///
 /// # Delivery Semantics
 ///
-/// - **Enqueue**: Durably persists the item and returns its position.
+/// - **Append**: Writes an item to the journal and returns its position; does not persist.
+/// - **Flush**: Persists appended items without pruning.
+/// - **Enqueue**: Appends then flushes; the item is durably persisted before return.
 /// - **Dequeue**: Returns unacked items in FIFO order, skipping already-acked items.
-/// - **Ack**: Marks an item as processed. Pruning happens during [Queue::prune].
+/// - **Ack**: Marks an item as processed. Pruning happens during [Queue::prune] or [Queue::commit].
 ///
 /// # Crash Recovery
 ///
@@ -142,6 +144,21 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         position < self.ack_floor || self.acked_above.get(&position).is_some()
     }
 
+    /// Append an item to the queue without persisting.
+    ///
+    /// The item is written to the journal but not durably persisted. Call
+    /// [Self::flush] to persist appends only, or [Self::commit] to prune and persist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
+    pub async fn append(&mut self, item: V) -> Result<u64, Error> {
+        let pos = self.journal.append(item).await?;
+        self.metrics.size.set(self.journal.size() as i64);
+        debug!(position = pos, "appended item");
+        Ok(pos)
+    }
+
     /// Enqueue an item, returning its position.
     ///
     /// The item is durably persisted before returning. If this method returns
@@ -151,10 +168,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn enqueue(&mut self, item: V) -> Result<u64, Error> {
-        let pos = self.journal.append(item).await?;
-        self.journal.commit().await?;
-        self.metrics.size.set(self.journal.size() as i64);
-        debug!(position = pos, "enqueued item");
+        let pos = self.append(item).await?;
+        self.flush().await?;
         Ok(pos)
     }
 
@@ -168,22 +183,28 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn dequeue(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Find next unacked position
-        while self.read_pos < self.journal.size() {
-            if self.is_acked(self.read_pos) {
-                self.read_pos += 1;
-                continue;
-            }
+        let size = self.journal.size();
 
-            let item = self.journal.read(self.read_pos).await?;
-            let pos = self.read_pos;
-            self.read_pos += 1;
-
-            debug!(position = pos, "dequeued item");
-            return Ok(Some((pos, item)));
+        // Fast-forward above ack floor
+        if self.read_pos < self.ack_floor {
+            self.read_pos = self.ack_floor;
         }
 
-        Ok(None)
+        // Fast-forward past the ack range containing read_pos (if any).
+        if let Some((_, end)) = self.acked_above.get(&self.read_pos) {
+            self.read_pos = end.saturating_add(1);
+        }
+
+        if self.read_pos >= size {
+            return Ok(None);
+        }
+
+        let item = self.journal.read(self.read_pos).await?;
+        let pos = self.read_pos;
+        self.read_pos += 1;
+
+        debug!(position = pos, "dequeued item");
+        Ok(Some((pos, item)))
     }
 
     /// Peek at the next unacknowledged item without advancing the read position.
@@ -194,24 +215,31 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn peek(&self) -> Result<Option<(u64, V)>, Error> {
+        let size = self.journal.size();
         let mut pos = self.read_pos;
-        while pos < self.journal.size() {
-            if self.is_acked(pos) {
-                pos += 1;
-                continue;
-            }
 
-            let item = self.journal.read(pos).await?;
-            return Ok(Some((pos, item)));
+        // Fast-forward above ack floor
+        if pos < self.ack_floor {
+            pos = self.ack_floor;
         }
 
-        Ok(None)
+        // Fast-forward past the ack range containing pos (if any).
+        if let Some((_, end)) = self.acked_above.get(&pos) {
+            pos = end.saturating_add(1);
+        }
+
+        if pos >= size {
+            return Ok(None);
+        }
+
+        let item = self.journal.read(pos).await?;
+        Ok(Some((pos, item)))
     }
 
     /// Acknowledge processing of an item at the given position.
     ///
     /// After acknowledgment, the item will be skipped on dequeue. Pruning of
-    /// acknowledged items happens during [Self::prune].
+    /// acknowledged items happens during [Self::prune] or [Self::commit].
     ///
     /// If items are acked contiguously from the ack floor, the floor advances
     /// automatically to keep memory bounded.
@@ -331,26 +359,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.journal.size()
     }
 
-    /// Returns the number of items not yet read.
-    ///
-    /// This is an upper bound on items available to dequeue - it counts items from
-    /// `read_pos` to `size`, but some may have been acknowledged out of order and
-    /// will be skipped during dequeue.
-    pub const fn pending(&self) -> u64 {
-        self.journal.size().saturating_sub(self.read_pos)
-    }
-
-    /// Returns the count of acknowledged items above the ack floor.
-    ///
-    /// This represents the memory overhead of out-of-order acknowledgments.
-    /// These items are tracked until the floor advances past them.
-    pub fn acked_above_count(&self) -> usize {
-        self.acked_above
-            .iter()
-            .map(|(&s, &e)| (e - s + 1) as usize)
-            .sum()
-    }
-
     /// Returns whether all enqueued items have been acknowledged.
     pub const fn is_empty(&self) -> bool {
         // If acked_above is non-empty, there's a gap at ack_floor (otherwise floor
@@ -387,29 +395,46 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         );
     }
 
-    /// Prune acknowledged items and commit the journal.
+    /// Persist appended items without pruning.
     ///
-    /// Faster than [Self::sync] but recovery may be required on startup if a crash
-    /// occurs before the next sync.
+    /// Use after [Self::append] to make appends durable. Does not advance the
+    /// pruning boundary; use [Self::commit] for that.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        self.journal.commit().await?;
+        Ok(())
+    }
+
+    /// Prune acknowledged items and persist the journal.
+    ///
+    /// Advances the durable ack boundary and flushes. Recovery may be required
+    /// on startup if a crash occurs before the next commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
     pub async fn commit(&mut self) -> Result<(), Error> {
         self.journal.prune(self.ack_floor).await?;
         self.journal.commit().await?;
         Ok(())
     }
 
-    /// Prune acknowledged items and sync the journal.
-    ///
-    /// Ensures the journal does not require recovery on startup.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        self.journal.prune(self.ack_floor).await?;
-        self.journal.sync().await?;
-        Ok(())
+    /// Returns the number of items not yet read (test-only).
+    #[cfg(test)]
+    pub(crate) const fn pending(&self) -> u64 {
+        self.journal.size().saturating_sub(self.read_pos)
     }
 
-    /// Destroy the queue and remove all associated storage.
-    pub async fn destroy(self) -> Result<(), Error> {
-        self.journal.destroy().await?;
-        Ok(())
+    /// Returns the count of acknowledged items above the ack floor (test-only).
+    #[cfg(test)]
+    pub(crate) fn acked_above_count(&self) -> usize {
+        self.acked_above
+            .iter()
+            .map(|(&s, &e)| (e - s + 1) as usize)
+            .sum()
     }
 }
 
@@ -481,8 +506,6 @@ mod tests {
             // Queue still has unacked items
             assert!(!queue.is_empty());
             assert!(queue.dequeue().await.unwrap().is_none());
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -511,8 +534,6 @@ mod tests {
             // All items acked
             assert!(queue.is_empty());
             assert_eq!(queue.ack_floor(), 5);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -554,8 +575,6 @@ mod tests {
             queue.ack(0).unwrap();
             assert_eq!(queue.ack_floor(), 5);
             assert!(queue.is_empty());
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -589,8 +608,6 @@ mod tests {
             // Dequeue should start at 5
             let (p, _) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(p, 5);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -623,8 +640,6 @@ mod tests {
             queue.ack_up_to(9).unwrap();
             assert_eq!(queue.ack_floor(), 9);
             assert_eq!(queue.acked_above_count(), 0);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -651,8 +666,6 @@ mod tests {
             // Batch ack up to 5 - should coalesce with 5, 6, 7
             queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 8); // Consumed 5, 6, 7
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -679,8 +692,6 @@ mod tests {
             // Acking up_to at or below floor is a no-op
             queue.ack_up_to(1).unwrap();
             assert_eq!(queue.ack_floor(), 2);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -716,8 +727,6 @@ mod tests {
             assert_eq!(item, vec![4]);
 
             assert!(queue.dequeue().await.unwrap().is_none());
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -748,8 +757,6 @@ mod tests {
             let (p, item) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(p, 0);
             assert_eq!(item, b"item0");
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -775,8 +782,6 @@ mod tests {
 
             // Double ack is a no-op
             queue.ack(1).unwrap();
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -793,7 +798,7 @@ mod tests {
             for i in 0..25u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
-            queue.sync().await.unwrap();
+            queue.commit().await.unwrap();
 
             // Read and ack some items
             for i in 0..15 {
@@ -806,8 +811,6 @@ mod tests {
             let (p, item) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(p, 15);
             assert_eq!(item, vec![15]);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -824,7 +827,7 @@ mod tests {
             for i in 0..50u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
-            queue.sync().await.unwrap();
+            queue.commit().await.unwrap();
 
             // First batch: ack items 0-14
             for i in 0..15 {
@@ -862,8 +865,6 @@ mod tests {
             // Queue should be empty now
             assert!(queue.is_empty());
             assert!(queue.dequeue().await.unwrap().is_none());
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -890,7 +891,7 @@ mod tests {
                 queue.ack(2).unwrap();
                 assert_eq!(queue.ack_floor(), 3);
 
-                queue.sync().await.unwrap();
+                queue.commit().await.unwrap();
             }
 
             // Second session: all items are re-delivered (no pruning occurred)
@@ -908,8 +909,6 @@ mod tests {
                     let (p, _) = queue.dequeue().await.unwrap().unwrap();
                     assert_eq!(p, i);
                 }
-
-                queue.destroy().await.unwrap();
             }
         });
     }
@@ -939,7 +938,7 @@ mod tests {
                 assert_eq!(queue.ack_floor(), 15);
 
                 // Sync triggers pruning
-                queue.sync().await.unwrap();
+                queue.commit().await.unwrap();
 
                 // Verify pruning occurred
                 let pruning_boundary = queue.journal.bounds().start;
@@ -968,7 +967,6 @@ mod tests {
                 }
 
                 assert!(queue.dequeue().await.unwrap().is_none());
-                queue.destroy().await.unwrap();
             }
         });
     }
@@ -1001,8 +999,6 @@ mod tests {
             let (p, item) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(p, 0);
             assert_eq!(item, vec![0]);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1041,8 +1037,6 @@ mod tests {
             let (p, item) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(p, 5);
             assert_eq!(item, vec![5]);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1061,8 +1055,6 @@ mod tests {
             assert!(queue.peek().await.unwrap().is_none());
             queue.prune().await.unwrap();
             queue.reset();
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1080,7 +1072,7 @@ mod tests {
 
                 queue.enqueue(b"item0".to_vec()).await.unwrap();
                 queue.enqueue(b"item1".to_vec()).await.unwrap();
-                queue.sync().await.unwrap();
+                queue.commit().await.unwrap();
             }
 
             // Second session - data should persist
@@ -1097,8 +1089,6 @@ mod tests {
 
                 let (_, item) = queue.dequeue().await.unwrap().unwrap();
                 assert_eq!(item, b"item1");
-
-                queue.destroy().await.unwrap();
             }
         });
     }
@@ -1131,8 +1121,6 @@ mod tests {
             // Should have received all items not divisible by 3
             let expected: Vec<u64> = (0..100).filter(|x| x % 3 != 0).collect();
             assert_eq!(received, expected);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1163,8 +1151,6 @@ mod tests {
             queue.ack(0).unwrap();
             assert_eq!(queue.ack_floor(), 9);
             assert_eq!(queue.acked_above_count(), 0);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1195,8 +1181,6 @@ mod tests {
             let (pos, item) = queue.dequeue().await.unwrap().unwrap();
             assert_eq!(pos, 7);
             assert_eq!(item, vec![7]);
-
-            queue.destroy().await.unwrap();
         });
     }
 
@@ -1277,8 +1261,6 @@ mod tests {
                 encoded.contains("test_metrics_acked_above_ranges 0"),
                 "expected acked_above_ranges 0: {encoded}"
             );
-
-            queue.destroy().await.unwrap();
         });
     }
 }

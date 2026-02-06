@@ -5,7 +5,7 @@
 //! Tests that:
 //! - Enqueued items survive crashes
 //! - Unacknowledged items are re-delivered after recovery
-//! - Acknowledged items (with synced ack floor) are not re-delivered
+//! - Acknowledged items (once committed) may or may not be re-delivered after crash
 //! - Queue state is consistent after recovery
 
 use arbitrary::{Arbitrary, Result, Unstructured};
@@ -62,8 +62,8 @@ enum QueueOperation {
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
 
-    /// Sync the queue (persists ack state and prunes).
-    Sync,
+    /// Commit the queue (prune and persist; recovery may be needed on restart).
+    Commit,
 
     /// Reset read position to ack floor.
     Reset,
@@ -110,15 +110,15 @@ struct RecoveryState {
     /// Items that were enqueued but the operation may have failed.
     pending: Vec<u8>,
 
-    /// The ack floor at the time of last successful sync.
-    /// Pruning happens during sync, so this determines what was deleted.
-    synced_ack_floor: u64,
+    /// The ack floor at the time of last successful commit.
+    /// With commit-only, pruning may not be durable; used for max bound.
+    committed_ack_floor: u64,
 
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
 
-    /// Items per section (needed to calculate pruning boundaries).
-    items_per_section: u64,
+    /// Items per section (reserved for recovery bound calculations).
+    _items_per_section: u64,
 }
 
 impl RecoveryState {
@@ -126,9 +126,9 @@ impl RecoveryState {
         Self {
             committed: BTreeMap::new(),
             pending: Vec::new(),
-            synced_ack_floor: 0,
+            committed_ack_floor: 0,
             current_ack_floor: 0,
-            items_per_section,
+            _items_per_section: items_per_section,
         }
     }
 
@@ -148,10 +148,9 @@ impl RecoveryState {
         self.current_ack_floor = ack_floor;
     }
 
-    fn sync_succeeded(&mut self, ack_floor: u64) {
-        // Sync succeeded: pruning happened at current ack_floor.
+    fn commit_succeeded(&mut self, ack_floor: u64) {
         self.current_ack_floor = ack_floor;
-        self.synced_ack_floor = ack_floor;
+        self.committed_ack_floor = ack_floor;
     }
 
     /// Returns the minimum size we expect after recovery.
@@ -164,20 +163,11 @@ impl RecoveryState {
         (self.committed.len() + self.pending.len()) as u64
     }
 
-    /// Returns the minimum ack floor (pruning boundary) we expect after recovery.
+    /// Returns the minimum ack floor we expect after recovery.
     ///
-    /// After recovery, ack_floor = journal.bounds().start, which is the
-    /// first non-pruned position. Pruning is section-granular.
+    /// With commit-only, prune is not necessarily durable, so minimum is 0.
     fn min_recovered_ack_floor(&self) -> u64 {
-        // Pruning only removes complete sections below ack_floor.
-        // The minimum is 0 if no sync succeeded, or section-aligned floor otherwise.
-        if self.synced_ack_floor == 0 {
-            return 0;
-        }
-        // Pruning removes sections where all items are below ack_floor
-        // A section starting at pos is pruned if pos + items_per_section <= ack_floor
-        let complete_sections = self.synced_ack_floor / self.items_per_section;
-        complete_sections * self.items_per_section
+        0
     }
 
     /// Returns the maximum ack floor we expect after recovery.
@@ -248,9 +238,9 @@ async fn run_operations(
                 }
             }
 
-            QueueOperation::Sync => {
-                if queue.sync().await.is_ok() {
-                    state.sync_succeeded(queue.ack_floor());
+            QueueOperation::Commit => {
+                if queue.commit().await.is_ok() {
+                    state.commit_succeeded(queue.ack_floor());
                 }
             }
 
@@ -405,11 +395,6 @@ fn fuzz(input: FuzzInput) {
             .expect("Queue recovery should succeed");
 
         verify_recovery(&mut queue, &state).await;
-
-        queue
-            .destroy()
-            .await
-            .expect("Should be able to destroy queue");
     });
 }
 

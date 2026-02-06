@@ -48,8 +48,8 @@ enum QueueOperation {
     /// Reset the read position.
     Reset,
 
-    /// Sync and prune.
-    Sync,
+    /// Commit (prune and persist).
+    Commit,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -265,8 +265,8 @@ fn fuzz(input: FuzzInput) {
                     reference.reset();
                 }
 
-                QueueOperation::Sync => {
-                    queue.sync().await.unwrap();
+                QueueOperation::Commit => {
+                    queue.commit().await.unwrap();
                 }
             }
 
@@ -292,8 +292,6 @@ fn fuzz(input: FuzzInput) {
                 );
             }
         }
-
-        queue.destroy().await.unwrap();
     });
 }
 

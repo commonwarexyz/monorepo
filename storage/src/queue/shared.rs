@@ -208,33 +208,6 @@ pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
     Ok((writer, reader))
 }
 
-/// Destroy a shared queue, removing all data from storage.
-///
-/// Both writer and reader must be passed to ensure exclusive access.
-/// All writer clones must be dropped before calling this function.
-///
-/// # Errors
-///
-/// Returns [`Error::OutstandingReferences`] if there are still outstanding
-/// writer clones (references to the shared state).
-pub async fn destroy<E: Clock + Storage + Metrics, V: CodecShared>(
-    writer: QueueWriter<E, V>,
-    reader: QueueReader<E, V>,
-) -> Result<(), Error> {
-    // Check for outstanding writer clones before doing anything destructive.
-    // With only the original writer and reader, strong_count should be 2.
-    if Arc::strong_count(&writer.queue) != 2 {
-        return Err(Error::OutstandingReferences);
-    }
-
-    // Drop reader to release its Arc reference
-    drop(reader);
-
-    // Now try_unwrap should succeed since we verified the count
-    let queue = Arc::try_unwrap(writer.queue).map_err(|_| Error::OutstandingReferences)?;
-    queue.into_inner().destroy().await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,8 +250,6 @@ mod tests {
             // Ack the item
             reader.ack(recv_pos).await.unwrap();
             assert!(reader.is_empty().await);
-
-            destroy(writer, reader).await.unwrap();
         });
     }
 
@@ -311,8 +282,7 @@ mod tests {
                 assert_eq!(*item, vec![i as u8]);
             }
 
-            let writer = writer_handle.await.unwrap();
-            destroy(writer, reader).await.unwrap();
+            let _ = writer_handle.await.unwrap();
         });
     }
 
@@ -339,7 +309,6 @@ mod tests {
             assert_eq!(item, b"test".to_vec());
 
             reader.ack(pos).await.unwrap();
-            destroy(writer, reader).await.unwrap();
         });
     }
 
@@ -369,14 +338,8 @@ mod tests {
             let result = reader.recv().await.unwrap();
             assert!(result.is_none());
 
-            // Clean up manually since we dropped writer
             drop(reader);
-            Arc::try_unwrap(queue)
-                .unwrap()
-                .into_inner()
-                .destroy()
-                .await
-                .unwrap();
+            let _ = Arc::try_unwrap(queue).unwrap().into_inner();
         });
     }
 
@@ -398,7 +361,6 @@ mod tests {
             assert_eq!(item, b"item".to_vec());
 
             reader.ack(pos).await.unwrap();
-            destroy(writer, reader).await.unwrap();
         });
     }
 
@@ -438,9 +400,8 @@ mod tests {
             received.sort();
             assert_eq!(received, (0..10u8).collect::<Vec<_>>());
 
-            let writer = handle1.await.unwrap();
+            let _ = handle1.await.unwrap();
             handle2.await.unwrap();
-            destroy(writer, reader).await.unwrap();
         });
     }
 }
