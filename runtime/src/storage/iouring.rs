@@ -290,7 +290,7 @@ impl crate::Blob for Blob {
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
             IoBufsMut::Chunked(bufs) => {
-                let mut tmp = IoBufMut::with_capacity(buf_len);
+                let mut tmp = self.pool.alloc(buf_len);
                 // SAFETY: `len` bytes are filled via io_uring read loop below.
                 unsafe { tmp.prepare_read(buf_len)? };
                 (tmp, Some(bufs))
