@@ -241,51 +241,6 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V::Value) -> Result<(), Error> {
-        self.any
-            .update_with_callback(key, value, |loc| {
-                self.status.push(true);
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-            })
-            .await
-    }
-
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
-        self.any
-            .create_with_callback(key, value, |loc| {
-                self.status.push(true);
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-            })
-            .await
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        let mut r = false;
-        self.any
-            .delete_with_callback(key, |append, loc| {
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-                self.status.push(append);
-                r = true;
-            })
-            .await?;
-
-        Ok(r)
-    }
-
     /// Writes a batch of key-value pairs to the database.
     ///
     /// For each item in the iterator:
@@ -329,44 +284,6 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.get(key).await
-    }
-}
-
-// StoreMut for (Unmerkleized, NonDurable) (aka mutable) state
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location> + 'static,
-        H: Hasher,
-        const N: usize,
-    > kv::Updatable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.update(key, value).await
-    }
-}
-
-// StoreDeletable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location> + 'static,
-        H: Hasher,
-        const N: usize,
-    > kv::Deletable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
     }
 }
 

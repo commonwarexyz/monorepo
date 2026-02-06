@@ -171,18 +171,18 @@ where
     for i in 0u64..num_elements {
         let k = Sha256::hash(&i.to_be_bytes());
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
-        assert!(db.update(k, v).await.is_ok());
+        assert!(db.write_batch([(k, Some(v))].into_iter()).await.is_ok());
     }
 
     // Randomly update / delete them + randomly commit.
     for _ in 0u64..num_operations {
         let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
         if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            assert!(db.delete(rand_key).await.is_ok());
+            assert!(db.write_batch([(rand_key, None)].into_iter()).await.is_ok());
             continue;
         }
         let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
-        assert!(db.update(rand_key, v).await.is_ok());
+        assert!(db.write_batch([(rand_key, Some(v))].into_iter()).await.is_ok());
         if rng.next_u32() % commit_frequency == 0 {
             let (durable, _) = db.commit(None).await.unwrap();
             db = durable.into_mutable();

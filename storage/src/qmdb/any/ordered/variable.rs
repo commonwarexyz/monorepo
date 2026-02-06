@@ -160,7 +160,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         kv::{
-            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            tests::{assert_batchable, assert_gettable, assert_send},
             Batchable as _, Deletable as _, Updatable as _,
         },
         mmr::{Location, Position},
@@ -267,10 +267,12 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.update(data.key, data.value).await.unwrap();
+                    db.write_batch([(data.key, Some(data.value))].into_iter())
+                        .await
+                        .unwrap();
                 }
                 Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)].into_iter()).await.unwrap();
                 }
                 Operation::CommitFloor(_, _) => {
                     // CommitFloor consumes self - not supported in this helper.
@@ -371,8 +373,12 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
             let val = Sha256::fill(1u8);
 
-            db.update(key1.clone(), val).await.unwrap();
-            db.update(key3.clone(), val).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val))].into_iter())
+                .await
+                .unwrap();
+            db.write_batch([(key3.clone(), Some(val))].into_iter())
+                .await
+                .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
@@ -419,8 +425,12 @@ pub(crate) mod test {
             let mut db = open_variable_db(context.with_label("first"))
                 .await
                 .into_mutable();
-            db.update(key1.clone(), val1).await.unwrap();
-            db.update(key3.clone(), val3).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val1))].into_iter())
+                .await
+                .unwrap();
+            db.write_batch([(key3.clone(), Some(val3))].into_iter())
+                .await
+                .unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             let mut batch = db.start_batch();
@@ -442,8 +452,12 @@ pub(crate) mod test {
             let mut db = open_variable_db(context.with_label("second"))
                 .await
                 .into_mutable();
-            db.update(key1.clone(), val1).await.unwrap();
-            db.update(key3.clone(), val3).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val1))].into_iter())
+                .await
+                .unwrap();
+            db.write_batch([(key3.clone(), Some(val3))].into_iter())
+                .await
+                .unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             let mut batch = db.start_batch();
@@ -513,9 +527,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableAnyTest, key: Digest, value: Vec<u8>) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value.clone()));
-        assert_send(db.create(key, value.clone()));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value.clone()))].into_iter()));
+        assert_send(db.write_batch([(key, None)].into_iter()));
         assert_batchable(db, key, value);
         assert_send(db.get_all(&key));
         assert_send(db.get_with_loc(&key));

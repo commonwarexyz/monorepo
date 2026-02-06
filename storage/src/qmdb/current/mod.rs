@@ -317,7 +317,7 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FixedConfig, VariableConfig};
     use crate::{
-        kv::{Deletable as _, Updatable as _},
+        kv::Batchable as _,
         qmdb::{
             any::states::{CleanAny, MutableAny as _, UnmerkleizedDurableAny as _},
             store::{
@@ -401,7 +401,7 @@ pub mod tests {
         for i in 0u64..num_elements {
             let k = TestKey::from_seed(i);
             let v = TestValue::from_seed(rng.next_u64());
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))].into_iter()).await.unwrap();
         }
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
@@ -409,11 +409,11 @@ pub mod tests {
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32() % 7 == 0 {
-                db.delete(rand_key).await.unwrap();
+                db.write_batch([(rand_key, None)].into_iter()).await.unwrap();
                 continue;
             }
             let v = TestValue::from_seed(rng.next_u64());
-            db.update(rand_key, v).await.unwrap();
+            db.write_batch([(rand_key, Some(v))].into_iter()).await.unwrap();
             if commit_changes && rng.next_u32() % 20 == 0 {
                 // Commit every ~20 updates.
                 let (durable_db, _) = db.commit(None).await?;
@@ -608,8 +608,8 @@ pub mod tests {
                 let key: C::Key = TestKey::from_seed(i);
                 let value: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
 
-                db_no_pruning_mut.update(key, value.clone()).await.unwrap();
-                db_pruning_mut.update(key, value).await.unwrap();
+                db_no_pruning_mut.write_batch([(key, Some(value.clone()))].into_iter()).await.unwrap();
+                db_pruning_mut.write_batch([(key, Some(value))].into_iter()).await.unwrap();
 
                 // Commit periodically
                 if i % 50 == 49 {
@@ -754,7 +754,7 @@ pub mod tests {
             for i in 0u64..ELEMENTS {
                 let k: C::Key = TestKey::from_seed(i);
                 let v: <C as LogStore>::Value = TestValue::from_seed(i * 1000);
-                db.update(k, v.clone()).await.unwrap();
+                db.write_batch([(k, Some(v.clone()))].into_iter()).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -765,7 +765,7 @@ pub mod tests {
                 }
                 let k: C::Key = TestKey::from_seed(i);
                 let v: <C as LogStore>::Value = TestValue::from_seed((i + 1) * 10000);
-                db.update(k, v.clone()).await.unwrap();
+                db.write_batch([(k, Some(v.clone()))].into_iter()).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -775,7 +775,7 @@ pub mod tests {
                     continue;
                 }
                 let k: C::Key = TestKey::from_seed(i);
-                db.delete(k).await.unwrap();
+                db.write_batch([(k, None)].into_iter()).await.unwrap();
                 map.remove(&k);
             }
 

@@ -8,9 +8,9 @@ use crate::{
             db::{AuthenticatedLog, Db},
             ValueEncoding,
         },
-        build_snapshot_from_log, create_key, delete_key, delete_known_loc,
+        build_snapshot_from_log, delete_known_loc,
         operation::{Committable, Operation as OperationTrait},
-        update_key, update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
+        update_known_loc, DurabilityState, Durable, Error, MerkleizationState,
         Merkleized, NonDurable, Unmerkleized,
     },
 };
@@ -86,86 +86,6 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    /// Appends the given delete operation to the log, updating the snapshot and other state to
-    /// reflect the deletion.
-    pub(crate) async fn delete_key(&mut self, key: K) -> Result<Option<Location>, Error> {
-        let Some(loc) = delete_key(&mut self.snapshot, &self.log, &key).await? else {
-            return Ok(None);
-        };
-        self.log.append(Operation::Delete(key)).await?;
-        self.durable_state.steps += 1;
-        self.active_keys -= 1;
-
-        Ok(Some(loc))
-    }
-
-    /// Appends the provided update to the log, returning the old location of the key if
-    /// it was previously assigned some value, and None otherwise.
-    pub(crate) async fn update_key(
-        &mut self,
-        key: K,
-        value: V::Value,
-    ) -> Result<Option<Location>, Error> {
-        let new_loc = self.log.bounds().end;
-        let res = self.update_loc(&key, new_loc).await?;
-
-        self.log
-            .append(Operation::Update(Update(key, value)))
-            .await?;
-        if res.is_some() {
-            self.durable_state.steps += 1;
-        } else {
-            self.active_keys += 1;
-        }
-
-        Ok(res)
-    }
-
-    /// Creates a new key with the given operation, or returns false if the key already exists.
-    pub(crate) async fn create_key(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
-        let new_loc = self.log.bounds().end;
-        if !create_key(&mut self.snapshot, &self.log, &key, new_loc).await? {
-            return Ok(false);
-        }
-
-        self.log
-            .append(Operation::Update(Update(key, value)))
-            .await?;
-        self.active_keys += 1;
-
-        Ok(true)
-    }
-
-    /// Updates the location of `key` in the snapshot to `new_loc`, returning the previous location
-    /// of the key if any was found.
-    pub(crate) async fn update_loc(
-        &mut self,
-        key: &K,
-        new_loc: Location,
-    ) -> Result<Option<Location>, Error> {
-        update_key(&mut self.snapshot, &self.log, key, new_loc).await
-    }
-
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V::Value) -> Result<(), Error> {
-        self.update_key(key, value).await.map(|_| ())
-    }
-
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
-        self.create_key(key, value).await
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        Ok(self.delete_key(key).await?.is_some())
-    }
-
     /// Performs a batch update, invoking the callback for each resulting operation. The first
     /// argument of the callback is the activity status of the operation, and the second argument is
     /// the location of the operation it inactivates (if any).
@@ -301,39 +221,6 @@ where
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync + 'static,
-        H: Hasher,
-    > kv::Updatable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.update(key, value).await
-    }
-}
-
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync + 'static,
-        H: Hasher,
-    > kv::Deletable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: CodecShared,
-{
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
-    }
-}
-
 impl<E, K, V, C, I, H> Batchable for Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
@@ -455,7 +342,7 @@ where
 pub(super) mod test {
     use super::*;
     use crate::{
-        kv::{Deletable as _, Gettable as _, Updatable as _},
+        kv::Gettable as _,
         mmr::StandardHasher,
         qmdb::{
             store::{LogStore, MerkleizedStore},
@@ -505,7 +392,7 @@ pub(super) mod test {
         // Make sure closing/reopening gets us back to the same state, even after adding an
         // uncommitted op, and even without a clean shutdown.
         let mut db = db.into_mutable();
-        db.update(k1, v1).await.unwrap();
+        db.write_batch([(k1, Some(v1))].into_iter()).await.unwrap();
         drop(db);
         let db = next_db().await;
         assert_eq!(db.bounds().end, 1);
@@ -533,7 +420,7 @@ pub(super) mod test {
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
         let mut db = db.into_mutable();
-        db.update(k1, v1).await.unwrap();
+        db.write_batch([(k1, Some(v1))].into_iter()).await.unwrap();
         for _ in 1..100 {
             let (clean_db, _) = db.commit(None).await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
@@ -544,7 +431,7 @@ pub(super) mod test {
         }
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
-        db.delete(k1).await.unwrap();
+        db.write_batch([(k1, None)].into_iter()).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
         assert!(db.is_empty());
         assert_eq!(db.bounds().end - 1, db.inactivity_floor_loc());
@@ -555,7 +442,7 @@ pub(super) mod test {
 
     pub(crate) async fn test_any_db_build_and_authenticate<
         D: TestableAnyDb<V>,
-        V: Codec + Clone + Eq + std::hash::Hash + std::fmt::Debug,
+        V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
     >(
         context: Context,
         db: D,
@@ -571,7 +458,7 @@ pub(super) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.update(k, v.clone()).await.unwrap();
+            db.write_batch([(k, Some(v.clone()))].into_iter()).await.unwrap();
             map.insert(k, v);
         }
 
@@ -582,7 +469,7 @@ pub(super) mod test {
             }
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.update(k, v.clone()).await.unwrap();
+            db.write_batch([(k, Some(v.clone()))].into_iter()).await.unwrap();
             map.insert(k, v);
         }
 
@@ -592,7 +479,7 @@ pub(super) mod test {
                 continue;
             }
             let k = Sha256::hash(&i.to_be_bytes());
-            db.delete(k).await.unwrap();
+            db.write_batch([(k, None)].into_iter()).await.unwrap();
             map.remove(&k);
         }
 
@@ -666,22 +553,24 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
 
-        assert!(db.create(d1, v1).await.unwrap());
+        assert!(db.get(&d1).await.unwrap().is_none());
+        db.write_batch([(d1, Some(v1))].into_iter()).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v1);
         assert!(db.get(&d2).await.unwrap().is_none());
 
-        assert!(db.create(d2, v1).await.unwrap());
+        assert!(db.get(&d2).await.unwrap().is_none());
+        db.write_batch([(d2, Some(v1))].into_iter()).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v1);
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        db.delete(d1).await.unwrap();
+        db.write_batch([(d1, None)].into_iter()).await.unwrap();
         assert!(db.get(&d1).await.unwrap().is_none());
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
-        db.update(d1, v2).await.unwrap();
+        db.write_batch([(d1, Some(v2))].into_iter()).await.unwrap();
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        db.update(d2, v1).await.unwrap();
+        db.write_batch([(d2, Some(v1))].into_iter()).await.unwrap();
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
         assert_eq!(db.bounds().end, 6); // 4 updates, 1 deletion + initial commit.
@@ -690,7 +579,7 @@ pub(super) mod test {
         let mut db = db.into_mutable();
 
         // Make sure create won't modify active keys.
-        assert!(!db.create(d1, v1).await.unwrap());
+        assert!(db.get(&d1).await.unwrap().is_some());
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
         // Should have moved 3 active operations to tip, leading to floor of 7.
@@ -698,25 +587,27 @@ pub(super) mod test {
         assert_eq!(db.bounds().end, 10); // floor of 7 + 2 active keys.
 
         // Delete all keys.
-        assert!(db.delete(d1).await.unwrap());
-        assert!(db.delete(d2).await.unwrap());
+        assert!(db.get(&d1).await.unwrap().is_some());
+        db.write_batch([(d1, None)].into_iter()).await.unwrap();
+        assert!(db.get(&d2).await.unwrap().is_some());
+        db.write_batch([(d2, None)].into_iter()).await.unwrap();
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 12); // 2 new delete ops.
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
 
         let (db, _) = db.commit(None).await.unwrap();
-        let mut db = db.into_mutable();
+        let db = db.into_mutable();
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(12));
         assert_eq!(db.bounds().end, 13); // only commit should remain.
 
         // Multiple deletions of the same key should be a no-op.
-        assert!(!db.delete(d1).await.unwrap());
+        assert!(db.get(&d1).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 13);
 
         // Deletions of non-existent keys should be a no-op.
         let d3 = Sha256::fill(3u8);
-        assert!(!db.delete(d3).await.unwrap());
+        assert!(db.get(&d3).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 13);
 
         // Make sure closing/reopening gets us back to the same state.
@@ -737,11 +628,11 @@ pub(super) mod test {
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
-        db.update(d1, v1).await.unwrap();
-        db.update(d2, v2).await.unwrap();
-        db.delete(d1).await.unwrap();
-        db.update(d2, v1).await.unwrap();
-        db.update(d1, v2).await.unwrap();
+        db.write_batch([(d1, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(d2, Some(v2))].into_iter()).await.unwrap();
+        db.write_batch([(d1, None)].into_iter()).await.unwrap();
+        db.write_batch([(d2, Some(v1))].into_iter()).await.unwrap();
+        db.write_batch([(d1, Some(v2))].into_iter()).await.unwrap();
 
         // Make sure last_commit is updated by changing the metadata back to None.
         let db = db
