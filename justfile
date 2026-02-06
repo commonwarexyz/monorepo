@@ -95,7 +95,7 @@ test-conformance *args='':
 regenerate-conformance *args='':
     RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
 
-# Check for public items without stability annotations
+# Find public items missing stability annotations.
 unstable-public *args='':
     ./scripts/find_unstable_public.sh {{ args }}
 
