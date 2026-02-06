@@ -83,7 +83,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
-            hasher.update(&(len as u64).to_be_bytes());
+            hasher.update(&len.to_be_bytes());
         });
         self.inner.read_at(offset, len).await
     }
@@ -99,7 +99,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
-            hasher.update(&(len as u64).to_be_bytes());
+            hasher.update(&len.to_be_bytes());
         });
         self.inner.read_at_buf(offset, len, buf).await
     }

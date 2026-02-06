@@ -42,6 +42,7 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
+            hasher.update(&len.to_be_bytes());
         });
 
         let buf = self
