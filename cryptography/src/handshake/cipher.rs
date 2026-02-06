@@ -168,6 +168,7 @@ impl SendCipher {
 pub struct RecvCipher {
     nonce: CounterNonce,
     inner: Secret<Cipher>,
+    poisoned: bool,
 }
 
 impl RecvCipher {
@@ -178,6 +179,7 @@ impl RecvCipher {
         Self {
             nonce: CounterNonce::new(),
             inner: Secret::new(Cipher::from_key(&key_bytes)),
+            poisoned: false,
         }
     }
 
@@ -190,37 +192,44 @@ impl RecvCipher {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - The cipher has been poisoned by a previous error
     /// - `encrypted_data.len() < TAG_SIZE`
     /// - Too many messages have been received with this cipher
     /// - The ciphertext was corrupted or tampered with
     ///
-    /// In the last two cases, the `RecvCipher` will no longer be able to return
-    /// valid ciphertexts, and will always return an error on subsequent calls
-    /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
-    /// is a simple (and safe) way to handle this scenario.
+    /// Any error poisons the cipher, causing all subsequent calls to
+    /// [`Self::recv_in_place`] to return [`Error::DecryptionFailed`]. Terminating (and
+    /// optionally reestablishing) the connection is the expected way to recover.
     #[inline]
     pub fn recv_in_place(&mut self, encrypted_data: &mut [u8]) -> Result<usize, Error> {
-        let nonce = self.nonce.inc()?;
-        if encrypted_data.len() < TAG_SIZE {
+        if self.poisoned {
             return Err(Error::DecryptionFailed);
         }
-        self.inner
-            .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
+        self.nonce
+            .inc()
+            .and_then(|nonce| {
+                if encrypted_data.len() < TAG_SIZE {
+                    return Err(Error::DecryptionFailed);
+                }
+                self.inner
+                    .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
+            })
+            .inspect_err(|_| self.poisoned = true)
     }
 
     /// Decrypts ciphertext and returns the original data.
     ///
     /// # Errors
     ///
-    /// This function will return an error in the following situations:
+    /// Returns an error if:
+    /// - The cipher has been poisoned by a previous error
+    /// - `encrypted_data.len() < TAG_SIZE`
+    /// - Too many messages have been received with this cipher
+    /// - The ciphertext was corrupted or tampered with
     ///
-    /// - Too many messages have been received with this cipher.
-    /// - The ciphertext was corrupted in some way.
-    ///
-    /// In *both* cases, the `RecvCipher` will no longer be able to return
-    /// valid ciphertexts, and will always return an error on subsequent calls
-    /// to [`Self::recv`]. Terminating (and optionally reestablishing) the connection
-    /// is a simple (and safe) way to handle this scenario.
+    /// Any error poisons the cipher, causing all subsequent calls to [`Self::recv`] to
+    /// return [`Error::DecryptionFailed`]. Terminating (and optionally reestablishing)
+    /// the connection is the expected way to recover.
     pub fn recv(&mut self, encrypted_data: &[u8]) -> Result<Vec<u8>, Error> {
         let mut buf = encrypted_data.to_vec();
         let plaintext_len = self.recv_in_place(&mut buf)?;
@@ -342,35 +351,35 @@ mod tests {
     }
 
     #[test]
-    fn test_nonce_sync_after_truncated_recv() {
+    fn test_recv_poisoned_after_corrupted() {
         let mut send = SendCipher::new(&mut test_rng());
         let mut recv = RecvCipher::new(&mut test_rng());
 
-        // Send message (sender nonce: 0 -> 1)
-        let ciphertext = send.send(b"message 1").unwrap();
+        // Successful roundtrip (nonce 0)
+        let ct0 = send.send(b"msg 0").unwrap();
+        assert!(recv.recv(&ct0).is_ok());
 
-        // Receiver gets truncated buffer (recv nonce: 0 -> 1)
-        let mut truncated = vec![0u8; TAG_SIZE - 1];
-        assert!(recv.recv_in_place(&mut truncated).is_err());
+        // Corrupt message triggers error and poisons the cipher
+        let mut corrupted = send.send(b"msg 1").unwrap();
+        corrupted[0] ^= 0xFF;
+        assert!(recv.recv(&corrupted).is_err());
 
-        // Original ciphertext (nonce 0) no longer decrypts because recv nonce advanced to 1
-        assert!(recv.recv(&ciphertext).is_err());
+        // Valid message fails after poisoning
+        let ct2 = send.send(b"msg 2").unwrap();
+        assert!(matches!(recv.recv(&ct2), Err(Error::DecryptionFailed)));
     }
 
     #[test]
-    fn test_nonce_sync_after_corrupted_recv() {
+    fn test_recv_poisoned_after_truncated() {
         let mut send = SendCipher::new(&mut test_rng());
         let mut recv = RecvCipher::new(&mut test_rng());
 
-        // Send message (sender nonce: 0 -> 1)
-        let ciphertext = send.send(b"message 1").unwrap();
+        // Truncated message (< TAG_SIZE) poisons the cipher
+        let short = vec![0u8; TAG_SIZE - 1];
+        assert!(matches!(recv.recv(&short), Err(Error::DecryptionFailed)));
 
-        // Corrupt a copy (valid length, bad content)
-        let mut corrupted = ciphertext.clone();
-        corrupted[0] ^= 0xFF;
-        assert!(recv.recv_in_place(&mut corrupted).is_err());
-
-        // Original ciphertext (nonce 0) no longer decrypts because recv nonce advanced to 1
-        assert!(recv.recv(&ciphertext).is_err());
+        // Valid message fails after poisoning
+        let ct = send.send(b"msg 0").unwrap();
+        assert!(matches!(recv.recv(&ct), Err(Error::DecryptionFailed)));
     }
 }
