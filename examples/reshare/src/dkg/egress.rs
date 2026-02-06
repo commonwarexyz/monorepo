@@ -3,7 +3,7 @@ use commonware_cryptography::bls12381::{
     dkg::Output,
     primitives::{group::Share, variant::Variant},
 };
-use std::{future::Future, pin::Pin};
+use std::future::Future;
 
 /// An update from the DKG Actor.
 #[allow(dead_code)]
@@ -34,27 +34,21 @@ pub enum PostUpdate {
 /// This can be used to, e.g.
 /// - save the result to a file,
 /// - send the result across a channel.
-pub trait UpdateCallBack<V: Variant, P>: Send {
+pub trait UpdateCallBack<V: Variant, P: Send + 'static>: Send {
     fn on_update(
         &mut self,
         update: Update<V, P>,
-    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>>;
+    ) -> impl Future<Output = PostUpdate> + Send + '_;
 }
 
 /// An implementor of [UpdateCallBack] which always continues.
 pub struct ContinueOnUpdate;
 
-impl ContinueOnUpdate {
-    pub fn boxed() -> Box<Self> {
-        Box::new(Self)
-    }
-}
-
-impl<V: Variant, P> UpdateCallBack<V, P> for ContinueOnUpdate {
-    fn on_update(
+impl<V: Variant, P: Send + 'static> UpdateCallBack<V, P> for ContinueOnUpdate {
+    async fn on_update(
         &mut self,
         _update: Update<V, P>,
-    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
-        Box::pin(async { PostUpdate::Continue })
+    ) -> PostUpdate {
+        PostUpdate::Continue
     }
 }

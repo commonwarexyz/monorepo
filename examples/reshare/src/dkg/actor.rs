@@ -192,7 +192,7 @@ where
     }
 
     /// Start the DKG actor.
-    pub fn start(
+    pub fn start<CB>(
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
@@ -201,8 +201,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
-    ) -> Handle<()> {
+        callback: CB,
+    ) -> Handle<()>
+    where
+        CB: UpdateCallBack<V, C::PublicKey> + 'static,
+    {
         // NOTE: In a production setting with a large validator set, the implementor may want
         // to choose a dedicated thread for the DKG actor. This actor can perform CPU-intensive
         // cryptographic operations.
@@ -212,7 +215,7 @@ where
         )
     }
 
-    async fn run(
+    async fn run<CB>(
         mut self,
         output: Option<Output<V, C::PublicKey>>,
         share: Option<Share>,
@@ -221,8 +224,11 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         ),
-        mut callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
-    ) {
+        mut callback: CB,
+    )
+    where
+        CB: UpdateCallBack<V, C::PublicKey>,
+    {
         let max_read_size = NZU32!(self.peer_config.max_participants_per_round());
         let is_dkg = output.is_none();
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
