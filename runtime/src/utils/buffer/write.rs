@@ -80,7 +80,7 @@ impl<B: Blob> Blob for Write<B> {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
-        // SAFETY: write.rs fills all `len` bytes via extract + blob read below.
+        // SAFETY: `len` bytes are filled via extract + blob read below.
         unsafe { buf.prepare_read(len)? };
 
         // Ensure the read doesn't overflow.

@@ -788,7 +788,7 @@ impl<B: Blob> Blob for Append<B> {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
-        // SAFETY: append.rs fills all `len` bytes via read_into below.
+        // SAFETY: `len` bytes are filled via read_into below.
         unsafe { buf.prepare_read(len)? };
         match buf {
             IoBufsMut::Single(mut single) => {

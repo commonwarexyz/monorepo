@@ -42,7 +42,7 @@ impl crate::Blob for Blob {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
-        // SAFETY: fallback.rs fills all `len` bytes via read_exact below.
+        // SAFETY: `len` bytes are filled via read_exact below.
         unsafe { buf.prepare_read(len)? };
         let mut file = self.file.lock().await;
         let offset = offset
@@ -54,12 +54,14 @@ impl crate::Blob for Blob {
 
         match buf {
             IoBufsMut::Single(mut single) => {
+                // Read directly into the single buffer
                 file.read_exact(single.as_mut())
                     .await
                     .map_err(|_| Error::ReadFailed)?;
                 Ok(IoBufsMut::Single(single))
             }
             IoBufsMut::Chunked(mut chunks) => {
+                // Read into a temporary buffer and copy to preserve the chunked structure
                 let mut temp = vec![0u8; len];
                 file.read_exact(&mut temp)
                     .await

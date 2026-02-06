@@ -688,10 +688,11 @@ stability_scope!(BETA {
     /// before dropping to ensure all changes are durably persisted.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
-        /// Read `len` bytes at `offset` into a caller-provided buffer.
+        /// Read `len` bytes at `offset` into caller-provided buffer(s).
         ///
-        /// Implementations must fill exactly `len` bytes. `len` must be
-        /// <= buffer capacity.
+        /// The caller provides the buffer(s), and the implementation fills it with
+        /// exactly `len` bytes of data read from the blob starting at `offset`. `len`
+        /// must be <= buffer capacity. Returns the same buffer(s), filled with data.
         ///
         /// # Contract
         ///
@@ -703,10 +704,10 @@ stability_scope!(BETA {
             buf: impl Into<IoBufsMut> + Send,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Read `len` bytes at `offset`.
+        /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
+        /// of data read from the blob starting at `offset`.
         ///
-        /// Allocates a buffer internally. For reusing buffers, use
-        /// [`Blob::read_at_buf`].
+        /// For reusing buffers, use [`Blob::read_at_buf`].
         fn read_at(
             &self,
             offset: u64,

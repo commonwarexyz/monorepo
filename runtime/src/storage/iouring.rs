@@ -281,7 +281,7 @@ impl crate::Blob for Blob {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut input_buf = buf.into();
-        // SAFETY: iouring.rs fills all `len` bytes via io_uring read below.
+        // SAFETY: `len` bytes are filled via io_uring read loop below.
         unsafe { input_buf.prepare_read(len)? };
 
         // For single buffers, read directly into them (zero-copy).
@@ -289,10 +289,13 @@ impl crate::Blob for Blob {
         let buf_len = len;
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
-            IoBufsMut::Chunked(bufs) => (IoBufMut::with_capacity(buf_len), Some(bufs)),
+            IoBufsMut::Chunked(bufs) => {
+                let mut tmp = IoBufMut::with_capacity(buf_len);
+                // SAFETY: `len` bytes are filled via io_uring read loop below.
+                unsafe { tmp.prepare_read(buf_len)? };
+                (tmp, Some(bufs))
+            }
         };
-        // SAFETY: io_uring read loop fills all buf_len bytes below.
-        unsafe { io_buf.set_len(buf_len) };
 
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
