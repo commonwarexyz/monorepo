@@ -140,13 +140,20 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use std::sync::Arc;
 
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
+
     #[tokio::test]
     async fn test_audited_storage() {
-        let inner = MemStorage::default();
+        let inner = MemStorage::new(test_pool());
         let auditor = Arc::new(crate::deterministic::Auditor::default());
         let storage = AuditedStorage::new(inner, auditor.clone());
 
@@ -158,12 +165,12 @@ mod tests {
         use crate::deterministic::Auditor;
 
         // Initialize the first storage and auditor
-        let inner1 = MemStorage::default();
+        let inner1 = MemStorage::new(test_pool());
         let auditor1 = Arc::new(Auditor::default());
         let storage1 = AuditedStorage::new(inner1, auditor1.clone());
 
         // Initialize the second storage and auditor
-        let inner2 = MemStorage::default();
+        let inner2 = MemStorage::new(test_pool());
         let auditor2 = Arc::new(Auditor::default());
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 

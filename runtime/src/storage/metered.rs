@@ -179,14 +179,18 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
-        Blob, Storage as _,
+        Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
     use prometheus_client::registry::Registry;
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default())
+    }
 
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         run_storage_tests(storage).await;
@@ -196,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_metrics() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
@@ -252,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         // Open multiple blobs
@@ -293,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn test_cloned_blobs_share_metrics() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob

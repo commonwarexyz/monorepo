@@ -360,9 +360,16 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
-        Blob as _, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use rand::{rngs::StdRng, SeedableRng};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
 
     /// Test harness with faulty storage wrapping memory storage.
     struct Harness {
@@ -377,7 +384,7 @@ mod tests {
         }
 
         fn with_seed(seed: u64, config: Config) -> Self {
-            let inner = MemStorage::default();
+            let inner = MemStorage::new(test_pool());
             let rng = Arc::new(Mutex::new(
                 Box::new(StdRng::seed_from_u64(seed)) as BoxDynRng
             ));

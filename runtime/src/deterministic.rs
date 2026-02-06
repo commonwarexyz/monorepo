@@ -870,20 +870,6 @@ impl Context {
         // Create shared RNG (used by both executor and storage)
         let rng = Arc::new(Mutex::new(cfg.rng));
 
-        // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
-        let storage = MeteredStorage::new(
-            AuditedStorage::new(
-                FaultyStorage::new(MemStorage::default(), rng.clone(), storage_fault_config),
-                auditor.clone(),
-            ),
-            runtime_registry,
-        );
-
-        // Create network
-        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
-
         // Initialize buffer pools
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
@@ -909,6 +895,24 @@ impl Context {
             storage_config,
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
+
+        // Create storage fault config (default to disabled if None)
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
+        let storage = MeteredStorage::new(
+            AuditedStorage::new(
+                FaultyStorage::new(
+                    MemStorage::new(storage_buffer_pool.clone()),
+                    rng.clone(),
+                    storage_fault_config,
+                ),
+                auditor.clone(),
+            ),
+            runtime_registry,
+        );
+
+        // Create network
+        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
+        let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
