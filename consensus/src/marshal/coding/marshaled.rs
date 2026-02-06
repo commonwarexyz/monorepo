@@ -405,6 +405,9 @@ where
                     is_valid = validity_request => is_valid,
                 };
                 let _ = verify_duration.try_set(start.elapsed().as_millis());
+                if application_valid {
+                    marshal.verified(round, block).await;
+                }
                 tx.send_lossy(application_valid);
             });
 
@@ -665,6 +668,7 @@ where
                 .marshal
                 .subscribe_by_commitment(Some(context.round), payload)
                 .await;
+            let mut marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = context.round;
             let block_digest: B::Digest = payload.block_digest();
@@ -705,7 +709,10 @@ where
                         return;
                     }
 
-                    // Valid re-proposal. Create a completed verification task for `certify`.
+                    // Valid re-proposal. Notify the marshal and create a completed
+                    // verification task for `certify`.
+                    marshal.verified(round, block).await;
+
                     let (task_tx, task_rx) = oneshot::channel();
                     task_tx.send_lossy(true);
                     verification_tasks
