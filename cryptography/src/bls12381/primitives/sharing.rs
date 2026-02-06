@@ -57,8 +57,25 @@ impl Mode {
 
     /// Compute the scalars for all participants.
     #[cfg(feature = "std")]
-    pub(crate) fn all_scalars(self, total: NonZeroU32) -> impl Iterator<Item = Scalar> {
-        (0..total.get()).map(move |i| self.scalar(total, Participant::new(i)).expect("i < total"))
+    pub(crate) fn all_scalars(self, total: NonZeroU32) -> Vec<Scalar> {
+        match self {
+            Self::NonZeroCounter => (0..total.get())
+                .map(|i| Scalar::from_u64(i as u64 + 1))
+                .collect(),
+            Self::RootsOfUnity => {
+                let size = (total.get() as u64).next_power_of_two();
+                let lg_size = size.ilog2() as u8;
+                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
+                let mut acc = Scalar::one();
+                (0..total.get())
+                    .map(|_| {
+                        let val = acc.clone();
+                        acc *= &w;
+                        val
+                    })
+                    .collect()
+            }
+        }
     }
 
     /// Create an interpolator for this mode, given a set of indices.
@@ -213,7 +230,7 @@ impl<V: Variant> Sharing<V> {
     }
 
     #[cfg(feature = "std")]
-    fn all_scalars(&self) -> impl Iterator<Item = Scalar> {
+    fn all_scalars(&self) -> Vec<Scalar> {
         self.mode.all_scalars(self.total)
     }
 
