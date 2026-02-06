@@ -45,7 +45,7 @@ impl crate::Stream for Stream {
             // SAFETY: We will write exactly `len` bytes before returning
             // (read_exact fills the entire buffer). The buffer contents
             // are uninitialized but we only write to it, never read.
-            unsafe { buf.set_len(len) };
+            unsafe { buf.prepare_read(len)? };
             self.stream
                 .read_exact(buf.as_mut())
                 .await

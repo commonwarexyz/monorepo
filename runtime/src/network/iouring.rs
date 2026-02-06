@@ -447,7 +447,7 @@ impl crate::Stream for Stream {
         // SAFETY: We will write exactly `len` bytes before returning
         // (loop continues until bytes_received == len). The buffer contents
         // are uninitialized but we only write to it, never read.
-        unsafe { owned_buf.set_len(len) };
+        unsafe { owned_buf.prepare_read(len)? };
         let mut bytes_received = 0;
 
         while bytes_received < len {
