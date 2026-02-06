@@ -109,7 +109,7 @@ impl<B: Blob> Read<B> {
         };
         let read_result = self
             .blob
-            .read_at_buf(self.blob_position, buf, bytes_to_read)
+            .read_at_buf(self.blob_position, bytes_to_read, buf)
             .await?;
         self.buffer = read_result.coalesce();
         self.buffer_valid_len = bytes_to_read;

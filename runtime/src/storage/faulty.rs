@@ -295,13 +295,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at_buf(
         &self,
         offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
         len: usize,
+        buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(Error::Io(injected_io_error()));
         }
-        self.inner.read_at_buf(offset, buf.into(), len).await
+        self.inner.read_at_buf(offset, len, buf.into()).await
     }
 
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {

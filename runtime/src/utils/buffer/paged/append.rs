@@ -506,8 +506,8 @@ impl<B: Blob> Append<B> {
     pub async fn read_up_to(
         &self,
         logical_offset: u64,
-        buf: impl Into<IoBufMut> + Send,
         len: usize,
+        buf: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
         let mut buf = buf.into();
         if len == 0 {
@@ -777,15 +777,15 @@ impl<B: Blob> Append<B> {
 
 impl<B: Blob> Blob for Append<B> {
     async fn read_at(&self, logical_offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(logical_offset, IoBufMut::with_capacity(len), len)
+        self.read_at_buf(logical_offset, len, IoBufMut::with_capacity(len))
             .await
     }
 
     async fn read_at_buf(
         &self,
         logical_offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
         len: usize,
+        buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
         // SAFETY: append.rs fills all `len` bytes via read_into below.

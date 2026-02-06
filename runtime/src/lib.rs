@@ -699,8 +699,8 @@ stability_scope!(BETA {
         fn read_at_buf(
             &self,
             offset: u64,
-            buf: impl Into<IoBufsMut> + Send,
             len: usize,
+            buf: impl Into<IoBufsMut> + Send,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Read `len` bytes at `offset`.

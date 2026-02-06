@@ -154,14 +154,14 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, crate::Error> {
-        self.read_at_buf(offset, self.pool.alloc(len), len).await
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
     }
 
     async fn read_at_buf(
         &self,
         offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
         len: usize,
+        buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, crate::Error> {
         let mut buf = buf.into();
         // SAFETY: memory.rs fills all `len` bytes via copy_from_slice below.

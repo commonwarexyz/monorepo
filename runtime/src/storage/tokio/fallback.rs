@@ -32,14 +32,14 @@ impl Blob {
 
 impl crate::Blob for Blob {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, self.pool.alloc(len), len).await
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
     }
 
     async fn read_at_buf(
         &self,
         offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
         len: usize,
+        buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
         // SAFETY: fallback.rs fills all `len` bytes via read_exact below.

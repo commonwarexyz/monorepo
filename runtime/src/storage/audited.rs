@@ -91,8 +91,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at_buf(
         &self,
         offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
         len: usize,
+        buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let buf = buf.into();
         self.auditor.event(b"read_at", |hasher| {
@@ -101,7 +101,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&offset.to_be_bytes());
             hasher.update(&(len as u64).to_be_bytes());
         });
-        self.inner.read_at_buf(offset, buf, len).await
+        self.inner.read_at_buf(offset, len, buf).await
     }
 
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {

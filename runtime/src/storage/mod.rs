@@ -749,7 +749,7 @@ pub(crate) mod tests {
         // Test with single buffer - verify same buffer is returned
         let input_buf = IoBufMut::zeroed(11);
         let input_ptr = input_buf.as_ref().as_ptr();
-        let output = blob.read_at_buf(0, input_buf, 11).await.unwrap();
+        let output = blob.read_at_buf(0, 11, input_buf).await.unwrap();
         assert!(
             output.is_single(),
             "Single input should return single output"
@@ -769,7 +769,7 @@ pub(crate) mod tests {
         let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!input_bufs.is_single(), "Should be chunked");
 
-        let output = blob.read_at_buf(0, input_bufs, 11).await.unwrap();
+        let output = blob.read_at_buf(0, 11, input_bufs).await.unwrap();
         assert!(
             !output.is_single(),
             "Chunked input should return chunked output"

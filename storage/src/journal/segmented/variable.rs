@@ -252,8 +252,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         let (buf, available) = blob
             .read_up_to(
                 offset,
-                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
                 MAX_U32_VARINT_SIZE,
+                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
             )
             .await?;
         let buf = buf.freeze();

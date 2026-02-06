@@ -147,10 +147,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at_buf(
         &self,
         offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
         len: usize,
+        buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let read = self.inner.read_at_buf(offset, buf, len).await?;
+        let read = self.inner.read_at_buf(offset, len, buf).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
         Ok(read)
