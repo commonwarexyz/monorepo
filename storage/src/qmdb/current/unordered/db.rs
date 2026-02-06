@@ -187,14 +187,6 @@ where
     where
         Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
     {
-        let status = &mut self.status;
-        self.any
-            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            })
-            .await
+        self.write_batch(iter).await
     }
 }

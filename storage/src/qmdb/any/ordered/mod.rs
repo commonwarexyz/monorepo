@@ -538,7 +538,7 @@ where
     where
         Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
     {
-        self.write_batch_with_callback(iter, |_, _| {}).await
+        self.write_batch(iter).await
     }
 }
 
