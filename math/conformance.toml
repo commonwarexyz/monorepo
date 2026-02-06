@@ -6,10 +6,6 @@ hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
 n_cases = 65536
 hash = "0285839b29ab975f6f348ae6df4075ec9b35b1c091f135813629175358015870"
 
-["commonware_math::ntt::test::conformance::CodecConformance<Matrix>"]
-n_cases = 65536
-hash = "0285839b29ab975f6f348ae6df4075ec9b35b1c091f135813629175358015870"
-
 ["commonware_math::poly::test::conformance::CodecConformance<Poly<F>>"]
 n_cases = 65536
 hash = "54e1597874d55f57cdcb090728d133d0e4448509f417db8434bfd39614a7b465"
