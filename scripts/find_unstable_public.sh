@@ -4,7 +4,7 @@
 # At MAX level, all stability-marked items are excluded. Any public items that
 # appear in rustdoc JSON are unmarked and need stability annotations.
 #
-# Usage: ./scripts/find_unstable_public.sh [crate-name...] [-p <crate>] [--package <crate>] [--package=<crate>]
+# Usage: ./scripts/find_unstable_public.sh [-p <crate>] [--package <crate>] [--package=<crate>]
 #        If no crate specified, checks all workspace library crates.
 #        Unrecognized flags are silently ignored so cargo flags can be forwarded.
 
@@ -25,7 +25,7 @@ fi
 
 usage() {
     cat >&2 <<'EOF'
-Usage: ./scripts/find_unstable_public.sh [crate-name...] [-p <crate>] [--package <crate>] [--package=<crate>]
+Usage: ./scripts/find_unstable_public.sh [-p <crate>] [--package <crate>] [--package=<crate>]
        ./scripts/find_unstable_public.sh [--help]
 
 If no crate is specified, checks all workspace library crates.
@@ -59,27 +59,19 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
-        --)
-            shift
-            while [[ $# -gt 0 ]]; do
-                selected_crates+=("$1")
-                shift
-            done
-            ;;
         --*=*)
             # Ignore unrecognized --flag=value flags
             shift
             ;;
         -*)
             # Ignore unrecognized flags and consume their value argument
-            # (e.g. --features std forwarded from check-stability)
             shift
             if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
                 shift
             fi
             ;;
         *)
-            selected_crates+=("$1")
+            # Ignore unrecognized positional arguments
             shift
             ;;
     esac
