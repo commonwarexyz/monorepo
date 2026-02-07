@@ -153,7 +153,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Read blob
-        let buf = blob.read_at(0, len as usize).await?.coalesce();
+        let len: usize = len.try_into().expect("blob too large for platform");
+        let buf = blob.read_at(0, len).await?.coalesce();
 
         // Verify integrity.
         //
