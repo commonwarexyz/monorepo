@@ -7,6 +7,18 @@ use core::ops::{Index, IndexMut};
 use rand_core::CryptoRngCore;
 use core::num::NonZeroU32;
 
+/// Log2 of the base polynomial size for vanishing polynomial computation.
+///
+/// Instead of building the vanishing polynomial from individual linear factors
+/// using the full merge tree, base polynomials of size `2^LG_VANISHING_BASE`
+/// are computed naively by multiplying (X - root) factors one at a time.
+/// This replaces the bottom levels of the merge tree with a simpler, faster
+/// direct computation.
+///
+/// Higher values reduce merge tree overhead but increase the per-chunk cost
+/// (quadratic in the base size). Values around 4-6 work well in practice.
+const LG_VANISHING_BASE: u32 = 12;
+
 /// Reverse the first `bit_width` bits of `i`.
 ///
 /// Any bits beyond that width will be erased.
@@ -418,48 +430,92 @@ impl<F: FieldNTT> NTTPolynomial<F> {
         // so that we can correctly interpolate the result back.
         //
         // The tricky part is transforming this algorithm into an iterative one, and respecting
-        // the reverse bit order of the coefficients we need
+        // the reverse bit order of the coefficients we need.
+        //
+        // Rather than starting from individual linear factors (X - 1) at the leaves
+        // and merging all the way up the tree, we first build "base" polynomials of
+        // size B = 2^LG_VANISHING_BASE by naively multiplying the appropriate
+        // (X - root) factors one at a time. This replaces the bottom levels of the
+        // merge tree with a simpler direct computation, then the merge tree continues
+        // from there.
+        //
+        // The roots for each base polynomial are the B-th roots of unity. Specifically,
+        // leaf j within any chunk has the compressed root omega_B^(reverse_bits(b, j)),
+        // where omega_B is a primitive B-th root of unity. This falls out from the
+        // root-scaling that the merge tree would have applied at each of the first b levels.
         let rows = except.len() as usize;
         let padded_rows = rows.next_power_of_two();
         let zeroes = except.count_zeros() as usize + padded_rows - rows;
         assert!(zeroes < padded_rows, "too many points to vanish over");
         let lg_rows = padded_rows.ilog2();
-        // At each iteration, we split `except` into sections.
-        // Each section has a polynomial associated with it, which should
-        // be the polynomial that vanishes over all the 0 bits of that section,
-        // or the 0 polynomial if that section has no 0 bits.
-        //
-        // The sections are organized into a tree:
-        //
-        // 0xx             1xx
-        // 00x     01x     10x         11x
-        // 000 001 010 011 100 101 110 111
-        //
-        // The first half of the sections are even, the second half are odd.
-        // The first half of the first half have their first two bits set to 00,
-        // the second half of the first half have their first two bits set to 01,
-        // and so on.
-        //
-        // In other words, the ith index in except becomes the i.reverse_bits()
-        // section.
-        //
-        // How many polynomials do we have? (Potentially 0 ones).
-        let mut polynomial_count = padded_rows;
-        // How many coefficients does each polynomial have?
-        let mut polynomial_size: usize = 2;
-        // For the first iteration, each
+
+        // Clamp the base level to the total number of levels.
+        let b = LG_VANISHING_BASE.min(lg_rows);
+        let base = 1usize << b; // B = 2^b
+        let slot_size = 2 * base; // Each polynomial slot has 2B coefficients
+        let lg_slot = b + 1;
+        let chunk_count = padded_rows >> b;
+
+        // Precompute the B-th roots of unity: [1, omega_B, omega_B^2, ..., omega_B^(B-1)].
+        let roots = {
+            let omega_b = F::root_of_unity(b as u8)
+                .expect("too many rows to create vanishing polynomial");
+            let mut roots = Vec::with_capacity(base);
+            let mut omega_k = F::one();
+            for _ in 0..base {
+                roots.push(omega_k.clone());
+                omega_k *= &omega_b;
+            }
+            roots
+        };
+
+        // Build base polynomials naively by multiplying (X - root) factors.
         let mut polynomials = vec![F::zero(); 2 * padded_rows];
-        let mut active = BitMap::<DEFAULT_CHUNK_SIZE>::with_capacity(polynomial_count as u64);
-        for i in 0..polynomial_count {
-            let rev_i = reverse_bits(lg_rows, i as u64) as usize;
-            if !except.get(rev_i as u64) {
-                polynomials[2 * i] = -F::one();
-                polynomials[2 * i + 1] = F::one();
-                active.push(true);
-            } else {
-                active.push(false);
+        let mut active = BitMap::<DEFAULT_CHUNK_SIZE>::with_capacity(chunk_count as u64);
+        let mut poly_scratch = vec![F::zero(); base + 1];
+
+        for chunk in 0..chunk_count {
+            let start = chunk * slot_size;
+            poly_scratch[0] = F::one();
+            let mut degree = 0;
+            let mut has_root = false;
+
+            for k in 0..base {
+                let global_leaf = chunk * base + k;
+                let original_index = reverse_bits(lg_rows, global_leaf as u64);
+                // Out-of-bounds indices (from padding) are not in except,
+                // so they are active (should vanish).
+                if !except.get(original_index) {
+                    has_root = true;
+                    let root = &roots[reverse_bits(b, k as u64) as usize];
+                    // Multiply poly_scratch by (X - root) in standard coefficient order.
+                    poly_scratch[degree + 1] = poly_scratch[degree].clone();
+                    for i in (1..=degree).rev() {
+                        poly_scratch[i] =
+                            poly_scratch[i - 1].clone() - &(root.clone() * &poly_scratch[i]);
+                    }
+                    poly_scratch[0] = -(root.clone() * &poly_scratch[0]);
+                    degree += 1;
+                }
+            }
+
+            active.push(has_root);
+
+            if has_root {
+                // Write into the slot in bit-reversed order: the coefficient
+                // of X^i goes to position reverse_bits(lg_slot, i).
+                for i in 0..=degree {
+                    polynomials[start + reverse_bits(lg_slot, i as u64) as usize] =
+                        poly_scratch[i].clone();
+                }
+            }
+
+            // Clear scratch for the next chunk.
+            for i in 0..=degree {
+                poly_scratch[i] = F::zero();
             }
         }
+
         // Rather than store w at each iteration, and divide by it, just store its inverse,
         // allowing us to multiply by it.
         let w_invs = {
@@ -477,9 +533,12 @@ impl<F: FieldNTT> NTTPolynomial<F> {
             out.reverse();
             out
         };
-        // When we multiply
+
+        // Continue the merge tree from level b onward.
+        let mut polynomial_count = chunk_count;
+        let mut polynomial_size: usize = slot_size;
         let mut scratch: Vec<F> = Vec::with_capacity(padded_rows);
-        for w_inv in w_invs.into_iter() {
+        for w_inv in w_invs.into_iter().skip(b as usize) {
             // After this iteration, we're going to end up with half the polynomials
             polynomial_count >>= 1;
             // and each of them will be twice as large.
