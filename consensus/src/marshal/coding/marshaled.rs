@@ -84,7 +84,11 @@ use futures::{
 };
 use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 use rand::Rng;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
@@ -148,6 +152,7 @@ where
     #[allow(clippy::type_complexity)]
     last_built: Arc<Mutex<Option<(Round, CodedBlock<B, C>)>>>,
     verification_tasks: Arc<Mutex<TasksMap<B>>>,
+    cached_genesis: Arc<OnceLock<(CodingCommitment, CodedBlock<B, C>)>>,
 
     build_duration: Gauge,
     verify_duration: Gauge,
@@ -222,6 +227,7 @@ where
             epocher,
             last_built: Arc::new(Mutex::new(None)),
             verification_tasks: Arc::new(Mutex::new(HashMap::new())),
+            cached_genesis: Arc::new(OnceLock::new()),
 
             build_duration,
             verify_duration,
@@ -258,6 +264,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
+        let cached_genesis = self.cached_genesis.clone();
 
         let (mut tx, rx) = oneshot::channel();
         self.context
@@ -272,6 +279,7 @@ where
                     Some(Round::new(context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
+                    cached_genesis,
                 )
                 .await;
 
@@ -485,6 +493,7 @@ where
         let last_built = self.last_built.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
+        let cached_genesis = self.cached_genesis.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
@@ -512,6 +521,7 @@ where
                     Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
+                    cached_genesis,
                 )
                 .await;
 
@@ -990,6 +1000,7 @@ async fn fetch_parent<E, S, A, B, C>(
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, S::PublicKey>>,
+    cached_genesis: Arc<OnceLock<(CodingCommitment, CodedBlock<B, C>)>>,
 ) -> Either<
     Ready<Result<CodedBlock<B, C>, oneshot::error::RecvError>>,
     oneshot::Receiver<CodedBlock<B, C>>,
@@ -1001,12 +1012,18 @@ where
     B: CertifiableBlock,
     C: CodingScheme,
 {
-    let genesis = application.genesis().await;
-    let genesis_coding_commitment = genesis_coding_commitment(&genesis);
-
-    if parent_commitment == genesis_coding_commitment {
+    if cached_genesis.get().is_none() {
+        let genesis = application.genesis().await;
+        let genesis_coding_commitment = genesis_coding_commitment(&genesis);
         let coded_genesis = CodedBlock::<B, C>::new_trusted(genesis, genesis_coding_commitment);
-        Either::Left(futures::future::ready(Ok(coded_genesis)))
+        let _ = cached_genesis.set((genesis_coding_commitment, coded_genesis));
+    }
+
+    let (genesis_commitment, coded_genesis) = cached_genesis
+        .get()
+        .expect("genesis cache should be initialized");
+    if parent_commitment == *genesis_commitment {
+        Either::Left(futures::future::ready(Ok(coded_genesis.clone())))
     } else {
         Either::Right(
             marshal
