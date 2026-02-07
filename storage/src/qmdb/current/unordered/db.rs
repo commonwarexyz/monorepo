@@ -133,14 +133,44 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
+        // Collect deferred floor-raising operations without writing them yet. This allows us
+        // to skip copying keys that the batch will overwrite.
+        let mut deferred = if self.any.pending_steps > 0 {
+            self.status.set_bit(*self.any.last_commit_loc, false);
+            let floor = self.any.inactivity_floor_loc;
+            let steps = self.any.pending_steps;
+            let (new_floor, ops) = self
+                .any
+                .as_floor_helper()
+                .collect_floor_ops(&mut self.status, floor, steps)
+                .await?;
+            self.any.inactivity_floor_loc = new_floor;
+            self.any.pending_steps = 0;
+            ops
+        } else {
+            Default::default()
+        };
+
+        let batch: Vec<_> = iter.into_iter().collect();
         let status = &mut self.status;
         self.any
-            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
+            .write_batch_with_callback(batch, move |append: bool, loc: Option<Location>| {
                 status.push(append);
                 if let Some(loc) = loc {
                     status.set_bit(*loc, false);
                 }
             })
+            .await?;
+
+        // Remove deferred entries whose keys were overwritten or deleted by the batch.
+        deferred.retain(|key, (old_loc, _)| {
+            self.any.snapshot.get(key).any(|&loc| loc == *old_loc)
+        });
+
+        // Flush remaining deferred operations (keys not touched by the batch).
+        self.any
+            .as_floor_helper()
+            .flush_collected_ops(&mut self.status, deferred)
             .await
     }
 }

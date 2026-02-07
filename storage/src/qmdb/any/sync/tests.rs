@@ -67,9 +67,6 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
         &self,
         pos: Position,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
-
-    /// Get pinned nodes from the internal cached map (used before closing db in partial match tests)
-    fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Self::Digest>;
 }
 
 /// Harness for sync tests.
@@ -499,14 +496,23 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        // Create and populate target database
+        // Create and populate target database. Two rounds of apply_ops ensure the
+        // deferred floor-raising from the first commit is executed during the second
+        // round's write_batch, so that inactivity_floor_loc > 0.
         let mut target_db = H::init_db(context.with_label("target")).await;
         let target_ops = H::create_ops(50);
         target_db = H::apply_ops(target_db, target_ops).await;
         // commit already done in apply_ops
+        let additional_ops = H::create_ops_seeded(1, 42);
+        target_db = H::apply_ops(target_db, additional_ops).await;
+        // commit already done in apply_ops
 
         // Capture initial target state
         let initial_lower_bound = target_db.inactivity_floor_loc();
+        assert!(
+            initial_lower_bound > Location::new_unchecked(0),
+            "floor must be > 0 for this test"
+        );
         let initial_upper_bound = target_db.bounds().end;
         let initial_root = target_db.root();
 
@@ -1085,11 +1091,6 @@ where
         sync_db = H::apply_ops(sync_db, original_ops.clone()).await;
         // commit already done in apply_ops
         sync_db.prune(sync_db.inactivity_floor_loc()).await.unwrap();
-        let sync_db_original_size = sync_db.bounds().end;
-
-        // Get pinned nodes before closing the database
-        let pinned_nodes =
-            sync_db.pinned_nodes_from_map(Position::try_from(sync_db_original_size).unwrap());
 
         sync_db.sync().await.unwrap();
         drop(sync_db);
@@ -1106,6 +1107,12 @@ where
         let sync_lower_bound = target_db.inactivity_floor_loc();
         let sync_upper_bound = target_db.bounds().end;
         let target_hash = target_db.root();
+
+        // Get pinned nodes from the target db at the sync lower bound position
+        // (this is the correct position after deferred floor-raising).
+        let pinned_nodes = target_db
+            .pinned_nodes_at(Position::try_from(sync_lower_bound).unwrap())
+            .await;
 
         let (mmr, journal) = target_db.into_log_components();
 

@@ -398,15 +398,15 @@ pub(crate) mod test {
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let root = db.root();
-            assert_eq!(db.bounds().end, 1961);
+            assert_eq!(db.bounds().end, 1817);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1961))
+                Some(Location::new_unchecked(1817))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(504));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
+            assert_eq!(db.log.bounds().start, Location::new_unchecked(504));
             assert_eq!(db.snapshot.items(), 857);
 
             db.sync().await.unwrap();
@@ -415,13 +415,13 @@ pub(crate) mod test {
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, 1961);
+            assert_eq!(db.bounds().end, 1817);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
-                Some(Location::new_unchecked(1961))
+                Some(Location::new_unchecked(1817))
             );
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(504));
+            assert_eq!(db.log.bounds().start, Location::new_unchecked(504));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -522,11 +522,6 @@ pub(crate) mod test {
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())
                     .collect()
-            }
-
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
-                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
     }

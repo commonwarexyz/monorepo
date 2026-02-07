@@ -390,13 +390,14 @@ pub(crate) mod test {
             assert_eq!(db.bounds().end, 2620);
             assert_eq!(db.snapshot.items(), 857);
 
-            // Test that commit + sync w/ pruning will raise the activity floor.
+            // Commit records the un-raised floor; floor-raising is deferred to write_batch.
             let (db, _) = db.commit(None).await.unwrap();
             let mut db = db.into_merkleized();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.bounds().end, 4241);
-            assert_eq!(db.inactivity_floor_loc(), 3383);
+            // No floor-raising yet: just the user ops + 1 CommitFloor.
+            assert_eq!(db.bounds().end, 2621);
+            assert_eq!(db.inactivity_floor_loc(), 0);
             assert_eq!(db.snapshot.items(), 857);
 
             // Drop & reopen the db, making sure it has exactly the same state.
@@ -405,8 +406,8 @@ pub(crate) mod test {
             drop(db);
             let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, 4241);
-            assert_eq!(db.inactivity_floor_loc(), 3383);
+            assert_eq!(db.bounds().end, 2621);
+            assert_eq!(db.inactivity_floor_loc(), 0);
             assert_eq!(db.snapshot.items(), 857);
 
             // Confirm the db's state matches that of the separate map we computed independently.
@@ -428,9 +429,12 @@ pub(crate) mod test {
             let end_loc = db.size();
             let start_pos = db.log.mmr.bounds().start;
             let start_loc = Location::try_from(start_pos).unwrap();
-            // Raise the inactivity floor via commit and make sure historical inactive operations
-            // are still provable.
-            let db = db.into_mutable();
+            // Raise the inactivity floor via an empty write_batch (triggers deferred
+            // floor-raising) then commit.
+            let mut db = db.into_mutable();
+            db.write_batch(std::iter::empty::<(Digest, Option<Digest>)>())
+                .await
+                .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized();
             let root = db.root();
@@ -1292,11 +1296,6 @@ pub(crate) mod test {
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())
                     .collect()
-            }
-
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
-                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
     }

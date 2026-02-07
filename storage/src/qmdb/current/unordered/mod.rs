@@ -71,14 +71,14 @@ pub mod tests {
             let (db, range) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
             assert_eq!(*range.start, 1);
-            assert_eq!(*range.end, 4);
+            assert_eq!(*range.end, 3);
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.bounds().end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
+            assert_eq!(db.bounds().end, Location::new_unchecked(3)); // 1 initial commit + 1 update + 1 commit (floor-raise deferred).
             let root1 = db.root();
             assert_ne!(root1, root0);
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 moves + 1 initial commit.
+            assert_eq!(db.bounds().end, Location::new_unchecked(3));
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root1);
 
@@ -92,9 +92,9 @@ pub mod tests {
             let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
             let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(*range.start, 4);
-            assert_eq!(*range.end, 6);
-            assert_eq!(db.bounds().end, Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(*range.start, 3);
+            assert_eq!(*range.end, 5);
+            assert_eq!(db.bounds().end, Location::new_unchecked(5)); // 1 initial commit + 1 update + 2 commits + 1 delete (move skipped: batch deletes the key).
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
 
@@ -105,14 +105,14 @@ pub mod tests {
             let mut db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             // Commit adds a commit even for no-op, so op_count increases and root changes.
-            assert_eq!(db.bounds().end, Location::new_unchecked(7));
+            assert_eq!(db.bounds().end, Location::new_unchecked(6));
             let root3 = db.root();
             assert_ne!(root3, root2);
 
             // Confirm re-open preserves state.
             drop(db);
             let db: C = open_db(context.with_label("fourth"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(7));
+            assert_eq!(db.bounds().end, Location::new_unchecked(6));
             // Last commit had no metadata (passed None to commit).
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.root(), root3);

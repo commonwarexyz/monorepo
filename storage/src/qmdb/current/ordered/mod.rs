@@ -78,14 +78,14 @@ pub mod tests {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(db.bounds().end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
+            assert_eq!(db.bounds().end, Location::new_unchecked(3)); // 1 initial commit + 1 update + 1 commit (floor-raise deferred).
             assert!(db.get_metadata().await.unwrap().is_none());
             let root1 = db.root();
             assert_ne!(root1, root0);
 
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(4));
+            assert_eq!(db.bounds().end, Location::new_unchecked(3));
             assert_eq!(db.root(), root1);
 
             // Create of same key should fail (key already exists).
@@ -99,16 +99,16 @@ pub mod tests {
             let metadata: <C as LogStore>::Value = TestValue::from_seed(1);
             let (db, _) = db.commit(Some(metadata.clone())).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_eq!(db.bounds().end, Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
+            assert_eq!(db.bounds().end, Location::new_unchecked(5)); // 1 update, 2 commits, 1 delete (move skipped: batch deletes the key).
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
             let root2 = db.root();
 
             drop(db);
             let db: C = open_db(context.with_label("fourth"), partition.clone()).await;
-            assert_eq!(db.bounds().end, Location::new_unchecked(6));
+            assert_eq!(db.bounds().end, Location::new_unchecked(5));
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(5));
+            assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(4));
             assert_eq!(db.root(), root2);
 
             // Repeated delete of same key should fail (key already deleted).

@@ -553,11 +553,6 @@ pub(crate) mod test {
                     .map(|n| n.unwrap().unwrap())
                     .collect()
             }
-
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
-                nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
-            }
         }
     }
 }

@@ -62,6 +62,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub mod any;
@@ -400,5 +401,92 @@ where
         status.push(true);
 
         Ok(inactivity_floor_loc + 1)
+    }
+
+    /// Collects active keyed operations from the floor range without moving them. For each of
+    /// `steps` floor-raising steps, finds the next active keyed operation and stores it in a
+    /// `BTreeMap` indexed by key. The snapshot and log are not modified. Returns the new floor
+    /// location and the collected operations with their original locations.
+    ///
+    /// Uses the status bitmap to efficiently skip inactive operations. Bitmap bits for collected
+    /// operations are set to false.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are not enough active keyed operations above the inactivity floor.
+    pub(crate) async fn collect_floor_ops<
+        E: Storage + Clock + Metrics,
+        D: Digest,
+        const N: usize,
+    >(
+        &self,
+        status: &mut UnmerkleizedBitMap<E, D, N>,
+        mut inactivity_floor_loc: Location,
+        steps: u32,
+    ) -> Result<
+        (
+            Location,
+            BTreeMap<<<C as Contiguous>::Item as Operation>::Key, (Location, C::Item)>,
+        ),
+        Error,
+    >
+    where
+        I: Index<Value = Location>,
+    {
+        let mut ops = BTreeMap::new();
+        for _ in 0..steps {
+            // Use the status bitmap to find the next active operation. Stop if we exhaust
+            // the bitmap; this can happen when pending_steps exceeds the number of active
+            // keyed operations (the original raise_floor would "recycle" moved copies, but
+            // collect does not push new bits).
+            while *inactivity_floor_loc < status.len()
+                && !status.get_bit(*inactivity_floor_loc)
+            {
+                inactivity_floor_loc += 1;
+            }
+            if *inactivity_floor_loc >= status.len() {
+                break;
+            }
+
+            let old_loc = inactivity_floor_loc;
+            inactivity_floor_loc += 1;
+            status.set_bit(*old_loc, false);
+
+            let op = self.log.read(*old_loc).await?;
+            let key = op
+                .key()
+                .expect("bitmap-active op should be keyed")
+                .clone();
+
+            // Check that this key is active in the snapshot at this location.
+            debug_assert!(
+                self.snapshot.get(key.as_ref()).any(|&loc| loc == old_loc),
+                "bitmap-active keyed op should be in the snapshot"
+            );
+
+            ops.insert(key, (old_loc, op));
+        }
+        Ok((inactivity_floor_loc, ops))
+    }
+
+    /// Moves the remaining collected floor operations to the tip of the log, updating the
+    /// snapshot and bitmap for each.
+    pub(crate) async fn flush_collected_ops<
+        E: Storage + Clock + Metrics,
+        D: Digest,
+        const N: usize,
+    >(
+        &mut self,
+        status: &mut UnmerkleizedBitMap<E, D, N>,
+        ops: BTreeMap<<<C as Contiguous>::Item as Operation>::Key, (Location, C::Item)>,
+    ) -> Result<(), Error> {
+        for (_key, (old_loc, op)) in ops {
+            assert!(
+                self.move_op_if_active(op, old_loc).await?,
+                "deferred floor-raising op should still be active"
+            );
+            status.push(true);
+        }
+        Ok(())
     }
 }

@@ -791,7 +791,9 @@ pub mod tests {
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 
-            // Verify expected state after prune.
+            // Verify expected state after prune. Since floor-raising is deferred to
+            // write_batch and there is no write_batch after this commit, the floor stays
+            // at 0 and no copy operations are added to the log.
             assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
                 db.inactivity_floor_loc(),
@@ -953,7 +955,7 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<C, F, Fut>(open_db, 4241, 3383);
+        test_current_db_build_big::<C, F, Fut>(open_db, 2621, 0);
     }
 
     fn test_unordered_build_big<C, F, Fut>(open_db: F)
@@ -964,7 +966,7 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<C, F, Fut>(open_db, 1957, 838);
+        test_current_db_build_big::<C, F, Fut>(open_db, 1479, 0);
     }
 
     #[test_traced("WARN")]

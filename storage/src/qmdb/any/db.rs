@@ -19,10 +19,10 @@ use crate::{
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    Persistable, UnmerkleizedBitMap,
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
@@ -75,6 +75,10 @@ pub struct Db<
 
     /// Whether the database is in the durable or non-durable state.
     pub(crate) durable_state: D,
+
+    /// The number of pending floor-raising steps to perform at the start of the next write_batch.
+    /// Each step moves one active operation from below the inactivity floor to the log tip.
+    pub(crate) pending_steps: u32,
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
@@ -205,7 +209,8 @@ where
         // appropriately to report the inactive bits.
         let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
         let last_commit = log.read(last_commit_loc).await?;
-        let (inactivity_floor_loc, _) = last_commit.has_floor().expect("should be a commit");
+        let (inactivity_floor_loc, pending_steps) =
+            last_commit.has_floor().expect("should be a commit");
         if let Some(known_inactivity_floor) = known_inactivity_floor {
             (*known_inactivity_floor..*inactivity_floor_loc).for_each(|_| callback(false, None));
         }
@@ -221,6 +226,7 @@ where
             last_commit_loc,
             active_keys,
             durable_state: store::Durable,
+            pending_steps,
             _update: core::marker::PhantomData,
         })
     }
@@ -244,6 +250,7 @@ where
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: NonDurable { steps: 0 },
+            pending_steps: self.pending_steps,
             _update: core::marker::PhantomData,
         }
     }
@@ -270,6 +277,7 @@ where
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: self.durable_state,
+            pending_steps: self.pending_steps,
             _update: core::marker::PhantomData,
         }
     }
@@ -296,6 +304,7 @@ where
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: store::NonDurable { steps: 0 },
+            pending_steps: self.pending_steps,
             _update: core::marker::PhantomData,
         }
     }
@@ -322,6 +331,7 @@ where
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: self.durable_state,
+            pending_steps: self.pending_steps,
             _update: core::marker::PhantomData,
         }
     }
@@ -356,23 +366,35 @@ where
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `[start_loc, end_loc)` location range of committed operations.
+    /// this function. Performs any remaining deferred floor-raising, then appends the commit
+    /// operation. Returns the `[start_loc, end_loc)` location range of committed operations.
     pub async fn commit(
         mut self,
         metadata: Option<V::Value>,
     ) -> Result<(Db<E, C, I, H, U, M, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
 
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let (inactivity_floor_loc, steps) = self.raise_floor().await?;
+        // Perform any remaining deferred floor-raising from prior commits (in case write_batch
+        // was not called since the last commit).
+        for _ in 0..self.pending_steps {
+            let loc = self.inactivity_floor_loc;
+            self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+        }
 
-        // Append the commit operation with the new inactivity floor and steps taken.
+        // Compute pending steps for this batch. If the DB is empty, move the floor to tip instead.
+        let pending_steps = if self.is_empty() {
+            self.inactivity_floor_loc = self.log.bounds().end;
+            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+            0
+        } else {
+            u32::try_from(self.durable_state.steps).expect("steps should fit in u32") + 1
+        };
+
+        // Append the commit operation with the raised floor and pending steps.
         self.apply_commit_op(Operation::CommitFloor(
             metadata,
-            inactivity_floor_loc,
-            steps,
+            self.inactivity_floor_loc,
+            pending_steps,
         ))
         .await?;
 
@@ -380,69 +402,34 @@ where
 
         let db = Db {
             log: self.log,
-            inactivity_floor_loc,
+            inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
             snapshot: self.snapshot,
             active_keys: self.active_keys,
             durable_state: store::Durable,
+            pending_steps,
             _update: core::marker::PhantomData,
         };
 
         Ok((db, range))
     }
+}
 
-    /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
-    /// Raises the floor to the tip if the db is empty. Returns the new floor location and the
-    /// number of steps taken.
-    pub(crate) async fn raise_floor(&mut self) -> Result<(Location, u32), Error> {
-        let steps_taken = if self.is_empty() {
-            self.inactivity_floor_loc = self.log.bounds().end;
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-            0
-        } else {
-            let steps_to_take = self.durable_state.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-            u32::try_from(steps_to_take).expect("steps should fit in u32")
-        };
-        self.durable_state.steps = 0;
-
-        Ok((self.inactivity_floor_loc, steps_taken))
-    }
-
-    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor. Returns the new floor location and the number of
-    /// steps taken.
-    pub(crate) async fn raise_floor_with_bitmap<
-        F: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
-        &mut self,
-        status: &mut UnmerkleizedBitMap<F, D, N>,
-    ) -> Result<(Location, u32), Error> {
-        let steps_taken = if self.is_empty() {
-            self.inactivity_floor_loc = self.log.bounds().end;
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-            0
-        } else {
-            let steps_to_take = self.durable_state.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self
-                    .as_floor_helper()
-                    .raise_floor_with_bitmap(status, loc)
-                    .await?;
-            }
-            u32::try_from(steps_to_take).expect("steps should fit in u32")
-        };
-        self.durable_state.steps = 0;
-
-        Ok((self.inactivity_floor_loc, steps_taken))
-    }
-
+// Floor-raising functionality for NonDurable states. This impl block has relaxed bounds
+// (no Persistable requirement) so that write_batch can call as_floor_helper.
+impl<E, K, V, U, C, I, H, M> Db<E, C, I, H, U, M, NonDurable>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: MutableContiguous<Item = Operation<K, V, U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    M: MerkleizationState<DigestOf<H>>,
+    Operation<K, V, U>: Codec,
+    AuthenticatedLog<E, C, H, M>: MutableContiguous<Item = Operation<K, V, U>>,
+{
     /// Returns a FloorHelper wrapping the current state of the log.
     pub(crate) const fn as_floor_helper(
         &mut self,

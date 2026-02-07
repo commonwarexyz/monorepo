@@ -161,6 +161,13 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
+        // Perform deferred floor-raising from prior commits.
+        for _ in 0..self.pending_steps {
+            let loc = self.inactivity_floor_loc;
+            self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+        }
+        self.pending_steps = 0;
+
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }
@@ -185,7 +192,8 @@ impl<
         let active_keys =
             build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {}).await?;
         let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
-        assert!(log.read(last_commit_loc).await?.is_commit());
+        let commit_op = log.read(last_commit_loc).await?;
+        let (_, pending_steps) = commit_op.has_floor().expect("last op should be a commit");
 
         Ok(Self {
             log,
@@ -194,6 +202,7 @@ impl<
             last_commit_loc,
             durable_state: Durable {},
             active_keys,
+            pending_steps,
             _update: core::marker::PhantomData,
         })
     }
@@ -420,12 +429,15 @@ pub(super) mod test {
         assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
-        // non-empty db.
+        // non-empty db. An empty write_batch triggers deferred floor-raising from prior commits.
         let mut db = db.into_mutable();
         db.write_batch([(k1, Some(v1))]).await.unwrap();
         for _ in 1..100 {
+            db.write_batch(core::iter::empty::<(Digest, Option<Digest>)>())
+                .await
+                .unwrap();
             let (clean_db, _) = db.commit(None).await.unwrap();
-            // Distance should equal 3 after the second commit, with inactivity_floor
+            // Distance should equal 3 after the first commit, with inactivity_floor
             // referencing the previous commit operation.
             assert!(clean_db.bounds().end - clean_db.inactivity_floor_loc() <= 3);
             db = clean_db.into_mutable();
@@ -488,13 +500,13 @@ pub(super) mod test {
         assert_eq!(db.bounds().end, Location::new_unchecked(1478));
         assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
 
-        // Commit + sync with pruning raises inactivity floor.
+        // Commit records pending floor-raising steps but does not raise the floor.
         let (db, _) = db.commit(None).await.unwrap();
         let mut db = db.into_merkleized().await.unwrap();
         db.sync().await.unwrap();
         db.prune(db.inactivity_floor_loc()).await.unwrap();
-        assert_eq!(db.bounds().end, Location::new_unchecked(1957));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
+        assert_eq!(db.bounds().end, Location::new_unchecked(1479));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
 
         // Drop & reopen and ensure state matches.
         let root = db.root();
@@ -502,8 +514,8 @@ pub(super) mod test {
         drop(db);
         let db = reopen_db(context.with_label("reopened")).await;
         assert_eq!(root, db.root());
-        assert_eq!(db.bounds().end, Location::new_unchecked(1957));
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(838));
+        assert_eq!(db.bounds().end, Location::new_unchecked(1479));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
 
         // State matches reference map.
         for i in 0u64..ELEMENTS {
@@ -584,9 +596,10 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_some());
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
 
-        // Should have moved 3 active operations to tip, leading to floor of 7.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
-        assert_eq!(db.bounds().end, 10); // floor of 7 + 2 active keys.
+        // Floor-raising is deferred to the next write_batch call, so the floor
+        // has not been raised yet.
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(0));
+        assert_eq!(db.bounds().end, 7); // 6 ops + 1 commit, no floor-raising copies yet.
 
         // Delete all keys.
         assert!(db.get(&d1).await.unwrap().is_some());
@@ -596,7 +609,7 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 12); // 2 new delete ops.
-        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(7));
+        assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(8));
 
         let (db, _) = db.commit(None).await.unwrap();
         let db = db.into_mutable();
@@ -647,15 +660,15 @@ pub(super) mod test {
             .unwrap();
 
         // Confirm close/reopen gets us back to the same state.
-        assert_eq!(db.bounds().end, 23);
+        assert_eq!(db.bounds().end, 20);
         let root = db.root();
         let db = next_db().await;
 
         assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().end, 23);
+        assert_eq!(db.bounds().end, 20);
 
-        // Commit will raise the inactivity floor, which won't affect state but will affect the
-        // root.
+        // Commit appends a new CommitFloor which changes the root, even though no user
+        // operations were added.
         let db = db.into_mutable();
         let mut db = db
             .commit(None)

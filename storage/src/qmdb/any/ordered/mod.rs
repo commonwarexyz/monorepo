@@ -457,6 +457,13 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
+        // Perform deferred floor-raising from prior commits.
+        for _ in 0..self.pending_steps {
+            let loc = self.inactivity_floor_loc;
+            self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+        }
+        self.pending_steps = 0;
+
         self.write_batch_with_callback(iter, |_, _| {}).await
     }
 }

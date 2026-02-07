@@ -332,9 +332,9 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    /// Raises the activity floor according to policy followed by appending a commit operation with
-    /// the provided `metadata` and the new inactivity floor value. Returns the `[start_loc,
-    /// end_loc)` location range of committed operations.
+    /// Performs any remaining deferred floor-raising, then appends a commit operation with the
+    /// provided `metadata` and the current inactivity floor. Returns the `[start_loc, end_loc)`
+    /// location range of committed operations.
     async fn apply_commit_op(
         &mut self,
         metadata: Option<V::Value>,
@@ -344,14 +344,30 @@ where
         // Inactivate the current commit operation.
         self.status.set_bit(*self.any.last_commit_loc, false);
 
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let (inactivity_floor_loc, steps) =
-            self.any.raise_floor_with_bitmap(&mut self.status).await?;
+        // Perform any remaining deferred floor-raising from prior commits (in case write_batch
+        // was not called since the last commit).
+        for _ in 0..self.any.pending_steps {
+            let loc = self.any.inactivity_floor_loc;
+            self.any.inactivity_floor_loc = self
+                .any
+                .as_floor_helper()
+                .raise_floor_with_bitmap(&mut self.status, loc)
+                .await?;
+        }
 
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
+        // Compute pending steps for this batch. If the DB is empty, move the floor to tip instead.
+        let pending_steps = if self.any.is_empty() {
+            self.any.inactivity_floor_loc = self.any.log.bounds().end;
+            0
+        } else {
+            u32::try_from(self.any.durable_state.steps).expect("steps should fit in u32") + 1
+        };
+        self.any.pending_steps = pending_steps;
+
+        // Append the commit operation with the raised floor and tag it as active in the bitmap.
         self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc, steps);
+        let commit_op =
+            Operation::CommitFloor(metadata, self.any.inactivity_floor_loc, pending_steps);
 
         self.any.apply_commit_op(commit_op).await?;
 
@@ -375,6 +391,7 @@ where
             snapshot: self.any.snapshot,
             durable_state: store::Durable,
             active_keys: self.any.active_keys,
+            pending_steps: self.any.pending_steps,
             _update: core::marker::PhantomData,
         };
 

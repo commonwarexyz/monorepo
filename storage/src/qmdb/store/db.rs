@@ -161,6 +161,9 @@ where
     /// The location of the last commit operation.
     pub last_commit_loc: Location,
 
+    /// The number of pending floor-raising steps to perform at the start of the next write_batch.
+    pending_steps: u32,
+
     /// The state of the store.
     pub state: S,
 }
@@ -301,7 +304,8 @@ where
         let last_commit_loc =
             Location::new_unchecked(log.size().checked_sub(1).expect("commit should exist"));
         let op = log.read(*last_commit_loc).await?;
-        let (inactivity_floor_loc, _) = op.has_floor().expect("last op should be a commit");
+        let (inactivity_floor_loc, pending_steps) =
+            op.has_floor().expect("last op should be a commit");
 
         // Build the snapshot.
         let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
@@ -314,6 +318,7 @@ where
             active_keys,
             inactivity_floor_loc,
             last_commit_loc,
+            pending_steps,
             state: Durable,
         })
     }
@@ -326,6 +331,7 @@ where
             active_keys: self.active_keys,
             inactivity_floor_loc: self.inactivity_floor_loc,
             last_commit_loc: self.last_commit_loc,
+            pending_steps: self.pending_steps,
             state: NonDurable::default(),
         }
     }
@@ -368,6 +374,13 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V>)> + Send,
     ) -> Result<(), Error> {
+        // Perform deferred floor-raising from prior commits.
+        for _ in 0..self.pending_steps {
+            let loc = self.inactivity_floor_loc;
+            self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+        }
+        self.pending_steps = 0;
+
         for (key, value) in iter {
             if let Some(value) = value {
                 let new_loc = self.size();
@@ -395,9 +408,10 @@ where
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return from
-    /// this function. Also raises the inactivity floor according to the schedule. Returns the
-    /// `(start_loc, end_loc]` location range of committed operations. The end of the returned range
-    /// includes the commit operation itself, and hence will always be equal to `op_count`.
+    /// this function. Performs any remaining deferred floor-raising, then appends the commit
+    /// operation. Returns the `(start_loc, end_loc]` location range of committed operations. The
+    /// end of the returned range includes the commit operation itself, and hence will always be
+    /// equal to `op_count`.
     ///
     /// Note that even if no operations were added since the last commit, this is a root-state
     /// changing operation.
@@ -412,28 +426,29 @@ where
     ) -> Result<(Db<E, K, V, T, Durable>, Range<Location>), Error> {
         let start_loc = self.last_commit_loc + 1;
 
-        // Raise the inactivity floor by taking `self.state.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let steps_taken = if self.is_empty() {
+        // Perform any remaining deferred floor-raising from prior commits (in case write_batch
+        // was not called since the last commit).
+        for _ in 0..self.pending_steps {
+            let loc = self.inactivity_floor_loc;
+            self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
+        }
+
+        // Compute pending steps for this batch. If the DB is empty, move the floor to tip instead.
+        let pending_steps = if self.is_empty() {
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
             0
         } else {
-            let steps_to_take = self.state.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
-            }
-            u32::try_from(steps_to_take).expect("steps should fit in u32")
+            u32::try_from(self.state.steps).expect("steps should fit in u32") + 1
         };
 
-        // Apply the commit operation with the new inactivity floor and steps taken.
+        // Apply the commit operation with the raised floor and pending steps.
         self.last_commit_loc = Location::new_unchecked(
             self.log
                 .append(Operation::CommitFloor(
                     metadata,
                     self.inactivity_floor_loc,
-                    steps_taken,
+                    pending_steps,
                 ))
                 .await?,
         );
@@ -450,6 +465,7 @@ where
                 active_keys: self.active_keys,
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 last_commit_loc: self.last_commit_loc,
+                pending_steps,
                 state: Durable,
             },
             range,
@@ -641,7 +657,13 @@ mod test {
                 .unwrap();
             let (mut db, _) = db.commit(None).await.unwrap();
             for _ in 1..100 {
-                (db, _) = db.into_dirty().commit(None).await.unwrap();
+                let mut dirty = db.into_dirty();
+                // Trigger deferred floor-raising from the prior commit.
+                dirty
+                    .write_batch(core::iter::empty::<(Digest, Option<Vec<u8>>)>())
+                    .await
+                    .unwrap();
+                (db, _) = dirty.commit(None).await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
                 assert!(db.bounds().end - db.inactivity_floor_loc <= 3);
@@ -701,27 +723,26 @@ mod test {
             assert_eq!(db.bounds().end, 2);
             assert_eq!(db.inactivity_floor_loc, 0);
 
-            // Persist the changes
+            // Persist the changes. Floor-raising is deferred to the next write_batch, so
+            // the commit just records the un-raised floor and pending steps.
             let metadata = vec![99, 100];
             let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(range.start, 1);
-            assert_eq!(range.end, 4);
+            assert_eq!(range.end, 3);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
-            // Even though the store was pruned, the inactivity floor was raised by 2, and
-            // the old operations remain in the same blob as an active operation, so they're
-            // retained.
-            assert_eq!(db.bounds().end, 4);
-            assert_eq!(db.inactivity_floor_loc, 2);
+            assert_eq!(db.bounds().end, 3);
+            assert_eq!(db.inactivity_floor_loc, 0);
 
             // Re-open the store
             let mut db = create_test_store(ctx.with_label("store_2"))
                 .await
                 .into_dirty();
 
-            // Ensure the re-opened store retained the committed operations
-            assert_eq!(db.bounds().end, 4);
-            assert_eq!(db.inactivity_floor_loc, 2);
+            // Ensure the re-opened store retained the committed operations.
+            // Floor is un-raised; raising will happen at the next write_batch.
+            assert_eq!(db.bounds().end, 3);
+            assert_eq!(db.inactivity_floor_loc, 0);
 
             // Fetch the value, ensuring it is still present
             let fetched_value = db.get(&key).await.unwrap();
@@ -740,13 +761,13 @@ mod test {
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             let (db, range) = db.commit(None).await.unwrap();
-            assert_eq!(range.start, 4);
+            assert_eq!(range.start, 3);
             assert_eq!(range.end, db.bounds().end);
             assert_eq!(db.get_metadata().await.unwrap(), None);
             let mut db = db.into_dirty();
 
-            assert_eq!(db.bounds().end, 8);
-            assert_eq!(db.inactivity_floor_loc, 3);
+            assert_eq!(db.bounds().end, 7);
+            assert_eq!(db.inactivity_floor_loc, 2);
 
             // Ensure all keys can be accessed, despite the first section being pruned.
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
@@ -796,21 +817,36 @@ mod test {
             db.sync().await.unwrap();
             drop(db);
 
-            // Re-open the store, prune it, then ensure it replays the log correctly.
-            let mut db = create_test_store(ctx.with_label("store_1")).await;
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            // Re-open the store and ensure it replays the log correctly.
+            let db = create_test_store(ctx.with_label("store_1")).await;
 
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // 100 operations were applied, each triggering one step, plus the commit op.
-            assert_eq!(db.bounds().end, UPDATES * 2 + 2);
-            // Only the highest `Update` operation is active, plus the commit operation above it.
-            let expected_floor = UPDATES * 2;
-            assert_eq!(db.inactivity_floor_loc, expected_floor);
+            // Floor-raising is deferred, so the log contains only the original updates
+            // plus the commit op. The floor is at 0 (un-raised).
+            assert_eq!(db.bounds().end, UPDATES + 2);
+            assert_eq!(db.inactivity_floor_loc, 0);
 
-            // All blobs prior to the inactivity floor are pruned, so the oldest retained location
-            // is the first in the last retained blob.
+            // Trigger deferred floor-raising by performing an empty write_batch, then commit
+            // to make the raised state durable.
+            let mut dirty = db.into_dirty();
+            dirty
+                .write_batch(core::iter::empty::<(Digest, Option<Vec<u8>>)>())
+                .await
+                .unwrap();
+            let (mut db, _) = dirty.commit(None).await.unwrap();
+
+            // After floor-raising, 100 steps were performed: the first step scanned past
+            // all 100 inactive updates + InitCommit to find the one active update and copy it,
+            // subsequent steps each copied the same key forward once more. The second step
+            // also skips past the original CommitFloor, so the floor ends up at 2*UPDATES + 1.
+            let expected_floor = UPDATES * 2 + 1;
+            assert_eq!(db.inactivity_floor_loc, expected_floor);
+            assert_eq!(db.bounds().end, UPDATES * 2 + 3);
+
+            // Prune up to the inactivity floor.
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
             assert_eq!(db.log.bounds().start, expected_floor - expected_floor % 7);
 
             db.destroy().await.unwrap();
@@ -913,8 +949,8 @@ mod test {
             db.write_batch([(k_n, None)]).await.unwrap();
 
             let (db, range) = db.commit(None).await.unwrap();
-            assert_eq!(range.start, 9);
-            assert_eq!(range.end, 11);
+            assert_eq!(range.start, 8);
+            assert_eq!(range.end, 10);
 
             assert!(db.get(&k_n).await.unwrap().is_none());
             // Make sure k is still there
@@ -945,8 +981,8 @@ mod test {
             db.write_batch([(k_b, Some(v_b.clone()))]).await.unwrap();
 
             let (db, _) = db.commit(None).await.unwrap();
-            assert_eq!(db.bounds().end, 5);
-            assert_eq!(db.inactivity_floor_loc, 2);
+            assert_eq!(db.bounds().end, 4);
+            assert_eq!(db.inactivity_floor_loc, 0);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_a);
 
             let mut db = db.into_dirty();
@@ -954,8 +990,8 @@ mod test {
             db.write_batch([(k_a, Some(v_c.clone()))]).await.unwrap();
 
             let (db, _) = db.commit(None).await.unwrap();
-            assert_eq!(db.bounds().end, 11);
-            assert_eq!(db.inactivity_floor_loc, 8);
+            assert_eq!(db.bounds().end, 8);
+            assert_eq!(db.inactivity_floor_loc, 2);
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
             assert_eq!(db.get(&k_b).await.unwrap().unwrap(), v_a);
 
@@ -1023,7 +1059,7 @@ mod test {
             }
             let (db, _) = db.commit(None).await.unwrap();
             let op_count = db.bounds().end;
-            assert_eq!(op_count, 1673);
+            assert_eq!(op_count, 1338);
             assert_eq!(db.snapshot.items(), 1000);
 
             // Delete every 7th key
@@ -1060,11 +1096,11 @@ mod test {
             }
             let (mut db, _) = db.commit(None).await.unwrap();
 
-            assert_eq!(db.bounds().end, 1961);
-            assert_eq!(db.inactivity_floor_loc, 756);
+            assert_eq!(db.bounds().end, 1817);
+            assert_eq!(db.inactivity_floor_loc, 504);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.log.bounds().start, 756 /*- 756 % 7 == 0*/);
+            assert_eq!(db.log.bounds().start, 504 /*- 504 % 7 == 0*/);
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -1126,16 +1162,17 @@ mod test {
             let metadata = vec![99, 100];
             let (db, range) = db.commit(Some(metadata.clone())).await.unwrap();
             assert_eq!(range.start, 1);
-            assert_eq!(range.end, 4);
+            assert_eq!(range.end, 3);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
             drop(db);
 
             // Re-open the store
             let db = create_test_store(ctx.with_label("store_2")).await;
 
-            // Ensure the re-opened store retained the committed operations
-            assert_eq!(db.bounds().end, 4);
-            assert_eq!(db.inactivity_floor_loc, 2);
+            // Ensure the re-opened store retained the committed operations.
+            // Floor is un-raised; raising will happen at the next write_batch.
+            assert_eq!(db.bounds().end, 3);
+            assert_eq!(db.inactivity_floor_loc, 0);
 
             // Fetch the value, ensuring it is still present
             let fetched_value = db.get(&key).await.unwrap();
