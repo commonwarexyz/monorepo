@@ -251,7 +251,7 @@ pub(crate) mod test {
                 Operation::Delete(key) => {
                     db.write_batch([(key, None)]).await.unwrap();
                 }
-                Operation::CommitFloor(_, _) => {
+                Operation::CommitFloor(_, _, _) => {
                     // CommitFloor consumes self - not supported in this helper.
                     // Test data from create_test_ops never includes CommitFloor.
                     panic!("CommitFloor not supported in apply_ops");

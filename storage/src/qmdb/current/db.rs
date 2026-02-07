@@ -346,11 +346,12 @@ where
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let inactivity_floor_loc = self.any.raise_floor_with_bitmap(&mut self.status).await?;
+        let (inactivity_floor_loc, steps) =
+            self.any.raise_floor_with_bitmap(&mut self.status).await?;
 
         // Append the commit operation with the new floor and tag it as active in the bitmap.
         self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc, steps);
 
         self.any.apply_commit_op(commit_op).await?;
 

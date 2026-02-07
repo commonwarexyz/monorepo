@@ -22,7 +22,7 @@ pub type Unordered<K, V> = Operation<K, V, update::Unordered<K, V>>;
 pub enum Operation<K: Array, V: ValueEncoding, S: Update<K, V>> {
     Delete(K),
     Update(S),
-    CommitFloor(Option<V::Value>, Location),
+    CommitFloor(Option<V::Value>, Location, u32),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -37,7 +37,11 @@ where
         match choice {
             0 => Ok(Self::Delete(u.arbitrary()?)),
             1 => Ok(Self::Update(u.arbitrary()?)),
-            2 => Ok(Self::CommitFloor(u.arbitrary()?, u.arbitrary()?)),
+            2 => Ok(Self::CommitFloor(
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+            )),
             _ => unreachable!(),
         }
     }
@@ -56,7 +60,7 @@ where
         match self {
             Self::Delete(k) => Some(k),
             Self::Update(p) => Some(p.key()),
-            Self::CommitFloor(_, _) => None,
+            Self::CommitFloor(_, _, _) => None,
         }
     }
 
@@ -68,9 +72,9 @@ where
         matches!(self, Self::Delete(_))
     }
 
-    fn has_floor(&self) -> Option<Location> {
+    fn has_floor(&self) -> Option<(Location, u32)> {
         match self {
-            Self::CommitFloor(_, loc) => Some(*loc),
+            Self::CommitFloor(_, loc, steps) => Some((*loc, *steps)),
             _ => None,
         }
     }
@@ -84,7 +88,7 @@ where
     S: Update<K, V>,
 {
     fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_, _))
+        matches!(self, Self::CommitFloor(_, _, _))
     }
 }
 
@@ -98,7 +102,7 @@ where
         match self {
             Self::Delete(key) => write!(f, "[key:{key} <deleted>]"),
             Self::Update(payload) => payload.fmt(f),
-            Self::CommitFloor(value, loc) => {
+            Self::CommitFloor(value, loc, _) => {
                 if let Some(value) = value {
                     write!(
                         f,
@@ -143,8 +147,8 @@ mod tests {
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([9, 9, 9, 9]),
         });
-        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7));
+        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new_unchecked(5), 3);
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(7), 0);
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -160,7 +164,7 @@ mod tests {
 
         let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
         let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
-        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3));
+        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new_unchecked(3), 1);
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -180,9 +184,12 @@ mod tests {
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([3, 3, 3, 3]),
         });
-        let commit_some =
-            Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new_unchecked(9));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10));
+        let commit_some = Op::CommitFloor(
+            Some(vec![9, 9, 9]),
+            crate::mmr::Location::new_unchecked(9),
+            2,
+        );
+        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new_unchecked(10), 0);
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
@@ -202,7 +209,7 @@ mod tests {
             FixedBytes::from([5, 5, 5, 5]),
             vec![7, 7, 7, 7],
         ));
-        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new_unchecked(12));
+        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new_unchecked(12), 5);
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);

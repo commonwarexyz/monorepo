@@ -284,7 +284,7 @@ pub(crate) mod test {
                 unordered::Operation::Delete(key) => {
                     db.write_batch([(key, None)]).await.unwrap();
                 }
-                unordered::Operation::CommitFloor(_, _) => {
+                unordered::Operation::CommitFloor(_, _, _) => {
                     panic!("CommitFloor not supported in apply_ops");
                 }
             }

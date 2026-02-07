@@ -15,9 +15,9 @@ pub trait Operation {
     /// If this operation deletes its key's value.
     fn is_delete(&self) -> bool;
 
-    /// The inactivity floor location if this operation is a commit operation with a floor value,
+    /// The inactivity floor location and steps if this operation is a commit operation,
     /// None otherwise.
-    fn has_floor(&self) -> Option<Location>;
+    fn has_floor(&self) -> Option<(Location, u32)>;
 }
 
 /// A trait for operations used by database variants that support commit operations.

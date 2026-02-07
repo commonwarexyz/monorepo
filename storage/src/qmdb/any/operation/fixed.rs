@@ -20,7 +20,7 @@ where
     S: Update<K, FixedEncoding<V>> + FixedSize,
 {
     const UPDATE_OP_SIZE: usize = 1 + S::SIZE;
-    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE;
+    const COMMIT_OP_SIZE: usize = 1 + 1 + V::SIZE + u64::SIZE + u32::SIZE;
     const DELETE_OP_SIZE: usize = 1 + K::SIZE;
 }
 
@@ -63,7 +63,7 @@ where
                 p.write(buf);
                 buf.put_bytes(0, Self::SIZE - Self::UPDATE_OP_SIZE);
             }
-            Self::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc, steps) => {
                 COMMIT_CONTEXT.write(buf);
                 if let Some(metadata) = metadata {
                     true.write(buf);
@@ -72,6 +72,7 @@ where
                     buf.put_bytes(0, V::SIZE + 1);
                 }
                 buf.put_slice(&floor_loc.to_be_bytes());
+                steps.write(buf);
                 buf.put_bytes(0, Self::SIZE - Self::COMMIT_OP_SIZE);
             }
         }
@@ -115,8 +116,9 @@ where
                         "commit floor location overflow",
                     )
                 })?;
+                let steps = u32::read(buf)?;
                 ensure_zeros(buf, Self::SIZE - Self::COMMIT_OP_SIZE)?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
+                Ok(Self::CommitFloor(metadata, floor_loc, steps))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }

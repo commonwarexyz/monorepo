@@ -108,7 +108,7 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         match self.log.read(self.last_commit_loc).await? {
-            Operation::CommitFloor(metadata, _) => Ok(metadata),
+            Operation::CommitFloor(metadata, _, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
     }
@@ -205,7 +205,7 @@ where
         // appropriately to report the inactive bits.
         let last_commit_loc = log.size().checked_sub(1).expect("commit should exist");
         let last_commit = log.read(last_commit_loc).await?;
-        let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
+        let (inactivity_floor_loc, _) = last_commit.has_floor().expect("should be a commit");
         if let Some(known_inactivity_floor) = known_inactivity_floor {
             (*known_inactivity_floor..*inactivity_floor_loc).for_each(|_| callback(false, None));
         }
@@ -366,11 +366,15 @@ where
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        let inactivity_floor_loc = self.raise_floor().await?;
+        let (inactivity_floor_loc, steps) = self.raise_floor().await?;
 
-        // Append the commit operation with the new inactivity floor.
-        self.apply_commit_op(Operation::CommitFloor(metadata, inactivity_floor_loc))
-            .await?;
+        // Append the commit operation with the new inactivity floor and steps taken.
+        self.apply_commit_op(Operation::CommitFloor(
+            metadata,
+            inactivity_floor_loc,
+            steps,
+        ))
+        .await?;
 
         let range = start_loc..self.log.bounds().end;
 
@@ -388,25 +392,29 @@ where
     }
 
     /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
-    /// Raises the floor to the tip if the db is empty.
-    pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
-        if self.is_empty() {
+    /// Raises the floor to the tip if the db is empty. Returns the new floor location and the
+    /// number of steps taken.
+    pub(crate) async fn raise_floor(&mut self) -> Result<(Location, u32), Error> {
+        let steps_taken = if self.is_empty() {
             self.inactivity_floor_loc = self.log.bounds().end;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+            0
         } else {
             let steps_to_take = self.durable_state.steps + 1;
             for _ in 0..steps_to_take {
                 let loc = self.inactivity_floor_loc;
                 self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
-        }
+            u32::try_from(steps_to_take).expect("steps should fit in u32")
+        };
         self.durable_state.steps = 0;
 
-        Ok(self.inactivity_floor_loc)
+        Ok((self.inactivity_floor_loc, steps_taken))
     }
 
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor.
+    /// operation above the inactivity floor. Returns the new floor location and the number of
+    /// steps taken.
     pub(crate) async fn raise_floor_with_bitmap<
         F: Storage + Clock + Metrics,
         D: Digest,
@@ -414,10 +422,11 @@ where
     >(
         &mut self,
         status: &mut UnmerkleizedBitMap<F, D, N>,
-    ) -> Result<Location, Error> {
-        if self.is_empty() {
+    ) -> Result<(Location, u32), Error> {
+        let steps_taken = if self.is_empty() {
             self.inactivity_floor_loc = self.log.bounds().end;
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+            0
         } else {
             let steps_to_take = self.durable_state.steps + 1;
             for _ in 0..steps_to_take {
@@ -427,10 +436,11 @@ where
                     .raise_floor_with_bitmap(status, loc)
                     .await?;
             }
-        }
+            u32::try_from(steps_to_take).expect("steps should fit in u32")
+        };
         self.durable_state.steps = 0;
 
-        Ok(self.inactivity_floor_loc)
+        Ok((self.inactivity_floor_loc, steps_taken))
     }
 
     /// Returns a FloorHelper wrapping the current state of the log.

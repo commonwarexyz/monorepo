@@ -126,14 +126,14 @@ where
 
                 (op_proof, Operation::Update(data.clone()))
             }
-            super::ExclusionProof::Commit(op_proof, metadata) => {
+            super::ExclusionProof::Commit(op_proof, metadata, steps) => {
                 // Handle the case where the proof shows the db is empty, hence any key is proven
                 // excluded. For the db to be empty, the floor must equal the commit operation's
                 // location.
                 let floor_loc = op_proof.loc;
                 (
                     op_proof,
-                    Operation::CommitFloor(metadata.clone(), floor_loc),
+                    Operation::CommitFloor(metadata.clone(), floor_loc, *steps),
                 )
             }
         };
@@ -217,11 +217,11 @@ where
         Ok(match span {
             Some((_, key_data)) => super::ExclusionProof::KeyValue(op_proof, key_data),
             None => {
-                let value = match self.any.log.read(loc).await? {
-                    Operation::CommitFloor(value, _) => value,
+                let (value, steps) = match self.any.log.read(loc).await? {
+                    Operation::CommitFloor(value, _, steps) => (value, steps),
                     _ => unreachable!("last commit is not a CommitFloor operation"),
                 };
-                super::ExclusionProof::Commit(op_proof, value)
+                super::ExclusionProof::Commit(op_proof, value, steps)
             }
         })
     }

@@ -436,7 +436,7 @@ pub mod test {
                 let op = db.any.log.read(Location::new_unchecked(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
-                    Operation::CommitFloor(_, _) => continue,
+                    Operation::CommitFloor(_, _, _) => continue,
                     _ => unreachable!("expected update or commit floor operation"),
                 };
                 let proof = db.key_value_proof(hasher.inner(), key).await.unwrap();

@@ -227,7 +227,7 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let Operation::CommitFloor(metadata, _) = self.log.read(*self.last_commit_loc).await?
+        let Operation::CommitFloor(metadata, _, _) = self.log.read(*self.last_commit_loc).await?
         else {
             unreachable!("last commit should be a commit floor operation");
         };
@@ -290,7 +290,7 @@ where
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
             warn!("Log is empty, initializing new db");
-            log.append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+            log.append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                 .await?;
         }
 
@@ -301,7 +301,7 @@ where
         let last_commit_loc =
             Location::new_unchecked(log.size().checked_sub(1).expect("commit should exist"));
         let op = log.read(*last_commit_loc).await?;
-        let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
+        let (inactivity_floor_loc, _) = op.has_floor().expect("last op should be a commit");
 
         // Build the snapshot.
         let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
@@ -414,21 +414,27 @@ where
 
         // Raise the inactivity floor by taking `self.state.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
-        if self.is_empty() {
+        let steps_taken = if self.is_empty() {
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
+            0
         } else {
             let steps_to_take = self.state.steps + 1;
             for _ in 0..steps_to_take {
                 let loc = self.inactivity_floor_loc;
                 self.inactivity_floor_loc = self.as_floor_helper().raise_floor(loc).await?;
             }
-        }
+            u32::try_from(steps_to_take).expect("steps should fit in u32")
+        };
 
-        // Apply the commit operation with the new inactivity floor.
+        // Apply the commit operation with the new inactivity floor and steps taken.
         self.last_commit_loc = Location::new_unchecked(
             self.log
-                .append(Operation::CommitFloor(metadata, self.inactivity_floor_loc))
+                .append(Operation::CommitFloor(
+                    metadata,
+                    self.inactivity_floor_loc,
+                    steps_taken,
+                ))
                 .await?,
         );
 

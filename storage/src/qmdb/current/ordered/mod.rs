@@ -153,6 +153,6 @@ pub enum ExclusionProof<K: Array, V: ValueEncoding, D: Digest, const N: usize> {
     /// Proves that the database has no active keys, allowing any key to be proven excluded.
     /// Specifically, the proof establishes the most recent Commit operation has an activity floor
     /// equal to its own location, which is a necessary and sufficient condition for an empty
-    /// database.
-    Commit(OperationProof<D, N>, Option<V::Value>),
+    /// database. The u32 is the number of steps taken during the commit.
+    Commit(OperationProof<D, N>, Option<V::Value>, u32),
 }

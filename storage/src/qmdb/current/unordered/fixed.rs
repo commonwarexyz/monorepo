@@ -431,7 +431,7 @@ pub mod test {
                 let (key, value) = match db.any.log.read(Location::new_unchecked(i)).await.unwrap()
                 {
                     Operation::Update(UnorderedUpdate(key, value)) => (key, value),
-                    Operation::CommitFloor(_, _) => continue,
+                    Operation::CommitFloor(_, _, _) => continue,
                     Operation::Delete(_) => {
                         unreachable!("location does not reference update/commit operation")
                     }

@@ -69,12 +69,12 @@ where
             operations.push(Operation::Update(Update(key, value)));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
+                operations.push(Operation::CommitFloor(None, Location::from(i + 1), 0));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(None, Location::from(count)));
+        operations.push(Operation::CommitFloor(None, Location::from(count), 0));
         operations
     }
 
@@ -98,7 +98,7 @@ where
                 Operation::Delete(key) => {
                     db.write_batch([(key, None)]).await?;
                 }
-                Operation::CommitFloor(metadata, _) => {
+                Operation::CommitFloor(metadata, _, _) => {
                     let (durable_db, _) = db.commit(metadata).await?;
                     if i == num_ops - 1 {
                         // Last operation - return the clean database
@@ -151,7 +151,7 @@ mod tests {
         let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::CommitFloor(_, loc) = &ops[5] {
+        if let Operation::CommitFloor(_, loc, _) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");

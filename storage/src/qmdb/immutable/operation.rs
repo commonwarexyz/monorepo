@@ -69,7 +69,7 @@ impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
         matches!(self, Self::Set(_, _))
     }
 
-    fn has_floor(&self) -> Option<Location> {
+    fn has_floor(&self) -> Option<(Location, u32)> {
         // Immutable databases don't have inactivity floors
         None
     }

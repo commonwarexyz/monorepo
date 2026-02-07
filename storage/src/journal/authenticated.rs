@@ -731,7 +731,7 @@ mod tests {
             let mmr = mmr.merkleize(&mut hasher);
 
             // Add commit operation to journal only (making journal ahead)
-            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
+            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0), 0);
             journal.append(commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
@@ -760,7 +760,7 @@ mod tests {
             }
 
             // Add commit
-            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0));
+            let commit_op = Operation::CommitFloor(None, Location::new_unchecked(0), 0);
             journal.append(commit_op).await.unwrap();
             journal.sync().await.unwrap();
 
@@ -824,7 +824,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                     .await
                     .unwrap();
                 for i in 4..7 {
@@ -853,12 +853,12 @@ mod tests {
                 // Add multiple commits
                 journal.append(create_operation(0)).await.unwrap();
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                     .await
                     .unwrap(); // pos 1
                 journal.append(create_operation(2)).await.unwrap();
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(1)))
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(1), 0))
                     .await
                     .unwrap(); // pos 3
                 journal.append(create_operation(4)).await.unwrap();
@@ -909,7 +909,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                     .await
                     .unwrap(); // pos 10
                 for i in 11..15 {
@@ -949,7 +949,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
@@ -1008,7 +1008,7 @@ mod tests {
                     journal.append(create_operation(i)).await.unwrap();
                 }
                 journal
-                    .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                    .append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                     .await
                     .unwrap(); // pos 5
                 for i in 6..10 {
@@ -1133,7 +1133,7 @@ mod tests {
 
             // Add commit and prune
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(50), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1203,7 +1203,7 @@ mod tests {
 
             // Add commit operation to commit the operations
             let commit_loc = journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(0), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1254,7 +1254,7 @@ mod tests {
 
             // Add commit at position 50
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(50), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1277,7 +1277,7 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(50), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1306,7 +1306,7 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(50), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1343,7 +1343,7 @@ mod tests {
                 create_journal_with_ops(context.with_label("pruned"), "oldest", 100).await;
             let mut journal = journal.into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(50), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1381,7 +1381,7 @@ mod tests {
                     .await
                     .into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(50)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(50), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1403,7 +1403,7 @@ mod tests {
                 .into_dirty();
 
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(25), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();
@@ -1612,7 +1612,7 @@ mod tests {
 
             let mut journal = journal.into_dirty();
             journal
-                .append(Operation::CommitFloor(None, Location::new_unchecked(25)))
+                .append(Operation::CommitFloor(None, Location::new_unchecked(25), 0))
                 .await
                 .unwrap();
             let mut journal = journal.merkleize();

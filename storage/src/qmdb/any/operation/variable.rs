@@ -22,7 +22,9 @@ where
         1 + match self {
             Self::Delete(_) => K::SIZE,
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => v.encode_size() + UInt(**floor).encode_size(),
+            Self::CommitFloor(v, floor, steps) => {
+                v.encode_size() + UInt(**floor).encode_size() + UInt(*steps as u64).encode_size()
+            }
         }
     }
 }
@@ -43,10 +45,11 @@ where
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
             }
-            Self::CommitFloor(metadata, floor_loc) => {
+            Self::CommitFloor(metadata, floor_loc, steps) => {
                 COMMIT_CONTEXT.write(buf);
                 metadata.write(buf);
                 UInt(**floor_loc).write(buf);
+                UInt(*steps as u64).write(buf);
             }
         }
     }
@@ -79,7 +82,14 @@ where
                         "commit floor location overflow",
                     )
                 })?;
-                Ok(Self::CommitFloor(metadata, floor_loc))
+                let steps: u64 = UInt::read(buf)?.into();
+                let steps = u32::try_from(steps).map_err(|_| {
+                    CodecError::Invalid(
+                        "storage::qmdb::any::operation::variable::Operation",
+                        "commit steps overflow",
+                    )
+                })?;
+                Ok(Self::CommitFloor(metadata, floor_loc, steps))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
