@@ -511,6 +511,7 @@ impl<B: Blob> Append<B> {
     ) -> Result<(IoBufMut, usize), Error> {
         let mut buf = buf.into();
         if len == 0 {
+            buf.truncate(0);
             return Ok((buf, 0));
         }
         let blob_size = self.size().await;
@@ -1076,6 +1077,36 @@ mod tests {
             // Verify data is still readable after reopen.
             let read_buf = append.read_at(0, 206).await.unwrap().coalesce();
             assert_eq!(read_buf, &expected[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_up_to_zero_len_truncates_buffer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            // Open a new blob.
+            let (blob, blob_size) = context
+                .open("test_partition", b"read_up_to_zero_len")
+                .await
+                .unwrap();
+            assert_eq!(blob_size, 0);
+
+            // Create a page cache reference.
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+
+            // Create an Append wrapper and write some data.
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            append.append(&[1, 2, 3, 4]).await.unwrap();
+
+            // Request a zero-length read with a reused, non-empty buffer.
+            let stale = vec![9, 8, 7, 6];
+            let (buf, read) = append.read_up_to(0, 0, stale).await.unwrap();
+
+            assert_eq!(read, 0);
+            assert_eq!(buf.len(), 0, "read_up_to must truncate returned buffer");
+            assert_eq!(buf.freeze().as_ref(), b"");
         });
     }
 
