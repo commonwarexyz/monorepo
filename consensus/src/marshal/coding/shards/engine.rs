@@ -159,17 +159,17 @@ use commonware_codec::{Codec, Error as CodecError, Read};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{
-    utils::codec::{wrap, WrappedReceiver, WrappedSender},
-    Blocker, Receiver, Recipients, Sender,
-};
+use commonware_p2p::{utils::codec::WrappedSender, Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{
+        fallible::{AsyncFallibleExt, OneshotExt},
+        mpsc, oneshot,
+    },
     ordered::{Quorum, Set},
     Participant,
 };
@@ -370,14 +370,15 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let (mut sender, receiver) =
-            wrap::<_, _, Shard<C, H>>(self.shard_codec_cfg.clone(), sender, receiver);
-        let (receiver_service, mut receiver) = WrappedBackgroundReceiver::new(
-            self.context.with_label("wrapped_background_receiver"),
-            receiver,
-            self.blocker.clone(),
-            self.background_channel_capacity,
-        );
+        let mut sender = WrappedSender::<_, Shard<C, H>>::new(sender);
+        let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
+            WrappedBackgroundReceiver::new(
+                self.context.with_label("wrapped_background_receiver"),
+                receiver,
+                self.shard_codec_cfg.clone(),
+                self.blocker.clone(),
+                self.background_channel_capacity,
+            );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
 
@@ -1322,11 +1323,13 @@ where
     }
 }
 
-/// A background receiver that wraps a [`WrappedReceiver`] and decodes messages using a [`Codec`]
-/// in a separate task.
+/// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
+/// decode tasks using a [`Codec`].
 ///
-/// This is particularly useful for situations where decoding large messages introduces pressure
-/// on an event loop that uses [`WrappedReceiver`], such as in the shard engine.
+/// This pipelines network I/O (receiving bytes) with CPU work (decoding messages) by spawning
+/// a separate task for each decode operation, rather than decoding sequentially on the receive
+/// loop. This is particularly useful when decoding large messages (such as erasure-coded shards)
+/// would otherwise create backpressure on the event loop.
 struct WrappedBackgroundReceiver<E, P, B, R, V>
 where
     E: Spawner,
@@ -1336,7 +1339,8 @@ where
     V: Codec + Send,
 {
     context: ContextCell<E>,
-    receiver: WrappedReceiver<R, V>,
+    receiver: R,
+    codec_config: V::Cfg,
     blocker: B,
     sender: mpsc::Sender<(P, V)>,
 }
@@ -1349,10 +1353,12 @@ where
     R: Receiver<PublicKey = P>,
     V: Codec + Send + 'static,
 {
-    /// Create a new [`WrappedBackgroundReceiver`] with the given receiver and blocker.
+    /// Create a new [`WrappedBackgroundReceiver`] with the given receiver, codec config, and
+    /// blocker.
     pub fn new(
         context: E,
-        receiver: WrappedReceiver<R, V>,
+        receiver: R,
+        codec_config: V::Cfg,
         blocker: B,
         channel_capacity: usize,
     ) -> (Self, mpsc::Receiver<(P, V)>) {
@@ -1361,6 +1367,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 receiver,
+                codec_config,
                 blocker,
                 sender: tx,
             },
@@ -1377,26 +1384,37 @@ where
     }
 
     /// Run the background receiver's event loop.
+    ///
+    /// Each incoming message is decoded in a separate spawned task, allowing
+    /// the receive loop to continue draining the network buffer while decodes
+    /// proceed concurrently.
     async fn run(mut self) {
         select_loop! {
             self.context,
             on_stopped => {
                 debug!("wrapped background receiver received shutdown signal, stopping");
             },
-            Ok((peer, value)) = self.receiver.recv() else {
+            Ok((peer, bytes)) = self.receiver.recv() else {
                 debug!("wrapped background receiver closed, stopping");
                 return;
             } => {
-                let value = match value {
-                    Ok(value) => value,
-                    Err(err) => {
-                        warn!(?peer, ?err, "received invalid message, blocking peer");
-                        self.blocker.block(peer).await;
-                        continue;
-                    }
-                };
+                let config = self.codec_config.clone();
+                let mut sender = self.sender.clone();
+                let mut blocker = self.blocker.clone();
 
-                let _ = self.sender.send((peer, value)).await;
+                let ctx = self.context.take();
+                ctx.clone().spawn(|_| async move {
+                    match V::decode_cfg(bytes.as_ref(), &config) {
+                        Ok(value) => {
+                            sender.send_lossy((peer, value)).await;
+                        }
+                        Err(err) => {
+                            warn!(?peer, ?err, "received invalid message, blocking peer");
+                            blocker.block(peer).await;
+                        }
+                    }
+                });
+                self.context.restore(ctx);
             }
         }
     }
