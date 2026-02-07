@@ -649,24 +649,6 @@ impl<F: FieldNTT> NTTPolynomial<F> {
         0
     }
 
-    /// Compute the derivative of this polynomial.
-    ///
-    /// For a polynomial `f(X) = a0 + a1 X + a2 X^2 + ... + an X^n`,
-    /// the derivative is `f'(X) = a1 + 2*a2 X + ... + n*an X^(n-1)`.
-    fn derivative(&self) -> Self {
-        let rows = self.coefficients.len();
-        let lg_rows = rows.ilog2();
-        let mut result = vec![F::zero(); rows];
-        for i in 1..rows {
-            let src_idx = reverse_bits(lg_rows, i as u64) as usize;
-            let dst_idx = reverse_bits(lg_rows, (i - 1) as u64) as usize;
-            result[dst_idx] = self.coefficients[src_idx].scale(&[i as u64]);
-        }
-        Self {
-            coefficients: result,
-        }
-    }
-
     /// Convert this polynomial into a PolynomialVector with a single column.
     fn into_polynomial_vector(self) -> PolynomialVector<F> {
         let rows = self.coefficients.len();
@@ -1012,18 +994,19 @@ impl<F> EvaluationVector<F> {
 /// Compute Lagrange coefficients for interpolating a polynomial at 0 from evaluations
 /// at roots of unity.
 ///
-/// Given a subset T of indices where we have evaluations, this computes the Lagrange
-/// coefficients needed to interpolate to 0. For each index `j` in T, the coefficient
+/// Given a subset S of indices where we have evaluations, this computes the Lagrange
+/// coefficients needed to interpolate to 0. For each index `j` in S, the coefficient
 /// is `L_j(0)` where `L_j` is the Lagrange basis polynomial.
 ///
-/// This uses the fast O(n log n) algorithm from:
-/// <https://alinush.github.io/threshold-bls>
+/// The key formula is: `L_j(0) = P_Sbar(w^j) / (N * P_Sbar(0))`
 ///
-/// The key formula is: `L_j(0) = V_T(0) / (-w^j * V_T'(w^j))`
+/// where `P_Sbar` is the (possibly scaled) vanishing polynomial over the complement
+/// (missing points), and N is the domain size. This follows from
+/// `V_S(X) * V_Sbar(X) = X^N - 1`, which gives `V_S(0) = -1/V_Sbar(0)`.
+/// The scaling factor of `P_Sbar` cancels in the ratio.
 ///
-/// where `V_T(X) = prod_{k in T}(X - w^k)` is the vanishing polynomial over points we
-/// have, and `V_T'` is its derivative. Using FFT, we evaluate `V_T'` at all roots of
-/// unity in O(n log n) time.
+/// Building `P_Sbar` via [`NTTPolynomial::vanishing`] is cheaper than building `V_S`
+/// when most points are present (the typical erasure-coding case), since `|Sbar| << |S|`.
 ///
 /// # Arguments
 /// * `total` - The total number of points in the domain (rounded up to power of 2)
@@ -1038,7 +1021,6 @@ pub fn lagrange_coefficients<F: FieldNTT>(
     let total_u64 = u64::from(total.get());
     let size = total_u64.next_power_of_two();
     let size_usize: usize = size.try_into().expect("domain too large (usize overflow)");
-    let lg_size = size.ilog2() as u8;
 
     let mut present: BitMap = BitMap::zeroes(size);
     for i in iter {
@@ -1059,54 +1041,26 @@ pub fn lagrange_coefficients<F: FieldNTT>(
         return (0..size as u32).map(|i| (i, n_inv.clone())).collect();
     }
 
-    let mut complement: BitMap = BitMap::zeroes(size);
-    for i in 0..size {
-        if !present.get(i) {
-            complement.set(i, true);
+    // Build P_Sbar (vanishes at indices NOT in present) and evaluate at all
+    // roots of unity via NTT. Note: vanishing() may produce a scaled polynomial
+    // P_Sbar = c * V_Sbar, but the scaling cancels in the ratio below.
+    let vp_complement: NTTPolynomial<F> = NTTPolynomial::vanishing(&present);
+    let p_sbar_at_zero = vp_complement.coefficients[0].clone();
+    let complement_evals = vp_complement.into_polynomial_vector().evaluate().data;
+
+    // From V_S(0) * V_Sbar(0) = -1 (since V_S * V_Sbar = X^N - 1), we get:
+    //   L_j(0) = -V_S(0) * V_Sbar(w^j) / N = V_Sbar(w^j) / (N * V_Sbar(0))
+    // Since P_Sbar = c * V_Sbar, the scaling c cancels:
+    //   L_j(0) = P_Sbar(w^j) / (N * P_Sbar(0))
+    let factor = (F::one().scale(&[size]) * &p_sbar_at_zero).inv();
+
+    let mut out = Vec::with_capacity(num_present);
+    for j in 0..size as u32 {
+        if present.get(u64::from(j)) {
+            let coeff = factor.clone() * &complement_evals[(j as usize, 0)];
+            out.push((j, coeff));
         }
     }
-
-    let vp: NTTPolynomial<F> = NTTPolynomial::vanishing(&complement);
-    let vp_at_zero = vp.coefficients[0].clone();
-    let vp_derivative = vp.derivative();
-
-    let derivative_evals = vp_derivative.into_polynomial_vector().evaluate().data;
-
-    let w = F::root_of_unity(lg_size).expect("domain too large for NTT");
-
-    // Collect indices and denominators for batch inversion
-    let mut indices = Vec::with_capacity(num_present);
-    let mut denoms = Vec::with_capacity(num_present);
-
-    let mut neg_w_i = -F::one();
-    for i in 0..size as u32 {
-        if present.get(u64::from(i)) {
-            let vp_prime_at_w_i = derivative_evals[(i as usize, 0)].clone();
-            denoms.push(neg_w_i.clone() * &vp_prime_at_w_i);
-            indices.push(i);
-        }
-        neg_w_i *= &w;
-    }
-
-    // Batch inversion using Montgomery's trick: t inversions -> 1 inversion + O(t) muls
-    let m = denoms.len();
-    let mut prefix = Vec::with_capacity(m + 1);
-    prefix.push(F::one());
-    for d in &denoms {
-        let next = prefix.last().unwrap().clone() * d;
-        prefix.push(next);
-    }
-
-    let mut inv_acc = prefix[m].inv();
-
-    // Build output in reverse order, then reverse
-    let mut out = Vec::with_capacity(m);
-    for j in (0..m).rev() {
-        let denom_inv = inv_acc.clone() * &prefix[j];
-        inv_acc *= &denoms[j];
-        out.push((indices[j], vp_at_zero.clone() * &denom_inv));
-    }
-    out.reverse();
     out
 }
 
