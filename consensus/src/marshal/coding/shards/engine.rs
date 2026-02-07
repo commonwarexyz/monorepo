@@ -92,18 +92,19 @@
 //!
 //! ```text
 //!    +----------------------+
-//!    | AwaitingStrong       |
+//!    | AwaitingQuorum       |
 //!    | - leader known       |
 //!    | - buffer weak        |  <--- pre-leader buffered shards are ingested here
+//!    | - checking_data when |
+//!    |   strong verified    |
 //!    +----------------------+
 //!               |
-//!               | leader strong shard passes C::weaken
+//!               | quorum met + batch validation passes
 //!               v
 //!    +----------------------+
 //!    | Ready                |
 //!    | - has checking_data  |
-//!    | - validate weak via  |
-//!    |   C::check           |
+//!    | - checked shards     |
 //!    +----------------------+
 //!               |
 //!               | checked_shards.len() >= minimum_shards
@@ -631,7 +632,7 @@ where
         };
 
         // Ingest weak shards first so they populate pending_weak_shards before
-        // the strong shard transitions to Ready and drains in parallel.
+        // the strong shard sets checking_data and triggers batch validation.
         let mut progressed = false;
         for (peer, shard) in buffered_weak.into_iter().chain(buffered_strong) {
             progressed |= state
@@ -853,9 +854,12 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// Stage 1: leader known; wait for leader strong shard, buffer weak shards.
-    AwaitingStrong(AwaitingStrongState<P, C, H>),
-    /// Stage 2: leader strong shard verified; validate weak shards immediately.
+    /// Stage 1: leader known; buffer weak shards and optionally hold checking
+    /// data from a verified strong shard. Transitions to `Ready` when quorum
+    /// is met and batch validation succeeds.
+    AwaitingQuorum(AwaitingQuorumState<P, C, H>),
+    /// Stage 2: batch validation passed; checked shards are available for
+    /// reconstruction.
     Ready(ReadyState<P, C, H>),
 }
 
@@ -878,11 +882,13 @@ where
     view: View,
 }
 
-/// Phase data for `ReconstructionState::AwaitingStrong`.
+/// Phase data for `ReconstructionState::AwaitingQuorum`.
 ///
-/// In this phase, the leader is known, but checking data is not yet available.
-/// Weak shards are buffered until the leader's strong shard is verified.
-struct AwaitingStrongState<P, C, H>
+/// In this phase, the leader is known. Weak shards are buffered until enough
+/// shards (strong + pending weak) are available to attempt batch validation.
+/// `checking_data` is populated once the leader's strong shard is verified via
+/// `C::weaken`.
+struct AwaitingQuorumState<P, C, H>
 where
     P: PublicKey,
     C: CodingScheme,
@@ -890,12 +896,13 @@ where
 {
     common: CommonState<P, C, H>,
     pending_weak_shards: BTreeMap<P, WeakShard<C>>,
+    checking_data: Option<C::CheckingData>,
 }
 
 /// Phase data for `ReconstructionState::Ready`.
 ///
-/// In this phase, checking data is available and incoming weak shards are
-/// validated immediately.
+/// Batch validation has passed. Checked shards are available for
+/// reconstruction.
 struct ReadyState<P, C, H>
 where
     P: PublicKey,
@@ -921,7 +928,6 @@ struct WeakShard<C>
 where
     C: CodingScheme,
 {
-    commitment: CodingCommitment,
     index: u16,
     data: C::WeakShard,
 }
@@ -954,23 +960,23 @@ where
     }
 }
 
-impl<P, C, H> AwaitingStrongState<P, C, H>
+impl<P, C, H> AwaitingQuorumState<P, C, H>
 where
     P: PublicKey,
     C: CodingScheme,
     H: Hasher,
 {
-    /// Verify the leader's strong shard and transition to `Ready` on success.
+    /// Verify the leader's strong shard and store checking data.
     ///
-    /// Returns `None` if verification fails (sender is blocked), otherwise the
-    /// constructed `ReadyState`.
+    /// Returns `false` if verification fails (sender is blocked), `true` on
+    /// success. Does not transition state; the caller should invoke
+    /// `try_transition` after this returns `true`.
     async fn verify_strong_shard(
         &mut self,
         sender: P,
         shard: StrongShard<C>,
-        strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> Option<ReadyState<P, C, H>> {
+    ) -> bool {
         let StrongShard {
             commitment,
             index,
@@ -984,7 +990,7 @@ where
         ) else {
             warn!(?sender, "invalid strong shard received, blocking peer");
             blocker.block(sender).await;
-            return None;
+            return false;
         };
 
         self.common.checked_shards.push(checked);
@@ -993,31 +999,31 @@ where
             index,
             DistributionShard::Weak(weak_shard_data),
         ));
-
-        let pending_weak = std::mem::take(&mut self.pending_weak_shards);
-        self.drain_pending(commitment, &checking_data, pending_weak, strategy, blocker)
-            .await;
-
-        let view = self.common.view;
-        let leader = self.common.leader.clone();
-        let common = std::mem::replace(&mut self.common, CommonState::new(leader, view));
-        Some(ReadyState {
-            common,
-            checking_data,
-        })
+        self.checking_data = Some(checking_data);
+        true
     }
 
-    /// Attempts to drain pending weak shards once checking data is available.
-    async fn drain_pending(
+    /// Check whether quorum is met and, if so, batch-validate all pending weak
+    /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
+    async fn try_transition(
         &mut self,
         commitment: CodingCommitment,
-        checking_data: &C::CheckingData,
-        pending_shards: BTreeMap<P, WeakShard<C>>,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) {
-        let (new_checked_shards, to_block) =
-            strategy.map_partition_collect_vec(pending_shards, |(peer, shard)| {
+    ) -> Option<ReadyState<P, C, H>> {
+        if self.checking_data.is_none() {
+            return None;
+        }
+        let minimum = usize::from(commitment.config().minimum_shards);
+        if self.common.checked_shards.len() + self.pending_weak_shards.len() < minimum {
+            return None;
+        }
+
+        // Batch-validate all pending weak shards in parallel.
+        let pending = std::mem::take(&mut self.pending_weak_shards);
+        let checking_data = self.checking_data.as_ref().unwrap();
+        let (new_checked, to_block) =
+            strategy.map_partition_collect_vec(pending, |(peer, shard)| {
                 let checked = C::check(
                     &commitment.config(),
                     &commitment.coding_digest(),
@@ -1032,8 +1038,22 @@ where
             warn!(?peer, "invalid shard received, blocking peer");
             blocker.block(peer).await;
         }
+        self.common.checked_shards.extend(new_checked);
 
-        self.common.checked_shards.extend(new_checked_shards);
+        // After validation, some may have failed; recheck threshold.
+        if self.common.checked_shards.len() < minimum {
+            return None;
+        }
+
+        // Transition to Ready.
+        let checking_data = self.checking_data.take().unwrap();
+        let view = self.common.view;
+        let leader = self.common.leader.clone();
+        let common = std::mem::replace(&mut self.common, CommonState::new(leader, view));
+        Some(ReadyState {
+            common,
+            checking_data,
+        })
     }
 }
 
@@ -1056,16 +1076,17 @@ where
 {
     /// Create an initial reconstruction state for a commitment.
     const fn new(leader: P, view: View) -> Self {
-        Self::AwaitingStrong(AwaitingStrongState {
+        Self::AwaitingQuorum(AwaitingQuorumState {
             common: CommonState::new(leader, view),
             pending_weak_shards: BTreeMap::new(),
+            checking_data: None,
         })
     }
 
     /// Access common state shared across all phases.
     const fn common(&self) -> &CommonState<P, C, H> {
         match self {
-            Self::AwaitingStrong(state) => &state.common,
+            Self::AwaitingQuorum(state) => &state.common,
             Self::Ready(state) => &state.common,
         }
     }
@@ -1073,7 +1094,7 @@ where
     /// Mutably access common state shared across all phases.
     const fn common_mut(&mut self) -> &mut CommonState<P, C, H> {
         match self {
-            Self::AwaitingStrong(state) => &mut state.common,
+            Self::AwaitingQuorum(state) => &mut state.common,
             Self::Ready(state) => &mut state.common,
         }
     }
@@ -1083,13 +1104,14 @@ where
         &self.common().leader
     }
 
-    /// Returns checking data when the state has reached `Ready`.
+    /// Returns checking data when available.
     ///
-    /// This is required to validate weak shards and reconstruct the block.
+    /// In `AwaitingQuorum`, this is `Some` once the leader's strong shard has
+    /// been verified. In `Ready`, it is always `Some`.
     const fn checking_data(&self) -> Option<&C::CheckingData> {
         match self {
+            Self::AwaitingQuorum(state) => state.checking_data.as_ref(),
             Self::Ready(state) => Some(&state.checking_data),
-            _ => None,
         }
     }
 
@@ -1168,19 +1190,25 @@ where
                     index,
                     data,
                 };
-                self.insert_strong_shard(ctx.me, sender, strong, ctx.strategy, blocker)
+                self.insert_strong_shard(ctx.me, sender, strong, blocker)
                     .await
             }
             DistributionShard::Weak(data) => {
-                let weak = WeakShard {
-                    commitment,
-                    index,
-                    data,
-                };
+                let weak = WeakShard { index, data };
                 self.insert_weak_shard(sender, sender_index, weak, blocker)
                     .await
             }
         };
+
+        if progressed {
+            if let Self::AwaitingQuorum(state) = self {
+                if let Some(ready) =
+                    state.try_transition(commitment, ctx.strategy, blocker).await
+                {
+                    *self = Self::Ready(ready);
+                }
+            }
+        }
 
         progressed
     }
@@ -1193,7 +1221,6 @@ where
         me: Option<&Participant>,
         sender: P,
         shard: StrongShard<C>,
-        strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let Some(me) = me else {
@@ -1221,7 +1248,7 @@ where
         }
 
         match self {
-            Self::AwaitingStrong(state) => {
+            Self::AwaitingQuorum(state) => {
                 if sender != state.common.leader {
                     warn!(
                         ?sender,
@@ -1231,20 +1258,13 @@ where
                     blocker.block(sender).await;
                     return false;
                 }
-                if state.common.contributed.get(u64::from(me.get())) {
+                if state.checking_data.is_some() {
                     warn!(?sender, "duplicate strong shard from leader, blocking peer");
                     blocker.block(sender).await;
                     return false;
                 }
                 state.common.contributed.set(u64::from(me.get()), true);
-                if let Some(ready) = state
-                    .verify_strong_shard(sender, shard, strategy, blocker)
-                    .await
-                {
-                    *self = Self::Ready(ready);
-                    return true;
-                }
-                false
+                state.verify_strong_shard(sender, shard, blocker).await
             }
             Self::Ready(state) => {
                 if sender != state.common.leader {
@@ -1300,25 +1320,11 @@ where
             .set(u64::from(sender_index.get()), true);
 
         match self {
-            Self::AwaitingStrong(state) => {
+            Self::AwaitingQuorum(state) => {
                 state.pending_weak_shards.insert(sender, shard);
                 true
             }
-            Self::Ready(state) => {
-                let Ok(checked) = C::check(
-                    &shard.commitment.config(),
-                    &shard.commitment.coding_digest(),
-                    &state.checking_data,
-                    shard.index,
-                    shard.data,
-                ) else {
-                    warn!(?sender, "invalid shard received, blocking peer");
-                    blocker.block(sender).await;
-                    return false;
-                };
-                state.common.checked_shards.push(checked);
-                true
-            }
+            Self::Ready(_) => false,
         }
     }
 }
@@ -2908,7 +2914,7 @@ mod tests {
     #[test_traced]
     fn test_invalid_weak_shard_crypto_blocks_peer() {
         // Test that a weak shard failing cryptographic verification (C::check)
-        // results in blocking the sender (immediate path, checking_data available).
+        // results in blocking the sender once batch validation fires at quorum.
         let fixture = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -2959,9 +2965,28 @@ mod tests {
                 // Peer 1 sends the invalid weak shard.
                 peers[1]
                     .sender
-                    .send(Recipients::One(peer3_pk), wrong_bytes, true)
+                    .send(Recipients::One(peer3_pk.clone()), wrong_bytes, true)
                     .await
                     .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // No block yet: batch validation deferred until quorum.
+                // Send valid weak shards from peers 2 and 4 to reach quorum
+                // (minimum_shards = 4: 1 strong + 3 pending weak).
+                for &idx in &[2, 4] {
+                    let peer_index = peers[idx].index.get() as u16;
+                    let weak = coded_block1
+                        .shard::<H>(peer_index)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed");
+                    let bytes = weak.encode();
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(peer3_pk.clone()), bytes, true)
+                        .await
+                        .expect("send failed");
+                }
                 context.sleep(config.link.latency * 2).await;
 
                 // Peer 1 should be blocked for invalid weak shard crypto.
@@ -2973,7 +2998,7 @@ mod tests {
     #[test_traced]
     fn test_invalid_pending_weak_shard_blocked_on_drain() {
         // Test that a weak shard buffered in pending_weak_shards (before checking data) is
-        // blocked when drain_pending runs and C::check fails.
+        // blocked when batch validation runs at quorum and C::check fails.
         let fixture = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -3014,6 +3039,29 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(blocked.is_empty(), "no peers should be blocked yet");
 
+                // Send valid weak shards from peers 2 and 4 so the pending count
+                // reaches quorum once the strong shard arrives
+                // (minimum_shards = 4: 1 strong + 3 pending weak).
+                for &idx in &[2, 4] {
+                    let peer_index = peers[idx].index.get() as u16;
+                    let weak = coded_block1
+                        .shard::<H>(peer_index)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed");
+                    let bytes = weak.encode();
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(peer3_pk.clone()), bytes, true)
+                        .await
+                        .expect("send failed");
+                }
+                context.sleep(config.link.latency * 2).await;
+
+                // No one should be blocked yet (all shards are buffered pending leader).
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(blocked.is_empty(), "no peers should be blocked yet");
+
                 // Now inform peer 3 of the leader and send the valid strong shard.
                 let leader = peers[0].public_key.clone();
                 peers[3]
@@ -3031,7 +3079,7 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // Peer 1 should be blocked after drain_pending validates and
+                // Peer 1 should be blocked after batch validation validates and
                 // rejects their invalid weak shard.
                 assert_blocked(&oracle, &peers[3].public_key, &peers[1].public_key).await;
             },
