@@ -5,41 +5,47 @@ use super::{
 use commonware_cryptography::sha256::Sha256 as QmdbHasher;
 use commonware_runtime::tokio;
 use commonware_storage::{
-    qmdb::{any, NonDurable, Unmerkleized},
+    qmdb::{current, NonDurable},
     translator::EightCap,
 };
+use commonware_storage::qmdb::current::db::Unmerkleized;
+
+const CURRENT_CHUNK_SIZE: usize = 32;
 
 pub(crate) type Context = tokio::Context;
 pub(crate) type AccountStore =
-    any::unordered::variable::Db<Context, AccountKey, AccountRecord, QmdbHasher, EightCap>;
+    current::ordered::variable::Db<Context, AccountKey, AccountRecord, QmdbHasher, EightCap, CURRENT_CHUNK_SIZE>;
 pub(crate) type StorageStore =
-    any::unordered::variable::Db<Context, StorageKey, StorageRecord, QmdbHasher, EightCap>;
+    current::ordered::variable::Db<Context, StorageKey, StorageRecord, QmdbHasher, EightCap, CURRENT_CHUNK_SIZE>;
 pub(crate) type CodeStore =
-    any::unordered::variable::Db<Context, CodeKey, Vec<u8>, QmdbHasher, EightCap>;
-pub(crate) type AccountStoreDirty = any::unordered::variable::Db<
+    current::ordered::variable::Db<Context, CodeKey, Vec<u8>, QmdbHasher, EightCap, CURRENT_CHUNK_SIZE>;
+pub(crate) type AccountStoreDirty = current::ordered::variable::Db<
     Context,
     AccountKey,
     AccountRecord,
     QmdbHasher,
     EightCap,
+    CURRENT_CHUNK_SIZE,
     Unmerkleized,
     NonDurable,
 >;
-pub(crate) type StorageStoreDirty = any::unordered::variable::Db<
+pub(crate) type StorageStoreDirty = current::ordered::variable::Db<
     Context,
     StorageKey,
     StorageRecord,
     QmdbHasher,
     EightCap,
+    CURRENT_CHUNK_SIZE,
     Unmerkleized,
     NonDurable,
 >;
-pub(crate) type CodeStoreDirty = any::unordered::variable::Db<
+pub(crate) type CodeStoreDirty = current::ordered::variable::Db<
     Context,
     CodeKey,
     Vec<u8>,
     QmdbHasher,
     EightCap,
+    CURRENT_CHUNK_SIZE,
     Unmerkleized,
     NonDurable,
 >;

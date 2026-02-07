@@ -4,7 +4,7 @@ use super::{
 };
 use commonware_codec::RangeCfg;
 use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
-use commonware_storage::{qmdb::any::VariableConfig, translator::EightCap};
+use commonware_storage::{qmdb::current::VariableConfig, translator::EightCap};
 use commonware_utils::{NZUsize, NZU64};
 
 const CODE_MAX_BYTES: usize = 24_576;
@@ -45,6 +45,7 @@ fn store_config<C>(
         log_compression: None,
         log_codec_config,
         log_items_per_blob: NZU64!(128),
+        bitmap_metadata_partition: format!("{prefix}-{name}-bitmap-meta"),
         translator: EightCap,
         thread_pool: None,
         page_cache,

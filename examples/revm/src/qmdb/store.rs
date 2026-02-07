@@ -139,7 +139,8 @@ impl Stores {
             batch.into_iter().collect::<Vec<_>>()
         };
         accounts.write_batch(batch_ops.into_iter()).await?;
-        let (accounts, _) = accounts.into_merkleized().commit(None).await?;
+        let (accounts, _) = accounts.commit(None).await?;
+        let accounts = accounts.into_merkleized().await?;
         Ok(Self {
             accounts,
             storage,
@@ -153,9 +154,9 @@ impl Stores {
         let (mut dirty, batches) = dirty.build_batches(changes).await?;
         dirty.apply_batches(batches).await?;
 
-        let accounts = dirty.accounts.into_merkleized();
-        let storage = dirty.storage.into_merkleized();
-        let code = dirty.code.into_merkleized();
+        let accounts = dirty.accounts.into_merkleized().await?;
+        let storage = dirty.storage.into_merkleized().await?;
+        let code = dirty.code.into_merkleized().await?;
         Ok(state_root_from_roots(
             accounts.root(),
             storage.root(),
@@ -292,9 +293,12 @@ impl DirtyStores {
 
     /// Commits all dirty stores and returns them in durable form.
     pub(super) async fn commit(self) -> Result<Stores, Error> {
-        let (accounts, _) = self.accounts.into_merkleized().commit(None).await?;
-        let (storage, _) = self.storage.into_merkleized().commit(None).await?;
-        let (code, _) = self.code.into_merkleized().commit(None).await?;
+        let (accounts, _) = self.accounts.commit(None).await?;
+        let accounts = accounts.into_merkleized().await?;
+        let (storage, _) = self.storage.commit(None).await?;
+        let storage = storage.into_merkleized().await?;
+        let (code, _) = self.code.commit(None).await?;
+        let code = code.into_merkleized().await?;
         Ok(Stores {
             accounts,
             storage,
