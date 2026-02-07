@@ -1011,9 +1011,7 @@ where
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> Option<ReadyState<P, C, H>> {
-        if self.checking_data.is_none() {
-            return None;
-        }
+        self.checking_data.as_ref()?;
         let minimum = usize::from(commitment.config().minimum_shards);
         if self.common.checked_shards.len() + self.pending_weak_shards.len() < minimum {
             return None;
@@ -1202,8 +1200,9 @@ where
 
         if progressed {
             if let Self::AwaitingQuorum(state) = self {
-                if let Some(ready) =
-                    state.try_transition(commitment, ctx.strategy, blocker).await
+                if let Some(ready) = state
+                    .try_transition(commitment, ctx.strategy, blocker)
+                    .await
                 {
                     *self = Self::Ready(ready);
                 }

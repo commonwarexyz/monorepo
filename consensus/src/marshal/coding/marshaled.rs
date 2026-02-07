@@ -208,9 +208,8 @@ where
             "Time taken to fetch a parent block in the proposal process, in milliseconds",
             proposal_parent_fetch_duration.clone(),
         );
-        let erasure_encode_duration = Histogram::new([
-            3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0,
-        ]);
+        let erasure_encode_duration =
+            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
         context.register(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a block, in seconds",
