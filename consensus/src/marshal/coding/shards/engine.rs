@@ -3040,6 +3040,120 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_reconstruction_recovers_after_quorum_with_one_invalid_weak_shard() {
+        // With 10 peers, minimum_shards=4.
+        // Contribute exactly 4 shards first (1 strong + 3 weak), with one weak invalid:
+        // quorum is reached, but checked_shards stays at 3 after batch validation.
+        // Then send one more valid weak shard to meet reconstruction threshold.
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let commitment1 = coded_block1.commitment();
+
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+
+                // Prepare one invalid weak shard: shard data from block2, commitment from block1.
+                let peer1_index = peers[1].index.get() as u16;
+                let mut invalid_weak = coded_block2
+                    .shard::<H>(peer1_index)
+                    .expect("missing shard")
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+                invalid_weak.commitment = commitment1;
+
+                // Announce leader and deliver receiver's strong shard.
+                let leader = peers[0].public_key.clone();
+                peers[receiver_idx]
+                    .mailbox
+                    .external_proposed(commitment1, leader, View::new(1))
+                    .await;
+                let receiver_strong = coded_block1
+                    .shard::<H>(peers[receiver_idx].index.get() as u16)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), receiver_strong, true)
+                    .await
+                    .expect("send failed");
+
+                // Contribute exactly minimum_shards total:
+                // - invalid weak from peer1
+                // - valid weak from peer2
+                // - valid weak from peer4
+                peers[1]
+                    .sender
+                    .send(
+                        Recipients::One(receiver_pk.clone()),
+                        invalid_weak.encode(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+                for idx in [2usize, 4usize] {
+                    let weak = coded_block1
+                        .shard::<H>(peers[idx].index.get() as u16)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed")
+                        .encode();
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak, true)
+                        .await
+                        .expect("send failed");
+                }
+
+                context.sleep(config.link.latency * 2).await;
+
+                // Invalid weak shard should be blocked, and reconstruction should not happen yet.
+                assert_blocked(
+                    &oracle,
+                    &peers[receiver_idx].public_key,
+                    &peers[1].public_key,
+                )
+                .await;
+                assert!(
+                    peers[receiver_idx].mailbox.get(commitment1).await.is_none(),
+                    "block should not reconstruct with only 3 checked shards"
+                );
+
+                // Send one additional valid weak shard; this should now satisfy checked threshold.
+                let extra_valid = coded_block1
+                    .shard::<H>(peers[5].index.get() as u16)
+                    .expect("missing shard")
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed")
+                    .encode();
+                peers[5]
+                    .sender
+                    .send(Recipients::One(receiver_pk), extra_valid, true)
+                    .await
+                    .expect("send failed");
+
+                context.sleep(config.link.latency * 2).await;
+
+                let reconstructed = peers[receiver_idx]
+                    .mailbox
+                    .get(commitment1)
+                    .await
+                    .expect("block should reconstruct after additional valid weak shard");
+                assert_eq!(reconstructed.commitment(), commitment1);
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_invalid_pending_weak_shard_blocked_on_drain() {
         // Test that a weak shard buffered in pending_weak_shards (before checking data) is
         // blocked when batch validation runs at quorum and C::check fails.
