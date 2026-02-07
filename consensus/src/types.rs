@@ -816,14 +816,14 @@ commonware_macros::stability_scope!(ALPHA {
         }
     }
 
-    impl std::fmt::Display for CodingCommitment {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl core::fmt::Display for CodingCommitment {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             write!(f, "{}", commonware_utils::hex(self.as_ref()))
         }
     }
 
-    impl std::fmt::Debug for CodingCommitment {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl core::fmt::Debug for CodingCommitment {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             write!(f, "{}", commonware_utils::hex(self.as_ref()))
         }
     }

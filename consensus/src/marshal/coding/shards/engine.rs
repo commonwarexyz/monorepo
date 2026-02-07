@@ -237,7 +237,17 @@ where
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
     /// shards are only ingested when consensus provides a leader via
     /// [`ExternalProposed`](super::Message::ExternalProposed).
+    ///
+    /// The worst-case total memory usage for pre-leader buffers is
+    /// `num_participants * pre_leader_buffer_size * max_shard_size`.
     pub pre_leader_buffer_size: NonZeroUsize,
+
+    /// Capacity of the channel between the background receiver and the engine.
+    ///
+    /// The background receiver decodes incoming network messages in a separate
+    /// task and forwards them to the engine over an `mpsc` channel with this
+    /// capacity.
+    pub background_channel_capacity: usize,
 }
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
@@ -287,6 +297,9 @@ where
     /// Maximum buffered pre-leader shards per peer.
     pre_leader_buffer_size: NonZeroUsize,
 
+    /// Capacity of the background receiver channel.
+    background_channel_capacity: usize,
+
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after we receive a finalization signal.
@@ -334,6 +347,7 @@ where
                 state: BTreeMap::new(),
                 pre_leader_buffers: BTreeMap::new(),
                 pre_leader_buffer_size: config.pre_leader_buffer_size,
+                background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 shard_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
@@ -362,6 +376,7 @@ where
             self.context.with_label("wrapped_background_receiver"),
             receiver,
             self.blocker.clone(),
+            self.background_channel_capacity,
         );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
@@ -655,7 +670,7 @@ where
             }
 
             let shard = block
-                .shard(index)
+                .shard(index as u16)
                 .expect("block must have shard for each participant");
             let _ = sender
                 .send(Recipients::One(peer.clone()), shard, true)
@@ -896,7 +911,7 @@ where
     C: CodingScheme,
 {
     commitment: CodingCommitment,
-    index: usize,
+    index: u16,
     data: C::StrongShard,
 }
 
@@ -906,7 +921,7 @@ where
     C: CodingScheme,
 {
     commitment: CodingCommitment,
-    index: usize,
+    index: u16,
     data: C::WeakShard,
 }
 
@@ -960,14 +975,10 @@ where
             index,
             data,
         } = shard;
-        let shard_index: u16 = index
-            .try_into()
-            .expect("shard index impossibly out of bounds");
-
         let Ok((checking_data, checked, weak_shard_data)) = C::weaken(
             &commitment.config(),
             &commitment.coding_digest(),
-            shard_index,
+            index,
             data,
         ) else {
             warn!(?sender, "invalid strong shard received, blocking peer");
@@ -978,7 +989,7 @@ where
         self.common.checked_shards.push(checked);
         self.common.our_weak_shard = Some(Shard::new(
             commitment,
-            usize::from(shard_index),
+            index,
             DistributionShard::Weak(weak_shard_data),
         ));
 
@@ -1006,15 +1017,11 @@ where
     ) {
         let (new_checked_shards, to_block) =
             strategy.map_partition_collect_vec(pending_shards, |(peer, shard)| {
-                let shard_index = shard
-                    .index
-                    .try_into()
-                    .expect("shard index impossibly out of bounds");
                 let checked = C::check(
                     &commitment.config(),
                     &commitment.coding_digest(),
                     checking_data,
-                    shard_index,
+                    shard.index,
                     shard.data,
                 );
                 (peer, checked.ok())
@@ -1177,7 +1184,6 @@ where
         progressed
     }
 
-    /// Handles a strong shard received from the network.
     /// Insert a strong shard according to the current phase.
     ///
     /// Returns `true` only when this progresses reconstruction state.
@@ -1189,11 +1195,6 @@ where
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
-        let shard_index: u16 = shard
-            .index
-            .try_into()
-            .expect("shard index impossibly out of bounds");
-
         let Some(me) = me else {
             warn!(
                 ?sender,
@@ -1207,10 +1208,10 @@ where
             .get()
             .try_into()
             .expect("participant index impossibly out of bounds");
-        if shard_index != expected_index {
+        if shard.index != expected_index {
             warn!(
                 ?sender,
-                shard_index,
+                shard_index = shard.index,
                 expected_index = me.get() as usize,
                 "strong shard index does not match self index, blocking peer"
             );
@@ -1260,7 +1261,6 @@ where
         }
     }
 
-    /// Inserts a weak shard into the state.
     /// Insert a weak shard according to the current phase.
     ///
     /// Returns `true` only when this progresses reconstruction state.
@@ -1271,18 +1271,14 @@ where
         shard: WeakShard<C>,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
-        let shard_index: u16 = shard
-            .index
-            .try_into()
-            .expect("shard index impossibly out of bounds");
         let expected_index: u16 = sender_index
             .get()
             .try_into()
             .expect("participant index impossibly out of bounds");
-        if shard_index != expected_index {
+        if shard.index != expected_index {
             warn!(
                 ?sender,
-                shard_index,
+                shard_index = shard.index,
                 expected_index = sender_index.get() as usize,
                 "weak shard index does not match participant index, blocking peer"
             );
@@ -1312,7 +1308,7 @@ where
                     &shard.commitment.config(),
                     &shard.commitment.coding_digest(),
                     &state.checking_data,
-                    shard_index,
+                    shard.index,
                     shard.data,
                 ) else {
                     warn!(?sender, "invalid shard received, blocking peer");
@@ -1358,8 +1354,9 @@ where
         context: E,
         receiver: WrappedReceiver<R, V>,
         blocker: B,
+        channel_capacity: usize,
     ) -> (Self, mpsc::Receiver<(P, V)>) {
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(channel_capacity);
         (
             Self {
                 context: ContextCell::new(context),
@@ -1564,6 +1561,7 @@ mod tests {
                         strategy: STRATEGY,
                         mailbox_size: 1024,
                         pre_leader_buffer_size: NZUsize!(64),
+                        background_channel_capacity: 1024,
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -1690,7 +1688,7 @@ mod tests {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
-                let receiver_index = peers[2].index.get() as usize;
+                let receiver_index = peers[2].index.get() as u16;
 
                 let valid_shard = coded_block
                     .shard::<H>(receiver_index)
@@ -1828,7 +1826,7 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard =
                     coded_block.shard::<H>(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
@@ -1882,7 +1880,7 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard =
                     coded_block.shard::<H>(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
@@ -1925,7 +1923,7 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard =
                     coded_block.shard::<H>(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
@@ -1975,7 +1973,7 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard = coded_block.shard::<H>(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
@@ -2053,7 +2051,7 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard =
                     coded_block.shard::<H>(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
@@ -2123,12 +2121,12 @@ mod tests {
                 let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard (to initialize their checking_data).
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard =
                     coded_block.shard::<H>(peer2_index).expect("missing shard");
 
                 // Get peer 1's weak shard.
-                let peer1_index = peers[1].index.get() as usize;
+                let peer1_index = peers[1].index.get() as u16;
                 let peer1_strong_shard =
                     coded_block.shard::<H>(peer1_index).expect("missing shard");
                 let peer1_weak_shard = peer1_strong_shard
@@ -2216,7 +2214,7 @@ mod tests {
                     .external_proposed(commitment_a, leader.clone(), View::new(1))
                     .await;
                 let peer1_strong_a = block_a
-                    .shard::<H>(peers[1].index.get() as usize)
+                    .shard::<H>(peers[1].index.get() as u16)
                     .expect("missing shard");
                 let weak_a = peer1_strong_a
                     .verify_into_weak()
@@ -2236,7 +2234,7 @@ mod tests {
                     .await;
                 // Strong shard for peer2 from leader.
                 let strong_b = block_b
-                    .shard::<H>(peers[2].index.get() as usize)
+                    .shard::<H>(peers[2].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -2248,7 +2246,7 @@ mod tests {
                 // Three weak shards for minimum threshold (4 total with strong).
                 for i in [1usize, 3usize, 4usize] {
                     let weak = block_b
-                        .shard::<H>(peers[i].index.get() as usize)
+                        .shard::<H>(peers[i].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -2309,7 +2307,7 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 3's strong shard.
-                let peer3_index = peers[3].index.get() as usize;
+                let peer3_index = peers[3].index.get() as u16;
                 let peer3_strong_shard =
                     coded_block.shard::<H>(peer3_index).expect("missing shard");
 
@@ -2318,7 +2316,7 @@ mod tests {
                     .iter()
                     .map(|&i| {
                         coded_block
-                            .shard::<H>(peers[i].index.get() as usize)
+                            .shard::<H>(peers[i].index.get() as u16)
                             .expect("missing shard")
                             .verify_into_weak()
                             .expect("verify_into_weak failed")
@@ -2418,7 +2416,7 @@ mod tests {
                 // Send one strong shard from the eventual leader and three weak shards,
                 // all before leader announcement.
                 let strong = coded_block
-                    .shard::<H>(peers[receiver_idx].index.get() as usize)
+                    .shard::<H>(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -2429,7 +2427,7 @@ mod tests {
 
                 for i in [1usize, 2usize, 4usize] {
                     let weak = coded_block
-                        .shard::<H>(peers[i].index.get() as usize)
+                        .shard::<H>(peers[i].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -2511,7 +2509,7 @@ mod tests {
 
                 // Send leader strong shard after leader is known.
                 let strong = coded_block
-                    .shard::<H>(peers[receiver_idx].index.get() as usize)
+                    .shard::<H>(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -2531,7 +2529,7 @@ mod tests {
                 // Send enough weak shards after leader known to reconstruct.
                 for i in [1usize, 2usize, 4usize] {
                     let weak = coded_block
-                        .shard::<H>(peers[i].index.get() as usize)
+                        .shard::<H>(peers[i].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -2577,7 +2575,7 @@ mod tests {
                 let peer0_pk = peers[0].public_key.clone();
                 for peer in peers[1..3].iter_mut() {
                     let weak_shard = coded_block
-                        .shard::<H>(peer.index.get() as usize)
+                        .shard::<H>(peer.index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -2621,7 +2619,7 @@ mod tests {
                 // (state was cleared), not duplicates.
                 for peer in peers[1..3].iter_mut() {
                     let weak_shard = coded_block
-                        .shard::<H>(peer.index.get() as usize)
+                        .shard::<H>(peer.index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -2703,7 +2701,7 @@ mod tests {
 
                 // Peer 3 (now non-participant) sends a shard to peer 0.
                 let weak_shard = coded_block
-                    .shard::<H>(peers[3].index.get() as usize)
+                    .shard::<H>(peers[3].index.get() as u16)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -2736,7 +2734,7 @@ mod tests {
                 let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let peer2_strong_shard =
                     coded_block.shard::<H>(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
@@ -2800,7 +2798,7 @@ mod tests {
 
                 // Get peer 2's strong shard from block2, but re-wrap it with
                 // block1's commitment so it fails C::weaken.
-                let peer2_index = peers[2].index.get() as usize;
+                let peer2_index = peers[2].index.get() as u16;
                 let mut wrong_shard = coded_block2.shard::<H>(peer2_index).expect("missing shard");
                 wrong_shard.commitment = commitment1;
                 let wrong_bytes = wrong_shard.encode();
@@ -2844,19 +2842,19 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard so peer 3 can validate weak shards.
-                let peer3_index = peers[3].index.get() as usize;
+                let peer3_index = peers[3].index.get() as u16;
                 let peer3_strong_shard =
                     coded_block.shard::<H>(peer3_index).expect("missing shard");
 
                 // Get peer 1's valid weak shard, then change the index to peer 4's index.
-                let peer1_index = peers[1].index.get() as usize;
+                let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_index_weak_shard = coded_block
                     .shard::<H>(peer1_index)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
                 // Mutate the index so it doesn't match sender (peer 1).
-                wrong_index_weak_shard.index = peers[4].index.get() as usize;
+                wrong_index_weak_shard.index = peers[4].index.get() as u16;
                 let wrong_bytes = wrong_index_weak_shard.encode();
 
                 let peer3_pk = peers[3].public_key.clone();
@@ -2909,13 +2907,13 @@ mod tests {
                 let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 3's strong shard from block1 (valid).
-                let peer3_index = peers[3].index.get() as usize;
+                let peer3_index = peers[3].index.get() as u16;
                 let peer3_strong_shard =
                     coded_block1.shard::<H>(peer3_index).expect("missing shard");
 
                 // Get peer 1's weak shard from block2, but re-wrap with block1's
                 // commitment so C::check fails.
-                let peer1_index = peers[1].index.get() as usize;
+                let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_weak_shard = coded_block2
                     .shard::<H>(peer1_index)
                     .expect("missing shard")
@@ -2974,7 +2972,7 @@ mod tests {
                 let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 1's weak shard from block2, but wrap with block1's commitment.
-                let peer1_index = peers[1].index.get() as usize;
+                let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_weak_shard = coded_block2
                     .shard::<H>(peer1_index)
                     .expect("missing shard")
@@ -3004,7 +3002,7 @@ mod tests {
                     .mailbox
                     .external_proposed(commitment1, leader, View::new(1))
                     .await;
-                let peer3_index = peers[3].index.get() as usize;
+                let peer3_index = peers[3].index.get() as u16;
                 let peer3_strong_shard =
                     coded_block1.shard::<H>(peer3_index).expect("missing shard");
                 let strong_bytes = peer3_strong_shard.encode();

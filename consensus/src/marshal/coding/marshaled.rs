@@ -269,6 +269,7 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("deferred_verify")
+            .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
                 let round = context.round;
 
@@ -514,6 +515,7 @@ where
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("propose")
+            .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
                 let (parent_view, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
@@ -941,7 +943,7 @@ where
                 round = %round,
                 commitment = %block.commitment(),
                 height = %block.height(),
-                "skipping requested broadcast of block with mismatched digest"
+                "skipping requested broadcast of block with mismatched commitment"
             );
             return;
         }

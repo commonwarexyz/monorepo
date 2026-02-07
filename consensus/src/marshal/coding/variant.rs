@@ -52,9 +52,9 @@ where
 
     async fn find_by_digest(
         &mut self,
-        _digest: <CodedBlock<B, C> as Digestible>::Digest,
+        digest: <CodedBlock<B, C> as Digestible>::Digest,
     ) -> Option<Self::CachedBlock> {
-        self.get_by_digest(_digest).await
+        self.get_by_digest(digest).await
     }
 
     async fn find_by_commitment(

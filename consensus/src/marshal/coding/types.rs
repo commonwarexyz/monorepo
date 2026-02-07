@@ -4,7 +4,7 @@ use crate::{
     types::{CodingCommitment, Height},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{EncodeSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{
     sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
@@ -109,7 +109,7 @@ pub struct Shard<C: Scheme, H: Hasher> {
     /// The coding commitment
     pub(crate) commitment: CodingCommitment,
     /// The index of this shard within the commitment.
-    pub(crate) index: usize,
+    pub(crate) index: u16,
     /// An individual shard within the commitment.
     pub(crate) inner: DistributionShard<C>,
     /// Phantom data for the hasher.
@@ -119,7 +119,7 @@ pub struct Shard<C: Scheme, H: Hasher> {
 impl<C: Scheme, H: Hasher> Shard<C, H> {
     pub const fn new(
         commitment: CodingCommitment,
-        index: usize,
+        index: u16,
         inner: DistributionShard<C>,
     ) -> Self {
         Self {
@@ -131,7 +131,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
     }
 
     /// Returns the index of this shard within the commitment.
-    pub const fn index(&self) -> usize {
+    pub const fn index(&self) -> u16 {
         self.index
     }
 
@@ -167,7 +167,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         let weak_shard = C::weaken(
             &self.commitment.config(),
             &self.commitment.coding_digest(),
-            u16::try_from(self.index).expect("shard index fits in u16"),
+            self.index,
             shard,
         )
         .ok()
@@ -230,7 +230,7 @@ impl<C: Scheme, H: Hasher> Read for Shard<C, H> {
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let commitment = CodingCommitment::read(buf)?;
-        let index = usize::read_cfg(buf, &RangeCfg::from(0..=u16::MAX as usize))?;
+        let index = u16::read(buf)?;
         let inner = DistributionShard::read_cfg(buf, cfg)?;
 
         Ok(Self {
@@ -260,7 +260,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             commitment: u.arbitrary()?,
-            index: u.arbitrary::<u32>()? as usize,
+            index: u.arbitrary()?,
             inner: u.arbitrary()?,
             _hasher: PhantomData,
         })
@@ -343,14 +343,14 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     }
 
     /// Returns a [Shard] at the given index, if the index is valid.
-    pub fn shard<H: Hasher>(&self, index: usize) -> Option<Shard<C, H>>
+    pub fn shard<H: Hasher>(&self, index: u16) -> Option<Shard<C, H>>
     where
         B: CertifiableBlock,
     {
         Some(Shard::new(
             self.commitment(),
             index,
-            DistributionShard::Strong(self.shards.as_ref()?.get(index)?.clone()),
+            DistributionShard::Strong(self.shards.as_ref()?.get(usize::from(index))?.clone()),
         ))
     }
 

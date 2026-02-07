@@ -973,6 +973,7 @@ where
         // Convert block to storage format
         let commitment = V::commitment(&block);
         let stored: V::StoredBlock = block.into();
+        let round = finalization.as_ref().map(|f| f.round());
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
@@ -996,12 +997,7 @@ where
         }
 
         // Update metrics and send tip update to application
-        if height > self.tip {
-            // Get the round from the finalization for the tip update
-            let round = match self.get_finalization_by_height(height).await {
-                Some(f) => f.proposal.round,
-                None => Round::zero(), // Fallback if no finalization (shouldn't happen for tip)
-            };
+        if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());

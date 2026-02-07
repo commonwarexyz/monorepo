@@ -24,7 +24,7 @@ hash = "411897b896d677abc652d5380a8314f9197ae6570edadfb43faa2bf7a47fd975"
 
 ["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<Shard<ReedSolomon<Sha256>,Sha256>>"]
 n_cases = 65536
-hash = "e7c5c033d68290da9ad851e16a81e964f6631be7b105bf564fcf6ccac8ce6c17"
+hash = "e8ffc0a1c875173b314b8115055a420a98c60e6839954a476e3b328da715e96e"
 
 ["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Request<B>>"]
 n_cases = 65536
