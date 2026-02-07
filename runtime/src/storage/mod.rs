@@ -207,6 +207,7 @@ pub(crate) mod tests {
     use super::{Header, HeaderError};
     use crate::{Blob, Buf, IoBuf, IoBufMut, IoBufsMut, Storage};
     use commonware_codec::{DecodeExt, Encode};
+    use futures::FutureExt;
 
     #[test]
     fn test_header_fields() {
@@ -298,7 +299,10 @@ pub(crate) mod tests {
         test_resize_then_open(&storage).await;
         test_partition_name_validation(&storage).await;
         test_blob_version_mismatch(&storage).await;
-        test_read_at_returns_same_buffer(&storage).await;
+        test_read_zero_length(&storage).await;
+        test_read_at_buf_returns_same_buffer(&storage).await;
+        test_read_at_buf_insufficient_capacity(&storage).await;
+        test_read_at_buf_larger_capacity(&storage).await;
     }
 
     /// Test opening a blob, writing to it, and reading back the data.
@@ -311,7 +315,7 @@ pub(crate) mod tests {
         assert_eq!(len, 0);
 
         blob.write_at(0, b"hello world").await.unwrap();
-        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        let read = blob.read_at(0, 11).await.unwrap();
 
         assert_eq!(
             read.coalesce(),
@@ -384,7 +388,7 @@ pub(crate) mod tests {
 
         let read_task = tokio::spawn({
             let blob = blob.clone();
-            async move { blob.read_at(0, IoBufMut::zeroed(16)).await.unwrap() }
+            async move { blob.read_at(0, 16).await.unwrap() }
         });
 
         write_task.await.unwrap();
@@ -408,11 +412,7 @@ pub(crate) mod tests {
         let large_data = vec![42u8; 10 * 1024 * 1024]; // 10 MB
         blob.write_at(0, large_data.clone()).await.unwrap();
 
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(10 * 1024 * 1024))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 10 * 1024 * 1024).await.unwrap().coalesce();
 
         assert_eq!(read, large_data.as_slice(), "Large data read/write failed");
     }
@@ -435,11 +435,7 @@ pub(crate) mod tests {
         blob.write_at(8, b"overwrite").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(17))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 17).await.unwrap().coalesce();
 
         assert_eq!(
             read, b"initial overwrite",
@@ -462,11 +458,18 @@ pub(crate) mod tests {
         blob.write_at(0, b"hello").await.unwrap();
 
         // Attempt to read beyond the written data
-        let result = blob.read_at(6, IoBufMut::zeroed(10)).await;
-
+        let result = blob.read_at(6, 10).await;
         assert!(
             result.is_err(),
             "Reading beyond written data should return an error"
+        );
+
+        // Same check via read_at_buf
+        let buf = IoBufMut::with_capacity(10);
+        let result = blob.read_at_buf(6, 10, buf).await;
+        assert!(
+            result.is_err(),
+            "read_at_buf beyond written data should return an error"
         );
     }
 
@@ -485,11 +488,7 @@ pub(crate) mod tests {
         blob.write_at(10_000, b"offset data").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(10_000, IoBufMut::zeroed(11))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(10_000, 11).await.unwrap().coalesce();
         assert_eq!(read, b"offset data", "Data at large offset is incorrect");
     }
 
@@ -511,11 +510,7 @@ pub(crate) mod tests {
         blob.write_at(5, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(11))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read, b"firstsecond", "Appended data is incorrect");
     }
 
@@ -532,18 +527,10 @@ pub(crate) mod tests {
         blob.write_at(10, b"second").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(5))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 5).await.unwrap().coalesce();
         assert_eq!(read, b"first", "Data at offset 0 is incorrect");
 
-        let read = blob
-            .read_at(10, IoBufMut::zeroed(6))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(10, 6).await.unwrap().coalesce();
         assert_eq!(read, b"second", "Data at offset 10 is incorrect");
     }
 
@@ -572,7 +559,7 @@ pub(crate) mod tests {
         // Read back the data in chunks
         for i in 0..num_chunks {
             let read = blob
-                .read_at((i * chunk_size) as u64, IoBufMut::zeroed(chunk_size))
+                .read_at((i * chunk_size) as u64, chunk_size)
                 .await
                 .unwrap()
                 .coalesce();
@@ -591,10 +578,18 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let result = blob.read_at(0, IoBufMut::zeroed(1)).await;
+        let result = blob.read_at(0, 1).await;
         assert!(
             result.is_err(),
             "Reading from an empty blob should return an error"
+        );
+
+        // Same check via read_at_buf
+        let buf = IoBufMut::with_capacity(1);
+        let result = blob.read_at_buf(0, 1, buf).await;
+        assert!(
+            result.is_err(),
+            "read_at_buf from an empty blob should return an error"
         );
     }
 
@@ -614,11 +609,7 @@ pub(crate) mod tests {
         blob.write_at(4, b"map").await.unwrap();
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(7))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 7).await.unwrap().coalesce();
         assert_eq!(read, b"overmap", "Overlapping writes are incorrect");
     }
 
@@ -651,11 +642,7 @@ pub(crate) mod tests {
         assert_eq!(len, 5, "Blob length after resize is incorrect");
 
         // Read back the data
-        let read = blob
-            .read_at(0, IoBufMut::zeroed(5))
-            .await
-            .unwrap()
-            .coalesce();
+        let read = blob.read_at(0, 5).await.unwrap().coalesce();
         assert_eq!(read, b"hello", "Resized data is incorrect");
     }
 
@@ -764,8 +751,31 @@ pub(crate) mod tests {
         );
     }
 
-    /// Test that read_at returns the same buffer that was passed in (contract verification).
-    async fn test_read_at_returns_same_buffer<S>(storage: &S)
+    /// Test that read_at with zero length returns an empty buffer.
+    async fn test_read_zero_length<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_zero_len", b"blob")
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"hello").await.unwrap();
+
+        // read_at with len=0 should succeed and return empty
+        let output = blob.read_at(0, 0).await.unwrap();
+        assert_eq!(output.len(), 0);
+
+        // read_at_buf with len=0 should also succeed
+        let buf = IoBufMut::with_capacity(16);
+        let output = blob.read_at_buf(0, 0, buf).await.unwrap();
+        assert_eq!(output.len(), 0);
+    }
+
+    /// Test that read_at_buf returns the same buffer that was passed in (contract verification).
+    async fn test_read_at_buf_returns_same_buffer<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
@@ -781,7 +791,7 @@ pub(crate) mod tests {
         // Test with single buffer - verify same buffer is returned
         let input_buf = IoBufMut::zeroed(11);
         let input_ptr = input_buf.as_ref().as_ptr();
-        let output = blob.read_at(0, input_buf).await.unwrap();
+        let output = blob.read_at_buf(0, 11, input_buf).await.unwrap();
         assert!(
             output.is_single(),
             "Single input should return single output"
@@ -801,7 +811,7 @@ pub(crate) mod tests {
         let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!input_bufs.is_single(), "Should be chunked");
 
-        let output = blob.read_at(0, input_bufs).await.unwrap();
+        let output = blob.read_at_buf(0, 11, input_bufs).await.unwrap();
         assert!(
             !output.is_single(),
             "Chunked input should return chunked output"
@@ -826,5 +836,66 @@ pub(crate) mod tests {
             }
             _ => panic!("Expected Chunked variant"),
         }
+    }
+
+    /// Test that read_at_buf panics when buffer capacity < len.
+    async fn test_read_at_buf_insufficient_capacity<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_buf_capacity", b"blob")
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        // Single buffer with capacity 5, request 11 bytes
+        let buf = IoBufMut::with_capacity(5);
+        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf))
+            .catch_unwind()
+            .await;
+        assert!(
+            result.is_err(),
+            "Expected panic for insufficient single buffer capacity"
+        );
+
+        // Chunked buffers with total capacity 8, request 11 bytes
+        let bufs = IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+        let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs))
+            .catch_unwind()
+            .await;
+        assert!(
+            result.is_err(),
+            "Expected panic for insufficient chunked buffer capacity"
+        );
+    }
+
+    /// Test that read_at_buf works when buffer capacity exceeds len.
+    async fn test_read_at_buf_larger_capacity<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("test_read_at_buf_large_cap", b"blob")
+            .await
+            .unwrap();
+
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        // Buffer with capacity 64, request only 11 bytes
+        let buf = IoBufMut::with_capacity(64);
+        assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
+        let output = blob.read_at_buf(0, 11, buf).await.unwrap();
+        assert_eq!(output.len(), 11);
+        assert_eq!(output.coalesce(), b"hello world");
+
+        // Buffer with capacity 64, request only 5 bytes (partial read)
+        let buf = IoBufMut::with_capacity(64);
+        let output = blob.read_at_buf(0, 5, buf).await.unwrap();
+        assert_eq!(output.len(), 5);
+        assert_eq!(output.coalesce(), b"hello");
     }
 }

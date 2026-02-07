@@ -117,9 +117,7 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    async fn recv(&mut self, len: u64) -> Result<IoBufs, Error> {
-        let len = len as usize;
-
+    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
 
@@ -162,8 +160,8 @@ impl StreamTrait for Stream {
         Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
     }
 
-    fn peek(&self, max_len: u64) -> &[u8] {
-        let len = (max_len as usize).min(self.buffer.len());
+    fn peek(&self, max_len: usize) -> &[u8] {
+        let len = max_len.min(self.buffer.len());
         &self.buffer[..len]
     }
 }
@@ -190,7 +188,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             sink.send(data.as_slice()).await.unwrap();
-            let received = stream.recv(data.len() as u64).await.unwrap();
+            let received = stream.recv(data.len()).await.unwrap();
             assert_eq!(received.coalesce(), data);
         });
     }
@@ -221,7 +219,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let (received, _) = futures::try_join!(stream.recv(data.len() as u64), async {
+            let (received, _) = futures::try_join!(stream.recv(data.len()), async {
                 sleep(Duration::from_millis(50));
                 sink.send(data.as_slice()).await
             })

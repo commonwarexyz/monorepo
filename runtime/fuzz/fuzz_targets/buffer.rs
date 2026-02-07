@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, IoBufMut, Runner, Storage,
+    deterministic, Blob, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -316,7 +316,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let _ = writer.read_at(offset, IoBufMut::zeroed(size)).await;
+                            let _ = writer.read_at(offset, size).await;
                         }
                     }
                 }
@@ -344,7 +344,7 @@ fn fuzz(input: FuzzInput) {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {
-                            let _ = append.read_at(offset, IoBufMut::zeroed(size)).await;
+                            let _ = append.read_at(offset, size).await;
                         }
                     }
                 }

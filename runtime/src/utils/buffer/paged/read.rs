@@ -1,5 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Buf, Error, IoBufMut};
+use crate::{Blob, Buf, Error};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -108,10 +108,9 @@ impl<B: Blob> PageReader<B> {
         let bytes_to_read = pages_to_read * self.page_size;
 
         // Read physical data
-        let buf = IoBufMut::zeroed(bytes_to_read);
         let physical_buf = self
             .blob
-            .read_at(start_offset, buf)
+            .read_at(start_offset, bytes_to_read)
             .await?
             .coalesce()
             .freeze();

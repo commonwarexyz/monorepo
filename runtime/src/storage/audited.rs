@@ -78,20 +78,30 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
-        &self,
-        offset: u64,
-        buf: impl Into<IoBufsMut> + Send,
-    ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
-        let len = buf.len() as u64;
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
             hasher.update(&len.to_be_bytes());
         });
-        self.inner.read_at(offset, buf).await
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        buf: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        let buf = buf.into();
+        self.auditor.event(b"read_at_buf", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(&offset.to_be_bytes());
+            hasher.update(&len.to_be_bytes());
+        });
+        self.inner.read_at_buf(offset, len, buf).await
     }
 
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
@@ -130,13 +140,20 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, IoBufMut, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use std::sync::Arc;
 
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
+
     #[tokio::test]
     async fn test_audited_storage() {
-        let inner = MemStorage::default();
+        let inner = MemStorage::new(test_pool());
         let auditor = Arc::new(crate::deterministic::Auditor::default());
         let storage = AuditedStorage::new(inner, auditor.clone());
 
@@ -148,12 +165,12 @@ mod tests {
         use crate::deterministic::Auditor;
 
         // Initialize the first storage and auditor
-        let inner1 = MemStorage::default();
+        let inner1 = MemStorage::new(test_pool());
         let auditor1 = Arc::new(Auditor::default());
         let storage1 = AuditedStorage::new(inner1, auditor1.clone());
 
         // Initialize the second storage and auditor
-        let inner2 = MemStorage::default();
+        let inner2 = MemStorage::new(test_pool());
         let auditor2 = Arc::new(Auditor::default());
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
@@ -171,13 +188,13 @@ mod tests {
         );
 
         // Read data from the blobs
-        let read = blob1.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        let read = blob1.read_at(0, 11).await.unwrap();
         assert_eq!(
             read.coalesce(),
             b"hello world",
             "Blob1 content does not match"
         );
-        let read = blob2.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        let read = blob2.read_at(0, 11).await.unwrap();
         assert_eq!(
             read.coalesce(),
             b"hello world",

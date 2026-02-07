@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, Clock, IoBufMut, Metrics, Storage};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -442,9 +442,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let read_buf = blob
-            .read_at(offset, IoBufMut::zeroed(Entry::FULL_SIZE))
-            .await?;
+        let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
         Self::parse_entries(read_buf.coalesce().as_ref())
     }
@@ -1009,7 +1007,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         let read_offset = Self::table_offset(current_index);
         let read_buf = self
             .table
-            .read_at(read_offset, IoBufMut::zeroed(chunk_bytes))
+            .read_at(read_offset, chunk_bytes)
             .await?
             .coalesce();
 
@@ -1211,7 +1209,7 @@ mod tests {
     use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, IoBufMut, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
@@ -1263,11 +1261,7 @@ mod tests {
             freezer.close().await.unwrap();
 
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
-            let table_data = blob
-                .read_at(0, IoBufMut::zeroed(size as usize))
-                .await
-                .unwrap()
-                .coalesce();
+            let table_data = blob.read_at(0, size as usize).await.unwrap().coalesce();
 
             // Verify resize happened (table doubled from 4 to 8)
             let num_entries = size as usize / Entry::FULL_SIZE;
@@ -1326,10 +1320,7 @@ mod tests {
             // Corrupt the CRC in both slots of the table entry
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
-                let entry_data = blob
-                    .read_at(0, IoBufMut::zeroed(Entry::FULL_SIZE))
-                    .await
-                    .unwrap();
+                let entry_data = blob.read_at(0, Entry::FULL_SIZE).await.unwrap();
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt CRC of first slot (last 4 bytes of first slot)
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;

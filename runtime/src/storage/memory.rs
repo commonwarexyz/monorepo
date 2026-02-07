@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{IoBufs, IoBufsMut};
+use crate::{BufferPool, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_utils::hex;
 use sha2::{Digest, Sha256};
@@ -13,12 +13,14 @@ use std::{
 #[derive(Clone)]
 pub struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
+    pool: BufferPool,
 }
 
-impl Default for Storage {
-    fn default() -> Self {
+impl Storage {
+    pub fn new(pool: BufferPool) -> Self {
         Self {
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
+            pool,
         }
     }
 }
@@ -77,6 +79,7 @@ impl crate::Storage for Storage {
                 partition.into(),
                 name,
                 content.clone(),
+                self.pool.clone(),
             ),
             logical_len,
             blob_version,
@@ -128,6 +131,7 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
     content: Arc<RwLock<Vec<u8>>>,
+    pool: BufferPool,
 }
 
 impl Blob {
@@ -136,23 +140,32 @@ impl Blob {
         partition: String,
         name: &[u8],
         content: Vec<u8>,
+        pool: BufferPool,
     ) -> Self {
         Self {
             partitions,
             partition,
             name: name.into(),
             content: Arc::new(RwLock::new(content)),
+            pool,
         }
     }
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, crate::Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    }
+
+    async fn read_at_buf(
         &self,
         offset: u64,
+        len: usize,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, crate::Error> {
         let mut buf = buf.into();
+        // SAFETY: `len` bytes are filled via copy_from_slice below.
+        unsafe { buf.set_len(len) };
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
@@ -161,10 +174,10 @@ impl crate::Blob for Blob {
             .map_err(|_| crate::Error::OffsetOverflow)?;
         let content = self.content.read().unwrap();
         let content_len = content.len();
-        if offset + buf.len() > content_len {
+        if offset + len > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        buf.copy_from_slice(&content[offset..offset + buf.len()]);
+        buf.copy_from_slice(&content[offset..offset + len]);
         Ok(buf)
     }
 
@@ -222,17 +235,24 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, BufferPoolConfig, Storage as _};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
 
     #[tokio::test]
     async fn test_memory_storage() {
-        let storage = Storage::default();
+        let storage = Storage::new(test_pool());
         run_storage_tests(storage).await;
     }
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        let storage = Storage::default();
+        let storage = Storage::new(test_pool());
 
         // New blob returns logical size 0
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
@@ -266,7 +286,7 @@ mod tests {
         }
 
         // Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+        let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // Corrupted blob recovery (0 < raw_size < 8)
@@ -295,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_magic_mismatch() {
-        let storage = Storage::default();
+        let storage = Storage::new(test_pool());
 
         // Manually insert a blob with invalid magic bytes
         {

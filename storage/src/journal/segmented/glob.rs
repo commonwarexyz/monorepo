@@ -30,7 +30,7 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, BufMut, Error as RError, IoBufMut, Metrics, Storage};
+use commonware_runtime::{Blob as _, BufMut, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -128,10 +128,7 @@ impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
             .ok_or(Error::SectionOutOfRange(section))?;
 
         // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer
-            .read_at(offset, IoBufMut::zeroed(size as usize))
-            .await?
-            .coalesce();
+        let buf = writer.read_at(offset, size as usize).await?.coalesce();
 
         // Entry format: [compressed_data] [crc32 (4 bytes)]
         if buf.len() < crc32::Digest::SIZE {

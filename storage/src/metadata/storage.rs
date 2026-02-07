@@ -2,8 +2,7 @@ use super::{Config, Error};
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, IoBufMut, Metrics,
-    Storage,
+    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::Span;
 use futures::{future::try_join_all, lock::Mutex};
@@ -154,10 +153,8 @@ impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
         }
 
         // Read blob
-        let buf = blob
-            .read_at(0, IoBufMut::zeroed(len as usize))
-            .await?
-            .coalesce();
+        let len: usize = len.try_into().expect("blob too large for platform");
+        let buf = blob.read_at(0, len).await?.coalesce();
 
         // Verify integrity.
         //

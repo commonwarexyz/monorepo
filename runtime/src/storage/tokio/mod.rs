@@ -1,5 +1,5 @@
 use super::Header;
-use crate::Error;
+use crate::{BufferPool, Error};
 use commonware_codec::Encode;
 use commonware_utils::{from_hex, hex};
 #[cfg(unix)]
@@ -56,13 +56,15 @@ impl Config {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     cfg: Config,
+    pool: BufferPool,
 }
 
 impl Storage {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: Config, pool: BufferPool) -> Self {
         Self {
             lock: Arc::new(Mutex::new(())),
             cfg,
+            pool,
         }
     }
 }
@@ -169,7 +171,7 @@ impl crate::Storage for Storage {
 
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file),
+                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
                 logical_size,
                 blob_version,
             ))
@@ -178,7 +180,7 @@ impl crate::Storage for Storage {
         {
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file),
+                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
                 logical_size,
                 blob_version,
             ))
@@ -247,16 +249,23 @@ impl crate::Storage for Storage {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
+    use crate::{storage::tests::run_storage_tests, Blob, BufferPoolConfig, Storage as _};
     use rand::{Rng as _, SeedableRng};
     use std::env;
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
 
     #[tokio::test]
     async fn test_storage() {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory = env::temp_dir().join(format!("storage_tokio_{}", rng.gen::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
-        let storage = Storage::new(config);
+        let storage = Storage::new(config, test_pool());
         run_storage_tests(storage).await;
     }
 
@@ -266,7 +275,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_header_{}", rng.gen::<u64>()));
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
-        let storage = Storage::new(config);
+        let storage = Storage::new(config, test_pool());
 
         // Test 1: New blob returns logical size 0 and correct app version
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
@@ -302,7 +311,7 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+        let read_buf = blob.read_at(0, data.len()).await.unwrap();
         assert_eq!(read_buf.coalesce(), data);
 
         // Test 4: Resize with logical length
@@ -332,7 +341,7 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2.read_at(0, IoBufMut::zeroed(9)).await.unwrap();
+        let read_buf = blob2.read_at(0, 9).await.unwrap();
         assert_eq!(read_buf.coalesce(), b"test data");
         drop(blob2);
 
@@ -362,10 +371,13 @@ mod tests {
     async fn test_blob_magic_mismatch() {
         let storage_directory =
             env::temp_dir().join(format!("test_magic_mismatch_{}", rand::random::<u64>()));
-        let storage = Storage::new(Config {
-            storage_directory: storage_directory.clone(),
-            maximum_buffer_size: 1024 * 1024,
-        });
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                maximum_buffer_size: 1024 * 1024,
+            },
+            test_pool(),
+        );
 
         // Create the partition directory and a file with invalid magic bytes
         let partition_path = storage_directory.join("partition");

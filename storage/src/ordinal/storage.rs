@@ -6,7 +6,7 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Buf, BufMut, Clock, Error as RError, IoBufMut, Metrics, Storage,
+    Blob, Buf, BufMut, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
@@ -292,10 +292,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let section = index / items_per_blob;
         let blob = self.blobs.get(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let read_buf = blob
-            .read_at(offset, IoBufMut::zeroed(Record::<V>::SIZE))
-            .await?
-            .coalesce();
+        let read_buf = blob.read_at(offset, Record::<V>::SIZE).await?.coalesce();
         let record = Record::<V>::read(&mut read_buf.as_ref())?;
 
         // If record is valid, return it

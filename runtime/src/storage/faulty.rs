@@ -285,15 +285,23 @@ impl<B: crate::Blob> Blob<B> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        if self.ctx.should_fail(Op::Read) {
+            return Err(Error::Io(injected_io_error()));
+        }
+        self.inner.read_at(offset, len).await
+    }
+
+    async fn read_at_buf(
         &self,
         offset: u64,
+        len: usize,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(Error::Io(injected_io_error()));
         }
-        self.inner.read_at(offset, buf.into()).await
+        self.inner.read_at_buf(offset, len, buf.into()).await
     }
 
     async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
@@ -352,9 +360,16 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
-        Blob as _, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use rand::{rngs::StdRng, SeedableRng};
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
 
     /// Test harness with faulty storage wrapping memory storage.
     struct Harness {
@@ -369,7 +384,7 @@ mod tests {
         }
 
         fn with_seed(seed: u64, config: Config) -> Self {
-            let inner = MemStorage::default();
+            let inner = MemStorage::new(test_pool());
             let rng = Arc::new(Mutex::new(
                 Box::new(StdRng::seed_from_u64(seed)) as BoxDynRng
             ));
@@ -423,10 +438,7 @@ mod tests {
         // Enable read faults
         h.config.write().unwrap().read_rate = Some(1.0);
 
-        assert!(matches!(
-            blob.read_at(0, vec![0u8; 4]).await,
-            Err(Error::Io(_))
-        ));
+        assert!(matches!(blob.read_at(0, 4).await, Err(Error::Io(_))));
     }
 
     #[tokio::test]
@@ -543,8 +555,7 @@ mod tests {
             data.len()
         );
 
-        let read_buf = vec![0u8; bytes_written];
-        let read_result = inner_blob.read_at(0, read_buf).await.unwrap();
+        let read_result = inner_blob.read_at(0, bytes_written).await.unwrap();
         assert_eq!(read_result.coalesce().as_ref(), &data[..bytes_written]);
     }
 

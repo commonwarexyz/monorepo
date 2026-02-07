@@ -870,20 +870,6 @@ impl Context {
         // Create shared RNG (used by both executor and storage)
         let rng = Arc::new(Mutex::new(cfg.rng));
 
-        // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
-        let storage = MeteredStorage::new(
-            AuditedStorage::new(
-                FaultyStorage::new(MemStorage::default(), rng.clone(), storage_fault_config),
-                auditor.clone(),
-            ),
-            runtime_registry,
-        );
-
-        // Create network
-        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
-        let network = MeteredNetwork::new(network, runtime_registry);
-
         // Initialize buffer pools
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
@@ -909,6 +895,24 @@ impl Context {
             storage_config,
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
+
+        // Create storage fault config (default to disabled if None)
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
+        let storage = MeteredStorage::new(
+            AuditedStorage::new(
+                FaultyStorage::new(
+                    MemStorage::new(storage_buffer_pool.clone()),
+                    rng.clone(),
+                    storage_fault_config,
+                ),
+                auditor.clone(),
+            ),
+            runtime_registry,
+        );
+
+        // Create network
+        let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
+        let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -1609,9 +1613,7 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{
-        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
-    };
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
@@ -1776,7 +1778,7 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read.coalesce(), data);
         });
     }
@@ -2126,7 +2128,7 @@ mod tests {
                 .expect("sync should succeed with faults disabled");
 
             // Verify data persisted
-            let read_buf = blob.read_at(0, vec![0u8; 9]).await.unwrap();
+            let read_buf = blob.read_at(0, 9).await.unwrap();
             assert_eq!(read_buf.coalesce(), b"recovered");
         });
     }

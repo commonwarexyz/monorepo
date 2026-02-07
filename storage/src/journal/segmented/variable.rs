@@ -250,7 +250,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
         let (buf, available) = blob
-            .read_up_to(IoBufMut::zeroed(MAX_U32_VARINT_SIZE), offset)
+            .read_up_to(
+                offset,
+                MAX_U32_VARINT_SIZE,
+                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
+            )
             .await?;
         let buf = buf.freeze();
         let mut cursor = Cursor::new(buf.slice(..available));

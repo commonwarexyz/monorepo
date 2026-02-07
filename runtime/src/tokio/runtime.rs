@@ -280,6 +280,16 @@ impl crate::Runner for Runner {
         let process = MeteredProcess::init(runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            BufferPoolConfig::for_network(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -292,29 +302,23 @@ impl crate::Runner for Runner {
                             iouring_config: Default::default(),
                         },
                         iouring_registry,
+                        storage_buffer_pool.clone(),
                     ),
                     runtime_registry,
                 );
             } else {
                 let storage = MeteredStorage::new(
-                    TokioStorage::new(TokioStorageConfig::new(
-                        self.cfg.storage_directory.clone(),
-                        self.cfg.maximum_buffer_size,
-                    )),
+                    TokioStorage::new(
+                        TokioStorageConfig::new(
+                            self.cfg.storage_directory.clone(),
+                            self.cfg.maximum_buffer_size,
+                        ),
+                        storage_buffer_pool.clone(),
+                    ),
                     runtime_registry,
                 );
             }
         }
-
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_network(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_storage(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
-        );
 
         // Initialize network
         cfg_if::cfg_if! {
