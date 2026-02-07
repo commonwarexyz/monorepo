@@ -242,50 +242,11 @@ async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
 /// Generate a large db with random data. The function seeds the db with exactly `num_elements`
 /// elements by inserting them in order, each with a new random value. Then, it performs
 /// `num_operations` over these elements, each selected uniformly at random for each operation. The
-/// database is committed after every `commit_frequency` operations (if Some), or at the end (if
-/// None).
+/// ratio of updates to deletes is configured with `DELETE_FREQUENCY`. The database is committed
+/// after every `commit_frequency` operations (if Some), or at the end (if None).
 ///
 /// Takes a mutable database and returns it in durable state after final commit.
 async fn gen_random_kv<M>(
-    mut db: M,
-    num_elements: u64,
-    num_operations: u64,
-    commit_frequency: Option<u32>,
-) -> M::Durable
-where
-    M: MutableAny<Key = Digest> + LogStore<Value = Digest>,
-    M::Durable: UnmerkleizedDurableAny<Mutable = M>,
-{
-    // Insert a random value for every possible element into the db.
-    let mut rng = StdRng::seed_from_u64(42);
-    for i in 0u64..num_elements {
-        let k = Sha256::hash(&i.to_be_bytes());
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.write_batch([(k, Some(v))]).await.unwrap();
-    }
-
-    // Randomly update / delete them + randomly commit.
-    for _ in 0u64..num_operations {
-        let rand_key = Sha256::hash(&(rng.next_u64() % num_elements).to_be_bytes());
-        if rng.next_u32() % DELETE_FREQUENCY == 0 {
-            db.write_batch([(rand_key, None)]).await.unwrap();
-            continue;
-        }
-        let v = Sha256::hash(&rng.next_u32().to_be_bytes());
-        db.write_batch([(rand_key, Some(v))]).await.unwrap();
-        if let Some(freq) = commit_frequency {
-            if rng.next_u32() % freq == 0 {
-                let (durable, _) = db.commit(None).await.unwrap();
-                db = durable.into_mutable();
-            }
-        }
-    }
-
-    let (durable, _) = db.commit(None).await.unwrap();
-    durable
-}
-
-async fn gen_random_kv_batched<M>(
     mut db: M,
     num_elements: u64,
     num_operations: u64,
