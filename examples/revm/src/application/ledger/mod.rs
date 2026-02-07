@@ -14,7 +14,7 @@ mod seed_cache;
 mod snapshot_store;
 
 use crate::{
-    domain::{Block, LedgerEvent, LedgerEvents, StateRoot, Tx, TxId},
+    domain::{genesis_context, Block, LedgerEvent, LedgerEvents, StateRoot, Tx, TxId},
     qmdb::{QmdbChangeSet, QmdbConfig, QmdbLedger, RevmDb},
     ConsensusDigest,
 };
@@ -23,8 +23,9 @@ use alloy_evm::revm::{
     Database as _,
 };
 use commonware_cryptography::Committable as _;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics};
-use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
+use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics, Spawner as _};
+use commonware_utils::channel::mpsc;
+use futures::lock::Mutex;
 use mempool::Mempool;
 use seed_cache::SeedCache;
 use snapshot_store::{LedgerSnapshot, SnapshotStore};
@@ -32,6 +33,8 @@ use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone)]
 /// Ledger view that owns the mutexed execution state.
 pub(crate) struct LedgerView {
+    /// Tokio context used to schedule blocking work.
+    context: tokio::Context,
     /// Mutex-protected running state.
     inner: Arc<Mutex<LedgerState>>,
     /// Genesis block stored so the automaton can replay from height 0.
@@ -66,8 +69,10 @@ impl LedgerView {
         .await?;
         let genesis_root = qmdb.root().await?;
 
+        let genesis_parent = crate::BlockId(B256::ZERO);
         let genesis_block = Block {
-            parent: crate::BlockId(B256::ZERO),
+            context: genesis_context(genesis_parent),
+            parent: genesis_parent,
             height: 0,
             prevrandao: B256::ZERO,
             state_root: genesis_root,
@@ -77,6 +82,7 @@ impl LedgerView {
         let db = RevmDb::new(qmdb.database()?);
 
         Ok(Self {
+            context,
             inner: Arc::new(Mutex::new(LedgerState {
                 mempool: Mempool::new(),
                 snapshots: SnapshotStore::new(
@@ -182,7 +188,14 @@ impl LedgerView {
             let changes = inner.merged_changes_from(parent, changes)?;
             (changes, inner.qmdb.clone())
         };
-        qmdb.compute_root(changes).await.map_err(Into::into)
+        let context = self.context.clone();
+        let compute_handle = context
+            .shared(true)
+            .spawn(move |_| async move { qmdb.compute_root(changes).await });
+        match compute_handle.await {
+            Ok(result) => result.map_err(anyhow::Error::from),
+            Err(err) => Err(anyhow::Error::from(err)),
+        }
     }
 
     /// Persist `digest` and any missing ancestors to QMDB.
@@ -203,7 +216,14 @@ impl LedgerView {
             (changes, inner.qmdb.clone(), chain)
         };
 
-        let result = qmdb.commit_changes(changes).await;
+        let context = self.context.clone();
+        let commit_handle = context
+            .shared(true)
+            .spawn(move |_| async move { qmdb.commit_changes(changes).await });
+        let result = match commit_handle.await {
+            Ok(result) => result.map_err(anyhow::Error::from),
+            Err(err) => Err(anyhow::Error::from(err)),
+        };
         let mut inner = self.inner.lock().await;
         inner.snapshots.clear_persisting_chain(&chain);
         match result {
@@ -211,7 +231,7 @@ impl LedgerView {
                 inner.snapshots.mark_persisted_chain(&chain);
                 Ok(true)
             }
-            Err(err) => Err(err.into()),
+            Err(err) => Err(err),
         }
     }
 
@@ -256,7 +276,7 @@ impl LedgerService {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn subscribe(&self) -> UnboundedReceiver<LedgerEvent> {
+    pub(crate) fn subscribe(&self) -> mpsc::UnboundedReceiver<LedgerEvent> {
         self.events.subscribe()
     }
 
@@ -345,7 +365,7 @@ mod tests {
     use super::{snapshot_store::LedgerSnapshot, LedgerService, LedgerView};
     use crate::{
         application::execution::{evm_env, execute_txs},
-        domain::{Block, Tx},
+        domain::{genesis_context, Block, Tx},
         qmdb::RevmDb,
         ConsensusDigest,
     };
@@ -450,6 +470,7 @@ mod tests {
             .await
             .expect("compute root");
         let block = Block {
+            context: genesis_context(parent.id()),
             parent: parent.id(),
             height,
             prevrandao: PREVRANDAO,

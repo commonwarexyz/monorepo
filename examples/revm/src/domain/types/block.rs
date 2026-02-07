@@ -1,11 +1,13 @@
 use super::{
     ids::{read_b256, write_b256, BlockId, StateRoot},
     tx::{Tx, TxCfg},
+    BlockContext,
 };
 use alloy_evm::revm::primitives::{keccak256, B256};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{Committable, Digestible, Hasher as _, Sha256};
+use commonware_consensus::types::{Round, View};
+use commonware_cryptography::{ed25519, Committable, Digestible, Hasher as _, Sha256, Signer as _};
 
 #[derive(Clone, Copy, Debug)]
 /// Configuration used when decoding blocks and their transactions.
@@ -19,6 +21,8 @@ pub struct BlockCfg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Example block type agreed on by consensus (via its digest).
 pub struct Block {
+    /// Consensus context used to propose this block.
+    pub context: BlockContext,
     /// Identifier of the parent block.
     pub parent: BlockId,
     /// Block height (number of committed ancestors).
@@ -45,6 +49,14 @@ fn digest_for_block_id(id: &BlockId) -> crate::ConsensusDigest {
     let mut hasher = Sha256::default();
     hasher.update(id.0.as_slice());
     hasher.finalize()
+}
+
+pub(crate) fn genesis_context(parent: BlockId) -> BlockContext {
+    BlockContext {
+        round: Round::zero(),
+        leader: ed25519::PrivateKey::from_seed(0).public_key(),
+        parent: (View::zero(), digest_for_block_id(&parent)),
+    }
 }
 
 impl Digestible for Block {
@@ -75,8 +87,17 @@ impl commonware_consensus::Block for Block {
     }
 }
 
+impl commonware_consensus::CertifiableBlock for Block {
+    type Context = BlockContext;
+
+    fn context(&self) -> Self::Context {
+        self.context.clone()
+    }
+}
+
 impl Write for Block {
     fn write(&self, buf: &mut impl BufMut) {
+        self.context.write(buf);
         self.parent.write(buf);
         self.height.write(buf);
         write_b256(&self.prevrandao, buf);
@@ -87,7 +108,8 @@ impl Write for Block {
 
 impl EncodeSize for Block {
     fn encode_size(&self) -> usize {
-        self.parent.encode_size()
+        self.context.encode_size()
+            + self.parent.encode_size()
             + self.height.encode_size()
             + 32
             + self.state_root.encode_size()
@@ -99,12 +121,14 @@ impl Read for Block {
     type Cfg = BlockCfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let context = BlockContext::read(buf)?;
         let parent = BlockId::read(buf)?;
         let height = u64::read(buf)?;
         let prevrandao = read_b256(buf)?;
         let state_root = StateRoot::read(buf)?;
         let txs = Vec::<Tx>::read_cfg(buf, &(RangeCfg::new(0..=cfg.max_txs), cfg.tx))?;
         Ok(Self {
+            context,
             parent,
             height,
             prevrandao,

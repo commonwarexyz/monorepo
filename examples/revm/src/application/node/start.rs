@@ -26,8 +26,7 @@ use commonware_cryptography::bls12381::primitives::variant::MinSig;
 use commonware_p2p::simulated;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio, Metrics as _, Spawner as _};
-use commonware_utils::{NZUsize, NZU64};
-use futures::{channel::mpsc, StreamExt as _};
+use commonware_utils::{channel::mpsc, NZUsize, NZU64};
 use std::time::Duration;
 
 /// Initialize and run a single node (QMDB/state + marshal + simplex engine).
@@ -82,16 +81,16 @@ where
     let node_id = index as u32;
     let event_context = context.clone();
     event_context.spawn(move |_| async move {
-        while let Some(event) = domain_events.next().await {
+        while let Some(event) = domain_events.recv().await {
             if let LedgerEvent::SnapshotPersisted(digest) = event {
-                let _ = finalized_tx_clone.unbounded_send((node_id, digest));
+                let _ = finalized_tx_clone.send((node_id, digest));
             }
         }
     });
     let handle = NodeHandle::new(ledger.clone());
     let app = RevmApplication::<ThresholdScheme>::new(block_cfg.max_txs, state.clone());
 
-    let finalized_reporter = FinalizedReporter::new(ledger.clone(), context.clone());
+    let finalized_reporter = FinalizedReporter::new(ledger.clone());
 
     let marshal_mailbox = start_marshal(
         &context,

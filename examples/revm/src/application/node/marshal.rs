@@ -97,7 +97,7 @@ where
 
     let resolver_cfg = marshal::resolver::p2p::Config {
         public_key: public_key.clone(),
-        manager,
+        provider: manager,
         blocker: control.clone(),
         mailbox_size: MAILBOX_SIZE,
         initial: Duration::from_millis(200),

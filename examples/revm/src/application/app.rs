@@ -12,7 +12,7 @@ use super::{
     ledger::{LedgerService, LedgerView},
 };
 use crate::{
-    domain::{Block, TxId},
+    domain::{Block, BlockContext, TxId},
     ConsensusDigest, PublicKey,
 };
 use alloy_evm::revm::primitives::B256;
@@ -32,6 +32,7 @@ async fn propose_inner<S>(
     // Ledger service commands for proposal preparation.
     state: LedgerService,
     max_txs: usize,
+    context: BlockContext,
     mut ancestry: AncestorStream<S, Block>,
 ) -> Option<Block>
 where
@@ -63,6 +64,7 @@ where
     let (db, outcome) = execute_txs(parent_snapshot.db, env, &txs).ok()?;
 
     let mut child = Block {
+        context,
         parent: parent.id(),
         height,
         prevrandao,
@@ -88,7 +90,11 @@ where
 }
 
 /// Helper function for verify that owns all its inputs.
-async fn verify_inner<S>(state: LedgerService, mut ancestry: AncestorStream<S, Block>) -> bool
+async fn verify_inner<S>(
+    state: LedgerService,
+    context: BlockContext,
+    mut ancestry: AncestorStream<S, Block>,
+) -> bool
 where
     S: CertScheme,
 {
@@ -96,6 +102,9 @@ where
         Some(block) => block,
         None => return false,
     };
+    if block.context != context {
+        return false;
+    }
     let parent = match ancestry.next().await {
         Some(block) => block,
         None => return false,
@@ -173,8 +182,8 @@ where
     ) -> impl std::future::Future<Output = Option<Self::Block>> + Send {
         let state = self.state.clone();
         let max_txs = self.max_txs;
-        let _ = context;
-        async move { propose_inner(state, max_txs, ancestry).await }
+        let (_, context) = context;
+        async move { propose_inner(state, max_txs, context, ancestry).await }
     }
 }
 
@@ -190,7 +199,7 @@ where
         ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
     ) -> impl std::future::Future<Output = bool> + Send {
         let state = self.state.clone();
-        let _ = context;
-        async move { verify_inner(state, ancestry).await }
+        let (_, context) = context;
+        async move { verify_inner(state, context, ancestry).await }
     }
 }

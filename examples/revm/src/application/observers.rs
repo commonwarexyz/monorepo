@@ -1,7 +1,6 @@
 use super::ledger::LedgerService;
 use crate::domain::LedgerEvent;
 use commonware_runtime::Spawner;
-use futures::StreamExt;
 use tracing::{debug, trace};
 
 /// Observers that react to ledger domain events without mutating aggregates.
@@ -14,7 +13,7 @@ impl LedgerObservers {
     {
         let mut receiver = service.subscribe();
         spawner.shared(true).spawn(move |_| async move {
-            while let Some(event) = receiver.next().await {
+            while let Some(event) = receiver.recv().await {
                 match event {
                     LedgerEvent::TransactionSubmitted(id) => {
                         trace!(tx=?id, "mempool accepted transaction");

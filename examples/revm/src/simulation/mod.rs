@@ -15,12 +15,8 @@ use anyhow::Context as _;
 use commonware_cryptography::ed25519;
 use commonware_p2p::{simulated, Manager as _};
 use commonware_runtime::{tokio, Metrics as _, Runner as _};
-use commonware_utils::{ordered::Set, TryCollect as _};
-use futures::{channel::mpsc, StreamExt as _};
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use commonware_utils::{channel::mpsc, ordered::Set, TryCollect as _};
+use std::time::Duration;
 
 mod demo;
 
@@ -181,7 +177,7 @@ async fn start_all_nodes(
     schemes: &[ThresholdScheme],
     bootstrap: &BootstrapConfig,
 ) -> anyhow::Result<(Vec<NodeHandle>, mpsc::UnboundedReceiver<FinalizationEvent>)> {
-    let (finalized_tx, finalized_rx) = mpsc::unbounded::<FinalizationEvent>();
+    let (finalized_tx, finalized_rx) = mpsc::unbounded_channel();
     let mut nodes = Vec::with_capacity(participants.len());
     let mut env = SimEnvironment::new(context.clone(), transport);
 
@@ -217,19 +213,17 @@ async fn start_network(
     context: &tokio::Context,
     participants: Set<ed25519::PublicKey>,
 ) -> SimTransport {
-    let base_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-    let (network, transport) = simulated::Network::new_with_base_addr(
+    let (network, transport) = simulated::Network::new(
         context.with_label("network"),
         simulated::Config {
             max_size: MAX_MSG_SIZE as u32,
             disconnect_on_block: true,
             tracked_peer_sets: None,
         },
-        base_addr,
     );
     network.start();
 
-    transport.manager().update(0, participants).await;
+    transport.manager().track(0, participants).await;
     transport
 }
 
@@ -273,7 +267,7 @@ async fn wait_for_finalized_head(
     let mut counts = vec![0u64; nodes];
     let mut nth = vec![None; nodes];
     while nth.iter().any(Option::is_none) {
-        let Some((node, digest)) = finalized_rx.next().await else {
+        let Some((node, digest)) = finalized_rx.recv().await else {
             break;
         };
         let idx = node as usize;

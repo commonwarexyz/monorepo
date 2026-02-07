@@ -180,8 +180,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             received_messages.clone(),
         );
 
-        // Start with a pseudo-random IP address to assign sockets to for new peers
-        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
+        // Start on loopback with a randomized non-privileged port to avoid invalid binds.
+        const BASE_PORT_MIN: u16 = 1024;
+        const BASE_PORT_MAX: u16 = 32767;
+        let port_span = u32::from(BASE_PORT_MAX - BASE_PORT_MIN + 1);
+        let base_port = BASE_PORT_MIN + (context.next_u32() % port_span) as u16;
+        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
 
         (
             Self {

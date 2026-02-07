@@ -15,6 +15,10 @@ mod tx;
 #[cfg(test)]
 mod tests;
 
+pub type BlockContext =
+    commonware_consensus::simplex::types::Context<crate::ConsensusDigest, crate::PublicKey>;
+
+pub(crate) use block::genesis_context;
 pub use block::{block_id, Block, BlockCfg};
 pub use ids::{BlockId, StateRoot, TxId};
 pub use tx::{Tx, TxCfg};

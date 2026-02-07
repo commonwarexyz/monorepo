@@ -51,8 +51,10 @@ fn test_block_roundtrip_and_id_stable() {
             data: Bytes::from(vec![9, 9, 9]),
         },
     ];
+    let parent = BlockId(B256::from([0xAAu8; 32]));
     let block = Block {
-        parent: BlockId(B256::from([0xAAu8; 32])),
+        context: super::genesis_context(parent),
+        parent,
         height: 7,
         prevrandao: B256::from([0x55u8; 32]),
         state_root: StateRoot(B256::from([0xBBu8; 32])),

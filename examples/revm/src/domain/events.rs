@@ -3,7 +3,7 @@
 use super::TxId;
 use crate::ConsensusDigest;
 use alloy_evm::revm::primitives::B256;
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use commonware_utils::channel::mpsc;
 use std::sync::{Arc, Mutex as StdMutex};
 
 /// Ledger-related domain events.
@@ -19,7 +19,7 @@ pub(crate) enum LedgerEvent {
 
 #[derive(Clone)]
 pub(crate) struct LedgerEvents {
-    listeners: Arc<StdMutex<Vec<UnboundedSender<LedgerEvent>>>>,
+    listeners: Arc<StdMutex<Vec<mpsc::UnboundedSender<LedgerEvent>>>>,
 }
 
 impl LedgerEvents {
@@ -31,11 +31,11 @@ impl LedgerEvents {
 
     pub(crate) fn publish(&self, event: LedgerEvent) {
         let mut guard = self.listeners.lock().unwrap();
-        guard.retain(|sender| sender.unbounded_send(event.clone()).is_ok());
+        guard.retain(|sender| sender.send(event.clone()).is_ok());
     }
 
-    pub(crate) fn subscribe(&self) -> UnboundedReceiver<LedgerEvent> {
-        let (sender, receiver) = unbounded();
+    pub(crate) fn subscribe(&self) -> mpsc::UnboundedReceiver<LedgerEvent> {
+        let (sender, receiver) = mpsc::unbounded_channel();
         self.listeners.lock().unwrap().push(sender);
         receiver
     }
