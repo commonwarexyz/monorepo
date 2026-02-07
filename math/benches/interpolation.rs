@@ -1,4 +1,5 @@
 use commonware_math::{fields::goldilocks::F, poly::Interpolator};
+use commonware_utils::{Faults, N3f1};
 use core::num::NonZeroU32;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
@@ -6,13 +7,13 @@ fn bench_interpolator_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("interpolator_creation");
 
     for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
-        let t = (2 * n) / 3;
+        let t = N3f1::quorum(n);
         let total = NonZeroU32::new(n).unwrap();
 
         let points: Vec<(u32, u32)> = (0..t).map(|i| (i, i + 1)).collect();
 
         group.bench_with_input(
-            BenchmarkId::new("naive", format!("n={} t={}", n, t)),
+            BenchmarkId::new("naive", n),
             &(&total, &points),
             |b, (total, points)| {
                 b.iter(|| {
@@ -23,7 +24,7 @@ fn bench_interpolator_creation(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("fast", format!("n={} t={}", n, t)),
+            BenchmarkId::new("fast", n),
             &(&total, &points),
             |b, (total, points)| {
                 b.iter(|| {
@@ -44,7 +45,7 @@ fn bench_interpolate_value(c: &mut Criterion) {
     let mut group = c.benchmark_group("interpolate_value");
 
     for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
-        let t = (2 * n) / 3;
+        let t = N3f1::quorum(n);
         let total = NonZeroU32::new(n).unwrap();
 
         let points: Vec<(u32, u32)> = (0..t).map(|i| (i, i + 1)).collect();
@@ -57,7 +58,7 @@ fn bench_interpolate_value(c: &mut Criterion) {
             Map::from_iter_dedup(points.iter().map(|&(i, _)| (i, F::from(i as u64 + 1))));
 
         group.bench_with_input(
-            BenchmarkId::new("naive_weights", format!("n={} t={}", n, t)),
+            BenchmarkId::new("naive_weights", n),
             &(&interpolator_naive, &evals),
             |b, (interpolator, evals)| {
                 b.iter(|| {
@@ -67,7 +68,7 @@ fn bench_interpolate_value(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("fast_weights", format!("n={} t={}", n, t)),
+            BenchmarkId::new("fast_weights", n),
             &(&interpolator_fast, &evals),
             |b, (interpolator, evals)| {
                 b.iter(|| {
