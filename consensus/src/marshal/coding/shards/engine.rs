@@ -156,8 +156,8 @@ use crate::{
     types::{CodingCommitment, View},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{Codec, Error as CodecError, Read};
-use commonware_coding::Scheme as CodingScheme;
+use commonware_codec::{Codec, Decode, Error as CodecError, Read};
+use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Receiver, Recipients, Sender};
@@ -175,7 +175,6 @@ use commonware_utils::{
     Participant,
 };
 use rand::Rng;
-use rayon::iter::Either;
 use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
@@ -197,8 +196,18 @@ pub enum Error<C: CodingScheme> {
     Codec(#[from] CodecError),
 
     /// The reconstructed block's digest does not match the commitment's block digest
-    #[error("block digest mismatch: reconstructed block does not match commitment")]
+    #[error("block digest mismatch: reconstructed block does not match commitment digest")]
     DigestMismatch,
+
+    /// The reconstructed block's config does not match the commitment's coding config
+    #[error("block config mismatch: reconstructed config does not match commitment config")]
+    ConfigMismatch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BlockSubscriptionKey<D> {
+    Commitment(CodingCommitment),
+    Digest(D),
 }
 
 /// Configuration for the [`Engine`].
@@ -315,7 +324,7 @@ where
     /// the keyed [`CodingCommitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
-        BTreeMap<Either<CodingCommitment, B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>>,
+        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics,
@@ -445,13 +454,13 @@ where
                     }
                     Message::SubscribeBlockByCommitment { commitment, response } => {
                         self.handle_block_subscription(
-                            Either::Left(commitment),
+                            BlockSubscriptionKey::Commitment(commitment),
                             response
                         ).await;
                     },
                     Message::SubscribeBlockByDigest { digest, response } => {
                         self.handle_block_subscription(
-                            Either::Right(digest),
+                            BlockSubscriptionKey::Digest(digest),
                             response
                         ).await;
                     },
@@ -467,31 +476,32 @@ where
                 // Track shard receipt per peer.
                 self.metrics.shards_received.get_or_create(&Peer::new(&peer)).inc();
 
-                // Insert the shard into the reconstruction state.
                 let commitment = shard.commitment();
-                if !self.reconstructed_blocks.contains_key(&commitment) {
-                    if let Some(state) = self.state.get_mut(&commitment) {
-                        let progressed = state
-                            .on_network_shard(
-                                peer,
-                                shard,
-                                InsertCtx {
-                                    me: self.me.as_ref(),
-                                    participants: &self.participants,
-                                    strategy: &self.strategy,
-                                },
-                                &mut self.blocker,
-                            )
-                            .await;
-                        if progressed {
-                            self.try_advance(&mut sender, commitment).await;
-                        }
-                    } else if self.participants.index(&peer).is_none() {
-                        warn!(?peer, "shard sent by non-participant, blocking peer");
-                        self.blocker.block(peer).await;
-                    } else {
-                        self.buffer_pre_leader_shard(peer, shard);
+                if self.reconstructed_blocks.contains_key(&commitment) {
+                    continue;
+                }
+
+                if let Some(state) = self.state.get_mut(&commitment) {
+                    let progressed = state
+                        .on_network_shard(
+                            peer,
+                            shard,
+                            InsertCtx {
+                                me: self.me.as_ref(),
+                                participants: &self.participants,
+                                strategy: &self.strategy,
+                            },
+                            &mut self.blocker,
+                        )
+                        .await;
+                    if progressed {
+                        self.try_advance(&mut sender, commitment).await;
                     }
+                } else if self.participants.index(&peer).is_none() {
+                    warn!(?peer, "shard sent by non-participant, blocking peer");
+                    self.blocker.block(peer).await;
+                } else {
+                    self.buffer_pre_leader_shard(peer, shard);
                 }
             }
         }
@@ -540,11 +550,23 @@ where
             .observe(start.elapsed().as_secs_f64());
 
         // Attempt to decode the block from the encoded blob
-        let inner = B::read_cfg(&mut blob.as_slice(), &self.block_codec_cfg)?;
+        let (inner, config): (B, CodingConfig) =
+            Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
         // Verify the reconstructed block's digest matches the commitment's block digest.
         if inner.digest() != commitment.block_digest() {
             return Err(Error::DigestMismatch);
+        }
+
+        // Verify the reconstructed block's coding config matches the commitment's coding config.
+        if config != commitment.config() {
+            warn!(
+                %commitment,
+                expected_config = ?commitment.config(),
+                actual_config = ?config,
+                "reconstructed block config does not match commitment config, but digest matches"
+            );
+            return Err(Error::ConfigMismatch);
         }
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
@@ -658,12 +680,18 @@ where
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         mut block: CodedBlock<B, C>,
     ) {
-        assert_eq!(block.shards(&self.strategy).len(), self.participants.len());
-
-        // Cache the block so we don't have to reconstruct it again.
         let commitment = block.commitment();
-        self.reconstructed_blocks
-            .insert(commitment, Arc::new(block.clone()));
+
+        let shard_count = block.shards(&self.strategy).len();
+        if shard_count != self.participants.len() {
+            warn!(
+                %commitment,
+                shard_count,
+                participants = self.participants.len(),
+                "cannot broadcast shards: participant/shard count mismatch"
+            );
+            return;
+        }
 
         // Broadcast each shard to the corresponding participant.
         for (index, peer) in self.participants.iter().enumerate() {
@@ -671,13 +699,22 @@ where
                 continue;
             }
 
-            let shard = block
-                .shard(index as u16)
-                .expect("block must have shard for each participant");
+            let Some(shard) = block.shard(index as u16) else {
+                warn!(
+                    %commitment,
+                    index,
+                    "cannot broadcast shards: missing shard for participant index"
+                );
+                return;
+            };
             let _ = sender
                 .send(Recipients::One(peer.clone()), shard, true)
                 .await;
         }
+
+        // Cache the block so we don't have to reconstruct it again.
+        self.reconstructed_blocks
+            .insert(commitment, Arc::new(block));
 
         debug!(?commitment, "broadcasted shards to participants");
     }
@@ -765,12 +802,14 @@ where
     #[inline]
     async fn handle_block_subscription(
         &mut self,
-        key: Either<CodingCommitment, B::Digest>,
+        key: BlockSubscriptionKey<B::Digest>,
         response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     ) {
         let block = match key {
-            Either::Left(commitment) => self.reconstructed_blocks.get(&commitment),
-            Either::Right(digest) => self
+            BlockSubscriptionKey::Commitment(commitment) => {
+                self.reconstructed_blocks.get(&commitment)
+            }
+            BlockSubscriptionKey::Digest(digest) => self
                 .reconstructed_blocks
                 .iter()
                 .find_map(|(_, block)| (block.digest() == digest).then_some(block)),
@@ -805,14 +844,20 @@ where
         let digest = block.digest();
 
         // Notify by-commitment subscribers.
-        if let Some(mut subscribers) = self.block_subscriptions.remove(&Either::Left(commitment)) {
+        if let Some(mut subscribers) = self
+            .block_subscriptions
+            .remove(&BlockSubscriptionKey::Commitment(commitment))
+        {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(Arc::clone(&block));
             }
         }
 
         // Notify by-digest subscribers.
-        if let Some(mut subscribers) = self.block_subscriptions.remove(&Either::Right(digest)) {
+        if let Some(mut subscribers) = self
+            .block_subscriptions
+            .remove(&BlockSubscriptionKey::Digest(digest))
+        {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(Arc::clone(&block));
             }

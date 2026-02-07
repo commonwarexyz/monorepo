@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
@@ -42,7 +42,7 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 #[derive(Debug, Clone)]
 pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
-    shard: Vec<u8>,
+    shard: Bytes,
 
     /// The index of [Chunk] in the original data.
     index: u16,
@@ -53,7 +53,7 @@ pub struct Chunk<D: Digest> {
 
 impl<D: Digest> Chunk<D> {
     /// Create a new [Chunk] from the given shard, index, and proof.
-    const fn new(shard: Vec<u8>, index: u16, proof: bmt::Proof<D>) -> Self {
+    const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
         Self {
             shard,
             index,
@@ -93,7 +93,7 @@ impl<D: Digest> Read for Chunk<D> {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let shard = Vec::<u8>::read_range(reader, ..=cfg.maximum_shard_size)?;
+        let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=cfg.maximum_shard_size))?;
         let index = u16::read(reader)?;
         let proof = bmt::Proof::<D>::read_cfg(reader, &1)?;
         Ok(Self {
@@ -125,7 +125,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            shard: u.arbitrary()?,
+            shard: u.arbitrary::<Vec<u8>>()?.into(),
             index: u.arbitrary()?,
             proof: u.arbitrary()?,
         })
@@ -258,7 +258,7 @@ fn encode<H: Hasher, S: Strategy>(
     let mut chunks = Vec::with_capacity(n);
     for (i, shard) in shards.into_iter().enumerate() {
         let proof = tree.proof(i as u32).map_err(|_| Error::InvalidProof)?;
-        chunks.push(Chunk::new(shard, i as u16, proof));
+        chunks.push(Chunk::new(shard.into(), i as u16, proof));
     }
 
     Ok((root, chunks))
@@ -314,9 +314,9 @@ fn decode<H: Hasher, S: Strategy>(
 
         // Add to provided shards
         if index < min {
-            provided_originals.push((index as usize, chunk.shard.as_slice()));
+            provided_originals.push((index as usize, chunk.shard.as_ref()));
         } else {
-            provided_recoveries.push((index as usize - k, chunk.shard.as_slice()));
+            provided_recoveries.push((index as usize - k, chunk.shard.as_ref()));
         }
     }
 
@@ -701,7 +701,9 @@ mod tests {
 
         // Tamper with one of the chunks by modifying the shard data
         if !chunks[1].shard.is_empty() {
-            chunks[1].shard[0] ^= 0xFF; // Flip bits in first byte
+            let mut shard = chunks[1].shard.to_vec();
+            shard[0] ^= 0xFF; // Flip bits in first byte
+            chunks[1].shard = shard.into();
         }
 
         // Try to decode with the tampered chunk
@@ -756,7 +758,7 @@ mod tests {
         for &i in &selected_indices {
             let merkle_proof = malicious_tree.proof(i as u32).unwrap();
             let shard = malicious_shards[i].clone();
-            let chunk = Chunk::new(shard, i as u16, merkle_proof);
+            let chunk = Chunk::new(shard.into(), i as u16, merkle_proof);
             pieces.push(chunk);
         }
 

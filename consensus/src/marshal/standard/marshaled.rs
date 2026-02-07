@@ -63,7 +63,10 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use futures::lock::Mutex;
+use futures::{
+    future::{Either, Ready},
+    lock::Mutex,
+};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -710,7 +713,7 @@ async fn fetch_parent<E, S, A, B>(
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut Mailbox<S, Standard<B>>,
-) -> oneshot::Receiver<B>
+) -> Either<Ready<Result<B, oneshot::error::RecvError>>, oneshot::Receiver<B>>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -719,12 +722,12 @@ where
 {
     let genesis = application.genesis().await;
     if parent_digest == genesis.digest() {
-        let (tx, rx) = oneshot::channel();
-        tx.send_lossy(genesis);
-        rx
+        Either::Left(futures::future::ready(Ok(genesis)))
     } else {
-        marshal
-            .subscribe_by_digest(parent_round, parent_digest)
-            .await
+        Either::Right(
+            marshal
+                .subscribe_by_digest(parent_round, parent_digest)
+                .await,
+        )
     }
 }

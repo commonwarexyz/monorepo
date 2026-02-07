@@ -331,6 +331,26 @@ where
                     }
                 };
 
+                // Validate that block commitments match what consensus expects.
+                if block.commitment() != commitment {
+                    debug!(
+                        expected_commitment = %commitment,
+                        block_commitment = %block.commitment(),
+                        "block commitment does not match expected commitment"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+                if parent.commitment() != parent_commitment {
+                    debug!(
+                        expected_parent_commitment = %parent_commitment,
+                        parent_commitment = %parent.commitment(),
+                        "parent commitment does not match expected parent commitment"
+                    );
+                    tx.send_lossy(false);
+                    return;
+                }
+
                 // Epoch boundary check
                 let Some(block_bounds) = epocher.containing(block.height()) else {
                     debug!(
@@ -670,14 +690,6 @@ where
         // 3. Waiting for shards could stall if the leader doesn't rebroadcast
         let is_reproposal = payload == context.parent.1;
         if is_reproposal {
-            // Validate that re-proposals only occur at epoch boundaries.
-            // We can infer block height from the commitment's block digest by checking
-            // if it matches the last height in the current epoch.
-            let last_in_epoch = self
-                .epocher
-                .last(context.epoch())
-                .expect("current epoch should exist");
-
             // Fetch the block to verify it's at the epoch boundary.
             // This should be fast since the parent block is typically already cached.
             let block_rx = self
@@ -728,7 +740,6 @@ where
                     if !is_at_epoch_boundary(&epocher, block.height(), round.epoch()) {
                         debug!(
                             height = %block.height(),
-                            %last_in_epoch,
                             "re-proposal is not at epoch boundary"
                         );
                         task_tx.send_lossy(false);
