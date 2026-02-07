@@ -12,7 +12,7 @@ use commonware_cryptography::{
     ed25519, Signer as _,
 };
 use commonware_p2p::simulated;
-use commonware_runtime::{buffer::PoolRef, tokio};
+use commonware_runtime::{buffer::paged::CacheRef, tokio};
 use commonware_utils::{ordered::Set, N3f1, NZUsize, TryCollect as _, NZU16, NZU32};
 use governor::Quota;
 use rand::{rngs::StdRng, SeedableRng as _};
@@ -56,9 +56,9 @@ pub(crate) const fn default_quota() -> Quota {
     Quota::per_second(NZU32!(1_000))
 }
 
-/// Default buffer pool used by node-local storage.
-pub(crate) fn default_buffer_pool() -> PoolRef {
-    PoolRef::new(NZU16!(16_384), NZUsize!(10_000))
+/// Default page cache used by node-local storage.
+pub(crate) fn default_page_cache() -> CacheRef {
+    CacheRef::new(NZU16!(16_384), NZUsize!(10_000))
 }
 
 /// Default block codec configuration for REVM transactions.

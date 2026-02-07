@@ -13,7 +13,7 @@ use commonware_consensus::{
 };
 use commonware_p2p::simulated;
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics as _};
+use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics as _};
 use commonware_storage::archive::immutable;
 use commonware_utils::{NZUsize, NZU64};
 use std::{sync::Arc, time::Duration};
@@ -53,8 +53,8 @@ pub(super) struct MarshalStart<M> {
     pub(super) manager: M,
     /// Threshold signing scheme for this node.
     pub(super) scheme: ThresholdScheme,
-    /// Buffer pool that backs all storage archives.
-    pub(super) buffer_pool: PoolRef,
+    /// Page cache that backs all storage archives.
+    pub(super) page_cache: CacheRef,
     /// Codec settings for block serialization.
     pub(super) block_codec_config: BlockCfg,
     /// Channels used for block broadcasts.
@@ -80,7 +80,7 @@ where
         control,
         manager,
         scheme,
-        buffer_pool,
+        page_cache,
         block_codec_config,
         blocks,
         backfill,
@@ -134,7 +134,7 @@ where
             freezer_key_partition: format!(
                 "{partition_prefix}-finalizations-by-height-freezer-key"
             ),
-            freezer_key_buffer_pool: buffer_pool.clone(),
+            freezer_key_page_cache: page_cache.clone(),
             freezer_value_partition: format!(
                 "{partition_prefix}-finalizations-by-height-freezer-value"
             ),
@@ -163,7 +163,7 @@ where
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,
             freezer_key_partition: format!("{partition_prefix}-finalized-blocks-freezer-key"),
-            freezer_key_buffer_pool: buffer_pool.clone(),
+            freezer_key_page_cache: page_cache.clone(),
             freezer_value_partition: format!("{partition_prefix}-finalized-blocks-freezer-value"),
             freezer_value_target_size: 1024,
             freezer_value_compression: None,
@@ -191,7 +191,7 @@ where
             mailbox_size: MAILBOX_SIZE,
             view_retention_timeout: commonware_consensus::types::ViewDelta::new(10),
             prunable_items_per_section: NZU64!(10),
-            buffer_pool,
+            page_cache,
             replay_buffer: NZUsize!(1024 * 1024),
             key_write_buffer: NZUsize!(1024 * 1024),
             value_write_buffer: NZUsize!(1024 * 1024),

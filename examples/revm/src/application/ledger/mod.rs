@@ -23,7 +23,7 @@ use alloy_evm::revm::{
     Database as _,
 };
 use commonware_cryptography::Committable as _;
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics};
+use commonware_runtime::{buffer::paged::CacheRef, tokio, Metrics};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
 use mempool::Mempool;
 use seed_cache::SeedCache;
@@ -54,13 +54,13 @@ pub(crate) struct LedgerState {
 impl LedgerView {
     pub(crate) async fn init(
         context: tokio::Context,
-        buffer_pool: PoolRef,
+        page_cache: CacheRef,
         partition_prefix: String,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> anyhow::Result<Self> {
         let qmdb = QmdbLedger::init(
             context.with_label("qmdb"),
-            QmdbConfig::new(partition_prefix, buffer_pool),
+            QmdbConfig::new(partition_prefix, page_cache),
             genesis_alloc,
         )
         .await?;
@@ -354,7 +354,7 @@ mod tests {
         Database as _,
     };
     use commonware_cryptography::Committable as _;
-    use commonware_runtime::{buffer::PoolRef, tokio, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, tokio, Runner};
     use commonware_utils::{NZUsize, NZU16};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -397,8 +397,8 @@ mod tests {
         format!("{prefix}-{id}")
     }
 
-    fn test_buffer_pool() -> PoolRef {
-        PoolRef::new(NZU16!(BUFFER_BLOCK_BYTES), NZUsize!(BUFFER_BLOCK_COUNT))
+    fn test_page_cache() -> CacheRef {
+        CacheRef::new(NZU16!(BUFFER_BLOCK_BYTES), NZUsize!(BUFFER_BLOCK_COUNT))
     }
 
     fn transfer_tx(from: Address, to: Address, value: u64) -> Tx {
@@ -418,7 +418,7 @@ mod tests {
     ) -> LedgerSetup {
         let ledger = LedgerView::init(
             context,
-            test_buffer_pool(),
+            test_page_cache(),
             next_partition(partition_prefix),
             allocations,
         )

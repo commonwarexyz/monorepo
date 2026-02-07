@@ -1,7 +1,7 @@
 use super::{
     channels::{register_channels, NodeChannels},
     config::{
-        block_codec_cfg, default_buffer_pool, default_quota, Peer, ThresholdScheme, EPOCH_LENGTH,
+        block_codec_cfg, default_page_cache, default_quota, Peer, ThresholdScheme, EPOCH_LENGTH,
         MAILBOX_SIZE, PARTITION_PREFIX,
     },
     env::{NodeEnvironment, TransportControl},
@@ -48,7 +48,7 @@ where
 {
     let context = env.context();
     let quota = default_quota();
-    let buffer_pool = default_buffer_pool();
+    let page_cache = default_page_cache();
     let partition_prefix = PARTITION_PREFIX;
 
     let (mut control, manager) = {
@@ -68,7 +68,7 @@ where
     let block_cfg = block_codec_cfg();
     let state = LedgerView::init(
         context.with_label(&format!("state_{index}")),
-        buffer_pool.clone(),
+        page_cache.clone(),
         format!("{partition_prefix}-qmdb-{index}"),
         bootstrap.genesis_alloc.clone(),
     )
@@ -102,7 +102,7 @@ where
             control: control.clone(),
             manager,
             scheme: scheme.clone(),
-            buffer_pool: buffer_pool.clone(),
+            page_cache: page_cache.clone(),
             block_codec_config: block_cfg,
             blocks,
             backfill,
@@ -153,7 +153,7 @@ where
             activity_timeout: ViewDelta::new(20),
             skip_timeout: ViewDelta::new(10),
             fetch_concurrent: 8,
-            buffer_pool,
+            page_cache,
         },
     );
     engine.start(votes, certs, resolver);

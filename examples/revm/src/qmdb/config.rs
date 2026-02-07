@@ -3,7 +3,7 @@ use super::{
     Error, Stores,
 };
 use commonware_codec::RangeCfg;
-use commonware_runtime::{buffer::PoolRef, Metrics as _};
+use commonware_runtime::{buffer::paged::CacheRef, Metrics as _};
 use commonware_storage::{qmdb::any::VariableConfig, translator::EightCap};
 use commonware_utils::{NZUsize, NZU64};
 
@@ -14,16 +14,16 @@ const CODE_MAX_BYTES: usize = 24_576;
 pub(crate) struct QmdbConfig {
     /// Prefix used to derive the QMDB partition names.
     pub(crate) partition_prefix: String,
-    /// Buffer pool shared by the underlying QMDB stores.
-    pub(crate) buffer_pool: PoolRef,
+    /// Page cache shared by the underlying QMDB stores.
+    pub(crate) page_cache: CacheRef,
 }
 
 impl QmdbConfig {
     /// Creates a new configuration for the example QMDB partitions.
-    pub(crate) const fn new(partition_prefix: String, buffer_pool: PoolRef) -> Self {
+    pub(crate) const fn new(partition_prefix: String, page_cache: CacheRef) -> Self {
         Self {
             partition_prefix,
-            buffer_pool,
+            page_cache,
         }
     }
 }
@@ -32,7 +32,7 @@ impl QmdbConfig {
 fn store_config<C>(
     prefix: &str,
     name: &str,
-    buffer_pool: PoolRef,
+    page_cache: CacheRef,
     log_codec_config: C,
 ) -> VariableConfig<EightCap, C> {
     VariableConfig {
@@ -47,7 +47,7 @@ fn store_config<C>(
         log_items_per_blob: NZU64!(128),
         translator: EightCap,
         thread_pool: None,
-        buffer_pool,
+        page_cache,
     }
 }
 
@@ -57,7 +57,7 @@ pub(super) async fn open_stores(context: Context, config: QmdbConfig) -> Result<
         store_config(
             &config.partition_prefix,
             "accounts",
-            config.buffer_pool.clone(),
+            config.page_cache.clone(),
             (),
         ),
     )
@@ -67,7 +67,7 @@ pub(super) async fn open_stores(context: Context, config: QmdbConfig) -> Result<
         store_config(
             &config.partition_prefix,
             "storage",
-            config.buffer_pool.clone(),
+            config.page_cache.clone(),
             (),
         ),
     )
@@ -77,7 +77,7 @@ pub(super) async fn open_stores(context: Context, config: QmdbConfig) -> Result<
         store_config(
             &config.partition_prefix,
             "code",
-            config.buffer_pool.clone(),
+            config.page_cache.clone(),
             (RangeCfg::new(0..=CODE_MAX_BYTES), ()),
         ),
     )
