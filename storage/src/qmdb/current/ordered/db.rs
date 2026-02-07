@@ -17,6 +17,8 @@ use crate::{
             db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
+        operation::Operation as _,
+        scan_floor_locs,
         store::{self, LogStore as _},
         DurabilityState, Durable, Error, NonDurable,
     },
@@ -25,7 +27,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
-use futures::stream::Stream;
+use futures::{future::try_join_all, stream::Stream};
+use std::collections::BTreeMap;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -250,33 +253,55 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
-        // Collect deferred floor-raising operations without writing them yet. This allows us
-        // to skip copying keys that the batch will overwrite.
-        let mut deferred = if self.any.pending_steps > 0 {
+        // Scan floor locations from bitmap (no log I/O).
+        let floor_locs = if self.any.pending_steps > 0 {
             self.status.set_bit(*self.any.last_commit_loc, false);
             let floor = self.any.inactivity_floor_loc;
             let steps = self.any.pending_steps;
-            let (new_floor, ops) = self
-                .any
-                .as_floor_helper()
-                .collect_floor_ops(&mut self.status, floor, steps)
-                .await?;
+            let (new_floor, locs) = scan_floor_locs(&mut self.status, floor, steps);
             self.any.inactivity_floor_loc = new_floor;
             self.any.pending_steps = 0;
-            ops
+            locs
         } else {
-            Default::default()
+            Vec::new()
         };
 
+        // Scan snapshot for batch locations (no log I/O).
         let batch: Vec<_> = iter.into_iter().collect();
+        let mut all_locs: Vec<Location> = floor_locs.clone();
+        for (key, _) in &batch {
+            all_locs.extend(self.any.snapshot.get(key).copied());
+        }
+
+        // Read all locations concurrently in a single batch.
+        all_locs.sort();
+        all_locs.dedup();
+        let futures = all_locs.iter().map(|loc| self.any.log.read(*loc));
+        let results = try_join_all(futures).await?;
+        let preread: BTreeMap<Location, _> =
+            all_locs.into_iter().zip(results).collect();
+
+        // Build deferred map from floor reads.
+        let mut deferred = BTreeMap::new();
+        for loc in floor_locs {
+            let op = preread[&loc].clone();
+            let key = op.key().expect("floor op should be keyed").clone();
+            deferred.insert(key, (loc, op));
+        }
+
+        // Process batch, passing pre-read ops to avoid redundant log reads.
         let status = &mut self.status;
         self.any
-            .write_batch_with_callback(batch, move |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            })
+            .write_batch_with_callback(
+                batch,
+                preread,
+                move |append: bool, loc: Option<Location>| {
+                    status.push(append);
+                    if let Some(loc) = loc {
+                        status.set_bit(*loc, false);
+                    }
+                },
+            )
             .await?;
 
         // Remove deferred entries that were handled by the batch, either because the batch

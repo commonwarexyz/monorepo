@@ -244,9 +244,13 @@ where
     /// Performs a batch update, invoking the callback for each resulting operation. The first
     /// argument of the callback is the activity status of the operation, and the second argument is
     /// the location of the operation it inactivates (if any).
+    ///
+    /// Pre-read operations in `preread` are used instead of reading from the log, allowing the
+    /// caller to combine log reads for better I/O concurrency.
     pub(crate) async fn write_batch_with_callback<F>(
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+        mut preread: BTreeMap<Location, Operation<K, V>>,
         mut callback: F,
     ) -> Result<(), Error>
     where
@@ -263,11 +267,23 @@ where
             mutations.insert(key, value);
         }
 
-        // Concurrently look up all possible matching locations.
+        // Read only locations not already in the preread map.
         locations.sort();
         locations.dedup();
-        let futures = locations.iter().map(|loc| self.log.read(*loc));
-        let results = try_join_all(futures).await?;
+        let missing: Vec<_> = locations
+            .iter()
+            .filter(|loc| !preread.contains_key(loc))
+            .copied()
+            .collect();
+        let futures = missing.iter().map(|loc| self.log.read(*loc));
+        let missing_results = try_join_all(futures).await?;
+        for (loc, op) in missing.into_iter().zip(missing_results) {
+            preread.insert(loc, op);
+        }
+        let results: Vec<_> = locations
+            .iter()
+            .map(|loc| preread.remove(loc).expect("all locations should be read"))
+            .collect();
 
         // A set of possible "next_key" values for any keys whose next_key value will need to be
         // updated.
@@ -464,7 +480,7 @@ where
         }
         self.pending_steps = 0;
 
-        self.write_batch_with_callback(iter, |_, _| {}).await
+        self.write_batch_with_callback(iter, BTreeMap::new(), |_, _| {}).await
     }
 }
 
