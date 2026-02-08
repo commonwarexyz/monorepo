@@ -214,7 +214,7 @@ pub struct Config {
 
     /// Configuration for deterministic storage fault injection.
     /// Defaults to no faults being injected.
-    storage_faults: FaultConfig,
+    storage_fault_cfg: FaultConfig,
 
     /// Buffer pool configuration for network I/O.
     network_buffer_pool_cfg: BufferPoolConfig,
@@ -244,7 +244,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
-            storage_faults: FaultConfig::default(),
+            storage_fault_cfg: FaultConfig::default(),
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
         }
@@ -297,8 +297,8 @@ impl Config {
     /// When set, the runtime will inject deterministic storage errors based on
     /// the provided configuration. Faults are drawn from the shared RNG, ensuring
     /// reproducible failure patterns for a given seed.
-    pub const fn with_storage_faults(mut self, faults: FaultConfig) -> Self {
-        self.storage_faults = faults;
+    pub const fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
+        self.storage_fault_cfg = faults;
         self
     }
 
@@ -924,7 +924,7 @@ impl Context {
         );
 
         // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
         let storage = MeteredStorage::new(
             AuditedStorage::new(
                 FaultyStorage::new(
@@ -1074,7 +1074,7 @@ impl Context {
     /// Changes to the returned [`FaultConfig`] take effect immediately for
     /// subsequent storage operations. This allows dynamically enabling or
     /// disabling fault injection during a test.
-    pub fn storage_faults(&self) -> Arc<RwLock<FaultConfig>> {
+    pub fn storage_fault_config(&self) -> Arc<RwLock<FaultConfig>> {
         self.storage.inner().inner().config()
     }
 
@@ -2108,7 +2108,7 @@ mod tests {
     #[test]
     fn test_storage_fault_injection_and_recovery() {
         // Phase 1: Run with 100% sync failure rate
-        let cfg = deterministic::Config::default().with_storage_faults(FaultConfig {
+        let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
             sync_rate: Some(1.0),
             ..Default::default()
         });
@@ -2126,7 +2126,7 @@ mod tests {
         // Phase 2: Recover and disable faults explicitly
         deterministic::Runner::from(checkpoint).start(|ctx| async move {
             // Explicitly disable faults for recovery verification
-            *ctx.storage_faults().write().unwrap() = FaultConfig::default();
+            *ctx.storage_fault_config().write().unwrap() = FaultConfig::default();
 
             // Data was not synced, so blob should be empty (unsynced writes are lost)
             let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
@@ -2155,8 +2155,8 @@ mod tests {
             blob.sync().await.expect("initial sync should succeed");
 
             // Enable sync faults dynamically
-            let faults = ctx.storage_faults();
-            faults.write().unwrap().sync_rate = Some(1.0);
+            let storage_fault_cfg = ctx.storage_fault_config();
+            storage_fault_cfg.write().unwrap().sync_rate = Some(1.0);
 
             // Now sync should fail
             blob.write_at(0, b"updated".to_vec()).await.unwrap();
@@ -2164,7 +2164,7 @@ mod tests {
             assert!(result.is_err(), "sync should fail with faults enabled");
 
             // Disable faults
-            faults.write().unwrap().sync_rate = Some(0.0);
+            storage_fault_cfg.write().unwrap().sync_rate = Some(0.0);
 
             // Sync should succeed again
             blob.sync()
@@ -2179,7 +2179,7 @@ mod tests {
         fn run_with_seed(seed: u64) -> Vec<bool> {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
-                .with_storage_faults(FaultConfig {
+                .with_storage_fault_config(FaultConfig {
                     open_rate: Some(0.5),
                     ..Default::default()
                 });
@@ -2217,7 +2217,7 @@ mod tests {
         fn run_with_seed(seed: u64) -> Vec<u32> {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
-                .with_storage_faults(FaultConfig {
+                .with_storage_fault_config(FaultConfig {
                     open_rate: Some(0.5),
                     write_rate: Some(0.3),
                     sync_rate: Some(0.2),

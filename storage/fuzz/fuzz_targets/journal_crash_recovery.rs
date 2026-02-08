@@ -524,13 +524,12 @@ where
             .await
             .unwrap();
 
-            let fault_config = deterministic::FaultConfig {
+            let storage_fault_cfg = ctx.storage_fault_config();
+            *storage_fault_cfg.write().unwrap() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(write_failure_rate),
                 ..Default::default()
             };
-            let faults = ctx.storage_faults();
-            *faults.write().unwrap() = fault_config;
 
             run_operations(&mut journal, &operations).await
         }
@@ -538,7 +537,7 @@ where
 
     let runner = deterministic::Runner::from(checkpoint);
     runner.start(|ctx| async move {
-        *ctx.storage_faults().write().unwrap() = deterministic::FaultConfig::default();
+        *ctx.storage_fault_config().write().unwrap() = deterministic::FaultConfig::default();
 
         let mut journal = J::init(
             ctx.with_label("recovered"),
