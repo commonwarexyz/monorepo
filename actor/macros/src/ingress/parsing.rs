@@ -8,6 +8,7 @@ use syn::{
 mod kw {
     syn::custom_keyword!(tell);
     syn::custom_keyword!(ask);
+    syn::custom_keyword!(subscribe);
     syn::custom_keyword!(unbounded);
 }
 
@@ -19,14 +20,21 @@ pub(crate) enum MailboxKind {
 
 pub(crate) enum ItemKind {
     Tell,
-    Ask { response: Box<Type> },
+    Ask {
+        response: Box<Type>,
+    },
+    /// Like `ask`, but the generated mailbox method returns the
+    /// `oneshot::Receiver` immediately instead of awaiting the response.
+    Subscribe {
+        response: Box<Type>,
+    },
 }
 
 impl ItemKind {
     pub(crate) const fn response(&self) -> Option<&Type> {
         match self {
             Self::Tell => None,
-            Self::Ask { response } => Some(response),
+            Self::Ask { response } | Self::Subscribe { response } => Some(response),
         }
     }
 }
@@ -93,24 +101,42 @@ fn parse_item(input: ParseStream<'_>) -> Result<Item> {
     let kind = if input.peek(kw::tell) {
         input.parse::<kw::tell>()?;
         ItemKind::Tell
-    } else if input.peek(kw::ask) {
-        input.parse::<kw::ask>()?;
+    } else if input.peek(kw::ask) || input.peek(kw::subscribe) {
+        let is_subscribe = input.peek(kw::subscribe);
+        if is_subscribe {
+            input.parse::<kw::subscribe>()?;
+        } else {
+            input.parse::<kw::ask>()?;
+        }
         let name: Ident = input.parse()?;
         let fields = parse_fields(input)?;
+        if let Some(field) = fields.iter().find(|f| f.name == "response") {
+            return Err(syn::Error::new(
+                field.name.span(),
+                "`response` is reserved for the implicit response channel in ask/subscribe items",
+            ));
+        }
         input.parse::<Token![->]>()?;
         let response: Type = input.parse()?;
         input.parse::<Token![;]>()?;
+        let kind = if is_subscribe {
+            ItemKind::Subscribe {
+                response: Box::new(response),
+            }
+        } else {
+            ItemKind::Ask {
+                response: Box::new(response),
+            }
+        };
         return Ok(Item {
             attrs,
             name,
             fields,
             expose_on_mailbox,
-            kind: ItemKind::Ask {
-                response: Box::new(response),
-            },
+            kind,
         });
     } else {
-        return Err(input.error("expected `tell` or `ask` item"));
+        return Err(input.error("expected `tell`, `ask`, or `subscribe` item"));
     };
 
     let name: Ident = input.parse()?;
@@ -135,7 +161,11 @@ impl Parse for IngressInput {
             MailboxKind::Bounded
         };
 
-        let has_header = !(input.peek(kw::tell) || input.peek(kw::ask) || input.peek(Token![pub]));
+        let has_header = !(input.peek(kw::tell)
+            || input.peek(kw::ask)
+            || input.peek(kw::subscribe)
+            || input.peek(Token![pub])
+            || input.peek(Token![#]));
         let (mailbox, generics) = if has_header {
             let mailbox: Ident = input.parse()?;
             let generics = if input.peek(Token![<]) {
@@ -143,6 +173,9 @@ impl Parse for IngressInput {
             } else {
                 Generics::default()
             };
+            if input.peek(Token![where]) {
+                return Err(input.error("where clauses are not supported on ingress! generics; use inline bounds like `<P: Trait>` instead"));
+            }
             input.parse::<Token![,]>()?;
             (mailbox, generics)
         } else {
@@ -157,10 +190,20 @@ impl Parse for IngressInput {
             items.push(parse_item(input)?);
         }
 
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            if !seen.insert(item.name.to_string()) {
+                return Err(syn::Error::new(
+                    item.name.span(),
+                    format!("duplicate item name `{}`", item.name),
+                ));
+            }
+        }
+
         if items.is_empty() {
             return Err(syn::Error::new(
                 mailbox.span(),
-                "ingress! requires at least one `tell` or `ask` item",
+                "ingress! requires at least one `tell`, `ask`, or `subscribe` item",
             ));
         }
 

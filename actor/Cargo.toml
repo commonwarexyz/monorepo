@@ -19,8 +19,6 @@ commonware-macros = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 futures.workspace = true
-governor.workspace = true
-rand.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
