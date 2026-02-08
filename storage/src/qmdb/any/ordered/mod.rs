@@ -646,7 +646,12 @@ where
         let mut deleted = Vec::new();
         let mut updated = BTreeMap::new();
         for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let Operation::Update(Update { key, value, next_key }) = op else {
+            let Operation::Update(Update {
+                key,
+                value,
+                next_key,
+            }) = op
+            else {
                 unreachable!("updates should have key data");
             };
             possible_next.insert(next_key);
