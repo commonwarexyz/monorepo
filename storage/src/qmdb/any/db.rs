@@ -26,6 +26,7 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::{num::NonZeroU64, ops::Range};
+use futures::future::try_join_all;
 use tracing::debug;
 
 /// Type alias for the authenticated journal used by [Db].
@@ -387,8 +388,9 @@ where
         Ok((db, range))
     }
 
-    /// Raises the inactivity floor by exactly one step, moving the first active operation to tip.
-    /// Raises the floor to the tip if the db is empty.
+    /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip.
+    /// TODO(<https://github.com/commonwarexyz/monorepo/issues/1829>): callers of this method should
+    /// migrate to using [Self::raise_floor_with_bitmap] instead.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.log.bounds().end;
@@ -405,8 +407,8 @@ where
         Ok(self.inactivity_floor_loc)
     }
 
-    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor.
+    /// Same as `raise_floor` but uses the status bitmap to more efficiently find active operations
+    /// to move to tip.
     pub(crate) async fn raise_floor_with_bitmap<
         F: Storage + Clock + Metrics,
         D: Digest,
@@ -415,20 +417,48 @@ where
         &mut self,
         status: &mut UnmerkleizedBitMap<F, D, N>,
     ) -> Result<Location, Error> {
-        if self.is_empty() {
-            self.inactivity_floor_loc = self.log.bounds().end;
-            debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = self.durable_state.steps + 1;
-            for _ in 0..steps_to_take {
-                let loc = self.inactivity_floor_loc;
-                self.inactivity_floor_loc = self
-                    .as_floor_helper()
-                    .raise_floor_with_bitmap(status, loc)
-                    .await?;
-            }
-        }
+        let tip = self.log.size();
+        let steps_to_take = self.durable_state.steps + 1;
         self.durable_state.steps = 0;
+
+        // If the db is empty then raise the floor to tip and return.
+        if self.is_empty() {
+            debug!(tip = ?tip, "db is empty, raising floor to tip");
+            self.inactivity_floor_loc = tip;
+            return Ok(tip);
+        }
+
+        // Scan the bitmap to find (up to) the first `steps_to_take` active locations above the
+        // inactivity floor, setting the corresponding bits to false.
+        let mut locs = Vec::with_capacity(steps_to_take as usize);
+        let mut floor = self.inactivity_floor_loc;
+        for _ in 0..steps_to_take {
+            while *floor < tip && !status.get_bit(*floor) {
+                floor += 1;
+            }
+            if *floor >= tip {
+                break;
+            }
+            status.set_bit(*floor, false);
+            locs.push(floor);
+            floor += 1;
+        }
+
+        // Concurrently read the active operations from the log.
+        let futures = locs.iter().map(|&loc| self.log.read(loc));
+        let ops = try_join_all(futures).await?;
+
+        // Move each to tip, updating the index and bitmap.
+        let mut helper = self.as_floor_helper();
+        for (&loc, op) in locs.iter().zip(ops) {
+            assert!(
+                helper.move_op_if_active(op, loc).await?,
+                "op should be active based on status bitmap"
+            );
+            status.push(true);
+        }
+
+        self.inactivity_floor_loc = floor;
 
         Ok(self.inactivity_floor_loc)
     }

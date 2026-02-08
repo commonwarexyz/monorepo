@@ -947,7 +947,7 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<C, F, Fut>(open_db, 4241, 3383);
+        test_current_db_build_big::<C, F, Fut>(open_db, 3478, 2620);
     }
 
     fn test_unordered_build_big<C, F, Fut>(open_db: F)
