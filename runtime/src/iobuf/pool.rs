@@ -126,12 +126,6 @@ pub struct BufferPoolConfig {
     pub alignment: NonZeroUsize,
 }
 
-impl Default for BufferPoolConfig {
-    fn default() -> Self {
-        Self::for_network()
-    }
-}
-
 impl BufferPoolConfig {
     /// Network I/O preset: cache-line aligned, cache_line_size to 64KB buffers,
     /// 4096 per class, not prefilled.
@@ -164,6 +158,57 @@ impl BufferPoolConfig {
             prefill: false,
             alignment: page,
         }
+    }
+
+    /// Returns a copy of this config with a new minimum buffer size.
+    pub const fn with_min_size(mut self, min_size: NonZeroUsize) -> Self {
+        self.min_size = min_size;
+        self
+    }
+
+    /// Returns a copy of this config with a new maximum buffer size.
+    pub const fn with_max_size(mut self, max_size: NonZeroUsize) -> Self {
+        self.max_size = max_size;
+        self
+    }
+
+    /// Returns a copy of this config with a new maximum number of buffers per size class.
+    pub const fn with_max_per_class(mut self, max_per_class: NonZeroUsize) -> Self {
+        self.max_per_class = max_per_class;
+        self
+    }
+
+    /// Returns a copy of this config with a new prefill setting.
+    pub const fn with_prefill(mut self, prefill: bool) -> Self {
+        self.prefill = prefill;
+        self
+    }
+
+    /// Returns a copy of this config with a new alignment.
+    pub const fn with_alignment(mut self, alignment: NonZeroUsize) -> Self {
+        self.alignment = alignment;
+        self
+    }
+
+    /// Returns a copy of this config sized for an approximate tracked-memory budget.
+    ///
+    /// This computes `max_per_class` as:
+    ///
+    /// `ceil(budget_bytes / sum(size_class_bytes))`
+    ///
+    /// where `size_class_bytes` includes every class from `min_size` to `max_size`.
+    /// This always rounds up to at least one buffer per size class, so the
+    /// resulting estimated capacity may exceed `budget_bytes`.
+    pub fn with_budget_bytes(mut self, budget_bytes: NonZeroUsize) -> Self {
+        let mut class_bytes = 0usize;
+        for i in 0..self.num_classes() {
+            class_bytes = class_bytes.saturating_add(self.class_size(i));
+        }
+        if class_bytes == 0 {
+            return self;
+        }
+        self.max_per_class = NZUsize!(budget_bytes.get().div_ceil(class_bytes));
+        self
     }
 
     /// Validates the configuration, panicking on invalid values.
@@ -1090,6 +1135,58 @@ mod tests {
         assert_eq!(config.max_per_class.get(), 32);
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), page_size());
+    }
+
+    #[test]
+    fn test_config_builders() {
+        let page = NZUsize!(page_size());
+        let config = BufferPoolConfig::for_storage()
+            .with_max_per_class(NZUsize!(64))
+            .with_prefill(true)
+            .with_min_size(page)
+            .with_max_size(NZUsize!(128 * 1024));
+
+        config.validate();
+        assert_eq!(config.min_size, page);
+        assert_eq!(config.max_size.get(), 128 * 1024);
+        assert_eq!(config.max_per_class.get(), 64);
+        assert!(config.prefill);
+
+        // Storage profile alignment stays page-sized unless explicitly changed.
+        assert_eq!(config.alignment.get(), page_size());
+
+        // Alignment can be tuned explicitly as long as min_size is also adjusted.
+        let aligned = BufferPoolConfig::for_network()
+            .with_alignment(NZUsize!(256))
+            .with_min_size(NZUsize!(256));
+        aligned.validate();
+        assert_eq!(aligned.alignment.get(), 256);
+        assert_eq!(aligned.min_size.get(), 256);
+    }
+
+    #[test]
+    fn test_config_with_budget_bytes() {
+        // Classes: 4, 8, 16 (sum = 28). Budget 280 => max_per_class = 10.
+        let config = BufferPoolConfig {
+            min_size: NZUsize!(4),
+            max_size: NZUsize!(16),
+            max_per_class: NZUsize!(1),
+            prefill: false,
+            alignment: NZUsize!(4),
+        }
+        .with_budget_bytes(NZUsize!(280));
+        assert_eq!(config.max_per_class.get(), 10);
+
+        // Budget 10 rounds up to one buffer per class.
+        let small_budget = BufferPoolConfig {
+            min_size: NZUsize!(4),
+            max_size: NZUsize!(16),
+            max_per_class: NZUsize!(1),
+            prefill: false,
+            alignment: NZUsize!(4),
+        }
+        .with_budget_bytes(NZUsize!(10));
+        assert_eq!(small_budget.max_per_class.get(), 1);
     }
 
     /// Helper to get the number of allocated buffers for a size class.
