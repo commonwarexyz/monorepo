@@ -21,11 +21,11 @@ pub mod tests {
     use rand::Rng;
     use std::collections::BTreeSet;
 
-    pub trait TestKey: Array + Copy + Send + Sync {
+    pub trait TestKey: Array + Copy + Send + Sync + 'static {
         fn from_seed(seed: u64) -> Self;
     }
 
-    pub trait TestValue: Codec + Eq + PartialEq + Debug + Send + Sync {
+    pub trait TestValue: Codec + Eq + PartialEq + Debug + Send + Sync + 'static {
         fn from_seed(seed: u64) -> Self;
     }
 

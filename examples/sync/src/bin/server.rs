@@ -161,8 +161,8 @@ where
         let database = db_opt.as_ref().expect("database should exist");
         (
             database.root(),
-            database.inactivity_floor(),
-            database.size(),
+            database.inactivity_floor().await,
+            database.size().await,
         )
     };
     let response = wire::GetSyncTargetResponse::<Key> {
@@ -192,7 +192,7 @@ where
     let database = db_opt.as_ref().expect("database should exist");
 
     // Check if we have enough operations
-    let db_size = database.size();
+    let db_size = database.size().await;
     if request.start_loc >= db_size {
         return Err(Error::InvalidRequest(format!(
             "start_loc >= database size ({}) >= ({})",
@@ -391,8 +391,8 @@ where
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     info!(
-        size = ?database.size(),
-        inactivity_floor = ?database.inactivity_floor(),
+        size = ?database.size().await,
+        inactivity_floor = ?database.inactivity_floor().await,
         root = %root_hex,
         "{} database ready",
         DB::name()

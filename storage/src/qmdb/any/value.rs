@@ -35,9 +35,9 @@ impl<V: VariableValue> sealed::ValueEncoding for VariableEncoding<V> {
 }
 
 /// A fixed-size, clonable value.
-pub trait FixedValue: CodecFixedShared + Clone {}
-impl<T: CodecFixedShared + Clone> FixedValue for T {}
+pub trait FixedValue: CodecFixedShared + Clone + 'static {}
+impl<T: CodecFixedShared + Clone + 'static> FixedValue for T {}
 
 /// A variable-size, clonable value.
-pub trait VariableValue: CodecShared + Clone {}
-impl<T: CodecShared + Clone> VariableValue for T {}
+pub trait VariableValue: CodecShared + Clone + 'static {}
+impl<T: CodecShared + Clone + 'static> VariableValue for T {}

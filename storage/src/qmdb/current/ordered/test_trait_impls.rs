@@ -2,6 +2,7 @@
 
 use super::{fixed, variable};
 use crate::{
+    journal::contiguous::{Contiguous, ContiguousReader},
     mmr::Location,
     qmdb::{
         any::{
@@ -15,6 +16,7 @@ use crate::{
             db::{Merkleized, Unmerkleized},
             BitmapPrunedBits,
         },
+        store::LogStore as _,
         Durable, Error, NonDurable,
     },
     translator::Translator,
@@ -227,8 +229,8 @@ impl<
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        self.any.log.reader().await.bounds().start
     }
 }
 
@@ -251,8 +253,8 @@ where
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        self.any.log.reader().await.bounds().start
     }
 }
 
@@ -368,8 +370,8 @@ impl<
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().await.start
     }
 }
 
@@ -496,7 +498,7 @@ where
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().await.start
     }
 }

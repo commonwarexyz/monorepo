@@ -6,7 +6,10 @@
 
 use crate::{
     journal::{
-        contiguous::fixed::{Config as JConfig, Journal},
+        contiguous::{
+            fixed::{Config as JConfig, Journal},
+            ContiguousReader,
+        },
         Error as JError,
     },
     metadata::{Config as MConfig, Metadata},
@@ -168,7 +171,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync> Mmr<E,
 
         // If a node isn't found in the metadata, it might still be in the journal.
         debug!(?pos, "reading node from journal");
-        let node = journal.read(*pos).await;
+        let node = journal.reader().await.read(*pos).await;
         match node {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
@@ -217,9 +220,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        let mut journal =
-            Journal::<E, D>::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let mut journal_size = Position::new(journal.bounds().end);
+        let journal = Journal::<E, D>::init(context.with_label("mmr_journal"), journal_cfg).await?;
+        let mut journal_size = Position::new(journal.size().await);
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
@@ -260,12 +262,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                     .expect("metadata prune position is not 8 bytes"),
             )
         });
-        let journal_bounds_start = journal.bounds().start;
+        let journal_bounds_start = journal.reader().await.bounds().start;
         if metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
             journal.prune(metadata_prune_pos).await?;
-            if journal.bounds().start != journal_bounds_start {
+            if journal.reader().await.bounds().start != journal_bounds_start {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
@@ -295,7 +297,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             );
             // Check if there is an intact leaf following the last valid size, from which we can
             // recover its missing parents.
-            let recovered_item = journal.read(*last_valid_size).await;
+            let recovered_item = journal.reader().await.read(*last_valid_size).await;
             if let Ok(item) = recovered_item {
                 orphaned_leaf = Some(item);
             }
@@ -340,7 +342,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             s.mem_mmr = dirty_mmr.merkleize(hasher, None);
             assert_eq!(pos, journal_size);
             s.sync().await?;
-            assert_eq!(s.size(), s.journal.bounds().end);
+            assert_eq!(s.size(), s.journal.size().await);
         }
 
         Ok(s)
@@ -374,9 +376,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 
         // Open the journal, handling existing data vs sync range.
         assert!(!cfg.range.is_empty(), "range must not be empty");
-        let mut journal: Journal<E, D> =
+        let journal: Journal<E, D> =
             Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let size = journal.size();
+        let size = journal.size().await;
 
         if size > *cfg.range.end {
             return Err(crate::journal::Error::ItemOutOfRange(size).into());
@@ -385,7 +387,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             journal.clear_to_size(*cfg.range.start).await?;
         }
 
-        let journal_size = Position::new(journal.size());
+        let journal_size = Position::new(journal.size().await);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -483,7 +485,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             return Ok(Some(node));
         }
 
-        match self.journal.read(*position).await {
+        match self.journal.reader().await.read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::JournalError(e)),
@@ -500,7 +502,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         }
         self.journal_size = self.size();
         self.journal.sync().await?;
-        assert_eq!(self.journal_size, self.journal.bounds().end);
+        assert_eq!(self.journal_size, self.journal.size().await);
 
         // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared by
         // pruning the mem_mmr.
@@ -751,7 +753,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             return Ok(());
         }
 
-        let mut clean_mmr = self.merkleize(hasher);
+        let clean_mmr = self.merkleize(hasher);
 
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.

@@ -1,6 +1,9 @@
 use crate::{
     index::unordered::Index,
-    journal::{authenticated, contiguous::variable},
+    journal::{
+        authenticated,
+        contiguous::{variable, ContiguousReader as _},
+    },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
         Location, Position, StandardHasher,
@@ -90,13 +93,22 @@ where
         let mut snapshot: Index<T, Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
-        // Get the start of the log.
-        let start_loc = journal.bounds().start;
+        let last_commit_loc = {
+            // Get the start of the log.
+            let reader = journal.journal.reader().await;
+            let start_loc = Location::new_unchecked(reader.bounds().start);
 
-        // Build snapshot from the log
-        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
+            // Build snapshot from the log
+            build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit_loc = journal.size().checked_sub(1).expect("commit should exist");
+            Location::new_unchecked(
+                reader
+                    .bounds()
+                    .end
+                    .checked_sub(1)
+                    .expect("commit should exist"),
+            )
+        };
 
         let mut db = Self {
             journal,
@@ -253,7 +265,7 @@ mod tests {
             let metadata = Some(Sha256::fill(1));
             let (durable_db, _) = target_db.commit(metadata).await.unwrap();
             let target_db = durable_db.into_merkleized();
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
             let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
@@ -285,8 +297,8 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(got_db.bounds().end, target_op_count);
-            assert_eq!(got_db.bounds().start, target_oldest_retained_loc);
+            assert_eq!(got_db.bounds().await.end, target_op_count);
+            assert_eq!(got_db.bounds().await.start, target_oldest_retained_loc);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(), target_root);
@@ -343,7 +355,7 @@ mod tests {
             let (durable_db, _) = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
             let target_db = durable_db.into_merkleized();
 
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
             let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
@@ -366,8 +378,8 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(got_db.bounds().end, target_op_count);
-            assert_eq!(got_db.bounds().start, target_oldest_retained_loc);
+            assert_eq!(got_db.bounds().await.end, target_op_count);
+            assert_eq!(got_db.bounds().await.start, target_oldest_retained_loc);
             assert_eq!(got_db.root(), target_root);
             assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
 
@@ -395,7 +407,7 @@ mod tests {
 
             // Capture target state
             let target_root = target_db.root();
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let op_count = bounds.end;
 
@@ -423,7 +435,7 @@ mod tests {
 
             // Save state before closing
             let expected_root = synced_db.root();
-            let bounds = synced_db.bounds();
+            let bounds = synced_db.bounds().await;
             let expected_op_count = bounds.end;
             let expected_oldest_retained_loc = bounds.start;
 
@@ -436,8 +448,11 @@ mod tests {
 
             // Verify state is preserved
             assert_eq!(reopened_db.root(), expected_root);
-            assert_eq!(reopened_db.bounds().end, expected_op_count);
-            assert_eq!(reopened_db.bounds().start, expected_oldest_retained_loc);
+            assert_eq!(reopened_db.bounds().await.end, expected_op_count);
+            assert_eq!(
+                reopened_db.bounds().await.start,
+                expected_oldest_retained_loc
+            );
 
             // Verify data integrity
             for op in &target_ops {
@@ -470,7 +485,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture the state after first commit
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let initial_lower_bound = bounds.start;
             let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
@@ -482,7 +497,7 @@ mod tests {
             apply_ops(&mut target_db, additional_ops.clone()).await;
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
-            let final_upper_bound = target_db.bounds().end;
+            let final_upper_bound = target_db.bounds().await.end;
             let final_root = target_db.root();
 
             // Wrap target database for shared mutable access
@@ -511,7 +526,8 @@ mod tests {
                         NextStep::Continue(new_client) => new_client,
                         NextStep::Complete(_) => panic!("client should not be complete"),
                     };
-                    let log_size = client.journal().size();
+                    let log_size =
+                        crate::journal::contiguous::Contiguous::size(client.journal()).await;
                     if log_size > initial_lower_bound {
                         break client;
                     }
@@ -539,8 +555,11 @@ mod tests {
                 |rw_lock| rw_lock.into_inner(),
             );
             {
-                assert_eq!(synced_db.bounds().end, target_db.bounds().end);
-                assert_eq!(synced_db.bounds().start, target_db.bounds().start);
+                assert_eq!(synced_db.bounds().await.end, target_db.bounds().await.end);
+                assert_eq!(
+                    synced_db.bounds().await.start,
+                    target_db.bounds().await.start
+                );
                 assert_eq!(synced_db.root(), target_db.root());
             }
 
@@ -607,7 +626,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             let target_root = target_db.root();
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let op_count = bounds.end;
 
@@ -635,7 +654,7 @@ mod tests {
 
             // Verify state matches the specified range
             assert_eq!(synced_db.root(), target_root);
-            assert_eq!(synced_db.bounds().end, op_count);
+            assert_eq!(synced_db.bounds().await.end, op_count);
 
             synced_db.destroy().await.unwrap();
             let target_db =
@@ -682,7 +701,7 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
             let root = target_db.root();
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let upper_bound = bounds.end; // Up to the last operation
 
@@ -704,7 +723,7 @@ mod tests {
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(sync_db.bounds().end, upper_bound);
+            assert_eq!(sync_db.bounds().await.end, upper_bound);
             assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
@@ -745,7 +764,7 @@ mod tests {
 
             // Prepare target
             let root = target_db.root();
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
@@ -766,7 +785,7 @@ mod tests {
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
-            assert_eq!(sync_db.bounds().end, upper_bound);
+            assert_eq!(sync_db.bounds().await.end, upper_bound);
             assert_eq!(sync_db.root(), root);
 
             sync_db.destroy().await.unwrap();
@@ -793,7 +812,7 @@ mod tests {
             target_db.prune(Location::new_unchecked(10)).await.unwrap();
 
             // Capture initial target state
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let initial_lower_bound = bounds.start;
             let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
@@ -854,7 +873,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let initial_lower_bound = bounds.start;
             let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
@@ -915,7 +934,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let initial_lower_bound = bounds.start;
             let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
@@ -934,7 +953,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture final target state
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let final_lower_bound = bounds.start;
             let final_upper_bound = bounds.end;
             let final_root = target_db.root();
@@ -974,8 +993,8 @@ mod tests {
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), final_root);
-            assert_eq!(synced_db.bounds().end, final_upper_bound);
-            assert_eq!(synced_db.bounds().start, final_lower_bound);
+            assert_eq!(synced_db.bounds().await.end, final_upper_bound);
+            assert_eq!(synced_db.bounds().await.start, final_lower_bound);
 
             synced_db.destroy().await.unwrap();
             let target_db = Arc::try_unwrap(target_db).map_or_else(
@@ -1000,7 +1019,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture initial target state
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let initial_lower_bound = bounds.start;
             let initial_upper_bound = bounds.end;
             let initial_root = target_db.root();
@@ -1059,7 +1078,7 @@ mod tests {
             let target_db = durable_db.into_merkleized();
 
             // Capture target state
-            let bounds = target_db.bounds();
+            let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
             let root = target_db.root();
@@ -1094,8 +1113,8 @@ mod tests {
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), root);
-            assert_eq!(synced_db.bounds().end, upper_bound);
-            assert_eq!(synced_db.bounds().start, lower_bound);
+            assert_eq!(synced_db.bounds().await.end, upper_bound);
+            assert_eq!(synced_db.bounds().await.start, lower_bound);
 
             synced_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)

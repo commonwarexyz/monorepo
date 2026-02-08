@@ -52,7 +52,7 @@
 
 use crate::{
     index::{Cursor, Unordered as Index},
-    journal::contiguous::{Contiguous, MutableContiguous},
+    journal::contiguous::{ContiguousReader, MutableContiguous},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
@@ -140,33 +140,34 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// inactivates (if any). Returns the number of active keys in the db.
 pub(super) async fn build_snapshot_from_log<C, I, F>(
     inactivity_floor_loc: Location,
-    log: &C,
+    reader: &C,
     snapshot: &mut I,
     mut callback: F,
 ) -> Result<usize, Error>
 where
-    C: Contiguous<Item: Operation>,
+    C: ContiguousReader<Item: Operation>,
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
-    let stream = log
-        .replay(*inactivity_floor_loc, SNAPSHOT_READ_BUFFER_SIZE)
+    let bounds = reader.bounds();
+    let stream = reader
+        .replay(SNAPSHOT_READ_BUFFER_SIZE, *inactivity_floor_loc)
         .await?;
     pin_mut!(stream);
-    let last_commit_loc = log.size().saturating_sub(1);
+    let last_commit_loc = bounds.end.saturating_sub(1);
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
             if op.is_delete() {
-                let old_loc = delete_key(snapshot, log, key).await?;
+                let old_loc = delete_key(snapshot, reader, key).await?;
                 callback(false, old_loc);
                 if old_loc.is_some() {
                     active_keys -= 1;
                 }
             } else if op.is_update() {
                 let new_loc = Location::new_unchecked(loc);
-                let old_loc = update_key(snapshot, log, key, new_loc).await?;
+                let old_loc = update_key(snapshot, reader, key, new_loc).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
                     active_keys += 1;
@@ -180,16 +181,17 @@ where
     Ok(active_keys)
 }
 
-/// Delete `key` from the snapshot if it exists, returning the location that was previously
-/// associated with it.
-async fn delete_key<I, C>(
+/// Delete `key` from the snapshot if it exists, using a stable log reader, and return the
+/// previously associated location.
+async fn delete_key<I, R>(
     snapshot: &mut I,
-    log: &C,
-    key: &<C::Item as Operation>::Key,
+    reader: &R,
+    key: &<R::Item as Operation>::Key,
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    C: Contiguous<Item: Operation>,
+    R: ContiguousReader,
+    R::Item: Operation,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
     let Some(mut cursor) = snapshot.get_mut(key) else {
@@ -197,7 +199,7 @@ where
     };
 
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op(log, &mut cursor, key).await? else {
+    let Some(loc) = find_update_op(reader, &mut cursor, key).await? else {
         return Ok(None);
     };
     cursor.delete();
@@ -205,17 +207,17 @@ where
     Ok(Some(loc))
 }
 
-/// Update the location of `key` to `new_loc` in the snapshot and return its old location, or insert
-/// it if the key isn't already present.
-async fn update_key<I, C>(
+/// Update `key` in the snapshot using a stable log reader, returning its old location if present.
+async fn update_key<I, R>(
     snapshot: &mut I,
-    log: &C,
-    key: &<C::Item as Operation>::Key,
+    reader: &R,
+    key: &<R::Item as Operation>::Key,
     new_loc: Location,
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    C: Contiguous<Item: Operation>,
+    R: ContiguousReader,
+    R::Item: Operation,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
@@ -224,7 +226,7 @@ where
     };
 
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op(log, &mut cursor, key).await? {
+    if let Some(loc) = find_update_op(reader, &mut cursor, key).await? {
         assert!(new_loc > loc);
         cursor.update(new_loc);
         return Ok(Some(loc));
@@ -242,16 +244,17 @@ where
 /// # Panics
 ///
 /// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
-async fn find_update_op<C>(
-    log: &C,
+async fn find_update_op<R>(
+    reader: &R,
     cursor: &mut impl Cursor<Value = Location>,
-    key: &<C::Item as Operation>::Key,
+    key: &<R::Item as Operation>::Key,
 ) -> Result<Option<Location>, Error>
 where
-    C: Contiguous<Item: Operation>,
+    R: ContiguousReader,
+    R::Item: Operation,
 {
     while let Some(&loc) = cursor.next() {
-        let op = log.read(*loc).await?;
+        let op = reader.read(*loc).await?;
         let k = op.key().expect("operation without key");
         if *k == *key {
             return Ok(Some(loc));
@@ -317,16 +320,17 @@ where
         };
 
         // If we find a snapshot entry corresponding to the operation, we know it's active.
-        let Some(mut cursor) = self.snapshot.get_mut(key) else {
-            return Ok(false);
-        };
-        if !cursor.find(|&loc| loc == old_loc) {
-            return Ok(false);
-        }
+        {
+            let Some(mut cursor) = self.snapshot.get_mut(key) else {
+                return Ok(false);
+            };
+            if !cursor.find(|&loc| loc == old_loc) {
+                return Ok(false);
+            }
 
-        // Update the operation's snapshot location to point to tip.
-        cursor.update(Location::new_unchecked(self.log.size()));
-        drop(cursor);
+            // Update the operation's snapshot location to point to tip.
+            cursor.update(Location::new_unchecked(self.log.size().await));
+        }
 
         // Apply the operation at tip.
         self.log.append(op).await?;
@@ -347,7 +351,7 @@ where
     where
         I: Index<Value = Location>,
     {
-        let tip_loc = Location::new_unchecked(self.log.size());
+        let tip_loc = Location::new_unchecked(self.log.size().await);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,
@@ -355,7 +359,10 @@ where
             );
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
-            let op = self.log.read(*old_loc).await?;
+            let op = {
+                let reader = self.log.reader().await;
+                reader.read(*old_loc).await?
+            };
             if self.move_op_if_active(op, old_loc).await? {
                 return Ok(inactivity_floor_loc);
             }

@@ -5,7 +5,10 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::{
         authenticated,
-        contiguous::variable::{self, Config as JournalConfig},
+        contiguous::{
+            variable::{self, Config as JournalConfig},
+            Contiguous as _, ContiguousReader,
+        },
     },
     kv,
     mmr::{journaled::Config as MmrConfig, Location, Proof},
@@ -114,26 +117,28 @@ impl<
     > Immutable<E, K, V, H, T, M, D>
 {
     /// Return the Location of the next operation appended to this db.
-    pub fn size(&self) -> Location {
-        self.bounds().end
+    pub async fn size(&self) -> Location {
+        self.bounds().await.end
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub fn bounds(&self) -> std::ops::Range<Location> {
-        self.journal.bounds()
+    pub async fn bounds(&self) -> std::ops::Range<Location> {
+        let bounds = self.journal.reader().await.bounds();
+        Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
     }
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        let oldest = self.journal.bounds().start;
         let iter = self.snapshot.get(key);
+        let reader = self.journal.reader().await;
+        let oldest = reader.bounds().start;
         for &loc in iter {
             if loc < oldest {
                 continue;
             }
-            if let Some(v) = self.get_from_loc(key, loc).await? {
+            if let Some(v) = Self::get_from_loc(&reader, key, loc).await? {
                 return Ok(Some(v));
             }
         }
@@ -144,12 +149,16 @@ impl<
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
-    async fn get_from_loc(&self, key: &K, loc: Location) -> Result<Option<V>, Error> {
-        if loc < self.journal.bounds().start {
+    async fn get_from_loc(
+        reader: &impl ContiguousReader<Item = Operation<K, V>>,
+        key: &K,
+        loc: Location,
+    ) -> Result<Option<V>, Error> {
+        if loc < reader.bounds().start {
             return Err(Error::OperationPruned(loc));
         }
 
-        let Operation::Set(k, v) = self.journal.read(loc).await? else {
+        let Operation::Set(k, v) = reader.read(*loc).await? else {
             return Err(Error::UnexpectedData(loc));
         };
 
@@ -163,7 +172,14 @@ impl<
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let last_commit_loc = self.last_commit_loc;
-        let Operation::Commit(metadata) = self.journal.read(last_commit_loc).await? else {
+        let Operation::Commit(metadata) = self
+            .journal
+            .journal
+            .reader()
+            .await
+            .read(*last_commit_loc)
+            .await?
+        else {
             unreachable!("no commit operation at location of last commit {last_commit_loc}");
         };
 
@@ -197,7 +213,7 @@ impl<
         start_index: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.bounds().end;
+        let op_count = self.bounds().await.end;
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
@@ -276,7 +292,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         )
         .await?;
 
-        if journal.size() == 0 {
+        if journal.size().await == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             let mut dirty_journal = journal.into_dirty();
             dirty_journal.append(Operation::Commit(None)).await?;
@@ -286,13 +302,22 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator.clone());
 
-        // Get the start of the log.
-        let start_loc = journal.bounds().start;
+        let last_commit_loc = {
+            // Get the start of the log.
+            let reader = journal.reader().await;
+            let start_loc = Location::new_unchecked(reader.bounds().start);
 
-        // Build snapshot from the log.
-        build_snapshot_from_log(start_loc, &journal.journal, &mut snapshot, |_, _| {}).await?;
+            // Build snapshot from the log.
+            build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-        let last_commit_loc = journal.size().checked_sub(1).expect("commit should exist");
+            Location::new_unchecked(
+                reader
+                    .bounds()
+                    .end
+                    .checked_sub(1)
+                    .expect("commit should exist"),
+            )
+        };
 
         Ok(Self {
             journal,
@@ -384,7 +409,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     /// Any keys that have been pruned and map to the same translated key will be dropped
     /// during this call.
     pub async fn set(&mut self, key: K, value: V) -> Result<(), Error> {
-        let bounds = self.bounds();
+        let bounds = self.bounds().await;
         self.snapshot
             .insert_and_prune(&key, bounds.end, |v| *v < bounds.start);
 
@@ -409,7 +434,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         let loc = self.journal.append(Operation::Commit(metadata)).await?;
         self.journal.commit().await?;
         self.last_commit_loc = loc;
-        let range = loc..self.bounds().end;
+        let range = loc..loc + 1;
 
         let db = Immutable {
             journal: self.journal,
@@ -463,17 +488,25 @@ impl<
 {
     type Value = V;
 
-    fn bounds(&self) -> std::ops::Range<Location> {
-        self.journal.bounds()
+    async fn bounds(&self) -> std::ops::Range<Location> {
+        self.bounds().await
     }
 
-    // All unpruned operations are active in an immutable store.
-    fn inactivity_floor_loc(&self) -> Location {
-        self.bounds().start
-    }
-
-    fn is_empty(&self) -> bool {
-        self.bounds().is_empty()
+    /// All updates are active in an immutable store, so the inactivity floor is always the location
+    /// of the first update. This implementation assumes that if an update exists, it's at location
+    /// 1, even though technically there may be multiple commits without any updates.
+    ///
+    /// # Warning
+    ///
+    /// Note that the immutable store allows active operations to be pruned, so the inactivity floor
+    /// may precede the pruning boundary. If you wish to know the range of currently retrievable
+    /// operations, use `bounds`.
+    async fn inactivity_floor_loc(&self) -> Location {
+        if *self.last_commit_loc == 0 {
+            Location::new_unchecked(0)
+        } else {
+            Location::new_unchecked(1)
+        }
     }
 
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
@@ -572,8 +605,8 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context.with_label("first")).await;
-            assert_eq!(db.bounds().end, 1);
-            assert_eq!(db.journal.bounds().start, Location::new_unchecked(0));
+            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().await.start, Location::new_unchecked(0));
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -585,13 +618,13 @@ pub(super) mod test {
             drop(db); // Simulate failed commit
             let db = open_db(context.with_label("second")).await;
             assert_eq!(db.root(), root);
-            assert_eq!(db.bounds().end, 1);
+            assert_eq!(db.bounds().await.end, 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let db = db.into_mutable();
             let (durable_db, _) = db.commit(None).await.unwrap();
             let db = durable_db.into_merkleized();
-            assert_eq!(db.bounds().end, 2); // commit op added
+            assert_eq!(db.bounds().await.end, 2); // commit op added
             let root = db.root();
             drop(db);
 
@@ -622,21 +655,21 @@ pub(super) mod test {
             db.set(k1, v1.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
-            assert_eq!(db.bounds().end, 2);
+            assert_eq!(db.bounds().await.end, 2);
             // Commit the first key.
             let metadata = Some(vec![99, 100]);
             let (durable_db, _) = db.commit(metadata.clone()).await.unwrap();
             let db = durable_db.into_merkleized();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get(&k2).await.unwrap().is_none());
-            assert_eq!(db.bounds().end, 3);
+            assert_eq!(db.bounds().await.end, 3);
             assert_eq!(db.get_metadata().await.unwrap(), metadata.clone());
             // Set the second key.
             let mut db = db.into_mutable();
             db.set(k2, v2.clone()).await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
-            assert_eq!(db.bounds().end, 4);
+            assert_eq!(db.bounds().await.end, 4);
 
             // Make sure we can still get metadata.
             assert_eq!(db.get_metadata().await.unwrap(), metadata);
@@ -644,7 +677,7 @@ pub(super) mod test {
             // Commit the second key.
             let (durable_db, _) = db.commit(None).await.unwrap();
             let db = durable_db.into_merkleized();
-            assert_eq!(db.bounds().end, 5);
+            assert_eq!(db.bounds().await.end, 5);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Capture state.
@@ -655,13 +688,13 @@ pub(super) mod test {
             let v3 = vec![9, 10, 11];
             let mut db = db.into_mutable();
             db.set(k3, v3).await.unwrap();
-            assert_eq!(db.bounds().end, 6);
+            assert_eq!(db.bounds().await.end, 6);
 
             // Reopen, make sure state is restored to last commit point.
             drop(db); // Simulate failed commit
             let db = open_db(context.with_label("second")).await;
             assert!(db.get(&k3).await.unwrap().is_none());
-            assert_eq!(db.bounds().end, 5);
+            assert_eq!(db.bounds().await.end, 5);
             assert_eq!(db.root(), root);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -686,11 +719,11 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.bounds().end, ELEMENTS + 1);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 1);
 
             let (durable_db, _) = db.commit(None).await.unwrap();
             let db = durable_db.into_merkleized();
-            assert_eq!(db.bounds().end, ELEMENTS + 2);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Drop & reopen the db, making sure it has exactly the same state.
             let root = db.root();
@@ -698,7 +731,7 @@ pub(super) mod test {
 
             let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, ELEMENTS + 2);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![i as u8; 100];
@@ -708,7 +741,7 @@ pub(super) mod test {
             // Make sure all ranges of 5 operations are provable, including truncated ranges at the
             // end.
             let max_ops = NZU64!(5);
-            for i in 0..*db.bounds().end {
+            for i in 0..*db.bounds().await.end {
                 let (proof, log) = db.proof(Location::new_unchecked(i), max_ops).await.unwrap();
                 assert!(verify_proof(
                     &mut hasher,
@@ -738,7 +771,7 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.bounds().end, ELEMENTS + 1);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 1);
             let (durable_db, _) = db.commit(None).await.unwrap();
             let mut db = durable_db.into_merkleized();
             db.sync().await.unwrap();
@@ -760,14 +793,14 @@ pub(super) mod test {
             // Recovery should replay the log to regenerate the MMR.
             // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.bounds().end, 2003);
+            assert_eq!(db.bounds().await.end, 2003);
             let root = db.root();
             assert_ne!(root, halfway_root);
 
             // Drop & reopen could preserve the final commit.
             drop(db);
             let db = open_db(context.with_label("third")).await;
-            assert_eq!(db.bounds().end, 2003);
+            assert_eq!(db.bounds().await.end, 2003);
             assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -798,7 +831,7 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.bounds().end, ELEMENTS + 3);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 3);
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             for i in 0u64..ELEMENTS {
@@ -812,7 +845,7 @@ pub(super) mod test {
 
             // Recovery should back up to previous commit point.
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.bounds().end, 3);
+            assert_eq!(db.bounds().await.end, 3);
             let root = db.root();
             assert_eq!(root, first_commit_root);
 
@@ -835,21 +868,21 @@ pub(super) mod test {
                 db.set(k, v).await.unwrap();
             }
 
-            assert_eq!(db.bounds().end, ELEMENTS + 1);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 1);
 
             let (durable_db, _) = db.commit(None).await.unwrap();
             let mut db = durable_db.into_merkleized();
-            assert_eq!(db.bounds().end, ELEMENTS + 2);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Prune the db to the first half of the operations.
             db.prune(Location::new_unchecked((ELEMENTS+2) / 2))
                 .await
                 .unwrap();
-            assert_eq!(db.bounds().end, ELEMENTS + 2);
+            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
-            let oldest_retained_loc = db.journal.bounds().start;
+            let oldest_retained_loc = db.bounds().await.start;
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
@@ -868,15 +901,15 @@ pub(super) mod test {
 
             let mut db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, ELEMENTS + 2);
-            let oldest_retained_loc = db.journal.bounds().start;
+            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
+            let oldest_retained_loc = db.bounds().await.start;
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.
             let loc = Location::new_unchecked(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
             db.prune(loc).await.unwrap();
             // Actual boundary should be a multiple of 5.
-            let oldest_retained_loc = db.journal.bounds().start;
+            let oldest_retained_loc = db.bounds().await.start;
             assert_eq!(
                 oldest_retained_loc,
                 Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)
@@ -886,7 +919,7 @@ pub(super) mod test {
             db.sync().await.unwrap();
             drop(db);
             let db = open_db(context.with_label("third")).await;
-            let oldest_retained_loc = db.journal.bounds().start;
+            let oldest_retained_loc = db.bounds().await.start;
             assert_eq!(
                 oldest_retained_loc,
                 Location::new_unchecked(ELEMENTS / 2 + ITEMS_PER_SECTION)

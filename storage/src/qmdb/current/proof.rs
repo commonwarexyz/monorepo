@@ -6,7 +6,7 @@
 
 use crate::{
     bitmap::{partial_chunk_root, MerkleizedBitMap},
-    journal::contiguous::Contiguous,
+    journal::contiguous::{Contiguous, ContiguousReader as _},
     mmr::{
         grafting::{Storage as GraftingStorage, Verifier},
         hasher::Hasher,
@@ -104,8 +104,9 @@ impl<D: Digest> RangeProof<D> {
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+        let reader = log.reader().await;
         let futures = (*start_loc..*end_loc)
-            .map(|i| log.read(i))
+            .map(|i| reader.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
             .await?

@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Runner as _,
 };
-use commonware_storage::journal::contiguous::fixed::Journal;
+use commonware_storage::journal::contiguous::{fixed::Journal, ContiguousReader as _};
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
@@ -30,10 +30,11 @@ const ITEM_SIZE: usize = 32;
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
 async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
+    let reader = journal.reader().await;
     let mut rng = StdRng::seed_from_u64(0);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
-        black_box(journal.read(pos).await.expect("failed to read data"));
+        black_box(reader.read(pos).await.expect("failed to read data"));
     }
 }
 
@@ -42,11 +43,12 @@ async fn bench_run_concurrent(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
 ) {
+    let reader = journal.reader().await;
     let mut rng = StdRng::seed_from_u64(0);
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
-        futures.push(journal.read(pos));
+        futures.push(reader.read(pos));
     }
     try_join_all(futures).await.expect("failed to read data");
 }

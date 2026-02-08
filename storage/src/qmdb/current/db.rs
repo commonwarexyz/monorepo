@@ -354,7 +354,7 @@ where
 
         self.any.apply_commit_op(commit_op).await?;
 
-        Ok(start_loc..self.any.log.bounds().end)
+        Ok(start_loc..self.any.log.size().await)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
@@ -489,20 +489,16 @@ where
 {
     type Value = V::Value;
 
-    fn bounds(&self) -> std::ops::Range<Location> {
-        self.any.bounds()
+    async fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds().await
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    async fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 }
 
