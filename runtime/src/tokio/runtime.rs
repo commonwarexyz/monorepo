@@ -193,12 +193,12 @@ impl Config {
         self
     }
     /// See [Config]
-    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = cfg;
         self
     }
     /// See [Config]
-    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = cfg;
         self
     }
