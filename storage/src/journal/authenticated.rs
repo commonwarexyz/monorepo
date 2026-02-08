@@ -462,6 +462,11 @@ where
     S: State<DigestOf<H>> + Send + Sync,
 {
     type Item = C::Item;
+    type Reader<'a> = C::Reader<'a> where Self: 'a;
+
+    async fn reader(&self) -> Self::Reader<'_> {
+        self.journal.reader().await
+    }
 
     async fn bounds(&self) -> std::ops::Range<u64> {
         self.journal.bounds().await

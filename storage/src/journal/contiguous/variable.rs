@@ -12,7 +12,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, RwLock, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, Storage};
 use commonware_utils::NZUsize;
 #[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
@@ -170,6 +170,39 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     /// This value is immutable after initialization and must remain consistent
     /// across restarts. Changing this value will result in data loss or corruption.
     items_per_section: u64,
+}
+
+/// A reader guard that holds a consistent snapshot of the variable journal's bounds.
+///
+/// While this guard exists, `prune()` will block (it needs a write lock),
+/// so any position within `bounds()` is guaranteed readable.
+pub struct Reader<'a, E: Clock + Storage + Metrics, V: Codec> {
+    guard: RwLockReadGuard<'a, Inner<E, V>>,
+    items_per_section: u64,
+}
+
+impl<E: Clock + Storage + Metrics, V: CodecShared> super::ContiguousReader
+    for Reader<'_, E, V>
+{
+    type Item = V;
+
+    fn bounds(&self) -> std::ops::Range<u64> {
+        self.guard.pruning_boundary..self.guard.size
+    }
+
+    async fn read(&self, position: u64) -> Result<V, Error> {
+        if position >= self.guard.size {
+            return Err(Error::ItemOutOfRange(position));
+        }
+        if position < self.guard.pruning_boundary {
+            return Err(Error::ItemPruned(position));
+        }
+
+        let offset = self.guard.offsets.read(position).await?;
+        let section = position_to_section(position, self.items_per_section);
+
+        self.guard.data.get(section, offset).await
+    }
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
@@ -457,6 +490,14 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         }
 
         Ok(position)
+    }
+
+    /// Acquire a reader guard that holds a consistent view of the journal.
+    pub async fn reader(&self) -> Reader<'_, E, V> {
+        Reader {
+            guard: self.inner.read().await,
+            items_per_section: self.items_per_section,
+        }
     }
 
     /// Returns [start, end) where `start` and `end - 1` are the positions of the oldest and newest
@@ -862,6 +903,11 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 // Implement Contiguous trait for variable-length items
 impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
+    type Reader<'a> = Reader<'a, E, V> where Self: 'a;
+
+    async fn reader(&self) -> Self::Reader<'_> {
+        Self::reader(self).await
+    }
 
     async fn bounds(&self) -> std::ops::Range<u64> {
         Self::bounds(self).await

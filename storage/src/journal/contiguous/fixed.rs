@@ -63,7 +63,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, RwLock, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, Storage};
 use futures::{lock::Mutex, stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
@@ -138,6 +138,53 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
 
     /// The maximum number of items per blob (section).
     items_per_blob: u64,
+}
+
+/// A reader guard that holds a consistent snapshot of the journal's bounds.
+///
+/// While this guard exists, `prune()` will block (it needs a write lock),
+/// so any position within `bounds()` is guaranteed readable.
+pub struct Reader<'a, E: Clock + Storage + Metrics, A: CodecFixedShared> {
+    guard: RwLockReadGuard<'a, Inner<E, A>>,
+    items_per_blob: u64,
+}
+
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::ContiguousReader
+    for Reader<'_, E, A>
+{
+    type Item = A;
+
+    fn bounds(&self) -> std::ops::Range<u64> {
+        self.guard.pruning_boundary..self.guard.size
+    }
+
+    async fn read(&self, pos: u64) -> Result<A, Error> {
+        if pos >= self.guard.size {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        if pos < self.guard.pruning_boundary {
+            return Err(Error::ItemPruned(pos));
+        }
+
+        let section = pos / self.items_per_blob;
+        let section_start = section * self.items_per_blob;
+
+        let first_in_section = self.guard.pruning_boundary.max(section_start);
+        let pos_in_section = pos - first_in_section;
+
+        self.guard
+            .journal
+            .get(section, pos_in_section)
+            .await
+            .map_err(|e| match e {
+                Error::SectionOutOfRange(e)
+                | Error::AlreadyPrunedToSection(e)
+                | Error::ItemOutOfRange(e) => {
+                    Error::Corruption(format!("section/item should be found, but got: {e}"))
+                }
+                other => other,
+            })
+    }
 }
 
 impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
@@ -515,6 +562,14 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(())
     }
 
+    /// Acquire a reader guard that holds a consistent view of the journal.
+    pub async fn reader(&self) -> Reader<'_, E, A> {
+        Reader {
+            guard: self.inner.read().await,
+            items_per_blob: self.items_per_blob,
+        }
+    }
+
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
     pub async fn size(&self) -> u64 {
@@ -844,6 +899,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 // Implement Contiguous trait for fixed-length journals
 impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
+    type Reader<'a> = Reader<'a, E, A> where Self: 'a;
+
+    async fn reader(&self) -> Self::Reader<'_> {
+        Self::reader(self).await
+    }
 
     async fn bounds(&self) -> std::ops::Range<u64> {
         Self::bounds(self).await
