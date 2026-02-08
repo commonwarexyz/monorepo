@@ -352,72 +352,77 @@ pub(crate) mod test {
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
         D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
     {
-        const ELEMENTS: u64 = 1000;
+        // Box the body to keep this function's returned future small,
+        // preventing stack overflow when monomorphized across 12 DB variants.
+        Box::pin(async move {
+            const ELEMENTS: u64 = 1000;
 
-        let mut db = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = db.commit(None).await.unwrap().0;
-        let mut db = db.into_merkleized().await.unwrap();
-        db.prune(db.inactivity_floor_loc().await).await.unwrap();
-        let root = db.root().await;
-        let op_count = db.size().await;
-        let inactivity_floor_loc = db.inactivity_floor_loc().await;
+            let mut db = db.into_mutable();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value(i * 1000);
+                db.update(k, v).await.unwrap();
+            }
+            let db = db.commit(None).await.unwrap().0;
+            let mut db = db.into_merkleized().await.unwrap();
+            db.prune(db.inactivity_floor_loc().await).await.unwrap();
+            let root = db.root().await;
+            let op_count = db.size().await;
+            let inactivity_floor_loc = db.inactivity_floor_loc().await;
 
-        let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.size().await, op_count);
-        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
-        assert_eq!(db.root().await, root);
+            let db = reopen_db(context.with_label("reopen1")).await;
+            assert_eq!(db.size().await, op_count);
+            assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+            assert_eq!(db.root().await, root);
 
-        let mut db = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.size().await, op_count);
-        assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
-        assert_eq!(db.root().await, root);
-
-        let mut dirty = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            dirty.update(k, v).await.unwrap();
-        }
-        let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.size().await, op_count);
-        assert_eq!(db.root().await, root);
-
-        let mut db = db.into_mutable();
-        for _ in 0..3 {
+            let mut db = db.into_mutable();
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = make_value((i + 1) * 10000);
                 db.update(k, v).await.unwrap();
             }
-        }
-        let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.size().await, op_count);
-        assert_eq!(db.root().await, root);
+            let db = reopen_db(context.with_label("reopen2")).await;
+            assert_eq!(db.size().await, op_count);
+            assert_eq!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+            assert_eq!(db.root().await, root);
 
-        let mut db = db.into_mutable();
-        for i in 0u64..ELEMENTS {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let _ = db.commit(None).await.unwrap();
-        let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.size().await > op_count);
-        assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
-        assert_ne!(db.root().await, root);
+            let mut dirty = db.into_mutable();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                dirty.update(k, v).await.unwrap();
+            }
+            let db = reopen_db(context.with_label("reopen3")).await;
+            assert_eq!(db.size().await, op_count);
+            assert_eq!(db.root().await, root);
 
-        db.destroy().await.unwrap();
+            let mut db = db.into_mutable();
+            for _ in 0..3 {
+                for i in 0u64..ELEMENTS {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = make_value((i + 1) * 10000);
+                    db.update(k, v).await.unwrap();
+                }
+            }
+            let db = reopen_db(context.with_label("reopen4")).await;
+            assert_eq!(db.size().await, op_count);
+            assert_eq!(db.root().await, root);
+
+            let mut db = db.into_mutable();
+            for i in 0u64..ELEMENTS {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.update(k, v).await.unwrap();
+            }
+            let _ = db.commit(None).await.unwrap();
+            let db = reopen_db(context.with_label("reopen5")).await;
+            assert!(db.size().await > op_count);
+            assert_ne!(db.inactivity_floor_loc().await, inactivity_floor_loc);
+            assert_ne!(db.root().await, root);
+
+            db.destroy().await.unwrap();
+        })
+        .await
     }
 
     /// Test recovery on empty db.
@@ -430,60 +435,65 @@ pub(crate) mod test {
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
         D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
     {
-        let root = db.root().await;
+        // Box the body to keep this function's returned future small,
+        // preventing stack overflow when monomorphized across 12 DB variants.
+        Box::pin(async move {
+            let root = db.root().await;
 
-        let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.size().await, 1);
-        assert_eq!(db.root().await, root);
+            let db = reopen_db(context.with_label("reopen1")).await;
+            assert_eq!(db.size().await, 1);
+            assert_eq!(db.root().await, root);
 
-        let mut db = db.into_mutable();
-        for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = reopen_db(context.with_label("reopen2")).await;
-        assert_eq!(db.size().await, 1);
-        assert_eq!(db.root().await, root);
-
-        let mut db = db.into_mutable();
-        for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        drop(db);
-        let db = reopen_db(context.with_label("reopen3")).await;
-        assert_eq!(db.size().await, 1);
-        assert_eq!(db.root().await, root);
-
-        let mut db = db.into_mutable();
-        for _ in 0..3 {
+            let mut db = db.into_mutable();
             for i in 0u64..1000 {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = make_value((i + 1) * 10000);
                 db.update(k, v).await.unwrap();
             }
-        }
-        drop(db);
-        let db = reopen_db(context.with_label("reopen4")).await;
-        assert_eq!(db.size().await, 1);
-        assert_eq!(db.root().await, root);
+            let db = reopen_db(context.with_label("reopen2")).await;
+            assert_eq!(db.size().await, 1);
+            assert_eq!(db.root().await, root);
 
-        let mut db = db.into_mutable();
-        for i in 0u64..1000 {
-            let k = Sha256::hash(&i.to_be_bytes());
-            let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
-        }
-        let db = db.commit(None).await.unwrap().0;
-        let db = db.into_merkleized().await.unwrap();
-        drop(db);
-        let db = reopen_db(context.with_label("reopen5")).await;
-        assert!(db.size().await > 1);
-        assert_ne!(db.root().await, root);
+            let mut db = db.into_mutable();
+            for i in 0u64..1000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.update(k, v).await.unwrap();
+            }
+            drop(db);
+            let db = reopen_db(context.with_label("reopen3")).await;
+            assert_eq!(db.size().await, 1);
+            assert_eq!(db.root().await, root);
 
-        db.destroy().await.unwrap();
+            let mut db = db.into_mutable();
+            for _ in 0..3 {
+                for i in 0u64..1000 {
+                    let k = Sha256::hash(&i.to_be_bytes());
+                    let v = make_value((i + 1) * 10000);
+                    db.update(k, v).await.unwrap();
+                }
+            }
+            drop(db);
+            let db = reopen_db(context.with_label("reopen4")).await;
+            assert_eq!(db.size().await, 1);
+            assert_eq!(db.root().await, root);
+
+            let mut db = db.into_mutable();
+            for i in 0u64..1000 {
+                let k = Sha256::hash(&i.to_be_bytes());
+                let v = make_value((i + 1) * 10000);
+                db.update(k, v).await.unwrap();
+            }
+            let db = db.commit(None).await.unwrap().0;
+            let db = db.into_merkleized().await.unwrap();
+            drop(db);
+            let db = reopen_db(context.with_label("reopen5")).await;
+            assert!(db.size().await > 1);
+            assert_ne!(db.root().await, root);
+
+            db.destroy().await.unwrap();
+        })
+        .await
     }
 
     /// Test that replaying multiple updates of the same key on startup preserves correct state.
