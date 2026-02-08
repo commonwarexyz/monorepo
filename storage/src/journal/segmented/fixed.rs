@@ -187,7 +187,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         start_section: u64,
         start_position: u64,
         buffer: NonZeroUsize,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u64, A), Error>> + Send, Error> {
         // Pre-create readers from blobs (async operation)
         let mut blob_info = Vec::new();
         for (&section, blob) in self.manager.sections_from(start_section) {

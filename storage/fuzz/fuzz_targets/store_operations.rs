@@ -143,7 +143,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let (mut clean_db, _) = db.commit(None).await.expect("Commit should not fail");
+                    let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_dirty();
                 }
@@ -155,7 +155,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    let _ = db.bounds().await.end;
                 }
 
                 Operation::InactivityFloorLoc => {

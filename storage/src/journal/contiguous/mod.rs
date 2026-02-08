@@ -15,6 +15,35 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
+/// A reader guard that holds a consistent view of the journal.
+///
+/// While this guard exists, the pruning boundary is guaranteed not to advance,
+/// so any position within `bounds()` is guaranteed readable.
+pub trait ContiguousReader: Send + Sync {
+    /// The type of items stored in the journal.
+    type Item;
+
+    /// Returns [start, end) with a guaranteed stable pruning boundary.
+    fn bounds(&self) -> Range<u64>;
+
+    /// Read the item at the given position.
+    ///
+    /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
+
+    /// Return a stream of all items starting from `start_pos`.
+    ///
+    /// Because the reader holds the lock, validation and stream setup happen
+    /// atomically with respect to `prune()`.
+    fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> impl Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
+    > + Send;
+}
+
 /// Core trait for contiguous journals supporting sequential append operations.
 ///
 /// A contiguous journal maintains a consecutively increasing position counter where each
@@ -23,9 +52,22 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
-    /// Returns [start, end) where `start` and `end - 1` are the indices of the oldest and newest
-    /// retained operations respectively.
-    fn bounds(&self) -> Range<u64>;
+    /// The reader guard type returned by `reader()`.
+    type Reader<'a>: ContiguousReader<Item = Self::Item>
+    where
+        Self: 'a;
+
+    /// Acquire a reader guard that holds a consistent view of the journal.
+    ///
+    /// While the returned guard exists, `prune()` will block, ensuring that
+    /// any position within `reader.bounds()` remains readable.
+    fn reader(&self) -> impl Future<Output = Self::Reader<'_>> + Send;
+
+    /// Returns [start, end) where `start` is the index of the oldest retained operation (affected
+    /// by pruning) and `end - 1` is the index of the newest retained operation.
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
+        async { self.reader().await.bounds() }
+    }
 
     /// Return the total number of items that have been appended to the journal.
     ///
@@ -33,26 +75,9 @@ pub trait Contiguous: Send + Sync {
     /// position as its value.
     ///
     /// Equivalent to `bounds().end`.
-    fn size(&self) -> u64 {
-        self.bounds().end
+    fn size(&self) -> impl Future<Output = u64> + Send {
+        async { self.bounds().await.end }
     }
-
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-    ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error>,
-    > + Send;
 
     /// Read the item at the given position.
     ///
@@ -60,7 +85,9 @@ pub trait Contiguous: Send + Sync {
     ///
     /// - Returns [Error::ItemPruned] if the item at `position` has been pruned.
     /// - Returns [Error::ItemOutOfRange] if the item at `position` does not exist.
-    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send {
+        async move { self.reader().await.read(position).await }
+    }
 }
 
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.
@@ -137,7 +164,7 @@ pub trait MutableContiguous: Contiguous + Send + Sync {
         P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
-            let bounds = self.bounds();
+            let bounds = self.bounds().await;
             let mut rewind_size = bounds.end;
 
             while rewind_size > bounds.start {

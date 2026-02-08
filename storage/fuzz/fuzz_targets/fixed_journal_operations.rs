@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
-use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
+use commonware_storage::journal::contiguous::{fixed::{Config as JournalConfig, Journal}, ContiguousReader as _};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
@@ -99,7 +99,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -116,7 +116,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Bounds => {
-                    let _bounds = journal.bounds();
+                    let _bounds = journal.bounds().await;
                 }
 
                 JournalOperation::Prune { min_pos } => {
@@ -134,7 +134,9 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         oldest_retained_pos
                     };
-                    match journal.replay(NZUsize!(*buffer), start_pos).await {
+                    let reader = journal.reader().await;
+                    let result = reader.replay(NZUsize!(*buffer), start_pos).await;
+                    match result {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
@@ -163,8 +165,8 @@ fn fuzz(input: FuzzInput) {
                     .unwrap();
                     restarts += 1;
                     // Reset tracking variables to match recovered state
-                    journal_size = journal.size();
-                    let bounds = journal.bounds();
+                    journal_size = journal.size().await;
+                    let bounds = journal.bounds().await;
                     oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
                 }
 

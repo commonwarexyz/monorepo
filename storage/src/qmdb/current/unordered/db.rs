@@ -105,8 +105,9 @@ where
         };
         let height = Self::grafting_height();
         let mmr = &self.any.log.mmr;
+        let status = self.status.read().await;
 
-        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
+        OperationProof::<H::Digest, N>::new(hasher, &*status, height, mmr, loc).await
     }
 }
 
@@ -127,10 +128,11 @@ where
     /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
     /// subject to rollback until the next successful `commit`.
     pub async fn update(&mut self, key: K, value: V::Value) -> Result<(), Error> {
+        let status = self.status.get_mut();
         if let Some(old_loc) = self.any.update_key(key, value).await? {
-            self.status.set_bit(*old_loc, false);
+            status.set_bit(*old_loc, false);
         }
-        self.status.push(true);
+        status.push(true);
 
         Ok(())
     }
@@ -142,7 +144,7 @@ where
         if !self.any.create(key, value).await? {
             return Ok(false);
         }
-        self.status.push(true);
+        self.status.get_mut().push(true);
 
         Ok(true)
     }
@@ -155,8 +157,9 @@ where
             return Ok(false);
         };
 
-        self.status.push(false);
-        self.status.set_bit(*loc, false);
+        let status = self.status.get_mut();
+        status.push(false);
+        status.set_bit(*loc, false);
 
         Ok(true)
     }
@@ -204,6 +207,10 @@ where
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.update(key, value).await
     }
+
+    async fn create(&mut self, key: Self::Key, value: Self::Value) -> Result<bool, Self::Error> {
+        self.create(key, value).await
+    }
 }
 
 // StoreDeletable for (Unmerkleized, NonDurable) (aka mutable) state
@@ -242,7 +249,7 @@ where
     where
         Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
     {
-        let status = &mut self.status;
+        let status = self.status.get_mut();
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
                 status.push(append);

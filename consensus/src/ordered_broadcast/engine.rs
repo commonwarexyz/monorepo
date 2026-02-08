@@ -1045,7 +1045,7 @@ impl<
 
             // Prepare the stream
             let stream = journal
-                .replay(0, 0, self.journal_replay_buffer)
+                .replay(self.journal_replay_buffer, 0, 0)
                 .await
                 .expect("unable to replay journal");
             pin_mut!(stream);
