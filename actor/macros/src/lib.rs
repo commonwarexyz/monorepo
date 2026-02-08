@@ -1,5 +1,4 @@
-//! Procedural macros for [`commonware_actor`](https://docs.rs/commonware-actor).
-
+#![doc = include_str!("../README.md")]
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
@@ -20,18 +19,20 @@ mod ingress;
 ///     unbounded MailboxName<Generics...>,
 ///     pub tell Name { fields... };
 ///     pub ask Name { fields... } -> Response;
+///     pub subscribe Name { fields... } -> Response;
 /// }
 /// ```
 ///
 /// # Examples
 ///
-/// Default mailbox name and mixed tell/ask items:
+/// Default mailbox name and mixed tell/ask/subscribe items:
 ///
 /// ```ignore
 /// ingress! {
 ///     tell LocalOnly;
 ///     pub tell Increment { amount: u64 };
 ///     pub ask Get -> u64;
+///     pub subscribe WaitForValue { key: String } -> String;
 /// }
 /// ```
 ///
@@ -67,9 +68,19 @@ mod ingress;
 ///
 /// The macro generates:
 /// - `<MailboxName>Message` ingress enum
-/// - per-item wrapper types implementing `Tell`/`Request`
+/// - per-item wrapper types implementing `Tell`/`Ask`
 /// - mailbox newtype wrapper over `Mailbox<_>` or `UnboundedMailbox<_>`
 /// - convenience methods only for `pub` items
+///
+/// # Item kinds
+///
+/// - `tell`: fire-and-forget message. The wrapper implements `Tell`.
+/// - `ask`: request-response. The wrapper implements `Ask`. The generated
+///   method awaits the response and returns `Result<Response, MailboxError>`.
+/// - `subscribe`: like `ask`, but the generated method sends the message
+///   and returns the `oneshot::Receiver<Response>` immediately without
+///   awaiting the actor's reply. The wrapper implements `Tell` (with the
+///   response sender included as a struct field).
 #[proc_macro]
 pub fn ingress(input: TokenStream) -> TokenStream {
     ingress::expand(input)
