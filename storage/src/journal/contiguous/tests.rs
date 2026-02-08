@@ -1,6 +1,6 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::Contiguous;
+use super::{Contiguous, ContiguousReader as _};
 use crate::{
     journal::{contiguous::MutableContiguous, Error},
     Persistable,
@@ -222,7 +222,8 @@ where
     }
 
     {
-        let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -253,7 +254,8 @@ where
     }
 
     {
-        let stream = journal.replay(NZUsize!(1024), 7).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 7).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -341,7 +343,8 @@ where
     {
         // Replay from a position that may or may not be pruned (section-aligned)
         // We replay from position 10 which should be safe
-        let stream = journal.replay(NZUsize!(1024), 10).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -418,7 +421,8 @@ where
 
     {
         // Replay from position 10 and verify positions
-        let stream = journal.replay(NZUsize!(1024), 10).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -471,7 +475,8 @@ where
     let journal = factory("replay_on_empty".to_string()).await.unwrap();
 
     {
-        let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -500,7 +505,8 @@ where
     let bounds = journal.bounds().await;
 
     {
-        let stream = journal.replay(NZUsize!(1024), bounds.end).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), bounds.end).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -599,7 +605,8 @@ where
 
         // Replay and verify all items
         {
-            let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -662,7 +669,8 @@ where
 
         // Replay from position 10 (first non-pruned position)
         {
-            let stream = journal.replay(NZUsize!(1024), 10).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -1072,7 +1080,8 @@ where
 
         // Replay should yield no items
         {
-            let stream = journal.replay(NZUsize!(1024), 0).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();

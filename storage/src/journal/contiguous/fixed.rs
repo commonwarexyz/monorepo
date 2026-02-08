@@ -185,6 +185,62 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::ContiguousReader
                 other => other,
             })
     }
+
+    async fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
+        let items_per_blob = self.items_per_blob;
+        let pruning_boundary = self.guard.pruning_boundary;
+
+        // Validate bounds.
+        if start_pos > self.guard.size {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+        if start_pos < pruning_boundary {
+            return Err(Error::ItemPruned(start_pos));
+        }
+
+        let start_section = start_pos / items_per_blob;
+        let section_start = start_section * items_per_blob;
+
+        // Calculate start position within the section.
+        let first_in_section = pruning_boundary.max(section_start);
+        let start_pos_in_section = start_pos - first_in_section;
+
+        // Check all middle sections (not oldest, not tail) in range are complete.
+        let journal = &self.guard.journal;
+        if let (Some(oldest), Some(newest)) =
+            (journal.oldest_section(), journal.newest_section())
+        {
+            let first_to_check = start_section.max(oldest + 1);
+            for section in first_to_check..newest {
+                let len = journal.section_len(section).await?;
+                if len < items_per_blob {
+                    return Err(Error::Corruption(format!(
+                        "section {section} incomplete: expected {items_per_blob} items, got {len}"
+                    )));
+                }
+            }
+        }
+
+        let inner_stream = journal
+            .replay(start_section, start_pos_in_section, buffer)
+            .await?;
+
+        // Transform (section, pos_in_section, item) to (global_pos, item).
+        let stream = inner_stream.map(move |result| {
+            result.map(|(section, pos_in_section, item)| {
+                let section_start = section * items_per_blob;
+                let first_in_section = pruning_boundary.max(section_start);
+                let global_pos = first_in_section + pos_in_section;
+                (global_pos, item)
+            })
+        });
+
+        Ok(stream)
+    }
 }
 
 impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
@@ -721,82 +777,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             })
     }
 
-    /// Returns an ordered stream of all items in the journal with position >= `start_pos`.
-    ///
-    /// # Errors
-    ///
-    /// - [Error::ItemOutOfRange] if `start_pos > size`
-    /// - [Error::ItemPruned] if `start_pos < pruning_boundary`
-    /// - [Error::Corruption] if a middle section is incomplete
-    pub async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send, Error> {
-        let items_per_blob = self.items_per_blob;
-
-        // Validate inputs and get inner stream.
-        let (inner_stream, pruning_boundary) = {
-            let inner = self.inner.read().await;
-
-            // Validate bounds.
-            if start_pos > inner.size {
-                return Err(Error::ItemOutOfRange(start_pos));
-            }
-
-            // Make sure we aren't trying to read pruned items.
-            if start_pos < inner.pruning_boundary {
-                return Err(Error::ItemPruned(start_pos));
-            }
-
-            let start_section = start_pos / self.items_per_blob;
-            let section_start = start_section * self.items_per_blob;
-
-            // Calculate start position within the section
-            let first_in_section = inner.pruning_boundary.max(section_start);
-            let start_pos_in_section = start_pos - first_in_section;
-
-            let items_per_blob = self.items_per_blob;
-
-            // Check all middle sections (not oldest, not tail) in range are complete.
-            // The oldest section may be partial due to mid-section pruning boundary.
-            // The tail section may be partial because it's not been fully filled yet.
-            let journal = &inner.journal;
-            if let (Some(oldest), Some(newest)) =
-                (journal.oldest_section(), journal.newest_section())
-            {
-                // Start from max(start_section, oldest+1) to skip oldest which may be partial
-                let first_to_check = start_section.max(oldest + 1);
-                for section in first_to_check..newest {
-                    let len = journal.section_len(section).await?;
-                    if len < items_per_blob {
-                        return Err(Error::Corruption(format!(
-                        "section {section} incomplete: expected {items_per_blob} items, got {len}"
-                    )));
-                    }
-                }
-            }
-
-            let inner_stream = journal
-                .replay(start_section, start_pos_in_section, buffer)
-                .await?;
-            // Return inner stream.
-            (inner_stream, inner.pruning_boundary)
-        };
-
-        // Transform (section, pos_in_section, item) to (global_pos, item).
-        let stream = inner_stream.map(move |result| {
-            result.map(|(section, pos_in_section, item)| {
-                let section_start = section * items_per_blob;
-                let first_in_section = pruning_boundary.max(section_start);
-                let global_pos = first_in_section + pos_in_section;
-                (global_pos, item)
-            })
-        });
-
-        Ok(stream)
-    }
-
     /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
     /// such items in order to preserve blob boundaries, but the amount of such items will always be
     /// less than the configured number of items per blob. Returns true if any items were pruned.
@@ -909,14 +889,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Jo
         Self::bounds(self).await
     }
 
-    async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error> {
-        Self::replay(self, buffer, start_pos).await
-    }
-
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
         Self::read(self, position).await
     }
@@ -955,6 +927,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::contiguous::ContiguousReader as _;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -1202,16 +1175,19 @@ mod tests {
 
             // Replaying from 0 should fail since all items before bounds.start are pruned
             {
-                let result = journal.replay(NZUsize!(1024), 0).await;
+                let reader = journal.reader().await;
+                let result = reader.replay(NZUsize!(1024), 0).await;
                 assert!(matches!(result, Err(Error::ItemPruned(0))));
             }
 
             // Replaying from pruning_boundary should return empty stream
             {
-                let res = journal.replay(NZUsize!(1024), 0).await;
+                let reader = journal.reader().await;
+                let res = reader.replay(NZUsize!(1024), 0).await;
                 assert!(matches!(res, Err(Error::ItemPruned(_))));
 
-                let stream = journal
+                let reader = journal.reader().await;
+                let stream = reader
                     .replay(NZUsize!(1024), journal.bounds().await.start)
                     .await
                     .expect("failed to replay journal from pruning boundary");
@@ -1296,7 +1272,8 @@ mod tests {
 
             // Replay should return all items
             {
-                let stream = journal
+                let reader = journal.reader().await;
+                let stream = reader
                     .replay(NZUsize!(1024), 0)
                     .await
                     .expect("failed to replay journal");
@@ -1353,7 +1330,8 @@ mod tests {
             // Replay all items.
             {
                 let mut error_found = false;
-                let stream = journal
+                let reader = journal.reader().await;
+                let stream = reader
                     .replay(NZUsize!(1024), 0)
                     .await
                     .expect("failed to replay journal");
@@ -1424,7 +1402,8 @@ mod tests {
             assert_eq!(journal.size().await, expected_size);
 
             // Replay should detect corruption (incomplete section) in section 40
-            match journal.replay(NZUsize!(1024), 0).await {
+            let reader = journal.reader().await;
+            match reader.replay(NZUsize!(1024), 0).await {
                 Err(Error::Corruption(msg)) => {
                     assert!(
                         msg.contains("section 40"),
@@ -1465,7 +1444,8 @@ mod tests {
                 .expect("init shouldn't fail");
 
             // But replay will.
-            match result.replay(NZUsize!(1024), 0).await {
+            let reader = result.reader().await;
+            match reader.replay(NZUsize!(1024), 0).await {
                 Err(Error::Corruption(_)) => {}
                 Err(err) => panic!("expected Corruption, got: {err}"),
                 Ok(_) => panic!("expected Corruption, got ok"),
@@ -1555,7 +1535,8 @@ mod tests {
 
             // Replay should return all items except the first `START_POS`.
             {
-                let stream = journal
+                let reader = journal.reader().await;
+                let stream = reader
                     .replay(NZUsize!(1024), START_POS)
                     .await
                     .expect("failed to replay journal");
@@ -2632,7 +2613,8 @@ mod tests {
 
             // Replay from pruning_boundary
             {
-                let stream = journal
+                let reader = journal.reader().await;
+                let stream = reader
                     .replay(NZUsize!(1024), 7)
                     .await
                     .expect("failed to replay");
@@ -2652,7 +2634,8 @@ mod tests {
 
             // Replay from mid-stream (position 12)
             {
-                let stream = journal
+                let reader = journal.reader().await;
+                let stream = reader
                     .replay(NZUsize!(1024), 12)
                     .await
                     .expect("failed to replay from mid-stream");

@@ -7,6 +7,7 @@ use commonware_runtime::{deterministic, Metrics as _, Runner};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
+    ContiguousReader as _,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -262,7 +263,8 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = FixedJournal::replay(self, buffer, start_pos).await?;
+        let reader = FixedJournal::reader(self).await;
+        let _ = reader.replay(buffer, start_pos).await?;
         Ok(())
     }
 
@@ -337,7 +339,8 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = VariableJournal::replay(self, buffer, start_pos).await?;
+        let reader = VariableJournal::reader(self).await;
+        let _ = reader.replay(buffer, start_pos).await?;
         Ok(())
     }
 

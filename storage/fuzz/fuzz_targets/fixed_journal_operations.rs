@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
-use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
+use commonware_storage::journal::contiguous::{fixed::{Config as JournalConfig, Journal}, ContiguousReader as _};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
@@ -134,7 +134,9 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         oldest_retained_pos
                     };
-                    match journal.replay(NZUsize!(*buffer), start_pos).await {
+                    let reader = journal.reader().await;
+                    let result = reader.replay(NZUsize!(*buffer), start_pos).await;
+                    match result {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors

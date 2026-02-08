@@ -52,7 +52,7 @@
 
 use crate::{
     index::{Cursor, Unordered as Index},
-    journal::contiguous::{Contiguous, MutableContiguous},
+    journal::contiguous::{Contiguous, ContiguousReader as _, MutableContiguous},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
     UnmerkleizedBitMap,
@@ -151,7 +151,8 @@ where
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
-    let stream = log
+    let reader = log.reader().await;
+    let stream = reader
         .replay(SNAPSHOT_READ_BUFFER_SIZE, *inactivity_floor_loc)
         .await?;
     pin_mut!(stream);

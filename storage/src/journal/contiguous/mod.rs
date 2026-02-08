@@ -30,6 +30,18 @@ pub trait ContiguousReader: Send + Sync {
     ///
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
     fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
+
+    /// Return a stream of all items starting from `start_pos`.
+    ///
+    /// Because the reader holds the lock, validation and stream setup happen
+    /// atomically with respect to `prune()`.
+    fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> impl Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
+    > + Send;
 }
 
 /// Core trait for contiguous journals supporting sequential append operations.
@@ -66,23 +78,6 @@ pub trait Contiguous: Send + Sync {
     fn size(&self) -> impl Future<Output = u64> + Send {
         async { self.bounds().await.end }
     }
-
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's
-    /// stable position in the journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `start_pos` exceeds the journal size or if any storage/decoding
-    /// errors occur during replay.
-    fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> impl std::future::Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error>,
-    > + Send;
 
     /// Read the item at the given position.
     ///

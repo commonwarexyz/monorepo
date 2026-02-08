@@ -203,6 +203,45 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> super::ContiguousReader
 
         self.guard.data.get(section, offset).await
     }
+
+    async fn replay(
+        &self,
+        buffer_size: NonZeroUsize,
+        start_pos: u64,
+    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
+        let items_per_section = self.items_per_section;
+
+        // Validate bounds.
+        if start_pos < self.guard.pruning_boundary {
+            return Err(Error::ItemPruned(start_pos));
+        }
+        if start_pos > self.guard.size {
+            return Err(Error::ItemOutOfRange(start_pos));
+        }
+
+        // Get the starting offset and section. For empty range (start_pos == size),
+        // use a section beyond existing data so data.replay returns empty naturally.
+        let (start_section, start_offset) = if start_pos < self.guard.size {
+            let offset = self.guard.offsets.read(start_pos).await?;
+            let section = position_to_section(start_pos, items_per_section);
+            (section, offset)
+        } else {
+            (u64::MAX, 0)
+        };
+
+        let inner_stream = self
+            .guard
+            .data
+            .replay(buffer_size, start_section, start_offset)
+            .await?;
+
+        // Map the stream to add positions.
+        let stream = inner_stream
+            .zip(stream::iter(start_pos..))
+            .map(|(result, pos)| result.map(|(_section, _offset, _size, item)| (pos, item)));
+
+        Ok(stream)
+    }
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
@@ -540,60 +579,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(pruned)
     }
 
-    /// Return a stream of all items in the journal starting from `start_pos`.
-    ///
-    /// Each item is yielded as a tuple `(position, item)` where position is the item's position in
-    /// the journal.
-    ///
-    /// # Errors
-    ///
-    ///  - [Error::ItemPruned] if any of the requested items are pruned.
-    ///  - [Error::ItemOutOfRange] if `start_pos` exceeds the journal size.
-    pub async fn replay(
-        &self,
-        buffer_size: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let items_per_section = self.items_per_section;
-
-        // Validate inputs and get inner stream.
-        let inner_stream = {
-            let inner = self.inner.read().await;
-
-            // Validate bounds.
-            if start_pos < inner.pruning_boundary {
-                return Err(Error::ItemPruned(start_pos));
-            }
-            if start_pos > inner.size {
-                return Err(Error::ItemOutOfRange(start_pos));
-            }
-
-            // Get the starting offset and section. For empty range (start_pos == size),
-            // use a section beyond existing data so data.replay returns empty naturally.
-            let (start_section, start_offset) = if start_pos < inner.size {
-                let offset = inner.offsets.read(start_pos).await?;
-                let section = position_to_section(start_pos, items_per_section);
-                (section, offset)
-            } else {
-                (u64::MAX, 0)
-            };
-
-            // Return the inner stream.
-            inner
-                .data
-                .replay(buffer_size, start_section, start_offset)
-                .await?
-        };
-
-        // Map the stream to add positions. The data journal yields (section, offset, size, item),
-        // but we need (position, item). Zip with position counter starting from start_pos.
-        let stream = inner_stream
-            .zip(stream::iter(start_pos..))
-            .map(|(result, pos)| result.map(|(_section, _offset, _size, item)| (pos, item)));
-
-        Ok(stream)
-    }
-
     /// Read the item at the given position.
     ///
     /// # Errors
@@ -913,14 +898,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> 
         Self::bounds(self).await
     }
 
-    async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send + '_, Error> {
-        Self::replay(self, buffer, start_pos).await
-    }
-
     async fn read(&self, position: u64) -> Result<Self::Item, Error> {
         Self::read(self, position).await
     }
@@ -1005,7 +982,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::run_contiguous_tests;
+    use crate::journal::contiguous::{tests::run_contiguous_tests, ContiguousReader as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -1163,7 +1140,8 @@ mod tests {
 
             // Test 1: Full replay
             {
-                let stream = journal.replay(NZUsize!(20), 0).await.unwrap();
+                let reader = journal.reader().await;
+                let stream = reader.replay(NZUsize!(20), 0).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 0..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -1175,7 +1153,8 @@ mod tests {
 
             // Test 2: Partial replay from middle of section
             {
-                let stream = journal.replay(NZUsize!(20), 15).await.unwrap();
+                let reader = journal.reader().await;
+                let stream = reader.replay(NZUsize!(20), 15).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 15..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -1187,7 +1166,8 @@ mod tests {
 
             // Test 3: Partial replay from section boundary
             {
-                let stream = journal.replay(NZUsize!(20), 20).await.unwrap();
+                let reader = journal.reader().await;
+                let stream = reader.replay(NZUsize!(20), 20).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -1200,17 +1180,20 @@ mod tests {
             // Test 4: Prune and verify replay from pruned
             journal.prune(20).await.unwrap();
             {
-                let res = journal.replay(NZUsize!(20), 0).await;
+                let reader = journal.reader().await;
+                let res = reader.replay(NZUsize!(20), 0).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
             {
-                let res = journal.replay(NZUsize!(20), 19).await;
+                let reader = journal.reader().await;
+                let res = reader.replay(NZUsize!(20), 19).await;
                 assert!(matches!(res, Err(crate::journal::Error::ItemPruned(_))));
             }
 
             // Test 5: Replay from exactly at pruning boundary after prune
             {
-                let stream = journal.replay(NZUsize!(20), 20).await.unwrap();
+                let reader = journal.reader().await;
+                let stream = reader.replay(NZUsize!(20), 20).await.unwrap();
                 futures::pin_mut!(stream);
                 for i in 20..40u64 {
                     let (pos, item) = stream.next().await.unwrap().unwrap();
@@ -1222,14 +1205,16 @@ mod tests {
 
             // Test 6: Replay from the end
             {
-                let stream = journal.replay(NZUsize!(20), 40).await.unwrap();
+                let reader = journal.reader().await;
+                let stream = reader.replay(NZUsize!(20), 40).await.unwrap();
                 futures::pin_mut!(stream);
                 assert!(stream.next().await.is_none());
             }
 
             // Test 7: Replay beyond the end (should error)
             {
-                let res = journal.replay(NZUsize!(20), 41).await;
+                let reader = journal.reader().await;
+                let res = reader.replay(NZUsize!(20), 41).await;
                 assert!(matches!(
                     res,
                     Err(crate::journal::Error::ItemOutOfRange(41))
@@ -3067,6 +3052,7 @@ mod tests {
 #[cfg(test)]
 mod repro_tests {
     use super::*;
+    use crate::journal::contiguous::ContiguousReader as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -3095,7 +3081,8 @@ mod repro_tests {
             assert_eq!(size, 5);
 
             // Replay from size (should be empty)
-            let stream = journal.replay(NZUsize!(1024), size).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), size).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();

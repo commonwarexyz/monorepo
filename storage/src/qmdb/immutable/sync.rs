@@ -23,7 +23,7 @@ impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
-    V: VariableValue,
+    V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
 {

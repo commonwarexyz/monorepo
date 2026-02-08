@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -472,17 +472,6 @@ where
         self.journal.bounds().await
     }
 
-    async fn replay(
-        &self,
-        buffer: NonZeroUsize,
-        start_pos: u64,
-    ) -> Result<
-        impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + '_,
-        JournalError,
-    > {
-        self.journal.replay(buffer, start_pos).await
-    }
-
     async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
         self.journal.read(position).await
     }
@@ -556,7 +545,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
+        journal::contiguous::{
+            fixed::{Config as JConfig, Journal as ContiguousJournal},
+            ContiguousReader as _,
+        },
         mmr::{
             journaled::{Config as MmrConfig, Mmr},
             Location,
@@ -576,7 +568,7 @@ mod tests {
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
@@ -1640,14 +1632,16 @@ mod tests {
         executor.start(|context| async move {
             // Test empty journal
             let journal = create_empty_journal(context.with_label("empty"), "replay").await;
-            let stream = journal.replay(NZUsize!(10), 0).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(10), 0).await.unwrap();
             futures::pin_mut!(stream);
             assert!(stream.next().await.is_none());
 
             // Test replaying all operations
             let journal =
                 create_journal_with_ops(context.with_label("with_ops"), "replay", 50).await;
-            let stream = journal.replay(NZUsize!(100), 0).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(100), 0).await.unwrap();
             futures::pin_mut!(stream);
 
             for i in 0..50 {
@@ -1666,7 +1660,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "replay_middle", 50).await;
-            let stream = journal.replay(NZUsize!(100), 25).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(100), 25).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut count = 0;
