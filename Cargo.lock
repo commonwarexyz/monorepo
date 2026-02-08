@@ -1005,8 +1005,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
- "governor",
- "rand 0.8.5",
  "thiserror 2.0.17",
  "tokio",
  "tracing",

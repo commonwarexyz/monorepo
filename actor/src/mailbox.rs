@@ -1,9 +1,14 @@
 //! Shared ingress mailbox primitives for actors.
 
-use crate::{Request, Tell};
+use crate::{Ask, Tell};
 use commonware_macros::select;
 use commonware_utils::channel::{mpsc, oneshot};
-use std::future::Future;
+use futures::future::pending;
+use std::{
+    fmt::{self, Debug, Formatter},
+    future::Future,
+    pin::pin,
+};
 use thiserror::Error;
 
 /// An error that can occur when sending a message to an actor.
@@ -12,6 +17,9 @@ pub enum MailboxError {
     /// The underlying channel to the actor was closed.
     #[error("mailbox closed")]
     Closed,
+    /// The bounded channel is full.
+    #[error("mailbox full")]
+    Full,
     /// The actor dropped its response handle.
     #[error("response channel was cancelled")]
     Cancelled,
@@ -35,8 +43,8 @@ impl<I> Clone for Mailbox<I> {
     }
 }
 
-impl<I> std::fmt::Debug for Mailbox<I> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<I> Debug for Mailbox<I> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Mailbox").finish_non_exhaustive()
     }
 }
@@ -62,14 +70,19 @@ impl<I> Mailbox<I> {
 
     /// Try to send a fire-and-forget message without blocking.
     ///
-    /// Returns `Ok(())` if the message was enqueued, or a [`mpsc::error::TrySendError`] if the
+    /// Returns `Ok(())` if the message was enqueued, or a [`MailboxError`] if the
     /// channel is full or closed. This is useful when the caller must not block
     /// (e.g., a router dispatching to many peers).
-    pub fn try_tell<T>(&self, msg: T) -> Result<(), mpsc::error::TrySendError<I>>
+    pub fn try_tell<T>(&self, msg: T) -> Result<(), MailboxError>
     where
         T: Tell<I>,
     {
-        self.tx.try_send(msg.into_ingress())
+        self.tx
+            .try_send(msg.into_ingress())
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => MailboxError::Full,
+                mpsc::error::TrySendError::Closed(_) => MailboxError::Closed,
+            })
     }
 
     /// Send a fire-and-forget message, ignoring closed-mailbox errors.
@@ -85,12 +98,11 @@ impl<I> Mailbox<I> {
     /// Send a request and wait for a response.
     ///
     /// Waits indefinitely unless the actor closes or drops the response channel.
-    pub async fn ask<R>(&mut self, msg: R) -> Result<R::Response, MailboxError>
+    pub async fn ask<A>(&mut self, msg: A) -> Result<A::Response, MailboxError>
     where
-        R: Request<I>,
+        A: Ask<I>,
     {
-        self.ask_timeout(msg, futures::future::pending::<()>())
-            .await
+        self.ask_timeout(msg, pending::<()>()).await
     }
 
     /// Send a request and race the response against `timeout`.
@@ -99,23 +111,23 @@ impl<I> Mailbox<I> {
     /// - [`MailboxError::Closed`] if ingress cannot be delivered
     /// - [`MailboxError::Timeout`] if `timeout` resolves first
     /// - [`MailboxError::Cancelled`] if actor drops the response sender
-    pub async fn ask_timeout<R, T>(
+    pub async fn ask_timeout<A, T>(
         &mut self,
-        msg: R,
+        msg: A,
         timeout: T,
-    ) -> Result<R::Response, MailboxError>
+    ) -> Result<A::Response, MailboxError>
     where
-        R: Request<I>,
+        A: Ask<I>,
         T: Future<Output = ()> + Send,
     {
-        let (tx, rx) = oneshot::channel::<R::Response>();
+        let (tx, rx) = oneshot::channel::<A::Response>();
         self.tx
             .send(msg.into_ingress(tx))
             .await
             .map_err(|_| MailboxError::Closed)?;
 
-        let mut timeout = std::pin::pin!(timeout);
-        let mut rx = std::pin::pin!(rx);
+        let mut timeout = pin!(timeout);
+        let mut rx = pin!(rx);
         select! {
             _ = &mut timeout => Err(MailboxError::Timeout),
             response = &mut rx => response.map_err(|_| MailboxError::Cancelled),
@@ -144,8 +156,8 @@ impl<I> Clone for UnboundedMailbox<I> {
     }
 }
 
-impl<I> std::fmt::Debug for UnboundedMailbox<I> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<I> Debug for UnboundedMailbox<I> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnboundedMailbox").finish_non_exhaustive()
     }
 }
@@ -168,6 +180,19 @@ impl<I> UnboundedMailbox<I> {
             .map_err(|_| MailboxError::Closed)
     }
 
+    /// Try to send a fire-and-forget message without blocking.
+    ///
+    /// For unbounded mailboxes this is equivalent to [`UnboundedMailbox::tell`],
+    /// but is provided for API symmetry with [`Mailbox::try_tell`].
+    pub fn try_tell<T>(&self, msg: T) -> Result<(), MailboxError>
+    where
+        T: Tell<I>,
+    {
+        self.tx
+            .send(msg.into_ingress())
+            .map_err(|_| MailboxError::Closed)
+    }
+
     /// Send a fire-and-forget message, ignoring closed-mailbox errors.
     ///
     /// Returns `true` when ingress was delivered and `false` if the mailbox was closed.
@@ -181,12 +206,11 @@ impl<I> UnboundedMailbox<I> {
     /// Send a request and wait for a response.
     ///
     /// Waits indefinitely unless the actor closes or drops the response channel.
-    pub async fn ask<R>(&mut self, msg: R) -> Result<R::Response, MailboxError>
+    pub async fn ask<A>(&mut self, msg: A) -> Result<A::Response, MailboxError>
     where
-        R: Request<I>,
+        A: Ask<I>,
     {
-        self.ask_timeout(msg, futures::future::pending::<()>())
-            .await
+        self.ask_timeout(msg, pending::<()>()).await
     }
 
     /// Send a request and race the response against `timeout`.
@@ -195,22 +219,22 @@ impl<I> UnboundedMailbox<I> {
     /// - [`MailboxError::Closed`] if ingress cannot be delivered
     /// - [`MailboxError::Timeout`] if `timeout` resolves first
     /// - [`MailboxError::Cancelled`] if actor drops the response sender
-    pub async fn ask_timeout<R, T>(
+    pub async fn ask_timeout<A, T>(
         &mut self,
-        msg: R,
+        msg: A,
         timeout: T,
-    ) -> Result<R::Response, MailboxError>
+    ) -> Result<A::Response, MailboxError>
     where
-        R: Request<I>,
+        A: Ask<I>,
         T: Future<Output = ()> + Send,
     {
-        let (tx, rx) = oneshot::channel::<R::Response>();
+        let (tx, rx) = oneshot::channel::<A::Response>();
         self.tx
             .send(msg.into_ingress(tx))
             .map_err(|_| MailboxError::Closed)?;
 
-        let mut timeout = std::pin::pin!(timeout);
-        let mut rx = std::pin::pin!(rx);
+        let mut timeout = pin!(timeout);
+        let mut rx = pin!(rx);
         select! {
             _ = &mut timeout => Err(MailboxError::Timeout),
             response = &mut rx => response.map_err(|_| MailboxError::Cancelled),
@@ -241,7 +265,7 @@ mod tests {
     }
 
     struct AskMsg;
-    impl Request<TestIngress> for AskMsg {
+    impl Ask<TestIngress> for AskMsg {
         type Response = u64;
 
         fn into_ingress(self, response: oneshot::Sender<Self::Response>) -> TestIngress {

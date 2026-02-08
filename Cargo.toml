@@ -86,9 +86,9 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-broadcast = { version = "2026.2.0", path = "broadcast" }
 commonware-actor = { version = "2026.2.0", path = "actor" }
 commonware-actor-macros = { version = "2026.2.0", path = "actor/macros" }
+commonware-broadcast = { version = "2026.2.0", path = "broadcast" }
 commonware-codec = { version = "2026.2.0", path = "codec", default-features = false }
 commonware-coding = { version = "2026.2.0", path = "coding" }
 commonware-collector = { version = "2026.2.0", path = "collector" }
