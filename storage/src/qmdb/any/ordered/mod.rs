@@ -646,25 +646,26 @@ where
         let mut deleted = Vec::new();
         let mut updated = BTreeMap::new();
         for (op, old_loc) in (results.into_iter()).zip(locations) {
-            let Operation::Update(key_data) = op else {
+            let Operation::Update(Update { key, value, next_key }) = op else {
                 unreachable!("updates should have key data");
             };
-            let key = key_data.key.clone();
-            possible_previous.insert(key.clone(), (key_data.value, old_loc));
-            possible_next.insert(key_data.next_key);
+            possible_next.insert(next_key);
 
-            let Some(update) = mutations.remove(&key) else {
+            let Some(mutation) = mutations.remove(&key) else {
                 // Due to translated key collisions, we may look up keys that aren't in the
                 // mutations set. Note that these could still end up next or previous keys to other
                 // keys in the batch, so they are still added to these sets above.
+                possible_previous.insert(key, (value, old_loc));
                 continue;
             };
 
-            if let Some(value) = update {
+            if let Some(new_value) = mutation {
                 // This is an update of an existing key.
-                updated.insert(key.clone(), (value, old_loc));
+                updated.insert(key.clone(), (new_value, old_loc));
+                possible_previous.insert(key, (value, old_loc));
             } else {
                 // This is a delete of an existing key.
+                possible_previous.insert(key.clone(), (value, old_loc));
                 deleted.push(key.clone());
 
                 // Update the log and snapshot.
