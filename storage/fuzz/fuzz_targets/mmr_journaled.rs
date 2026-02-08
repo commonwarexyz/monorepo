@@ -247,8 +247,8 @@ fn fuzz(input: FuzzInput) {
                             Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
                         let start_pos = Position::try_from(range.start).unwrap();
 
-                        if start_loc < mmr.leaves().await
-                            && end_loc < mmr.leaves().await
+                        if start_loc < leaves_count
+                            && end_loc < leaves_count
                             && mmr.bounds().await.contains(&start_pos)
                         {
                             if let Ok(proof) = mmr.range_proof(range.clone()).await {
@@ -281,8 +281,8 @@ fn fuzz(input: FuzzInput) {
                     if leaves_count > 0 {
                         // Ensure the size represents a valid MMR structure
                         let start_pos = Position::from(start_loc);
-                        if start_loc < mmr.leaves().await
-                            && end_loc < mmr.leaves().await
+                        if start_loc < leaves_count
+                            && end_loc < leaves_count
                             && mmr.bounds().await.contains(&start_pos)
                         {
                             let range =
