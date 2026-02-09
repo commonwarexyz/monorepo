@@ -459,7 +459,7 @@ where
 impl<E, C, H, S> Contiguous for Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: EncodeShared>,
+    C: Contiguous<Item: EncodeShared>,
     H: Hasher,
     S: State<DigestOf<H>> + Send + Sync,
 {

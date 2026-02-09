@@ -103,6 +103,17 @@ impl<const N: usize> Prunable<N> {
         self.pruned_chunks
     }
 
+    /// Return the number of complete (fully filled) chunks in the bitmap, accounting
+    /// for pruning. A chunk is complete when all CHUNK_SIZE_BITS bits have been written.
+    #[inline]
+    pub fn complete_chunks(&self) -> usize {
+        self.pruned_chunks
+            + self
+                .bitmap
+                .chunks_len()
+                .saturating_sub(if self.is_chunk_aligned() { 0 } else { 1 })
+    }
+
     /// Return the number of pruned bits.
     #[inline]
     pub const fn pruned_bits(&self) -> u64 {

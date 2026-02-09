@@ -1,11 +1,136 @@
 //! A _Current_ authenticated database provides succinct proofs of _any_ value ever associated with
-//! a key, and also whether that value is the _current_ value associated with it. The
-//! implementations are based on a [crate::qmdb::any] authenticated database combined with an
-//! authenticated [crate::bitmap::MerkleizedBitMap] over the activity status of each operation.
-//! The two structures are "grafted" together to minimize proof sizes.
+//! a key, and also whether that value is the _current_ value associated with it.
+//!
+//! # Motivation
+//!
+//! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some
+//! point, but it cannot prove that the value is still current -- some later operation may have
+//! updated or deleted it. A Current database adds exactly this capability by maintaining a bitmap
+//! that tracks which operations are _active_ (i.e. represent the current state of their key).
+//!
+//! To make this useful, a verifier needs both the operation and its activity status authenticated
+//! under a single root. We achieve this by _grafting_ bitmap chunks onto the operations MMR.
+//!
+//! # Data structures
+//!
+//! A Current database ([db::Db]) wraps an Any database and adds:
+//!
+//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if
+//!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
+//!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
+//!
+//! - **Grafted digest cache** (`BTreeMap<Position, Digest>`): A cache of digests at and above the
+//!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
+//!   into a single authenticated structure (see below).
+//!
+//! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed
+//!   to restore the grafted digest cache after pruning old bitmap chunks.
+//!
+//! # Grafting: combining the activity status bitmap and the ops MMR
+//!
+//! ## The problem
+//!
+//! Naively authenticating the bitmap and ops MMR as two independent Merkle structures would
+//! require two separate proofs per operation -- one for the operation's value, one for its
+//! activity status. This doubles proof sizes.
+//!
+//! ## The solution
+//!
+//! We combine ("graft") the two structures at a specific height in the ops MMR called the
+//! _grafting height_. The grafting height `h = log2(N * 8)` is chosen so that each subtree of
+//! height `h` in the ops MMR covers exactly one bitmap chunk's worth of operations.
+//!
+//! At the grafting height, instead of using the ops MMR's own subtree root, we replace it with a
+//! _grafted leaf_ digest that incorporates both the bitmap chunk and the ops subtree root:
+//!
+//! ```text
+//! grafted_leaf = hash(bitmap_chunk || ops_subtree_root)
+//! ```
+//!
+//! Above the grafting height, internal nodes use standard MMR hashing over the grafted leaves.
+//! Below the grafting height, the ops MMR is unchanged.
+//!
+//! ## Example
+//!
+//! Consider 8 operations with `N = 1` (8-bit chunks, so `h = log2(8) = 3`). But to illustrate
+//! the structure more clearly, let's use a smaller example: 8 operations with chunk size 4 bits
+//! (`h = 2`), yielding 2 complete bitmap chunks:
+//!
+//! ```text
+//! Ops MMR positions (8 leaves):
+//!
+//!   Height
+//!     3              14                    <-- peak (standard MMR hash of grafted children)
+//!                  /    \
+//!                 /      \
+//!                /        \
+//!     2  [G]    6          13    [G]       <-- grafting height: grafted leaves
+//!             /   \      /    \
+//!     1      2     5    9     12           <-- below grafting height: pure ops MMR
+//!           / \   / \  / \   /  \
+//!     0    0   1 3   4 7  8 10  11
+//!          ^           ^
+//!          |           |
+//!      ops 0-3     ops 4-7
+//!      chunk 0     chunk 1
+//! ```
+//!
+//! Positions 6 and 13 are at the grafting height. Their digests are:
+//! - `pos 6: hash(chunk_0 || ops_subtree_root(pos 6))`
+//! - `pos 13: hash(chunk_1 || ops_subtree_root(pos 13))`
+//!
+//! Position 14 (above grafting height) is a standard MMR internal node:
+//! - `pos 14: hash(14 || digest(pos 6) || digest(pos 13))`
+//!
+//! The grafted digest cache stores positions 6, 13, and 14. The ops MMR stores everything below
+//! (positions 0-5 and 7-12). Together they form a single virtual MMR whose root authenticates
+//! both the operations and their activity status.
+//!
+//! ## Proof generation and verification
+//!
+//! To prove that operation _i_ is active, we provide:
+//! 1. An MMR inclusion proof for the operation's leaf, using the virtual (grafted) storage.
+//! 2. The bitmap chunk containing bit _i_.
+//!
+//! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
+//! height, it uses standard MMR hashing. At the grafting height, it detects the boundary and
+//! reconstructs the grafted leaf by hashing `chunk || ops_subtree_root`. Above the grafting
+//! height, it resumes standard MMR hashing. If the reconstructed root matches the expected root
+//! and bit _i_ is set in the chunk, the operation is proven active.
+//!
+//! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
+//! proof verification at the grafting boundary.
+//!
+//! ## Partial chunks
+//!
+//! Operations arrive continuously, so the last bitmap chunk is usually incomplete (fewer than
+//! `N * 8` bits). An incomplete chunk has no grafted leaf in the cache because there is no
+//! corresponding complete subtree in the ops MMR. To still authenticate these bits, the root is
+//! computed as:
+//!
+//! ```text
+//! root = hash(mmr_root || next_bit || hash(partial_chunk))
+//! ```
+//!
+//! where `next_bit` is the index of the next unset position in the partial chunk and `mmr_root`
+//! is the root over the grafted MMR (which covers only complete chunks). When all chunks are
+//! complete, `root = mmr_root` with no additional hashing.
+//!
+//! ## Incremental updates
+//!
+//! When operations are added or bits change (e.g. an operation becomes inactive during floor
+//! raising), only the affected chunks are marked "dirty". During merkleization
+//! (`into_merkleized`), only dirty grafted leaves are recomputed and their ancestors are
+//! propagated upward through the cache. This avoids recomputing the entire grafted tree.
+//!
+//! ## Pruning
+//!
+//! Old bitmap chunks (below the inactivity floor) can be pruned. Before pruning, the grafted
+//! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
+//! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
+//! allowing the grafted tree to be rebuilt without the pruned chunks.
 
 use crate::{
-    bitmap::MerkleizedBitMap,
     index::Unordered as UnorderedIndex,
     journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
     mmr::{Location, StandardHasher},
@@ -24,10 +149,11 @@ use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
+mod grafting;
 pub mod ordered;
 pub mod proof;
 pub mod unordered;
@@ -181,20 +307,20 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let thread_pool = config.thread_pool.clone();
     let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
-    let mut hasher = StandardHasher::<H>::new();
-    let mut status = MerkleizedBitMap::init(
-        context.with_label("bitmap"),
+    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
+    let (bitmap_metadata, pruned_chunks, pinned_nodes) = db::init_bitmap_metadata::<E, H::Digest>(
+        context.with_label("bitmap_metadata"),
         &bitmap_metadata_partition,
-        thread_pool,
-        &mut hasher,
     )
-    .await?
-    .into_dirty();
+    .await?;
 
-    // Initialize the anydb with a callback that initializes the status bitmap.
+    // Initialize the activity status bitmap.
+    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+        .map_err(|_| crate::mmr::Error::DataCorrupted("pruned chunks overflow"))?;
+
+    // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new_unchecked(status.len());
     let any = any::init_fixed(
         context.with_label("any"),
@@ -210,14 +336,23 @@ where
     )
     .await?;
 
-    let status = db::merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+    // Build the grafted digests cache from the bitmap chunks and ops MMR.
+    let mut hasher = StandardHasher::<H>::new();
+    let (grafted_digests, grafted_leaf_count) =
+        db::build_grafted_digests::<H, N>(&mut hasher, &status, &pinned_nodes, &any.log.mmr)
+            .await?;
 
-    // Compute and cache the root
-    let root = db::root(&mut hasher, &status, &any.log.mmr).await?;
+    // Compute and cache the root.
+    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr, grafting::height::<N>());
+    let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
 
     Ok(db::Db {
         any,
         status,
+        grafted_digests,
+        grafted_leaf_count,
+
+        bitmap_metadata,
         state: db::Merkleized { root },
     })
 }
@@ -256,20 +391,20 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let thread_pool = config.thread_pool.clone();
     let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
 
-    let mut hasher = StandardHasher::<H>::new();
-    let mut status = MerkleizedBitMap::init(
-        context.with_label("bitmap"),
+    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
+    let (bitmap_metadata, pruned_chunks, pinned_nodes) = db::init_bitmap_metadata::<E, H::Digest>(
+        context.with_label("bitmap_metadata"),
         &bitmap_metadata_partition,
-        thread_pool,
-        &mut hasher,
     )
-    .await?
-    .into_dirty();
+    .await?;
 
-    // Initialize the anydb with a callback that initializes the status bitmap.
+    // Initialize the activity status bitmap.
+    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+        .map_err(|_| crate::mmr::Error::DataCorrupted("pruned chunks overflow"))?;
+
+    // Initialize the anydb with a callback that populates the activity status bitmap.
     let last_known_inactivity_floor = Location::new_unchecked(status.len());
     let any = any::init_variable(
         context.with_label("any"),
@@ -285,14 +420,22 @@ where
     )
     .await?;
 
-    let status = db::merkleize_grafted_bitmap(&mut hasher, status, &any.log.mmr).await?;
+    // Build the grafted digests cache from the bitmap and ops MMR.
+    let mut hasher = StandardHasher::<H>::new();
+    let (grafted_digests, grafted_leaf_count) =
+        db::build_grafted_digests::<H, N>(&mut hasher, &status, &pinned_nodes, &any.log.mmr)
+            .await?;
 
-    // Compute and cache the root
-    let root = db::root(&mut hasher, &status, &any.log.mmr).await?;
+    // Compute and cache the root.
+    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr, grafting::height::<N>());
+    let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
 
     Ok(db::Db {
         any,
         status,
+        grafted_digests,
+        grafted_leaf_count,
+        bitmap_metadata,
         state: db::Merkleized { root },
     })
 }

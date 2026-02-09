@@ -79,7 +79,6 @@ pub(crate) mod conformance;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod grafting;
         pub mod journaled;
         pub mod storage;
         pub mod verification;

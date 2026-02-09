@@ -55,11 +55,9 @@ use crate::{
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
-    UnmerkleizedBitMap,
 };
-use commonware_cryptography::{Digest, DigestOf};
-use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::NZUsize;
+use commonware_cryptography::DigestOf;
+use commonware_utils::{bitmap::Prunable as BitMap, NZUsize};
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
@@ -346,7 +344,7 @@ where
     /// Expects there is at least one active operation above the inactivity floor, and panics
     /// otherwise.
     // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): callers of this method should
-    // migrate to using [Self::raise_floor_with_bitmap] instead.
+    // migrate to using [Self::raise_floor_with_callback] instead.
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
         I: Index<Value = Location>,
@@ -367,20 +365,17 @@ where
     }
 
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor. The status bitmap is updated to reflect any moved
-    /// operations.
+    /// operation above the inactivity floor. Calls `on_move(old_loc, new_loc)` for each moved
+    /// operation so the caller can update its own bookkeeping.
     ///
     /// # Panics
     ///
     /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<
-        E: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
+    pub(crate) async fn raise_floor_with_callback<const N: usize>(
         &mut self,
-        status: &mut UnmerkleizedBitMap<E, D, N>,
+        status: &mut BitMap<N>,
         mut inactivity_floor_loc: Location,
+        on_move: &mut impl FnMut(Location, Location),
     ) -> Result<Location, Error>
     where
         I: Index<Value = Location>,
@@ -397,7 +392,9 @@ where
             "op should be active based on status bitmap"
         );
         status.set_bit(*inactivity_floor_loc, false);
+        let new_loc = Location::new_unchecked(status.len());
         status.push(true);
+        on_move(inactivity_floor_loc, new_loc);
 
         Ok(inactivity_floor_loc + 1)
     }

@@ -122,7 +122,6 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        bitmap::MerkleizedBitMap,
         kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, StandardHasher},
         qmdb::{
@@ -144,7 +143,7 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::NZU64;
+    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable state).
@@ -294,10 +293,8 @@ pub mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
-                    *proof_inactive.proof.loc
-                )
+                BitMap::<32>::unpruned_chunk(*active_loc),
+                BitMap::<32>::unpruned_chunk(*proof_inactive.proof.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;

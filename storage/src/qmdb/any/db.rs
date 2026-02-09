@@ -19,12 +19,12 @@ use crate::{
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    Persistable, UnmerkleizedBitMap,
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
@@ -406,14 +406,12 @@ where
     }
 
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<
-        F: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
+    /// operation above the inactivity floor. Calls `on_move(old_loc, new_loc)` for each moved
+    /// operation so the caller can update its own bookkeeping.
+    pub(crate) async fn raise_floor_with_callback<const N: usize>(
         &mut self,
-        status: &mut UnmerkleizedBitMap<F, D, N>,
+        status: &mut BitMap<N>,
+        on_move: &mut impl FnMut(Location, Location),
     ) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.log.bounds().end;
@@ -424,7 +422,7 @@ where
                 let loc = self.inactivity_floor_loc;
                 self.inactivity_floor_loc = self
                     .as_floor_helper()
-                    .raise_floor_with_bitmap(status, loc)
+                    .raise_floor_with_callback(status, loc, on_move)
                     .await?;
             }
         }
