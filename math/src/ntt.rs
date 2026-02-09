@@ -1,23 +1,15 @@
 use crate::algebra::{Additive, FieldNTT, Ring};
-#[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
-use commonware_utils::bitmap::{BitMap, DEFAULT_CHUNK_SIZE};
-use core::ops::{Index, IndexMut};
+use commonware_utils::bitmap::BitMap;
+use core::{
+    num::NonZeroU32,
+    ops::{Index, IndexMut},
+};
 use rand_core::CryptoRngCore;
-use core::num::NonZeroU32;
 
-/// Log2 of the base polynomial size for vanishing polynomial computation.
-///
-/// Instead of building the vanishing polynomial from individual linear factors
-/// using the full merge tree, base polynomials of size `2^LG_VANISHING_BASE`
-/// are computed naively by multiplying (X - root) factors one at a time.
-/// This replaces the bottom levels of the merge tree with a simpler, faster
-/// direct computation.
-///
-/// Higher values reduce merge tree overhead but increase the per-chunk cost
-/// (quadratic in the base size). Values around 4-6 work well in practice.
-const LG_VANISHING_BASE: u32 = 12;
+/// Benchmarked to be optimal.
+const LG_VANISHING_BASE: u32 = 8;
+const _: () = assert!(LG_VANISHING_BASE >= 1);
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
@@ -25,6 +17,16 @@ const LG_VANISHING_BASE: u32 = 12;
 fn reverse_bits(bit_width: u32, i: u64) -> u64 {
     assert!(bit_width <= 64, "bit_width must be <= 64");
     i.wrapping_shl(64 - bit_width).reverse_bits()
+}
+
+fn reverse_slice<T>(bit_width: u32, out: &mut [T]) {
+    assert_eq!(out.len(), 1 << bit_width);
+    for i in 0..out.len() {
+        let j = reverse_bits(bit_width, i as u64) as usize;
+        if i < j {
+            out.swap(i, j);
+        }
+    }
 }
 
 /// Calculate an NTT, or an inverse NTT (with FORWARD=false), in place.
@@ -153,20 +155,408 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
 /// A single column of some larger data.
 ///
 /// This allows us to easily do NTTs over partial segments of some bigger matrix.
-struct Column<'a, F> {
-    data: &'a mut [F],
+struct Columns<'a, const N: usize, F> {
+    data: [&'a mut [F]; N],
 }
 
-impl<'a, F> Index<(usize, usize)> for Column<'a, F> {
+impl<'a, const N: usize, F> Index<(usize, usize)> for Columns<'a, N, F> {
     type Output = F;
 
-    fn index(&self, (i, _): (usize, usize)) -> &Self::Output {
-        &self.data[i]
+    fn index(&self, (i, j): (usize, usize)) -> &Self::Output {
+        &self.data[j][i]
     }
 }
-impl<'a, F> IndexMut<(usize, usize)> for Column<'a, F> {
-    fn index_mut(&mut self, (i, _): (usize, usize)) -> &mut Self::Output {
-        &mut self.data[i]
+
+impl<'a, const N: usize, F> IndexMut<(usize, usize)> for Columns<'a, N, F> {
+    fn index_mut(&mut self, (i, j): (usize, usize)) -> &mut Self::Output {
+        &mut self.data[j][i]
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct VanishingPoints {
+    lg_size: u32,
+    bits: BitMap,
+}
+
+impl VanishingPoints {
+    pub fn new(lg_size: u32) -> Self {
+        Self {
+            lg_size,
+            bits: BitMap::zeroes(1 << lg_size),
+        }
+    }
+
+    pub fn all_non_vanishing(lg_size: u32) -> Self {
+        Self {
+            lg_size,
+            bits: BitMap::ones(1 << lg_size),
+        }
+    }
+
+    pub const fn lg_size(&self) -> u32 {
+        self.lg_size
+    }
+
+    fn set(&mut self, index: u64, value: bool) {
+        self.bits.set(reverse_bits(self.lg_size, index), value);
+    }
+
+    pub fn set_non_vanishing(&mut self, index: u64) {
+        self.set(index, true);
+    }
+
+    fn chunk_vanishes_everywhere(&self, lg_chunk_size: u32, index: u64) -> bool {
+        assert!(lg_chunk_size <= self.lg_size);
+        let start = index << lg_chunk_size;
+        self.bits.is_unset(start..start + (1 << lg_chunk_size))
+    }
+
+    fn get_chunk(&self, lg_chunk_size: u32, index: u64) -> impl Iterator<Item = bool> + '_ {
+        (index << lg_chunk_size..(index + 1) << lg_chunk_size).map(|i| self.bits.get(i))
+    }
+
+    pub fn count_non_vanishing(&self) -> u64 {
+        self.bits.count_ones()
+    }
+
+    pub fn get(&self, index: u64) -> bool {
+        self.bits.get(reverse_bits(self.lg_size, index))
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn iter_bits_in_order(&self) -> impl Iterator<Item = bool> + '_ {
+        (0..(1u64 << self.lg_size)).map(|i| self.get(i))
+    }
+}
+
+#[derive(Debug)]
+struct EvaluationColumn<F> {
+    evaluations: Vec<F>,
+}
+
+impl<F: FieldNTT> EvaluationColumn<F> {
+    pub fn vanishing(points: &VanishingPoints) -> (F, Self) {
+        #[derive(Clone, Copy)]
+        enum Where {
+            /// Vanishes at none of the roots; i.e. is f(X) = 1.
+            Nowhere,
+            /// Vanishes at at least one of the roots.
+            Somewhere,
+            /// Vanishes at every single one of the roots.
+            Everywhere,
+        }
+
+        use Where::*;
+
+        let lg_len = points.lg_size();
+        let len = 1usize << lg_len;
+        let mut out = vec![F::zero(); len];
+        // For small inputs, one chunk might more than cover it all.
+        let lg_chunk_size = LG_VANISHING_BASE.min(lg_len);
+        let mut at_zero = F::one();
+
+        // Populate out with polynomials up to a low degree.
+        // We also get a vector with the status of each polymomial, letting
+        // us accelerate the merging step.
+        let mut vanishes = {
+            let chunk_size = 1usize << lg_chunk_size;
+            // The negation of each possible root vanishing polynomials can have.
+            // We have the roots in reverse bit order.
+            let minus_roots = {
+                // We can panic without worry here, because we require a smaller
+                // root of unity to exist elsewhere.
+                let w = u8::try_from(lg_chunk_size)
+                    .ok()
+                    .and_then(|s| F::root_of_unity(s))
+                    .expect("sub-root of unity should exist");
+                // The powers of w we'll use as roots, pre-negated.
+                let mut out: Vec<_> = (0..)
+                    .scan(F::one(), |state, _| {
+                        let out = -state.clone();
+                        *state *= &w;
+                        Some(out)
+                    })
+                    .take(chunk_size)
+                    .collect();
+                // Make sure the order is what the rest of this routine expects.
+                reverse_slice(lg_chunk_size, out.as_mut_slice());
+                out
+            };
+            let mut negate_at_zero = false;
+            let vanishing = out
+                .chunks_exact_mut(chunk_size)
+                .enumerate()
+                .map(|(i, poly)| {
+                    let i_u64 = i as u64;
+                    if points.chunk_vanishes_everywhere(lg_chunk_size, i_u64) {
+                        poly[0] = -F::one();
+                        negate_at_zero ^= true;
+                        return Where::Everywhere;
+                    }
+                    poly[0] = F::one();
+                    let mut coeffs = 1;
+                    for (b_j, minus_root) in points
+                        .get_chunk(lg_chunk_size, i_u64)
+                        .zip(minus_roots.iter())
+                    {
+                        if b_j {
+                            continue;
+                        }
+                        poly[coeffs] = F::one();
+                        for k in (1..coeffs).rev() {
+                            let (chunk_head, chunk_tail) = poly.split_at_mut(k);
+                            chunk_tail[0] *= minus_root;
+                            chunk_tail[0] += &chunk_head[k - 1];
+                        }
+                        poly[0] *= minus_root;
+                        coeffs += 1;
+                    }
+                    if coeffs > 1 {
+                        reverse_slice(lg_chunk_size, poly);
+                        at_zero *= &poly[0];
+                        Where::Somewhere
+                    } else {
+                        Where::Nowhere
+                    }
+                })
+                .collect::<Vec<_>>();
+            if negate_at_zero {
+                at_zero = -at_zero.clone();
+            }
+            vanishing
+        };
+        // Avoid doing any of the subsequent work if we've already covered this case.
+        if lg_chunk_size >= lg_len {
+            // We do, however, need to turn the coefficients into evaluations.
+            return (at_zero, PolynomialColumn { coefficients: out }.evaluate());
+        }
+        let w_invs = {
+            // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
+            // making that left-hand term the inverse of w.
+            let mut w_inv = F::root_of_unity(lg_len as u8)
+                .expect("too many rows to create vanishing polynomial")
+                .exp(&[(1 << lg_len) - 1]);
+            let mut out = Vec::with_capacity((lg_len - lg_chunk_size) as usize);
+            for _ in lg_chunk_size..lg_len {
+                out.push(w_inv.clone());
+                w_inv = w_inv.clone() * &w_inv;
+            }
+            out.reverse();
+            out
+        };
+        let mut lg_chunk_size = lg_chunk_size;
+        let mut scratch = Vec::<F>::with_capacity(len);
+        let mut coeff_shifts = Vec::with_capacity(1 << lg_chunk_size);
+        for w_inv in w_invs.into_iter() {
+            let chunk_size = 1 << lg_chunk_size;
+            // Closure to shift coefficients by the current power.
+            // This lets us reuse the computation of the powers.
+            let mut shift_coeffs = |coeffs: &mut [F]| {
+                if coeff_shifts.len() != chunk_size {
+                    coeff_shifts.clear();
+                    let mut acc = F::one();
+                    for _ in 0..chunk_size {
+                        coeff_shifts.push(acc.clone());
+                        acc *= &w_inv;
+                    }
+                }
+                for (i, coeff_i) in coeffs.iter_mut().enumerate() {
+                    *coeff_i *= &coeff_shifts[reverse_bits(lg_chunk_size, i as u64) as usize];
+                }
+            };
+            let next_lg_chunk_size = lg_chunk_size + 1;
+            let next_chunk_size = 1 << next_lg_chunk_size;
+            for (i, chunk) in out.chunks_exact_mut(1 << next_lg_chunk_size).enumerate() {
+                let (left, right) = chunk.split_at_mut(1 << lg_chunk_size);
+                let (vanishes_l, vanishes_r) = (vanishes[2 * i], vanishes[2 * i + 1]);
+                let mut evaluated = false;
+                vanishes[i] = match (vanishes_l, vanishes_r) {
+                    (Nowhere, Nowhere) => {
+                        // Both polynomials consist of 1 0 0 0 ..., and we
+                        // want the final result to be that, just with more zeroes,
+                        // so we need to clear the 1 value on the right side.
+                        right[0] = F::zero();
+                        Nowhere
+                    }
+                    (Nowhere, Somewhere) => {
+                        // Clear the one value on the left.
+                        left[0] = F::zero();
+                        // Adjust the roots on the right.
+                        shift_coeffs(right);
+                        // Make it take all of the left space.
+                        for i in 0..chunk_size {
+                            chunk.swap(chunk_size + i, 2 * i);
+                        }
+                        Somewhere
+                    }
+                    (Nowhere, Everywhere) => {
+                        left[0] = -F::one();
+                        left[1] = -F::one();
+                        right[0] = F::zero();
+                        Somewhere
+                    }
+                    // These two cases mirror the two above.
+                    (Somewhere, Nowhere) => {
+                        // Clear the one on the right side.
+                        right[0] = F::zero();
+                        // Make it take all of the right space.
+                        // We can skip moving index 0.
+                        for i in (1..chunk_size).rev() {
+                            chunk.swap(i, 2 * i);
+                        }
+                        Somewhere
+                    }
+                    (Everywhere, Nowhere) => {
+                        right[0] = F::zero();
+                        left[0] = -F::one();
+                        left[1] = F::one();
+                        Somewhere
+                    }
+                    (Somewhere, Everywhere) => {
+                        // We need to make the left side occupy the whole space.
+                        // Shifting by one index has the effect of multiplying
+                        // the polynomial by X^(chunk_size), which is what we want.
+                        for i in (0..chunk_size).rev() {
+                            chunk.swap(i, 2 * i + 1);
+                            chunk[2 * i + 1] = -chunk[2 * i + 1].clone();
+                            chunk[2 * i] = chunk[2 * i + 1].clone();
+                        }
+                        Somewhere
+                    }
+                    (Everywhere, Somewhere) => {
+                        // Adjust the roots on the right.
+                        shift_coeffs(right);
+                        // Like above, but moving the right side.
+                        for i in 0..chunk_size {
+                            chunk.swap(chunk_size + i, 2 * i + 1);
+                            chunk[2 * i] = -chunk[2 * i + 1].clone();
+                        }
+                        Somewhere
+                    }
+                    // We have nothing to do in this case
+                    (Everywhere, Everywhere) => {
+                        right[0] = F::zero();
+                        at_zero = -at_zero.clone();
+                        Everywhere
+                    }
+                    // In this case, we can assume nothing, and have to do
+                    // the full logic for actually multiplying the polynomials.
+                    (Somewhere, Somewhere) => {
+                        // Adjust the roots on the right.
+                        shift_coeffs(right);
+                        // Populate the scratch buffer with the right side.
+                        scratch.clear();
+                        scratch.resize(next_chunk_size, F::zero());
+                        for i in 0..chunk_size {
+                            std::mem::swap(&mut right[i], &mut scratch[2 * i]);
+                        }
+                        // We can skip moving index 0.
+                        for i in (1..chunk_size).rev() {
+                            chunk.swap(i, 2 * i);
+                        }
+                        // Turn the polynomials into evaluations.
+                        ntt::<true, _, _>(
+                            next_chunk_size,
+                            2,
+                            &mut Columns {
+                                data: [chunk, scratch.as_mut_slice()],
+                            },
+                        );
+                        // Multiply them, into the chunk.
+                        for (l, r) in chunk.iter_mut().zip(scratch.iter_mut()) {
+                            *l *= r;
+                        }
+                        evaluated = true;
+                        Somewhere
+                    }
+                };
+                // If this isn't the last iteration, make sure to turn back into coefficients.
+                let should_be_evaluated = next_chunk_size >= len;
+                if should_be_evaluated != evaluated {
+                    if evaluated {
+                        ntt::<false, _, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
+                    } else {
+                        ntt::<true, _, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
+                    }
+                }
+                if next_chunk_size == len {}
+            }
+            lg_chunk_size = next_lg_chunk_size;
+        }
+        // We do, however, need to turn the coefficients into evaluations.
+        (at_zero, Self { evaluations: out })
+    }
+
+    pub fn interpolate(self) -> PolynomialColumn<F> {
+        let mut data = self.evaluations;
+        ntt::<false, _, _>(
+            data.len(),
+            1,
+            &mut Columns {
+                data: [data.as_mut_slice()],
+            },
+        );
+        PolynomialColumn { coefficients: data }
+    }
+}
+
+#[derive(Debug)]
+struct PolynomialColumn<F> {
+    coefficients: Vec<F>,
+}
+
+impl<F: FieldNTT> PolynomialColumn<F> {
+    pub fn evaluate(self) -> EvaluationColumn<F> {
+        let mut data = self.coefficients;
+        ntt::<true, _, _>(
+            data.len(),
+            1,
+            &mut Columns {
+                data: [data.as_mut_slice()],
+            },
+        );
+        EvaluationColumn { evaluations: data }
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn evaluate_one(&self, point: F) -> F {
+        let mut out = F::zero();
+        let rows = self.coefficients.len();
+        let lg_rows = rows.ilog2();
+        for i in (0..rows).rev() {
+            out = out * &point + &self.coefficients[reverse_bits(lg_rows, i as u64) as usize];
+        }
+        out
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn degree(&self) -> usize {
+        let rows = self.coefficients.len();
+        let lg_rows = rows.ilog2();
+        for i in (0..rows).rev() {
+            if self.coefficients[reverse_bits(lg_rows, i as u64) as usize] != F::zero() {
+                return i;
+            }
+        }
+        0
+    }
+
+    /// Divide the roots of each polynomial by some factor.
+    ///
+    /// If f(x) = 0, then after this transformation, f(x / z) = 0 instead.
+    ///
+    /// The number of roots does not change.
+    ///
+    /// c.f. [`EvaluationColumn::vanishing`] for how this is used.
+    fn divide_roots(&mut self, factor: F) {
+        let mut factor_i = F::one();
+        let lg_rows = self.coefficients.len().ilog2();
+        for i in 0..self.coefficients.len() {
+            let index = reverse_bits(lg_rows, i as u64) as usize;
+            self.coefficients[index] *= &factor_i;
+            factor_i *= &factor;
+        }
     }
 }
 
@@ -376,369 +766,6 @@ impl<'a, F: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Matrix<F> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct NTTPolynomial<F> {
-    coefficients: Vec<F>,
-}
-
-impl<F: FieldNTT> NTTPolynomial<F> {
-    /// Create a polynomial which vanishes (evaluates to 0) except at a few points.
-    ///
-    /// It's assumed that `except` is a bit vector with length a power of 2.
-    ///
-    /// For each index i NOT IN `except`, the resulting polynomial will evaluate
-    /// to w^i, where w is a `except.len()` root of unity.
-    ///
-    /// e.g. with `except` = 1001, then the resulting polynomial will
-    /// evaluate to 0 at w^1 and w^2, where w is a 4th root of unity.
-    fn vanishing(except: &BitMap) -> Self {
-        // Algorithm taken from: https://ethresear.ch/t/reed-solomon-erasure-code-recovery-in-n-log-2-n-time-with-ffts/3039.
-        // The basic idea of the algorithm is that given a set of indices S,
-        // we can split it in two: the even indices (first bit = 0) and the odd indices.
-        // We compute two vanishing polynomials over
-        //
-        //   S_L := {i / 2 | i in S}
-        //   S_R := {(i - 1) / 2 | i in S}
-        //
-        // Using a domain of half the size. i.e. instead of w, they use w^2 as the root.
-        //
-        // V_L vanishes at (w^2)^(i / 2) for each i in S, i.e. w^i, for each even i in S.
-        // Similarly, V_R vanishes at (w^2)^((i - 1) / 2) = w^(i - 1), for each odd i in S.
-        //
-        // To combine these into one polynomial, we multiply the roots of V_R by w, so that it
-        // vanishes at the w^i (for odd i) instead of w^(i - 1).
-        //
-        // To multiply the roots of a polynomial
-        //
-        //   P(X) := a0 + a1 X + a2 X^2 + ...
-        //
-        // by some factor z, it suffices to divide the ith coefficient by z^i:
-        //
-        //   Q(X) := a0 + (a1 / z) X + (a2 / z^2) X^2 + ...
-        //
-        // Notice that Q(z X) = P(X), so if P(x) = 0, then Q(z x) = 0, so we've multiplied
-        // the roots by a factor of z.
-        //
-        // After multiplying the roots of V_R by w, we can then multiply the resulting polynomial
-        // with V_L, producing a polynomial which vanishes at the right indices.
-        //
-        // To multiply efficiently, we can do multiplication over the evaluation domain:
-        // we perform an NTT over each polynomial, multiplie the evaluations pointwise,
-        // and then perform an inverse NTT to get the result. We just need to make sure that
-        // when we perform the NTT, we've added enough extra 0 coefficients in each polynomial
-        // to accommodate the extra degree. e.g. if we have two polynomials of degree 1, then
-        // we need to make sure to pad them to have enough coefficients for a polynomial of degree 2,
-        // so that we can correctly interpolate the result back.
-        //
-        // The tricky part is transforming this algorithm into an iterative one, and respecting
-        // the reverse bit order of the coefficients we need.
-        //
-        // Rather than starting from individual linear factors (X - 1) at the leaves
-        // and merging all the way up the tree, we first build "base" polynomials of
-        // size B = 2^LG_VANISHING_BASE by naively multiplying the appropriate
-        // (X - root) factors one at a time. This replaces the bottom levels of the
-        // merge tree with a simpler direct computation, then the merge tree continues
-        // from there.
-        //
-        // The roots for each base polynomial are the B-th roots of unity. Specifically,
-        // leaf j within any chunk has the compressed root omega_B^(reverse_bits(b, j)),
-        // where omega_B is a primitive B-th root of unity. This falls out from the
-        // root-scaling that the merge tree would have applied at each of the first b levels.
-        let rows = except.len() as usize;
-        let padded_rows = rows.next_power_of_two();
-        let zeroes = except.count_zeros() as usize + padded_rows - rows;
-        assert!(zeroes < padded_rows, "too many points to vanish over");
-        let lg_rows = padded_rows.ilog2();
-
-        // Clamp the base level to the total number of levels.
-        let b = LG_VANISHING_BASE.min(lg_rows);
-        let base = 1usize << b; // B = 2^b
-        let slot_size = 2 * base; // Each polynomial slot has 2B coefficients
-        let lg_slot = b + 1;
-        let chunk_count = padded_rows >> b;
-
-        // Precompute the B-th roots of unity: [1, omega_B, omega_B^2, ..., omega_B^(B-1)].
-        let roots = {
-            let omega_b = F::root_of_unity(b as u8)
-                .expect("too many rows to create vanishing polynomial");
-            let mut roots = Vec::with_capacity(base);
-            let mut omega_k = F::one();
-            for _ in 0..base {
-                roots.push(omega_k.clone());
-                omega_k *= &omega_b;
-            }
-            roots
-        };
-
-        // Build base polynomials naively by multiplying (X - root) factors.
-        let mut polynomials = vec![F::zero(); 2 * padded_rows];
-        let mut active = BitMap::<DEFAULT_CHUNK_SIZE>::with_capacity(chunk_count as u64);
-        let mut poly_scratch = vec![F::zero(); base + 1];
-
-        for chunk in 0..chunk_count {
-            let start = chunk * slot_size;
-            poly_scratch[0] = F::one();
-            let mut degree = 0;
-            let mut has_root = false;
-
-            for k in 0..base {
-                let global_leaf = chunk * base + k;
-                let original_index = reverse_bits(lg_rows, global_leaf as u64);
-                // Out-of-bounds indices (from padding) are not in except,
-                // so they are active (should vanish).
-                if !except.get(original_index) {
-                    has_root = true;
-                    let root = &roots[reverse_bits(b, k as u64) as usize];
-                    // Multiply poly_scratch by (X - root) in standard coefficient order.
-                    poly_scratch[degree + 1] = poly_scratch[degree].clone();
-                    for i in (1..=degree).rev() {
-                        poly_scratch[i] =
-                            poly_scratch[i - 1].clone() - &(root.clone() * &poly_scratch[i]);
-                    }
-                    poly_scratch[0] = -(root.clone() * &poly_scratch[0]);
-                    degree += 1;
-                }
-            }
-
-            active.push(has_root);
-
-            if has_root {
-                // Write into the slot in bit-reversed order: the coefficient
-                // of X^i goes to position reverse_bits(lg_slot, i).
-                for i in 0..=degree {
-                    polynomials[start + reverse_bits(lg_slot, i as u64) as usize] =
-                        poly_scratch[i].clone();
-                }
-            }
-
-            // Clear scratch for the next chunk.
-            for i in 0..=degree {
-                poly_scratch[i] = F::zero();
-            }
-        }
-
-        // Rather than store w at each iteration, and divide by it, just store its inverse,
-        // allowing us to multiply by it.
-        let w_invs = {
-            // since w^(2^lg_rows) = 1, w^(2^lg_rows - 1) * w = 1,
-            // making that left-hand term the inverse of w.
-            let mut w_inv = F::root_of_unity(lg_rows as u8)
-                .expect("too many rows to create vanishing polynomial")
-                .exp(&[(1 << lg_rows) - 1]);
-            let lg_rows = lg_rows as usize;
-            let mut out = Vec::with_capacity(lg_rows);
-            for _ in 0..lg_rows {
-                out.push(w_inv.clone());
-                w_inv = w_inv.clone() * &w_inv;
-            }
-            out.reverse();
-            out
-        };
-
-        // Continue the merge tree from level b onward.
-        let mut polynomial_count = chunk_count;
-        let mut polynomial_size: usize = slot_size;
-        let mut scratch: Vec<F> = Vec::with_capacity(padded_rows);
-        for w_inv in w_invs.into_iter().skip(b as usize) {
-            // After this iteration, we're going to end up with half the polynomials
-            polynomial_count >>= 1;
-            // and each of them will be twice as large.
-            let new_polynomial_size = polynomial_size << 1;
-            // Our goal is to construct the ith polynomial.
-            for i in 0..polynomial_count {
-                let start = new_polynomial_size * i;
-                let has_left = if ((2 * i) as u64) < active.len() {
-                    active.get((2 * i) as u64)
-                } else {
-                    false
-                };
-                let has_right = if ((2 * i + 1) as u64) < active.len() {
-                    active.get((2 * i + 1) as u64)
-                } else {
-                    false
-                };
-                match (has_left, has_right) {
-                    // No polynomials to combine.
-                    (false, false) => {}
-                    // We need to multiply the roots of the right side,
-                    // but then it can just expand to fill the entire polynomial.
-                    (false, true) => {
-                        let slice = &mut polynomials[start..start + new_polynomial_size];
-                        // Scale the roots of the right side by w.
-                        let lg_p_size = polynomial_size.ilog2();
-                        let mut w_j = F::one();
-                        for j in 0..polynomial_size {
-                            let index =
-                                polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
-                            slice[index] *= &w_j;
-                            w_j *= &w_inv;
-                        }
-                        // Expand the right side to occupy the entire space.
-                        // The left side must be 0s.
-                        for j in 0..polynomial_size {
-                            slice.swap(polynomial_size + j, 2 * j);
-                        }
-                    }
-                    // No need to multiply roots, but we do need to expand the left side.
-                    (true, false) => {
-                        let slice = &mut polynomials[start..start + new_polynomial_size];
-                        // Expand the left side to occupy the entire space.
-                        // The right side must be 0s.
-                        for j in (0..polynomial_size).rev() {
-                            slice.swap(j, 2 * j);
-                        }
-                    }
-                    // We need to combine the two doing an actual multiplication.
-                    (true, true) => {
-                        let slice = &mut polynomials[start..start + new_polynomial_size];
-                        let lg_p_size = polynomial_size.ilog2();
-
-                        // Scale the roots of the right side by w.
-                        let mut w_j = F::one();
-                        for j in 0..polynomial_size {
-                            let index =
-                                polynomial_size + reverse_bits(lg_p_size, j as u64) as usize;
-                            slice[index] *= &w_j;
-                            w_j *= &w_inv;
-                        }
-
-                        // For small polynomials, naive multiplication is faster than NTT.
-                        // The threshold is chosen empirically based on benchmarks.
-                        if polynomial_size <= 16 {
-                            // Naive polynomial multiplication.
-                            // Left poly is in slice[0..polynomial_size] (bit-reversed order)
-                            // Right poly is in slice[polynomial_size..] (bit-reversed order)
-                            // Result goes into slice (bit-reversed order)
-                            debug_assert_eq!(scratch.len(), 0);
-                            scratch.resize(new_polynomial_size, F::zero());
-                            let lg_new = new_polynomial_size.ilog2();
-
-                            // Convolve directly, accounting for bit-reversed storage
-                            for i in 0..polynomial_size {
-                                let li = reverse_bits(lg_p_size, i as u64) as usize;
-                                for j in 0..polynomial_size {
-                                    let rj = polynomial_size
-                                        + reverse_bits(lg_p_size, j as u64) as usize;
-                                    let dst = reverse_bits(lg_new, (i + j) as u64) as usize;
-                                    scratch[dst] += &(slice[li].clone() * &slice[rj]);
-                                }
-                            }
-
-                            slice.clone_from_slice(&scratch);
-                            scratch.clear();
-                        } else {
-                            // NTT-based multiplication for larger polynomials
-                            debug_assert_eq!(scratch.len(), 0);
-                            scratch.resize(new_polynomial_size, F::zero());
-
-                            // Expand the right side to occupy all of scratch.
-                            // Clear the right side.
-                            for j in 0..polynomial_size {
-                                scratch[2 * j] = slice[polynomial_size + j].clone();
-                                slice[polynomial_size + j] = F::zero();
-                            }
-
-                            // Expand the left side to occupy the entire space.
-                            // The right side has been cleared above.
-                            for j in (0..polynomial_size).rev() {
-                                slice.swap(j, 2 * j);
-                            }
-
-                            // Multiply the polynomials together, by first evaluating each of them,
-                            // then multiplying their evaluations, producing (f * g) evaluated over
-                            // the domain, which we can then interpolate back.
-                            ntt::<true, F, _>(
-                                new_polynomial_size,
-                                1,
-                                &mut Column { data: &mut scratch },
-                            );
-                            ntt::<true, F, _>(new_polynomial_size, 1, &mut Column { data: slice });
-                            for (s_i, p_i) in scratch.drain(..).zip(slice.iter_mut()) {
-                                *p_i *= &s_i;
-                            }
-                            ntt::<false, F, _>(new_polynomial_size, 1, &mut Column { data: slice })
-                        }
-                    }
-                }
-                // If there was a polynomial on the left or the right, then on the next iteration
-                // the combined section will have data to process, so we need to set it to true
-                // Resize active if needed and set the bit
-                active.set(i as u64, has_left | has_right);
-            }
-            polynomial_size = new_polynomial_size;
-        }
-        // If the final polynomial is inactive, there are no points to vanish over,
-        // so we want to return the polynomial f(X) = 1.
-        if !active.get(0) {
-            let mut coefficients = vec![F::zero(); padded_rows];
-            coefficients[0] = F::one();
-            return Self { coefficients };
-        }
-        // We have a polynomial that's twice the size we need, so we need to truncate it.
-        // This is the opposite of the sub-routine we had for expanding the left side to fit
-        // the entire polynomial.
-        for i in 0..padded_rows {
-            polynomials.swap(i, 2 * i);
-        }
-        polynomials.truncate(padded_rows);
-        Self {
-            coefficients: polynomials,
-        }
-    }
-
-    #[cfg(any(test, feature = "fuzz"))]
-    fn evaluate(&self, point: F) -> F {
-        let mut out = F::zero();
-        let rows = self.coefficients.len();
-        let lg_rows = rows.ilog2();
-        for i in (0..rows).rev() {
-            out = out * &point + &self.coefficients[reverse_bits(lg_rows, i as u64) as usize];
-        }
-        out
-    }
-
-    #[cfg(any(test, feature = "fuzz"))]
-    fn degree(&self) -> usize {
-        let rows = self.coefficients.len();
-        let lg_rows = rows.ilog2();
-        for i in (0..rows).rev() {
-            if self.coefficients[reverse_bits(lg_rows, i as u64) as usize] != F::zero() {
-                return i;
-            }
-        }
-        0
-    }
-
-    /// Convert this polynomial into a PolynomialVector with a single column.
-    fn into_polynomial_vector(self) -> PolynomialVector<F> {
-        let rows = self.coefficients.len();
-        PolynomialVector {
-            data: Matrix {
-                rows,
-                cols: 1,
-                data: self.coefficients,
-            },
-        }
-    }
-
-    /// Divide the roots of each polynomial by some factor.
-    ///
-    /// If f(x) = 0, then after this transformation, f(x / z) = 0 instead.
-    ///
-    /// The number of roots does not change.
-    ///
-    /// c.f. [Self::vanishing] for an explanation of how this works.
-    fn divide_roots(&mut self, factor: F) {
-        let mut factor_i = F::one();
-        let lg_rows = self.coefficients.len().ilog2();
-        for i in 0..self.coefficients.len() {
-            let index = reverse_bits(lg_rows, i as u64) as usize;
-            self.coefficients[index] *= &factor_i;
-            factor_i *= &factor;
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct PolynomialVector<F> {
     // Each column of this matrix contains the coefficients of a polynomial,
     // in reverse bit order. So, the ith coefficient appears at index i.reverse_bits().
@@ -796,7 +823,7 @@ impl<F: FieldNTT> PolynomialVector<F> {
     /// Evaluate each polynomial in this vector over all points in an interpolation domain.
     pub fn evaluate(mut self) -> EvaluationVector<F> {
         self.data.ntt::<true>();
-        let active_rows = BitMap::ones(self.data.rows as u64);
+        let active_rows = VanishingPoints::all_non_vanishing(self.data.rows().ilog2());
         EvaluationVector {
             data: self.data,
             active_rows,
@@ -830,13 +857,13 @@ impl<F: FieldNTT> PolynomialVector<F> {
 
         EvaluationVector {
             data: vandermonde_matrix.mul(&self.data),
-            active_rows: BitMap::ones(rows as u64),
+            active_rows: VanishingPoints::all_non_vanishing(lg_rows),
         }
     }
 
     /// Divide the roots of each polynomial by some factor.
     ///
-    /// c.f. [NTTPolynomial::divide_roots]. This performs the same operation on
+    /// c.f. [`PolynomialColumn::divide_roots`]. This performs the same operation on
     /// each polynomial in this vector.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
@@ -859,12 +886,12 @@ impl<F: FieldNTT> PolynomialVector<F> {
     /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
     ///
     /// This assumes that `q` has no zeroes over `coset_shift() * root_of_unity()^i`,
-    /// for any i. This will be the case for [NTTPolynomial::vanishing].
+    /// for any i. This will be the case for [`EvaluationColumn::vanishing`].
     /// If this isn't the case, the result may be junk.
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
     /// for that polynomial is not guaranteed to be anything meaningful.
-    fn divide(&mut self, mut q: NTTPolynomial<F>) {
+    fn divide(&mut self, mut q: PolynomialColumn<F>) {
         // The algorithm operates column wise.
         //
         // You can compute P(X) / Q(X) by evaluating each polynomial, then computing
@@ -897,8 +924,8 @@ impl<F: FieldNTT> PolynomialVector<F> {
         ntt::<true, F, _>(
             q.coefficients.len(),
             1,
-            &mut Column {
-                data: &mut q.coefficients,
+            &mut Columns {
+                data: [&mut q.coefficients],
             },
         );
         // Do a point wise division.
@@ -949,7 +976,7 @@ impl<F> PolynomialVector<F> {
 #[derive(Debug, PartialEq)]
 pub struct EvaluationVector<F> {
     data: Matrix<F>,
-    active_rows: BitMap,
+    active_rows: VanishingPoints,
 }
 
 impl<F: FieldNTT> EvaluationVector<F> {
@@ -972,18 +999,10 @@ impl<F: FieldNTT> EvaluationVector<F> {
         self.active_rows.set(row as u64, false);
     }
 
-    fn multiply(&mut self, polynomial: NTTPolynomial<F>) {
-        let NTTPolynomial { mut coefficients } = polynomial;
-        ntt::<true, F, _>(
-            coefficients.len(),
-            1,
-            &mut Column {
-                data: &mut coefficients,
-            },
-        );
-        for (i, c_i) in coefficients.iter().enumerate() {
+    fn multiply(&mut self, evaluation: &EvaluationColumn<F>) {
+        for (i, e_i) in evaluation.evaluations.iter().enumerate() {
             for self_j in &mut self.data[i] {
-                *self_j = self_j.clone() * c_i;
+                *self_j = self_j.clone() * e_i;
             }
         }
     }
@@ -1002,10 +1021,10 @@ impl<F: FieldNTT> EvaluationVector<F> {
         //
         // If we have multiple columns, then this procedure can be done column by column,
         // with the same vanishing polynomial.
-        let vanishing = NTTPolynomial::vanishing(&self.active_rows);
-        self.multiply(vanishing.clone());
+        let (_, vanishing) = EvaluationColumn::vanishing(&self.active_rows);
+        self.multiply(&vanishing);
         let mut out = self.interpolate();
-        out.divide(vanishing);
+        out.divide(vanishing.interpolate());
         out
     }
 }
@@ -1020,7 +1039,7 @@ impl<F: Additive> EvaluationVector<F> {
             "2^lg_rows must be a valid usize"
         );
         let data = Matrix::zero(1 << lg_rows, cols);
-        let active = BitMap::zeroes(data.rows as u64);
+        let active = VanishingPoints::new(lg_rows as u32);
         Self {
             data,
             active_rows: active,
@@ -1046,7 +1065,7 @@ impl<F> EvaluationVector<F> {
 
     /// Return how many distinct rows have been filled.
     pub fn filled_rows(&self) -> usize {
-        self.active_rows.count_ones() as usize
+        self.active_rows.count_non_vanishing() as usize
     }
 }
 
@@ -1064,7 +1083,7 @@ impl<F> EvaluationVector<F> {
 /// `V_S(X) * V_Sbar(X) = X^N - 1`, which gives `V_S(0) = -1/V_Sbar(0)`.
 /// The scaling factor of `P_Sbar` cancels in the ratio.
 ///
-/// Building `P_Sbar` via [`NTTPolynomial::vanishing`] is cheaper than building `V_S`
+/// Building `P_Sbar` as the vanishing polynomial over missing points is cheaper than building `V_S`
 /// when most points are present (the typical erasure-coding case), since `|Sbar| << |S|`.
 ///
 /// # Arguments
@@ -1079,44 +1098,43 @@ pub fn lagrange_coefficients<F: FieldNTT>(
 ) -> Vec<(u32, F)> {
     let total_u64 = u64::from(total.get());
     let size = total_u64.next_power_of_two();
-    let size_usize: usize = size.try_into().expect("domain too large (usize overflow)");
+    let lg_size = size.ilog2();
 
-    let mut present: BitMap = BitMap::zeroes(size);
+    let mut present = VanishingPoints::new(lg_size);
     for i in iter {
         let i_u64 = u64::from(i);
         if i_u64 < total_u64 {
-            present.set(i_u64, true);
+            present.set_non_vanishing(i_u64);
         }
     }
 
-    let num_present = present.count_ones() as usize;
+    let num_present = present.count_non_vanishing();
 
     if num_present == 0 {
         return Vec::new();
     }
 
-    if num_present == size_usize {
-        let n_inv = F::one().scale(&[size]).inv();
+    let n_f = F::one().scale(&[size]);
+    if num_present == size {
+        let n_inv = n_f.inv();
         return (0..size as u32).map(|i| (i, n_inv.clone())).collect();
     }
 
     // Build P_Sbar (vanishes at indices NOT in present) and evaluate at all
     // roots of unity via NTT. Note: vanishing() may produce a scaled polynomial
     // P_Sbar = c * V_Sbar, but the scaling cancels in the ratio below.
-    let vp_complement: NTTPolynomial<F> = NTTPolynomial::vanishing(&present);
-    let p_sbar_at_zero = vp_complement.coefficients[0].clone();
-    let complement_evals = vp_complement.into_polynomial_vector().evaluate().data;
+    let (p_sbar_at_zero, complement_evals) = EvaluationColumn::vanishing(&present);
 
     // From V_S(0) * V_Sbar(0) = -1 (since V_S * V_Sbar = X^N - 1), we get:
     //   L_j(0) = -V_S(0) * V_Sbar(w^j) / N = V_Sbar(w^j) / (N * V_Sbar(0))
     // Since P_Sbar = c * V_Sbar, the scaling c cancels:
     //   L_j(0) = P_Sbar(w^j) / (N * P_Sbar(0))
-    let factor = (F::one().scale(&[size]) * &p_sbar_at_zero).inv();
+    let factor = (n_f * &p_sbar_at_zero).inv();
 
-    let mut out = Vec::with_capacity(num_present);
+    let mut out = Vec::with_capacity(num_present as usize);
     for j in 0..size as u32 {
         if present.get(u64::from(j)) {
-            let coeff = factor.clone() * &complement_evals[(j as usize, 0)];
+            let coeff = factor.clone() * &complement_evals.evaluations[j as usize];
             out.push((j, coeff));
         }
     }
@@ -1146,7 +1164,7 @@ pub mod fuzz {
     fn arb_bit_vec_not_all_0(
         u: &mut Unstructured<'_>,
         max_log_rows: u32,
-    ) -> arbitrary::Result<BitMap> {
+    ) -> arbitrary::Result<VanishingPoints> {
         let lg_rows = u.int_in_range(0..=max_log_rows)?;
         let rows = 1usize << lg_rows;
         let set_row = u.int_in_range(0..=rows - 1)?;
@@ -1154,7 +1172,11 @@ pub mod fuzz {
             .map(|_| u.arbitrary())
             .collect::<arbitrary::Result<_>>()?;
         bools[set_row] = true;
-        Ok(BitMap::from(bools.as_slice()))
+        let mut out = VanishingPoints::new(lg_rows);
+        for (i, b) in bools.into_iter().enumerate() {
+            out.set(i as u64, b);
+        }
+        Ok(out)
     }
 
     fn arb_recovery_setup(
@@ -1176,7 +1198,7 @@ pub mod fuzz {
             let j = u.int_in_range(i..=padded_rows - 1)?;
             indices.swap(i, j);
         }
-        let mut present = BitMap::zeroes(padded_rows as u64);
+        let mut present = VanishingPoints::new(padded_rows.ilog2());
         for &i in &indices[..num_present] {
             present.set(i as u64, true);
         }
@@ -1191,18 +1213,35 @@ pub mod fuzz {
 
     #[derive(Debug)]
     pub struct RecoverySetup {
-        pub n: usize,
-        pub k: usize,
-        pub cols: usize,
-        pub data: Vec<F>,
-        pub present: BitMap,
+        n: usize,
+        k: usize,
+        cols: usize,
+        data: Vec<F>,
+        present: VanishingPoints,
     }
 
     impl RecoverySetup {
+        #[cfg(test)]
+        pub(crate) const fn new(
+            n: usize,
+            k: usize,
+            cols: usize,
+            data: Vec<F>,
+            present: VanishingPoints,
+        ) -> Self {
+            Self {
+                n,
+                k,
+                cols,
+                data,
+                present,
+            }
+        }
+
         pub fn test(self) {
             let data = PolynomialVector::new(self.n + self.k, self.cols, self.data.into_iter());
             let mut encoded = data.clone().evaluate();
-            for (i, b_i) in self.present.iter().enumerate() {
+            for (i, b_i) in self.present.iter_bits_in_order().enumerate() {
                 if !b_i {
                     encoded.remove_row(i);
                 }
@@ -1216,7 +1255,7 @@ pub mod fuzz {
     pub enum Plan {
         NttEqNaive(PolynomialVector<F>),
         EvaluationThenInverse(PolynomialVector<F>),
-        VanishingPolynomial(BitMap),
+        VanishingPolynomial(VanishingPoints),
         Recovery(RecoverySetup),
     }
 
@@ -1243,18 +1282,24 @@ pub mod fuzz {
                     assert_eq!(p.clone(), p.evaluate().interpolate());
                 }
                 Self::VanishingPolynomial(bv) => {
-                    let v = NTTPolynomial::vanishing(&bv);
-                    let expected_degree = bv.count_zeros();
+                    let total = 1u64 << bv.lg_size();
+                    let expected_degree = total - bv.count_non_vanishing();
+                    let (at_zero, evals) = EvaluationColumn::<F>::vanishing(&bv);
+                    let v = evals.interpolate();
                     assert_eq!(
                         v.degree(),
                         expected_degree as usize,
                         "expected v to have degree {}",
                         expected_degree
                     );
-                    let w = F::root_of_unity(bv.len().ilog2() as u8).unwrap();
+                    assert_eq!(
+                        at_zero, v.coefficients[0],
+                        "at_zero should be the 0th coefficient"
+                    );
+                    let w = F::root_of_unity(bv.lg_size() as u8).unwrap();
                     let mut w_i = F::one();
-                    for b_i in bv.iter() {
-                        let v_at_w_i = v.evaluate(w_i);
+                    for b_i in bv.iter_bits_in_order() {
+                        let v_at_w_i = v.evaluate_one(w_i);
                         if !b_i {
                             assert_eq!(v_at_w_i, F::zero(), "v should evaluate to 0 at {:?}", w_i);
                         } else {
@@ -1314,14 +1359,12 @@ mod test {
 
     #[test]
     fn test_recovery_000() {
-        fuzz::RecoverySetup {
-            n: 1,
-            k: 1,
-            cols: 1,
-            data: vec![F::one()],
-            present: vec![false, true].into(),
-        }
-        .test()
+        let present = {
+            let mut out = VanishingPoints::new(1);
+            out.set_non_vanishing(1);
+            out
+        };
+        fuzz::RecoverySetup::new(1, 1, 1, vec![F::one()], present).test()
     }
 
     #[cfg(feature = "arbitrary")]
