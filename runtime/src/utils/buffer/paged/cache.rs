@@ -65,8 +65,6 @@ struct Cache {
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
     page_fetches: HashMap<(u64, u64), PageFetchFut>,
-    /// Buffer pool retained for page-cache allocations.
-    pool: BufferPool,
 }
 
 /// Metadata for a single cache entry (page data stored in arena).
@@ -353,7 +351,6 @@ impl Cache {
             clock: 0,
             capacity,
             page_fetches: HashMap::new(),
-            pool,
         }
     }
 
@@ -429,12 +426,6 @@ impl Cache {
                 key,
                 referenced: AtomicBool::new(true),
             });
-            if slot >= self.slots.len() {
-                let mut new_slot = self.pool.alloc(self.page_size);
-                // SAFETY: We always write full pages into cache slots.
-                unsafe { new_slot.set_len(self.page_size) };
-                self.slots.push(new_slot);
-            }
             self.page_slice_mut(slot).copy_from_slice(page);
             return;
         }
@@ -464,7 +455,7 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::{super::Checksum, *};
-    use crate::{buffer::paged::CHECKSUM_SIZE, deterministic, Runner as _, Storage as _};
+    use crate::{buffer::paged::CHECKSUM_SIZE, deterministic, BufferPooler, Runner as _, Storage as _};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -553,7 +544,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             assert_eq!(cache_ref.next_id().await, 0);
             assert_eq!(cache_ref.next_id().await, 1);
@@ -590,7 +581,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(2),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
@@ -623,7 +614,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 NZU16!(MIN_PAGE_SIZE as u16),
                 NZUsize!(2),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
