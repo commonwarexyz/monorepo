@@ -50,6 +50,12 @@ enum QueueOperation {
     /// Enqueue a new item with the given value (repeated to fill ITEM_SIZE).
     Enqueue { value: u8 },
 
+    /// Append a new item without flushing (not durable until Flush).
+    Append { value: u8 },
+
+    /// Flush appended items to disk.
+    Flush,
+
     /// Dequeue and acknowledge the next item.
     DequeueAndAck,
 
@@ -62,7 +68,7 @@ enum QueueOperation {
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
 
-    /// Commit the queue (prune and persist; recovery may be needed on restart).
+    /// Commit the queue (flush and prune).
     Commit,
 
     /// Reset read position to ack floor.
@@ -103,15 +109,14 @@ struct FuzzInput {
 /// in-memory but not pruned will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
-    /// Items that were successfully enqueued (position -> value).
-    /// Each enqueue() does append + flush, so successful enqueues are durable.
+    /// Items that were successfully enqueued or flushed (position -> value).
     committed: BTreeMap<u64, u8>,
 
-    /// Items that were enqueued but the operation may have failed.
+    /// Items that were enqueued/appended but the operation may have failed,
+    /// or were appended but not yet flushed.
     pending: Vec<u8>,
 
     /// The ack floor at the time of last successful commit.
-    /// With commit-only, pruning may not be durable; used for max bound.
     committed_ack_floor: u64,
 
     /// Current in-memory ack floor (lost on crash).
@@ -119,6 +124,10 @@ struct RecoveryState {
 
     /// Items per section (reserved for recovery bound calculations).
     _items_per_section: u64,
+
+    /// Items that were appended but not yet flushed (position -> value).
+    /// These may be lost on crash. On flush, they move to committed.
+    unflushed: BTreeMap<u64, u8>,
 }
 
 impl RecoveryState {
@@ -129,6 +138,7 @@ impl RecoveryState {
             committed_ack_floor: 0,
             current_ack_floor: 0,
             _items_per_section: items_per_section,
+            unflushed: BTreeMap::new(),
         }
     }
 
@@ -138,13 +148,38 @@ impl RecoveryState {
     }
 
     fn enqueue_failed(&mut self, value: u8) {
-        // Enqueue may have partially succeeded (append but not commit).
+        // Enqueue may have partially succeeded (append but not flush).
         // Track as pending - it may or may not be persisted.
         self.pending.push(value);
     }
 
+    fn append_succeeded(&mut self, pos: u64, value: u8) {
+        // Append only - not durable until flushed.
+        self.unflushed.insert(pos, value);
+    }
+
+    fn append_failed(&mut self, value: u8) {
+        self.pending.push(value);
+    }
+
+    fn flush_succeeded(&mut self) {
+        // All unflushed items are now durable.
+        let unflushed = std::mem::take(&mut self.unflushed);
+        for (pos, value) in unflushed {
+            self.committed.insert(pos, value);
+        }
+    }
+
+    fn flush_failed(&mut self) {
+        // Unflushed items remain unflushed; they may or may not be durable.
+        // Move them to pending since we can't be sure.
+        let unflushed = std::mem::take(&mut self.unflushed);
+        for (_pos, value) in unflushed {
+            self.pending.push(value);
+        }
+    }
+
     fn update_ack_floor(&mut self, ack_floor: u64) {
-        // Get the actual ack floor from the queue (handles coalescing correctly)
         self.current_ack_floor = ack_floor;
     }
 
@@ -160,20 +195,16 @@ impl RecoveryState {
 
     /// Returns the maximum size we expect after recovery.
     fn max_recovered_size(&self) -> u64 {
-        (self.committed.len() + self.pending.len()) as u64
+        (self.committed.len() + self.pending.len() + self.unflushed.len()) as u64
     }
 
     /// Returns the minimum ack floor we expect after recovery.
-    ///
-    /// With commit-only, prune is not necessarily durable, so minimum is 0.
     fn min_recovered_ack_floor(&self) -> u64 {
         0
     }
 
     /// Returns the maximum ack floor we expect after recovery.
     fn max_recovered_ack_floor(&self) -> u64 {
-        // The maximum is the current ack floor if a sync was in progress
-        // and happened to complete despite faults
         self.current_ack_floor
     }
 }
@@ -199,11 +230,31 @@ async fn run_operations(
                         state.enqueue_succeeded(pos, *value);
                     }
                     Err(_) => {
-                        // Enqueue failed - item may or may not be persisted
                         state.enqueue_failed(*value);
                     }
                 }
             }
+
+            QueueOperation::Append { value } => {
+                let item = make_item(*value);
+                match queue.append(item).await {
+                    Ok(pos) => {
+                        state.append_succeeded(pos, *value);
+                    }
+                    Err(_) => {
+                        state.append_failed(*value);
+                    }
+                }
+            }
+
+            QueueOperation::Flush => match queue.flush().await {
+                Ok(()) => {
+                    state.flush_succeeded();
+                }
+                Err(_) => {
+                    state.flush_failed();
+                }
+            },
 
             QueueOperation::DequeueAndAck => {
                 if let Ok(Some((pos, _item))) = queue.dequeue().await {

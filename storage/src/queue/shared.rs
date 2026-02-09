@@ -78,6 +78,32 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
         Ok(start..end)
     }
 
+    /// Append an item without flushing, returning its position. The item
+    /// is immediately visible to the reader but is **not durable** until
+    /// [Self::flush] is called or the underlying journal auto-syncs at a
+    /// section boundary (see [`variable::Journal`](crate::journal::contiguous::variable::Journal)
+    /// invariant 1).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
+    pub async fn append(&self, item: V) -> Result<u64, Error> {
+        let pos = self.queue.lock().await.append(item).await?;
+        let _ = self.notify.try_send(());
+        debug!(position = pos, "writer: appended item");
+        Ok(pos)
+    }
+
+    /// Flush all previously appended items to disk. After this returns
+    /// successfully, all appended items are durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage operation fails.
+    pub async fn flush(&self) -> Result<(), Error> {
+        self.queue.lock().await.flush().await
+    }
+
     /// Returns the total number of items that have been enqueued.
     pub async fn size(&self) -> u64 {
         self.queue.lock().await.size()
@@ -270,6 +296,40 @@ mod tests {
 
             // Ack the item
             reader.ack(recv_pos).await.unwrap();
+            assert!(reader.is_empty().await);
+        });
+    }
+
+    #[test_traced]
+    fn test_shared_append_flush() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_shared_append_flush");
+            let (writer, mut reader) = init(context, cfg).await.unwrap();
+
+            // Append several items without flushing
+            for i in 0..5u8 {
+                let pos = writer.append(vec![i]).await.unwrap();
+                assert_eq!(pos, i as u64);
+            }
+
+            // Reader can see them before flush
+            let (pos, item) = reader.recv().await.unwrap().unwrap();
+            assert_eq!(pos, 0);
+            assert_eq!(item, vec![0]);
+
+            // Flush to make durable
+            writer.flush().await.unwrap();
+
+            // Remaining items still readable
+            for i in 1..5 {
+                let (pos, item) = reader.recv().await.unwrap().unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(item, vec![i as u8]);
+                reader.ack(pos).await.unwrap();
+            }
+
+            reader.ack(0).await.unwrap();
             assert!(reader.is_empty().await);
         });
     }

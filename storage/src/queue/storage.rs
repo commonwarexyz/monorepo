@@ -145,8 +145,11 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     }
 
     /// Append an item without persisting. Call [Self::flush] or [Self::commit]
-    /// afterwards to make it durable. The item is readable immediately, but
-    /// is lost on restart if not flushed.
+    /// afterwards to make it durable. The item is readable immediately but
+    /// is not guaranteed to survive a crash until flushed or the journal
+    /// auto-syncs at a section boundary (see
+    /// [`variable::Journal`](crate::journal::contiguous::variable::Journal)
+    /// invariant 1).
     ///
     /// # Errors
     ///
@@ -525,12 +528,9 @@ mod tests {
             let cfg = test_config("test_batch_persist");
 
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(
-                    context.with_label("first"),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
+                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("first"), cfg.clone())
+                    .await
+                    .unwrap();
                 for i in 0..4u8 {
                     queue.append(vec![i]).await.unwrap();
                 }
@@ -539,12 +539,9 @@ mod tests {
             }
 
             {
-                let mut queue = Queue::<_, Vec<u8>>::init(
-                    context.with_label("second"),
-                    cfg,
-                )
-                .await
-                .unwrap();
+                let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("second"), cfg)
+                    .await
+                    .unwrap();
                 assert_eq!(queue.size(), 4);
                 for i in 0..4 {
                     let (pos, item) = queue.dequeue().await.unwrap().unwrap();

@@ -30,8 +30,14 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
-    /// Enqueue a new item.
+    /// Enqueue a new item (append + flush).
     Enqueue { value: u8 },
+
+    /// Append a new item without flushing.
+    Append { value: u8 },
+
+    /// Flush appended items to disk.
+    Flush,
 
     /// Dequeue the next unacked item.
     Dequeue,
@@ -48,7 +54,10 @@ enum QueueOperation {
     /// Reset the read position.
     Reset,
 
-    /// Commit (prune and persist).
+    /// Prune acknowledged items.
+    Prune,
+
+    /// Commit (flush and prune).
     Commit,
 }
 
@@ -199,6 +208,16 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
                 }
 
+                QueueOperation::Append { value } => {
+                    let pos = queue.append(vec![*value]).await.unwrap();
+                    let ref_pos = reference.enqueue(*value);
+                    assert_eq!(pos, ref_pos, "append position mismatch");
+                }
+
+                QueueOperation::Flush => {
+                    queue.flush().await.unwrap();
+                }
+
                 QueueOperation::Dequeue => {
                     let result = queue.dequeue().await.unwrap();
                     let ref_result = reference.dequeue();
@@ -267,6 +286,10 @@ fn fuzz(input: FuzzInput) {
                 QueueOperation::Reset => {
                     queue.reset();
                     reference.reset();
+                }
+
+                QueueOperation::Prune => {
+                    queue.prune().await.unwrap();
                 }
 
                 QueueOperation::Commit => {
