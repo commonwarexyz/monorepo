@@ -2,10 +2,8 @@
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! Items are durably stored in a journal and will survive crashes. The reader must
-//! explicitly acknowledge each item after processing.
-//!
-//! On restart, all unacknowledged items will be re-delivered. Items that were
-//! acknowledged but not yet pruned from disk may also be re-delivered.
+//! explicitly acknowledge each item after processing. On restart, all non-pruned
+//! items are re-delivered (acknowledged or not).
 //!
 //! # Concurrent Access
 //!
@@ -33,29 +31,6 @@
 //!     }
 //! }
 //! ```
-//!
-//! # At-Least-Once Delivery
-//!
-//! The queue guarantees that every enqueued item will be delivered at least once.
-//! Duplicate delivery may occur if:
-//! - The reader processes an item but crashes before acknowledging it
-//! - The reader acknowledges items but the ack floor hasn't crossed a section boundary
-//!   (pruning is section-granular)
-//!
-//! Applications must be prepared to handle duplicate messages (idempotent processing).
-//!
-//! # Per-Item Acknowledgment
-//!
-//! Unlike watermark-based acking, this queue supports acknowledging items out of order.
-//! This enables:
-//! - Parallel processing with multiple workers
-//! - Selective retries (one stuck item doesn't block others)
-//! - Flexible processing order
-//!
-//! Acknowledged items are tracked in-memory using an "ack floor" plus ranges of acked
-//! items above the floor. When items are acked contiguously from the floor, the floor
-//! advances. Pruning happens during [`Queue::prune`](crate::queue::Queue::prune) and
-//! removes complete sections below the ack floor.
 //!
 //! # Example
 //!

@@ -41,31 +41,31 @@ pub struct Config<C> {
 /// acknowledge each item individually after processing. Items can be acknowledged
 /// out of order, enabling parallel processing.
 ///
-/// # Acknowledgment Model
+/// # Operations
 ///
-/// The queue tracks acknowledgments using:
-/// - `ack_floor`: All items at positions < floor are considered acknowledged
-/// - `acked_above`: An in-memory [RMap] of acknowledged positions >= floor
+/// - [append](Self::append) / [flush](Self::flush): Write items to the journal
+///   buffer, then persist. Items are readable immediately after append (before flush),
+///   but are lost on restart if not flushed.
+/// - [enqueue](Self::enqueue): Append + flush in one step; the item is durable before return.
+/// - [dequeue](Self::dequeue) / [peek](Self::peek): Return the next unacked item in FIFO order.
+/// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
+/// - [commit](Self::commit): Flush, then prune completed sections below the ack floor.
 ///
-/// When items are acked contiguously from the floor (e.g., floor=5, then ack 5, 6, 7),
-/// the floor advances automatically. This coalescing keeps memory usage bounded.
+/// # Acknowledgment
 ///
-/// # Delivery Semantics
+/// Acks are tracked in-memory with an `ack_floor` (all positions below are acked)
+/// plus an [RMap] of acked positions above the floor. When items are acked
+/// contiguously from the floor, the floor advances automatically.
 ///
-/// - **Append**: Writes an item to the journal and returns its position; does not persist.
-/// - **Flush**: Persists appended items without pruning.
-/// - **Enqueue**: Appends then flushes; the item is durably persisted before return.
-/// - **Dequeue**: Returns unacked items in FIFO order, skipping already-acked items.
-/// - **Ack**: Marks an item as processed. Pruning happens during [Queue::prune] or [Queue::commit].
+/// Acks are **not** persisted. The durable equivalent is the journal's pruning
+/// boundary, advanced by [commit](Self::commit). On restart, all non-pruned
+/// items are re-delivered regardless of prior ack state.
 ///
 /// # Crash Recovery
 ///
-/// On restart, the queue replays from the journal's pruning boundary (the oldest
-/// non-pruned item). Acknowledgment state is not persisted, so:
-/// - Items that were pruned before crash are considered acknowledged (deleted)
-/// - Items that were acked but not pruned will be re-delivered
-///
-/// This provides at-least-once delivery with minimal complexity.
+/// On restart, `ack_floor` is set to the journal's pruning boundary.
+/// Items that were pruned are gone; everything else is re-delivered.
+/// Applications must handle duplicates (idempotent processing).
 pub struct Queue<E: Clock + Storage + Metrics, V: CodecShared> {
     /// The underlying journal storing queue items.
     journal: variable::Journal<E, V>,
@@ -144,10 +144,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         position < self.ack_floor || self.acked_above.get(&position).is_some()
     }
 
-    /// Append an item to the queue without persisting.
-    ///
-    /// The item is written to the journal but not durably persisted. Call
-    /// [Self::flush] to persist appends only, or [Self::commit] to prune and persist.
+    /// Append an item without persisting. Call [Self::flush] or [Self::commit]
+    /// afterwards to make it durable. The item is readable immediately, but
+    /// is lost on restart if not flushed.
     ///
     /// # Errors
     ///
@@ -159,10 +158,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(pos)
     }
 
-    /// Enqueue an item, returning its position.
-    ///
-    /// The item is durably persisted before returning. If this method returns
-    /// successfully, the item is guaranteed to survive crashes.
+    /// Append and flush an item in one step, returning its position.
+    /// The item is durable before this method returns.
     ///
     /// # Errors
     ///
@@ -174,10 +171,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     }
 
     /// Dequeue the next unacknowledged item, returning its position and value.
-    ///
-    /// Returns `None` if the queue is empty (all items have been read or acknowledged).
-    ///
-    /// Items that have been acknowledged (even if not yet pruned) will be skipped.
+    /// Returns `None` when all items have been read or acknowledged.
+    /// Already-acked items are skipped automatically.
     ///
     /// # Errors
     ///
@@ -207,9 +202,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(Some((pos, item)))
     }
 
-    /// Peek at the next unacknowledged item without advancing the read position.
-    ///
-    /// Returns `None` if the queue is empty (all items have been read or acknowledged).
+    /// Like [Self::dequeue], but does not advance the read position.
     ///
     /// # Errors
     ///
@@ -236,21 +229,13 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(Some((pos, item)))
     }
 
-    /// Acknowledge processing of an item at the given position.
-    ///
-    /// After acknowledgment, the item will be skipped on dequeue. Pruning of
-    /// acknowledged items happens during [Self::prune] or [Self::commit].
-    ///
-    /// If items are acked contiguously from the ack floor, the floor advances
-    /// automatically to keep memory bounded.
-    ///
-    /// # Arguments
-    ///
-    /// * `position` - The position of the item to acknowledge.
+    /// Mark the item at `position` as processed (in-memory only).
+    /// The item will be skipped on subsequent dequeues. If this creates a
+    /// contiguous run from the ack floor, the floor advances automatically.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PositionOutOfRange] if position >= queue size.
+    /// Returns [Error::PositionOutOfRange] if `position >= queue size`.
     pub fn ack(&mut self, position: u64) -> Result<(), Error> {
         let size = self.journal.size();
         if position >= size {
@@ -293,19 +278,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(())
     }
 
-    /// Acknowledge all items up to (but not including) the given position.
-    ///
-    /// This is a convenience method for batch acknowledgment. It's equivalent to calling
-    /// [Queue::ack] for each position in `[ack_floor, up_to)`, but more efficient as it
-    /// directly advances the ack floor. Pruning happens during [Self::prune].
-    ///
-    /// # Arguments
-    ///
-    /// * `up_to` - The exclusive upper bound. Items at positions `[ack_floor, up_to)` are acknowledged.
+    /// Acknowledge all items in `[ack_floor, up_to)` by advancing the floor
+    /// directly. More efficient than calling [Self::ack] in a loop.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PositionOutOfRange] if `up_to > queue size`.
+    /// Returns [Error::PositionOutOfRange] if `up_to > queue size`.
     pub fn ack_up_to(&mut self, up_to: u64) -> Result<(), Error> {
         let size = self.journal.size();
         if up_to > size {
@@ -366,8 +344,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.ack_floor >= self.journal.size()
     }
 
-    /// Manually prune acknowledged items from storage.
-    ///
+    /// Prune completed sections below the ack floor without flushing.
     /// Returns `true` if any data was pruned.
     ///
     /// # Errors
@@ -381,10 +358,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(pruned)
     }
 
-    /// Reset the read position to re-deliver all unacknowledged items.
-    ///
-    /// After calling this method, [Queue::dequeue] will return items starting from
-    /// the ack floor, skipping any that have been acknowledged.
+    /// Reset the read position to the ack floor so [Self::dequeue] re-delivers
+    /// all unacknowledged items from the beginning.
     pub fn reset(&mut self) {
         let old_pos = self.read_pos;
         self.read_pos = self.ack_floor;
@@ -395,10 +370,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         );
     }
 
-    /// Persist appended items without pruning.
-    ///
-    /// Use after [Self::append] to make appends durable. Does not advance the
-    /// pruning boundary; use [Self::commit] for that.
+    /// Persist appended items without pruning. Use [Self::commit] to
+    /// also prune acknowledged sections.
     ///
     /// # Errors
     ///
@@ -408,17 +381,17 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(())
     }
 
-    /// Prune acknowledged items and persist the journal.
+    /// Flush appended items, then prune completed sections below the ack floor.
     ///
-    /// Advances the durable ack boundary and flushes. Recovery may be required
-    /// on startup if a crash occurs before the next commit.
+    /// Flush-then-prune ordering ensures a crash between steps cannot delete
+    /// old sections while the current section is still unflushed.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.prune(self.ack_floor).await?;
         self.journal.commit().await?;
+        self.journal.prune(self.ack_floor).await?;
         Ok(())
     }
 
@@ -506,6 +479,79 @@ mod tests {
             // Queue still has unacked items
             assert!(!queue.is_empty());
             assert!(queue.dequeue().await.unwrap().is_none());
+        });
+    }
+
+    #[test_traced]
+    fn test_append_flush_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_batch");
+            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
+                .await
+                .unwrap();
+
+            // Append multiple items, then flush once
+            for i in 0..5u8 {
+                queue.append(vec![i]).await.unwrap();
+            }
+            queue.flush().await.unwrap();
+            assert_eq!(queue.size(), 5);
+
+            // Dequeue and verify order
+            for i in 0..5 {
+                let (pos, item) = queue.dequeue().await.unwrap().unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(item, vec![i as u8]);
+            }
+
+            // Mix batch and single enqueue
+            for i in 5..8u8 {
+                queue.append(vec![i]).await.unwrap();
+            }
+            queue.flush().await.unwrap();
+            queue.enqueue(vec![8]).await.unwrap();
+            assert_eq!(queue.size(), 9);
+
+            queue.ack_up_to(9).unwrap();
+            assert!(queue.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_append_flush_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_batch_persist");
+
+            {
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("first"),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                for i in 0..4u8 {
+                    queue.append(vec![i]).await.unwrap();
+                }
+                queue.flush().await.unwrap();
+                queue.commit().await.unwrap();
+            }
+
+            {
+                let mut queue = Queue::<_, Vec<u8>>::init(
+                    context.with_label("second"),
+                    cfg,
+                )
+                .await
+                .unwrap();
+                assert_eq!(queue.size(), 4);
+                for i in 0..4 {
+                    let (pos, item) = queue.dequeue().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, vec![i as u8]);
+                }
+            }
         });
     }
 

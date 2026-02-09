@@ -11,7 +11,7 @@ use commonware_codec::CodecShared;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::channel::mpsc;
 use futures::lock::Mutex;
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 use tracing::debug;
 
 /// Writer handle for enqueueing items.
@@ -33,10 +33,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
-    /// Enqueue an item, returning its position.
-    ///
-    /// The item is durably persisted before returning. The reader will be
-    /// notified that a new item is available.
+    /// Enqueue an item, returning its position. The lock is held for the
+    /// full append + flush, so no reader can see the item until it is durable.
     ///
     /// # Errors
     ///
@@ -49,6 +47,35 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
 
         debug!(position = pos, "writer: enqueued item");
         Ok(pos)
+    }
+
+    /// Enqueue a batch of items with a single flush, returning positions
+    /// `[start, end)`. The lock is held for the full batch, so no reader can
+    /// see any item until the entire batch is durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any append or the final flush fails.
+    pub async fn enqueue_bulk(&self, items: &[V]) -> Result<Range<u64>, Error>
+    where
+        V: Clone,
+    {
+        let mut queue = self.queue.lock().await;
+        let start = queue.size();
+        for item in items {
+            queue.append(item.clone()).await?;
+        }
+        if !items.is_empty() {
+            queue.flush().await?;
+        }
+        let end = queue.size();
+        drop(queue);
+
+        if start < end {
+            let _ = self.notify.try_send(());
+        }
+        debug!(start, end, "writer: enqueued bulk");
+        Ok(start..end)
     }
 
     /// Returns the total number of items that have been enqueued.
@@ -107,31 +134,25 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
         self.queue.lock().await.dequeue().await
     }
 
-    /// Acknowledge processing of an item at the given position.
-    ///
-    /// See [Queue::ack] for details.
+    /// See [Queue::ack].
     ///
     /// # Errors
     ///
-    /// Returns an error if the position is out of range or storage fails.
+    /// Returns [super::Error::PositionOutOfRange] if the position is invalid.
     pub async fn ack(&self, position: u64) -> Result<(), Error> {
         self.queue.lock().await.ack(position)
     }
 
-    /// Acknowledge all items up to (but not including) the given position.
-    ///
-    /// See [Queue::ack_up_to] for details.
+    /// See [Queue::ack_up_to].
     ///
     /// # Errors
     ///
-    /// Returns an error if the position is out of range or storage fails.
+    /// Returns [super::Error::PositionOutOfRange] if `up_to` is invalid.
     pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
         self.queue.lock().await.ack_up_to(up_to)
     }
 
-    /// Peek at the next unacknowledged item without advancing the read position.
-    ///
-    /// See [Queue::peek] for details.
+    /// See [Queue::peek].
     pub async fn peek(&self) -> Result<Option<(u64, V)>, Error> {
         self.queue.lock().await.peek().await
     }
@@ -156,7 +177,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
         self.queue.lock().await.reset();
     }
 
-    /// Prune acknowledged items.
+    /// See [Queue::prune].
     ///
     /// See [Queue::prune] for details.
     pub async fn prune(&self) -> Result<bool, Error> {
@@ -249,6 +270,27 @@ mod tests {
 
             // Ack the item
             reader.ack(recv_pos).await.unwrap();
+            assert!(reader.is_empty().await);
+        });
+    }
+
+    #[test_traced]
+    fn test_shared_enqueue_bulk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_shared_bulk");
+            let (writer, mut reader) = init(context, cfg).await.unwrap();
+
+            let items: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i]).collect();
+            let range = writer.enqueue_bulk(&items).await.unwrap();
+            assert_eq!(range, 0..5);
+
+            for i in 0..5 {
+                let (pos, item) = reader.recv().await.unwrap().unwrap();
+                assert_eq!(pos, i);
+                assert_eq!(item, vec![i as u8]);
+                reader.ack(pos).await.unwrap();
+            }
             assert!(reader.is_empty().await);
         });
     }
