@@ -30,8 +30,8 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
-    Storage,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -101,7 +101,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<E, B, P, FC, FB, ES, T, A = Exact>
 where
-    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage + BufferPooler,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
@@ -162,7 +162,7 @@ where
 
 impl<E, B, P, FC, FB, ES, T, A> Actor<E, B, P, FC, FB, ES, T, A>
 where
-    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: CryptoRngCore + Spawner + Metrics + Clock + Storage + BufferPooler,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,

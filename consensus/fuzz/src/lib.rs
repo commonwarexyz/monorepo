@@ -35,7 +35,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Clock, IoBuf, Metrics, Runner, Spawner,
 };
 use commonware_utils::{channel::mpsc::Receiver, BytesRng, NZUsize, NZU16};
 use futures::future::join_all;
@@ -380,7 +380,11 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         fetch_concurrent: 1,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+            context.storage_buffer_pool().clone(),
+        ),
         strategy: Sequential,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
@@ -607,7 +611,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                    primary_context.storage_buffer_pool().clone(),
+                ),
                 strategy: Sequential,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
