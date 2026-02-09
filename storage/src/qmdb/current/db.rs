@@ -803,7 +803,7 @@ pub(super) async fn init_bitmap_metadata<E: Storage + Clock + Metrics, D: Digest
     let pruned_chunks = match metadata.get(&key) {
         Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
             error!("pruned chunks value not a valid u64");
-            mmr::Error::DataCorrupted("pruned chunks value not a valid u64")
+            Error::DataCorrupted("pruned chunks value not a valid u64")
         })?),
         None => {
             warn!("bitmap metadata does not contain pruned chunks, initializing as empty");

@@ -318,7 +318,7 @@ where
 
     // Initialize the activity status bitmap.
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| crate::mmr::Error::DataCorrupted("pruned chunks overflow"))?;
+        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new_unchecked(status.len());
@@ -402,7 +402,7 @@ where
 
     // Initialize the activity status bitmap.
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| crate::mmr::Error::DataCorrupted("pruned chunks overflow"))?;
+        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
 
     // Initialize the anydb with a callback that populates the activity status bitmap.
     let last_known_inactivity_floor = Location::new_unchecked(status.len());
