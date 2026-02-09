@@ -72,7 +72,7 @@ impl<E: Storage + Metrics + BufferPooler, V: CodecShared> Glob<E, V> {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
-                pool: commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                pool: context.storage_buffer_pool().clone(),
             },
         };
         let manager = Manager::init(context, manager_cfg).await?;

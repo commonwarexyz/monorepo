@@ -110,10 +110,7 @@ impl<B: Blob> Blob for Write<B> {
                 // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
                 // of the range.
                 if remaining > 0 {
-                    let blob_result = self
-                        .blob
-                        .read_at_buf(offset, remaining, self._pool.alloc(remaining))
-                        .await?;
+                    let blob_result = self.blob.read_at(offset, remaining).await?;
                     single.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 Ok(IoBufsMut::Single(single))
@@ -130,10 +127,7 @@ impl<B: Blob> Blob for Write<B> {
                 // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
                 // of the range.
                 if remaining > 0 {
-                    let blob_result = self
-                        .blob
-                        .read_at_buf(offset, remaining, self._pool.alloc(remaining))
-                        .await?;
+                    let blob_result = self.blob.read_at(offset, remaining).await?;
                     temp.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 // Copy back to original chunks

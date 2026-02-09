@@ -23,7 +23,7 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Buf, BufMut, BufferPool, Error, IoBuf};
+use crate::{Blob, Buf, BufMut, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
 
@@ -46,17 +46,12 @@ async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,
-    pool: BufferPool,
 ) -> Result<IoBuf, Error> {
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let physical_page_start = page_num * physical_page_size;
 
     let page = blob
-        .read_at_buf(
-            physical_page_start,
-            physical_page_size as usize,
-            pool.alloc(physical_page_size as usize),
-        )
+        .read_at(physical_page_start, physical_page_size as usize)
         .await?
         .coalesce();
 

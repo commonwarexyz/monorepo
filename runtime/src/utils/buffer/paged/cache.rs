@@ -233,9 +233,8 @@ impl CacheRef {
                     // work. get_page_from_blob handles CRC validation and returns only logical bytes.
                     let blob = blob.clone();
                     let page_size = self.page_size;
-                    let pool = self.pool.clone();
                     let future = async move {
-                        let page = get_page_from_blob(&blob, page_num, page_size, pool)
+                        let page = get_page_from_blob(&blob, page_num, page_size)
                             .await
                             .map_err(Arc::new)?;
                         // We should never be fetching partial pages through the page cache. This

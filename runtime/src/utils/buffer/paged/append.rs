@@ -110,7 +110,6 @@ impl<B: Blob> Append<B> {
             &blob,
             original_blob_size,
             cache_ref.page_size(),
-            cache_ref.pool(),
         )
         .await?;
         if invalid_data_found {
@@ -176,8 +175,7 @@ impl<B: Blob> Append<B> {
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
         let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, blob_size, cache_ref.page_size(), cache_ref.pool())
-                .await?;
+            Self::read_last_valid_page(&blob, blob_size, cache_ref.page_size()).await?;
         if invalid_data_found {
             // Invalid data was detected, so this blob is not consistent.
             return Err(Error::InvalidChecksum);
@@ -278,7 +276,6 @@ impl<B: Blob> Append<B> {
         blob: &B,
         blob_size: u64,
         page_size: u64,
-        pool: crate::BufferPool,
     ) -> Result<(Option<(IoBuf, Checksum)>, u64, bool), Error> {
         let physical_page_size = page_size + CHECKSUM_SIZE;
         let partial_bytes = blob_size % physical_page_size;
@@ -292,11 +289,7 @@ impl<B: Blob> Append<B> {
             // Read the last page and parse its CRC record.
             let page_start = last_page_end - physical_page_size;
             let buf = blob
-                .read_at_buf(
-                    page_start,
-                    physical_page_size as usize,
-                    pool.alloc(physical_page_size as usize),
-                )
+                .read_at(page_start, physical_page_size as usize)
                 .await?
                 .coalesce()
                 .freeze();
@@ -780,7 +773,6 @@ impl<B: Blob> Append<B> {
             logical_blob_size,
             prefetch_pages,
             logical_page_size_nz,
-            self.cache_ref.pool(),
         );
         Ok(Replay::new(reader))
     }
@@ -918,7 +910,6 @@ impl<B: Blob> Blob for Append<B> {
                 &blob_guard.blob,
                 full_pages,
                 logical_page_size,
-                self.cache_ref.pool(),
             )
             .await?;
 

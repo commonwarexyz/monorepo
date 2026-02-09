@@ -1,5 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Buf, BufferPool, Error, IoBuf};
+use crate::{Blob, Buf, Error, IoBuf};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -37,8 +37,6 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
-    /// Pool used to allocate read buffers.
-    pool: BufferPool,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -56,7 +54,6 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         prefetch_count: usize,
         logical_page_size: NonZeroU16,
-        pool: BufferPool,
     ) -> Self {
         let logical_page_size = logical_page_size.get() as usize;
         let page_size = logical_page_size + Checksum::SIZE;
@@ -69,7 +66,6 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             blob_page: 0,
             prefetch_count,
-            pool,
         }
     }
 
@@ -114,7 +110,7 @@ impl<B: Blob> PageReader<B> {
         // Read physical data
         let physical_buf = self
             .blob
-            .read_at_buf(start_offset, bytes_to_read, self.pool.alloc(bytes_to_read))
+            .read_at(start_offset, bytes_to_read)
             .await?
             .coalesce()
             .freeze();
