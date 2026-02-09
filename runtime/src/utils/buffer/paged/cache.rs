@@ -2,7 +2,7 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, Error, RwLock};
+use crate::{Blob, BufferPool, Error, IoBuf, IoBufMut, RwLock};
 use futures::{future::Shared, FutureExt};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -19,8 +19,8 @@ use tracing::{debug, error, trace};
 // Type alias for the future we'll be storing for each in-flight page fetch.
 //
 // We wrap [Error] in an Arc so it will be cloneable, which is required for the future to be
-// [Shared]. The Vec<u8> contains only the logical (validated) bytes of the page.
-type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<Vec<u8>, Arc<Error>>> + Send>>>;
+// [Shared]. The IoBuf contains only the logical (validated) bytes of the page.
+type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<IoBuf, Arc<Error>>> + Send>>>;
 
 /// A [Cache] caches pages of [Blob] data in memory after verifying the integrity of each.
 ///
@@ -35,7 +35,7 @@ type PageFetchFut = Shared<Pin<Box<dyn Future<Output = Result<Vec<u8>, Arc<Error
 /// reference bit to false along the way.
 struct Cache {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
-    /// page to the index of its slot in `entries` and `arena`.
+    /// page to the index of its slot in `entries` and `slots`.
     ///
     /// # Invariants
     ///
@@ -48,9 +48,10 @@ struct Cache {
     /// Each `entries` slot has exactly one corresponding `index` entry.
     entries: Vec<CacheEntry>,
 
-    /// Pre-allocated arena containing all page data contiguously.
-    /// Slot i's data is at `arena[i * page_size .. (i+1) * page_size]`.
-    arena: Vec<u8>,
+    /// Per-slot page buffers allocated from the pool.
+    ///
+    /// `slots[i]` stores one logical page for `entries[i]`.
+    slots: Vec<IoBufMut>,
 
     /// Size of each page in bytes.
     page_size: usize,
@@ -64,6 +65,8 @@ struct Cache {
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
     page_fetches: HashMap<(u64, u64), PageFetchFut>,
+    /// Buffer pool retained for page-cache allocations.
+    pool: BufferPool,
 }
 
 /// Metadata for a single cache entry (page data stored in arena).
@@ -93,18 +96,21 @@ pub struct CacheRef {
 
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
+    /// Pool used for page-cache and associated buffer allocations.
+    pool: BufferPool,
 }
 
 impl CacheRef {
     /// Returns a new [CacheRef] that will buffer up to `capacity` pages with the
-    /// given `page_size`.
-    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    /// given `page_size` and explicitly provided `pool`.
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         let page_size_u64 = page_size.get() as u64;
 
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(page_size, capacity))),
+            cache: Arc::new(RwLock::new(Cache::new(page_size, capacity, pool.clone()))),
+            pool,
         }
     }
 
@@ -112,6 +118,12 @@ impl CacheRef {
     #[inline]
     pub const fn page_size(&self) -> u64 {
         self.page_size
+    }
+
+    /// Returns the storage buffer pool associated with this cache.
+    #[inline]
+    pub fn pool(&self) -> BufferPool {
+        self.pool.clone()
     }
 
     /// Returns a unique id for the next blob that will use this page cache.
@@ -221,8 +233,9 @@ impl CacheRef {
                     // work. get_page_from_blob handles CRC validation and returns only logical bytes.
                     let blob = blob.clone();
                     let page_size = self.page_size;
+                    let pool = self.pool.clone();
                     let future = async move {
-                        let page = get_page_from_blob(&blob, page_num, page_size)
+                        let page = get_page_from_blob(&blob, page_num, page_size, pool)
                             .await
                             .map_err(Arc::new)?;
                         // We should never be fetching partial pages through the page cache. This
@@ -258,8 +271,9 @@ impl CacheRef {
             // Copy the requested portion of the page into the buffer and return immediately.
             let page_buf = fetch_result.map_err(|_| Error::ReadFailed)?;
             let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
+            let page_slice = page_buf.as_ref();
             buf[..bytes_to_copy]
-                .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
+                .copy_from_slice(&page_slice[offset_in_page..offset_in_page + bytes_to_copy]);
             return Ok(bytes_to_copy);
         }
 
@@ -280,12 +294,13 @@ impl CacheRef {
             }
         };
 
-        cache.cache(blob_id, &page_buf, page_num);
+        cache.cache(blob_id, page_buf.as_ref(), page_num);
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
+        let page_slice = page_buf.as_ref();
         buf[..bytes_to_copy]
-            .copy_from_slice(&page_buf[offset_in_page..offset_in_page + bytes_to_copy]);
+            .copy_from_slice(&page_slice[offset_in_page..offset_in_page + bytes_to_copy]);
 
         Ok(bytes_to_copy)
     }
@@ -319,21 +334,27 @@ impl CacheRef {
 }
 
 impl Cache {
-    /// Return a new empty page cache with an initial next-blob id of 0, and a max cache capacity of
-    /// `capacity` pages, each of size `page_size` bytes.
-    ///
-    /// The arena is pre-allocated to hold all pages contiguously.
-    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    /// Return a new empty page cache with an initial next-blob id of 0, and a max cache capacity
+    /// of `capacity` pages, each of size `page_size` bytes.
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         let page_size = page_size.get() as usize;
         let capacity = capacity.get();
+        let mut slots = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            let mut slot = pool.alloc(page_size);
+            // SAFETY: cache writes always initialize full logical pages.
+            unsafe { slot.set_len(page_size) };
+            slots.push(slot);
+        }
         Self {
             index: HashMap::new(),
             entries: Vec::with_capacity(capacity),
-            arena: vec![0u8; capacity * page_size],
+            slots,
             page_size,
             clock: 0,
             capacity,
             page_fetches: HashMap::new(),
+            pool,
         }
     }
 
@@ -341,16 +362,14 @@ impl Cache {
     #[inline]
     fn page_slice(&self, slot: usize) -> &[u8] {
         assert!(slot < self.capacity);
-        let start = slot * self.page_size;
-        &self.arena[start..start + self.page_size]
+        self.slots[slot].as_ref()
     }
 
     /// Returns a mutable slice to the page data for the given slot index.
     #[inline]
     fn page_slice_mut(&mut self, slot: usize) -> &mut [u8] {
         assert!(slot < self.capacity);
-        let start = slot * self.page_size;
-        &mut self.arena[start..start + self.page_size]
+        self.slots[slot].as_mut()
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
@@ -411,6 +430,12 @@ impl Cache {
                 key,
                 referenced: AtomicBool::new(true),
             });
+            if slot >= self.slots.len() {
+                let mut new_slot = self.pool.alloc(self.page_size);
+                // SAFETY: We always write full pages into cache slots.
+                unsafe { new_slot.set_len(self.page_size) };
+                self.slots.push(new_slot);
+            }
             self.page_slice_mut(slot).copy_from_slice(page);
             return;
         }
@@ -444,6 +469,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
+    use prometheus_client::registry::Registry;
     use std::num::NonZeroU16;
 
     // Logical page size (what CacheRef uses and what gets cached).
@@ -452,7 +478,9 @@ mod tests {
 
     #[test_traced]
     fn test_cache_basic() {
-        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(10));
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(10), pool);
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
@@ -523,7 +551,11 @@ mod tests {
             }
 
             // Fill the page cache with the blob's data via CacheRef::read.
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
+            let cache_ref = CacheRef::new(
+                PAGE_SIZE,
+                NZUsize!(10),
+                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+            );
             assert_eq!(cache_ref.next_id().await, 0);
             assert_eq!(cache_ref.next_id().await, 1);
             for i in 0..11 {
@@ -555,8 +587,12 @@ mod tests {
     #[test_traced]
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
+        executor.start(|context| async move {
+            let cache_ref = CacheRef::new(
+                PAGE_SIZE,
+                NZUsize!(2),
+                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+            );
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
@@ -582,10 +618,14 @@ mod tests {
     #[test_traced]
     fn test_cache_at_high_offset() {
         let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
+        executor.start(|context| async move {
             // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
-            let cache_ref = CacheRef::new(NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
+            let cache_ref = CacheRef::new(
+                NZU16!(MIN_PAGE_SIZE as u16),
+                NZUsize!(2),
+                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+            );
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
             // only).

@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, Runner, Storage,
+    deterministic, Blob, BufferPooler, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -130,7 +130,12 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
 
-                    read_buffer = Some(Read::new(blob, blob_size.min(size), NZUsize!(buffer_size)));
+                    read_buffer = Some(Read::new(
+                        blob,
+                        blob_size.min(size),
+                        NZUsize!(buffer_size),
+                        context.storage_buffer_pool().clone(),
+                    ));
                 }
 
                 FuzzOperation::CreateWrite {
@@ -144,7 +149,12 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("cannot open context");
 
-                    write_buffer = Some(Write::new(blob, initial_size as u64, NZUsize!(capacity)));
+                    write_buffer = Some(Write::new(
+                        blob,
+                        initial_size as u64,
+                        NZUsize!(capacity),
+                        context.storage_buffer_pool().clone(),
+                    ));
                 }
 
                 FuzzOperation::CreateAppend {
@@ -166,7 +176,11 @@ fn fuzz(input: FuzzInput) {
                     // in the CRC records.
                     if cache_ref.is_none() {
                         let cache_page_size = cache_page_size.clamp(1, u16::MAX);
-                        cache_ref = Some(CacheRef::new(NZU16!(cache_page_size), cache_capacity));
+                        cache_ref = Some(CacheRef::new(
+                            NZU16!(cache_page_size),
+                            cache_capacity,
+                            context.storage_buffer_pool().clone(),
+                        ));
                         cache_page_size_ref = Some(cache_page_size);
                     }
 
