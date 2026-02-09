@@ -188,6 +188,8 @@ impl LedgerView {
             let changes = inner.merged_changes_from(parent, changes)?;
             (changes, inner.qmdb.clone())
         };
+        // QMDB opens async stores; offload from tokio workers to avoid deep stacks via
+        // WrapDatabaseAsync (REVM sync reads) and prevent stack overflows.
         let context = self.context.clone();
         let compute_handle = context
             .shared(true)
@@ -216,6 +218,8 @@ impl LedgerView {
             (changes, inner.qmdb.clone(), chain)
         };
 
+        // QMDB persistence can run on the same call chain as REVM sync reads; keep it on
+        // the blocking pool to avoid worker stack overflows.
         let context = self.context.clone();
         let commit_handle = context
             .shared(true)
