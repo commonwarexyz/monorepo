@@ -45,8 +45,8 @@ rand_core.workspace = true
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
-criterion.workspace = true
 commonware-invariants.workspace = true
+criterion.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 
