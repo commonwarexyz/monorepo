@@ -147,9 +147,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Append an item without persisting. Call [Self::flush] or [Self::commit]
     /// afterwards to make it durable. The item is readable immediately but
     /// is not guaranteed to survive a crash until flushed or the journal
-    /// auto-syncs at a section boundary (see
-    /// [`variable::Journal`](crate::journal::contiguous::variable::Journal)
-    /// invariant 1).
+    /// auto-syncs at a section boundary (see [`variable::Journal`] invariant 1).
     ///
     /// # Errors
     ///
