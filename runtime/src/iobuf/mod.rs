@@ -855,6 +855,46 @@ impl IoBufsMut {
         }
     }
 
+    /// Returns the total capacity across all buffers.
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::Single(buf) => buf.capacity(),
+            Self::Chunked(bufs) => bufs
+                .iter()
+                .map(|b| b.capacity())
+                .fold(0, usize::saturating_add),
+        }
+    }
+
+    /// Sets the length of the buffer(s) to `len`, distributing across chunks.
+    ///
+    /// # Safety
+    ///
+    /// Caller must initialize all `len` bytes before the buffer is read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` exceeds total capacity.
+    pub(crate) unsafe fn set_len(&mut self, len: usize) {
+        assert!(
+            len <= self.capacity(),
+            "set_len({len}) exceeds capacity({})",
+            self.capacity()
+        );
+        match self {
+            Self::Single(buf) => buf.set_len(len),
+            Self::Chunked(bufs) => {
+                let mut remaining = len;
+                for buf in bufs.iter_mut() {
+                    let cap = buf.capacity();
+                    let to_set = remaining.min(cap);
+                    buf.set_len(to_set);
+                    remaining -= to_set;
+                }
+            }
+        }
+    }
+
     /// Copy data from a slice into the buffers.
     ///
     /// Panics if the slice length doesn't match the total buffer length.
@@ -2070,6 +2110,75 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
         assert_eq!(coalesced, b"hello");
         assert!(coalesced.capacity() >= 105);
+    }
+
+    #[test]
+    fn test_iobufsmut_set_len() {
+        // SAFETY: we don't read the uninitialized bytes.
+        unsafe {
+            // Single buffer
+            let mut bufs = IoBufsMut::from(IoBufMut::with_capacity(16));
+            bufs.set_len(10);
+            assert_eq!(bufs.len(), 10);
+
+            // Chunked: distributes across chunks [cap 5, cap 10], set 12 -> [5, 7]
+            let mut bufs = IoBufsMut::from(vec![
+                IoBufMut::with_capacity(5),
+                IoBufMut::with_capacity(10),
+            ]);
+            bufs.set_len(12);
+            assert_eq!(bufs.len(), 12);
+            match &bufs {
+                IoBufsMut::Chunked(c) => {
+                    assert_eq!(c[0].len(), 5);
+                    assert_eq!(c[1].len(), 7);
+                }
+                _ => panic!("expected Chunked"),
+            }
+
+            // Uneven capacities [3, 20, 2], set 18 -> [3, 15, 0]
+            let mut bufs = IoBufsMut::from(vec![
+                IoBufMut::with_capacity(3),
+                IoBufMut::with_capacity(20),
+                IoBufMut::with_capacity(2),
+            ]);
+            bufs.set_len(18);
+            match &bufs {
+                IoBufsMut::Chunked(c) => {
+                    assert_eq!(c[0].len(), 3);
+                    assert_eq!(c[1].len(), 15);
+                    assert_eq!(c[2].len(), 0);
+                }
+                _ => panic!("expected Chunked"),
+            }
+
+            // Exact total capacity [4, 4], set 8 -> [4, 4]
+            let mut bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+            bufs.set_len(8);
+            match &bufs {
+                IoBufsMut::Chunked(c) => {
+                    assert_eq!(c[0].len(), 4);
+                    assert_eq!(c[1].len(), 4);
+                }
+                _ => panic!("expected Chunked"),
+            }
+
+            // Zero length on chunked
+            let mut bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+            bufs.set_len(0);
+            assert_eq!(bufs.len(), 0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "set_len(9) exceeds capacity(8)")]
+    fn test_iobufsmut_set_len_overflow() {
+        let mut bufs =
+            IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+        // SAFETY: this will panic before any read.
+        unsafe { bufs.set_len(9) };
     }
 
     #[cfg(feature = "arbitrary")]

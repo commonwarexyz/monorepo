@@ -67,8 +67,6 @@ use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
-#[cfg(miri)]
-use commonware_utils::NZUsize;
 use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
@@ -216,18 +214,39 @@ pub struct Config {
 
     /// Configuration for deterministic storage fault injection.
     /// Defaults to no faults being injected.
-    storage_faults: FaultConfig,
+    storage_fault_cfg: FaultConfig,
+
+    /// Buffer pool configuration for network I/O.
+    network_buffer_pool_cfg: BufferPoolConfig,
+
+    /// Buffer pool configuration for storage I/O.
+    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under Miri
+                let network_buffer_pool_cfg = BufferPoolConfig::for_network()
+                    .with_max_per_class(commonware_utils::NZUsize!(32));
+                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
+                    .with_max_per_class(commonware_utils::NZUsize!(32));
+            } else {
+                let network_buffer_pool_cfg = BufferPoolConfig::for_network();
+                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage();
+            }
+        }
+
         Self {
             rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
             timeout: None,
             catch_panics: false,
-            storage_faults: FaultConfig::default(),
+            storage_fault_cfg: FaultConfig::default(),
+            network_buffer_pool_cfg,
+            storage_buffer_pool_cfg,
         }
     }
 
@@ -262,14 +281,24 @@ impl Config {
         self.catch_panics = catch_panics;
         self
     }
+    /// See [Config]
+    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.network_buffer_pool_cfg = cfg;
+        self
+    }
+    /// See [Config]
+    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.storage_buffer_pool_cfg = cfg;
+        self
+    }
 
     /// Configure storage fault injection.
     ///
     /// When set, the runtime will inject deterministic storage errors based on
     /// the provided configuration. Faults are drawn from the shared RNG, ensuring
     /// reproducible failure patterns for a given seed.
-    pub const fn with_storage_faults(mut self, faults: FaultConfig) -> Self {
-        self.storage_faults = faults;
+    pub const fn with_storage_fault_config(mut self, faults: FaultConfig) -> Self {
+        self.storage_fault_cfg = faults;
         self
     }
 
@@ -285,6 +314,14 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn network_buffer_pool_config(&self) -> &BufferPoolConfig {
+        &self.network_buffer_pool_cfg
+    }
+    /// See [Config]
+    pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
+        &self.storage_buffer_pool_cfg
     }
 
     /// Assert that the configuration is valid.
@@ -409,6 +446,8 @@ pub struct Checkpoint {
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
+    network_buffer_pool_cfg: BufferPoolConfig,
+    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Checkpoint {
@@ -484,6 +523,8 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
+        let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
+        let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
         let mut root = Box::pin(panicked.interrupt(f(context)));
 
         // Register the root task
@@ -646,6 +687,8 @@ impl Runner {
             storage,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
+            network_buffer_pool_cfg,
+            storage_buffer_pool_cfg,
         };
 
         (output, checkpoint)
@@ -870,11 +913,25 @@ impl Context {
         // Create shared RNG (used by both executor and storage)
         let rng = Arc::new(Mutex::new(cfg.rng));
 
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            cfg.network_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            cfg.storage_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Create storage fault config (default to disabled if None)
-        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_faults));
+        let storage_fault_config = Arc::new(RwLock::new(cfg.storage_fault_cfg));
         let storage = MeteredStorage::new(
             AuditedStorage::new(
-                FaultyStorage::new(MemStorage::default(), rng.clone(), storage_fault_config),
+                FaultyStorage::new(
+                    MemStorage::new(storage_buffer_pool.clone()),
+                    rng.clone(),
+                    storage_fault_config,
+                ),
                 auditor.clone(),
             ),
             runtime_registry,
@@ -883,32 +940,6 @@ impl Context {
         // Create network
         let network = AuditedNetwork::new(DeterministicNetwork::default(), auditor.clone());
         let network = MeteredNetwork::new(network, runtime_registry);
-
-        // Initialize buffer pools
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under miri
-                let network_config = BufferPoolConfig {
-                    max_per_class: NZUsize!(32),
-                    ..BufferPoolConfig::for_network()
-                };
-                let storage_config = BufferPoolConfig {
-                    max_per_class: NZUsize!(32),
-                    ..BufferPoolConfig::for_storage()
-                };
-            } else {
-                let network_config = BufferPoolConfig::for_network();
-                let storage_config = BufferPoolConfig::for_storage();
-            }
-        }
-        let network_buffer_pool = BufferPool::new(
-            network_config,
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            storage_config,
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
-        );
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
@@ -970,28 +1001,12 @@ impl Context {
         let network = MeteredNetwork::new(network, runtime_registry);
 
         // Initialize buffer pools
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under Miri
-                let network_config = BufferPoolConfig {
-                    max_per_class: NZUsize!(32),
-                    ..BufferPoolConfig::for_network()
-                };
-                let storage_config = BufferPoolConfig {
-                    max_per_class: NZUsize!(32),
-                    ..BufferPoolConfig::for_storage()
-                };
-            } else {
-                let network_config = BufferPoolConfig::for_network();
-                let storage_config = BufferPoolConfig::for_storage();
-            }
-        }
         let network_buffer_pool = BufferPool::new(
-            network_config,
+            checkpoint.network_buffer_pool_cfg.clone(),
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
-            storage_config,
+            checkpoint.storage_buffer_pool_cfg.clone(),
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
@@ -1059,7 +1074,7 @@ impl Context {
     /// Changes to the returned [`FaultConfig`] take effect immediately for
     /// subsequent storage operations. This allows dynamically enabling or
     /// disabling fault injection during a test.
-    pub fn storage_faults(&self) -> Arc<RwLock<FaultConfig>> {
+    pub fn storage_fault_config(&self) -> Arc<RwLock<FaultConfig>> {
         self.storage.inner().inner().config()
     }
 
@@ -1609,9 +1624,7 @@ mod tests {
     use crate::FutureExt;
     #[cfg(feature = "external")]
     use crate::Spawner;
-    use crate::{
-        deterministic, reschedule, Blob, IoBufMut, Metrics, Resolver, Runner as _, Storage,
-    };
+    use crate::{deterministic, reschedule, Blob, Metrics, Resolver, Runner as _, Storage};
     use commonware_macros::test_traced;
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
@@ -1776,7 +1789,7 @@ mod tests {
         executor.start(|context| async move {
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
-            let read = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read.coalesce(), data);
         });
     }
@@ -2095,7 +2108,7 @@ mod tests {
     #[test]
     fn test_storage_fault_injection_and_recovery() {
         // Phase 1: Run with 100% sync failure rate
-        let cfg = deterministic::Config::default().with_storage_faults(FaultConfig {
+        let cfg = deterministic::Config::default().with_storage_fault_config(FaultConfig {
             sync_rate: Some(1.0),
             ..Default::default()
         });
@@ -2113,7 +2126,7 @@ mod tests {
         // Phase 2: Recover and disable faults explicitly
         deterministic::Runner::from(checkpoint).start(|ctx| async move {
             // Explicitly disable faults for recovery verification
-            *ctx.storage_faults().write().unwrap() = FaultConfig::default();
+            *ctx.storage_fault_config().write().unwrap() = FaultConfig::default();
 
             // Data was not synced, so blob should be empty (unsynced writes are lost)
             let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
@@ -2126,7 +2139,7 @@ mod tests {
                 .expect("sync should succeed with faults disabled");
 
             // Verify data persisted
-            let read_buf = blob.read_at(0, vec![0u8; 9]).await.unwrap();
+            let read_buf = blob.read_at(0, 9).await.unwrap();
             assert_eq!(read_buf.coalesce(), b"recovered");
         });
     }
@@ -2142,8 +2155,8 @@ mod tests {
             blob.sync().await.expect("initial sync should succeed");
 
             // Enable sync faults dynamically
-            let faults = ctx.storage_faults();
-            faults.write().unwrap().sync_rate = Some(1.0);
+            let storage_fault_cfg = ctx.storage_fault_config();
+            storage_fault_cfg.write().unwrap().sync_rate = Some(1.0);
 
             // Now sync should fail
             blob.write_at(0, b"updated".to_vec()).await.unwrap();
@@ -2151,7 +2164,7 @@ mod tests {
             assert!(result.is_err(), "sync should fail with faults enabled");
 
             // Disable faults
-            faults.write().unwrap().sync_rate = Some(0.0);
+            storage_fault_cfg.write().unwrap().sync_rate = Some(0.0);
 
             // Sync should succeed again
             blob.sync()
@@ -2166,7 +2179,7 @@ mod tests {
         fn run_with_seed(seed: u64) -> Vec<bool> {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
-                .with_storage_faults(FaultConfig {
+                .with_storage_fault_config(FaultConfig {
                     open_rate: Some(0.5),
                     ..Default::default()
                 });
@@ -2204,7 +2217,7 @@ mod tests {
         fn run_with_seed(seed: u64) -> Vec<u32> {
             let cfg = deterministic::Config::default()
                 .with_seed(seed)
-                .with_storage_faults(FaultConfig {
+                .with_storage_fault_config(FaultConfig {
                     open_rate: Some(0.5),
                     write_rate: Some(0.3),
                     sync_rate: Some(0.2),

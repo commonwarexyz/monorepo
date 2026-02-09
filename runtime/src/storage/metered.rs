@@ -137,15 +137,22 @@ impl Drop for MetricsHandle {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        let read = self.inner.read_at(offset, len).await?;
+        self.metrics.storage_reads.inc();
+        self.metrics.storage_read_bytes.inc_by(len as u64);
+        Ok(read)
+    }
+
+    async fn read_at_buf(
         &self,
         offset: u64,
+        len: usize,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
-        let read = self.inner.read_at(offset, buf).await?;
+        let read = self.inner.read_at_buf(offset, len, buf).await?;
         self.metrics.storage_reads.inc();
-        self.metrics.storage_read_bytes.inc_by(read.len() as u64);
+        self.metrics.storage_read_bytes.inc_by(len as u64);
         Ok(read)
     }
 
@@ -172,14 +179,18 @@ mod tests {
     use super::*;
     use crate::{
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
-        Blob, IoBufMut, Storage as _,
+        Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
     use prometheus_client::registry::Registry;
+
+    fn test_pool() -> BufferPool {
+        BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default())
+    }
 
     #[tokio::test]
     async fn test_metered_storage() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         run_storage_tests(storage).await;
@@ -189,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_metrics() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
@@ -216,7 +227,7 @@ mod tests {
         );
 
         // Read data from the blob
-        let read = blob.read_at(0, IoBufMut::zeroed(11)).await.unwrap();
+        let read = blob.read_at(0, 11).await.unwrap();
         assert_eq!(read.coalesce(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
@@ -245,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         // Open multiple blobs
@@ -286,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn test_cloned_blobs_share_metrics() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::default();
+        let inner = MemoryStorage::new(test_pool());
         let storage = Storage::new(inner, &mut registry);
 
         // Open a blob
@@ -313,8 +324,8 @@ mod tests {
         // Use the clones for some operations to verify they share metrics
         blob.write_at(0, b"hello").await.unwrap();
         clone1.write_at(5, b"world").await.unwrap();
-        let _ = clone1.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
-        let _ = clone2.read_at(0, IoBufMut::zeroed(10)).await.unwrap();
+        let _ = clone1.read_at(0, 10).await.unwrap();
+        let _ = clone2.read_at(0, 10).await.unwrap();
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(

@@ -119,6 +119,6 @@ pub(crate) mod tests {
 
     #[allow(dead_code)]
     pub fn assert_batchable<T: Batchable + Send>(db: &mut T, key: T::Key, value: T::Value) {
-        assert_send(db.write_batch(vec![(key, Some(value))].into_iter()));
+        assert_send(db.write_batch(vec![(key, Some(value))]));
     }
 }

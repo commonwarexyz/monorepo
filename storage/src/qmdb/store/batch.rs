@@ -3,7 +3,7 @@
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        kv::{Batchable, Deletable as _, Gettable, Updatable as _},
+        kv::{Batchable as _, Deletable as _, Gettable, Updatable as _},
         qmdb::{
             any::states::{MutableAny, UnmerkleizedDurableAny},
             Error,
@@ -19,7 +19,7 @@ pub mod tests {
     use commonware_utils::{test_rng, Array};
     use core::{fmt::Debug, future::Future};
     use rand::Rng;
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     pub trait TestKey: Array + Copy + Send + Sync {
         fn from_seed(seed: u64) -> Self;
@@ -130,7 +130,8 @@ pub mod tests {
     {
         let mut db = next_db(new_db, counter).await;
         let key = TestKey::from_seed(1);
-        db.update(key, TestValue::from_seed(1)).await?;
+        db.write_batch([(key, Some(TestValue::from_seed(1)))])
+            .await?;
 
         let mut batch = db.start_batch();
         assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(1)));
@@ -160,7 +161,8 @@ pub mod tests {
         assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(3)));
 
         let existing = TestKey::from_seed(3);
-        db.update(existing, TestValue::from_seed(4)).await?;
+        db.write_batch([(existing, Some(TestValue::from_seed(4)))])
+            .await?;
 
         let mut batch = db.start_batch();
         assert!(!batch.create(existing, TestValue::from_seed(5)).await?);
@@ -178,7 +180,8 @@ pub mod tests {
     {
         let mut db = next_db(new_db, counter).await;
         let base_key = TestKey::from_seed(4);
-        db.update(base_key, TestValue::from_seed(10)).await?;
+        db.write_batch([(base_key, Some(TestValue::from_seed(10)))])
+            .await?;
         let mut batch = db.start_batch();
         assert!(batch.delete(base_key).await?);
         assert_eq!(batch.get(&base_key).await?, None);
@@ -210,7 +213,8 @@ pub mod tests {
         batch.delete_unchecked(key).await?;
         assert_eq!(batch.get(&key).await?, None);
 
-        db.update(key, TestValue::from_seed(13)).await?;
+        db.write_batch([(key, Some(TestValue::from_seed(13)))])
+            .await?;
         let mut batch = db.start_batch();
         batch.delete_unchecked(key).await?;
         assert_eq!(batch.get(&key).await?, None);
@@ -256,7 +260,7 @@ pub mod tests {
     {
         let mut db = next_db(new_db, counter).await;
         for i in 0..100 {
-            db.update(TestKey::from_seed(i), TestValue::from_seed(i))
+            db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))])
                 .await?;
         }
 
@@ -301,17 +305,15 @@ pub mod tests {
         let mut db = next_db(new_db, counter).await;
         // Create 100 keys and commit them.
         for i in 0..100 {
-            assert!(
-                db.create(TestKey::from_seed(i), TestValue::from_seed(i))
-                    .await?
-            );
+            db.write_batch([(TestKey::from_seed(i), Some(TestValue::from_seed(i)))])
+                .await?;
         }
         let (durable, _) = db.commit(None).await?;
         let mut db = durable.into_mutable();
 
         // Delete half of the keys at random.
         let mut rng = test_rng();
-        let mut deleted = HashSet::new();
+        let mut deleted = BTreeSet::new();
         let mut batch = db.start_batch();
         for i in 0..100 {
             if rng.gen_bool(0.5) {

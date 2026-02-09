@@ -23,7 +23,7 @@
 use super::Header;
 use crate::{
     iouring::{self, should_retry, OpBuffer},
-    Error, IoBufMut, IoBufs, IoBufsMut,
+    BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{
@@ -74,16 +74,18 @@ pub struct Config {
 pub struct Storage {
     storage_directory: PathBuf,
     io_sender: mpsc::Sender<iouring::Op>,
+    pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(mut cfg: Config, registry: &mut Registry) -> Self {
+    pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
         let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
 
         let storage = Self {
             storage_directory: cfg.storage_directory.clone(),
             io_sender,
+            pool,
         };
         let metrics = Arc::new(iouring::Metrics::new(registry));
 
@@ -167,7 +169,13 @@ impl crate::Storage for Storage {
                 .map_err(|e| e.into_error(partition, name))?
         };
 
-        let blob = Blob::new(partition.into(), name, file, self.io_sender.clone());
+        let blob = Blob::new(
+            partition.into(),
+            name,
+            file,
+            self.io_sender.clone(),
+            self.pool.clone(),
+        );
         Ok((blob, logical_len, blob_version))
     }
 
@@ -227,6 +235,8 @@ pub struct Blob {
     file: Arc<File>,
     /// Where to send IO operations to be executed
     io_sender: mpsc::Sender<iouring::Op>,
+    /// Buffer pool for read allocations
+    pool: BufferPool,
 }
 
 impl Clone for Blob {
@@ -236,6 +246,7 @@ impl Clone for Blob {
             name: self.name.clone(),
             file: self.file.clone(),
             io_sender: self.io_sender.clone(),
+            pool: self.pool.clone(),
         }
     }
 }
@@ -246,30 +257,43 @@ impl Blob {
         name: &[u8],
         file: File,
         io_sender: mpsc::Sender<iouring::Op>,
+        pool: BufferPool,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
             io_sender,
+            pool,
         }
     }
 }
 
 impl crate::Blob for Blob {
-    async fn read_at(
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
+    }
+
+    async fn read_at_buf(
         &self,
         offset: u64,
+        len: usize,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let input_buf = buf.into();
+        let mut input_buf = buf.into();
+        // SAFETY: `len` bytes are filled via io_uring read loop below.
+        unsafe { input_buf.set_len(len) };
 
         // For single buffers, read directly into them (zero-copy).
         // For chunked buffers, use a temporary and copy to preserve the input structure.
-        let buf_len = input_buf.len();
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
-            IoBufsMut::Chunked(bufs) => (IoBufMut::zeroed(buf_len), Some(bufs)),
+            IoBufsMut::Chunked(bufs) => {
+                let mut tmp = self.pool.alloc(len);
+                // SAFETY: `len` bytes are filled via io_uring read loop below.
+                unsafe { tmp.set_len(len) };
+                (tmp, Some(bufs))
+            }
         };
 
         let fd = types::Fd(self.file.as_raw_fd());
@@ -278,15 +302,15 @@ impl crate::Blob for Blob {
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        while bytes_read < buf_len {
+        while bytes_read < len {
             // Figure out how much is left to read and where to read into.
             //
             // SAFETY: IoBufMut wraps BytesMut which has stable memory addresses.
-            // `bytes_read` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_read)` stays within bounds and `buf_len - bytes_read`
+            // `bytes_read` is always < `len` due to the loop condition, so
+            // `add(bytes_read)` stays within bounds and `len - bytes_read`
             // correctly represents the remaining valid bytes.
             let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
-            let remaining_len = buf_len - bytes_read;
+            let remaining_len = len - bytes_read;
             let offset = offset + bytes_read as u64;
 
             // Create an operation to do the read
@@ -328,16 +352,11 @@ impl crate::Blob for Blob {
         // Return the same buffer structure as input
         match original_bufs {
             None => Ok(IoBufsMut::Single(io_buf)),
-            Some(mut bufs) => {
+            Some(bufs) => {
                 // Copy from temporary buffer to the original chunked buffers
-                let mut offset = 0;
-                for buf in bufs.iter_mut() {
-                    let len = buf.len();
-                    buf.as_mut()
-                        .copy_from_slice(&io_buf.as_ref()[offset..offset + len]);
-                    offset += len;
-                }
-                Ok(IoBufsMut::Chunked(bufs))
+                let mut result = IoBufsMut::Chunked(bufs);
+                result.copy_from_slice(io_buf.as_ref());
+                Ok(result)
             }
         }
     }
@@ -461,7 +480,9 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::{Header, *};
-    use crate::{storage::tests::run_storage_tests, Blob, IoBufMut, Storage as _};
+    use crate::{
+        storage::tests::run_storage_tests, Blob, BufferPool, BufferPoolConfig, Storage as _,
+    };
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
 
@@ -471,12 +492,14 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("commonware_iouring_storage_{}", rng.gen::<u64>()));
 
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
             },
             &mut Registry::default(),
+            pool,
         );
         (storage, storage_directory)
     }
@@ -526,11 +549,7 @@ mod tests {
         assert_eq!(&raw_content[Header::SIZE..], data);
 
         // Test 3: Read at logical offset 0 returns data from raw offset 8
-        let read_buf = blob
-            .read_at(0, IoBufMut::zeroed(data.len()))
-            .await
-            .unwrap()
-            .coalesce();
+        let read_buf = blob.read_at(0, data.len()).await.unwrap().coalesce();
         assert_eq!(read_buf, data);
 
         // Test 4: Resize with logical length
@@ -560,11 +579,7 @@ mod tests {
 
         let (blob2, size2) = storage.open("partition", b"test").await.unwrap();
         assert_eq!(size2, 9, "reopened blob should have logical size 9");
-        let read_buf = blob2
-            .read_at(0, IoBufMut::zeroed(9))
-            .await
-            .unwrap()
-            .coalesce();
+        let read_buf = blob2.read_at(0, 9).await.unwrap().coalesce();
         assert_eq!(read_buf, b"test data");
         drop(blob2);
 

@@ -238,35 +238,6 @@ where
     Ok(None)
 }
 
-/// Create a `key` with location `new_loc` in the snapshot only if it doesn't already exist, and
-/// return false otherwise.
-async fn create_key<I, C>(
-    snapshot: &mut I,
-    log: &C,
-    key: &<C::Item as Operation>::Key,
-    new_loc: Location,
-) -> Result<bool, Error>
-where
-    I: Index<Value = Location>,
-    C: Contiguous<Item: Operation>,
-{
-    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-    // cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-        return Ok(true);
-    };
-
-    // Confirm the key doesn't already exist.
-    if find_update_op(log, &mut cursor, key).await?.is_some() {
-        return Ok(false);
-    }
-
-    // The key doesn't exist, so add it to the cursor.
-    cursor.insert(new_loc);
-
-    Ok(true)
-}
-
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
 ///

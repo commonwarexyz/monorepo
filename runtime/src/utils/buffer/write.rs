@@ -68,16 +68,25 @@ impl<B: Blob> Write<B> {
 }
 
 impl<B: Blob> Blob for Write<B> {
-    async fn read_at(
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+            .await
+    }
+
+    async fn read_at_buf(
         &self,
         offset: u64,
+        len: usize,
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
-        let len = buf.len() as u64;
+        let mut buf = buf.into();
+        // SAFETY: `len` bytes are filled via extract + blob read below.
+        unsafe { buf.set_len(len) };
 
         // Ensure the read doesn't overflow.
-        let end_offset = offset.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        let end_offset = offset
+            .checked_add(len as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a read lock on the buffer.
         let buffer = self.buffer.read().await;
@@ -96,15 +105,14 @@ impl<B: Blob> Blob for Write<B> {
                 // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
                 // of the range.
                 if remaining > 0 {
-                    let blob_buf = IoBufMut::zeroed(remaining);
-                    let blob_result = self.blob.read_at(offset, blob_buf).await?;
+                    let blob_result = self.blob.read_at(offset, remaining).await?;
                     single.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 Ok(IoBufsMut::Single(single))
             }
             // For chunked buffers, read into temp and copy back to preserve structure.
-            IoBufsMut::Chunked(mut chunks) => {
-                let mut temp = vec![0u8; len as usize];
+            IoBufsMut::Chunked(chunks) => {
+                let mut temp = vec![0u8; len];
                 // Extract any bytes from the buffer that overlap with the
                 // requested range, into a temporary contiguous buffer
                 let remaining = buffer.extract(&mut temp, offset);
@@ -112,18 +120,13 @@ impl<B: Blob> Blob for Write<B> {
                 // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
                 // of the range.
                 if remaining > 0 {
-                    let blob_buf = IoBufMut::zeroed(remaining);
-                    let blob_result = self.blob.read_at(offset, blob_buf).await?;
+                    let blob_result = self.blob.read_at(offset, remaining).await?;
                     temp[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 // Copy back to original chunks
-                let mut pos = 0;
-                for chunk in chunks.iter_mut() {
-                    let chunk_len = chunk.len();
-                    chunk.as_mut().copy_from_slice(&temp[pos..pos + chunk_len]);
-                    pos += chunk_len;
-                }
-                Ok(IoBufsMut::Chunked(chunks))
+                let mut bufs = IoBufsMut::Chunked(chunks);
+                bufs.copy_from_slice(&temp);
+                Ok(bufs)
             }
         }
     }

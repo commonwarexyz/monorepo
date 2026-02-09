@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, IoBufMut, Metrics, Storage,
+    Blob, Buf, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},
@@ -157,9 +157,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Err(Error::ItemOutOfRange(position));
         }
 
-        let buf = blob
-            .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
-            .await?;
+        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
@@ -177,9 +175,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob
-            .read_at(offset, IoBufMut::zeroed(Self::CHUNK_SIZE))
-            .await?;
+        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
         A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
     }
 

@@ -131,6 +131,12 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
+
+    /// Buffer pool configuration for network I/O.
+    network_buffer_pool_cfg: BufferPoolConfig,
+
+    /// Buffer pool configuration for storage I/O.
+    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Config {
@@ -145,6 +151,8 @@ impl Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
+            network_buffer_pool_cfg: BufferPoolConfig::for_network(),
+            storage_buffer_pool_cfg: BufferPoolConfig::for_storage(),
         }
     }
 
@@ -184,6 +192,16 @@ impl Config {
         self.maximum_buffer_size = n;
         self
     }
+    /// See [Config]
+    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.network_buffer_pool_cfg = cfg;
+        self
+    }
+    /// See [Config]
+    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+        self.storage_buffer_pool_cfg = cfg;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -213,6 +231,14 @@ impl Config {
     /// See [Config]
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
+    }
+    /// See [Config]
+    pub const fn network_buffer_pool_config(&self) -> &BufferPoolConfig {
+        &self.network_buffer_pool_cfg
+    }
+    /// See [Config]
+    pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
+        &self.storage_buffer_pool_cfg
     }
 }
 
@@ -280,6 +306,16 @@ impl crate::Runner for Runner {
         let process = MeteredProcess::init(runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
+        // Initialize buffer pools
+        let network_buffer_pool = BufferPool::new(
+            self.cfg.network_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
+        );
+        let storage_buffer_pool = BufferPool::new(
+            self.cfg.storage_buffer_pool_cfg.clone(),
+            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
+        );
+
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -292,29 +328,23 @@ impl crate::Runner for Runner {
                             iouring_config: Default::default(),
                         },
                         iouring_registry,
+                        storage_buffer_pool.clone(),
                     ),
                     runtime_registry,
                 );
             } else {
                 let storage = MeteredStorage::new(
-                    TokioStorage::new(TokioStorageConfig::new(
-                        self.cfg.storage_directory.clone(),
-                        self.cfg.maximum_buffer_size,
-                    )),
+                    TokioStorage::new(
+                        TokioStorageConfig::new(
+                            self.cfg.storage_directory.clone(),
+                            self.cfg.maximum_buffer_size,
+                        ),
+                        storage_buffer_pool.clone(),
+                    ),
                     runtime_registry,
                 );
             }
         }
-
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_network(),
-            runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            BufferPoolConfig::for_storage(),
-            runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
-        );
 
         // Initialize network
         cfg_if::cfg_if! {

@@ -17,7 +17,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef},
-    deterministic, Blob, Buf, Error, IoBufMut, Runner, Storage,
+    deterministic, Blob, Buf, Error, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -135,7 +135,7 @@ fn fuzz(input: FuzzInput) {
 
         // Read the byte, flip the bit, write it back.
         let byte_buf = blob
-            .read_at(corrupt_offset, IoBufMut::zeroed(1))
+            .read_at(corrupt_offset, 1)
             .await
             .expect("cannot read byte to corrupt")
             .coalesce();
@@ -252,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let read_result = append.read_at(offset, IoBufMut::zeroed(len)).await;
+                let read_result = append.read_at(offset, len).await;
 
                 match read_result {
                     Ok(buf) => {

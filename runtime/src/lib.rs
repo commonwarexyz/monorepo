@@ -588,7 +588,7 @@ stability_scope!(BETA {
         /// # Warning
         ///
         /// If the stream returns an error, partially read data may be discarded.
-        fn recv(&mut self, len: u64) -> impl Future<Output = Result<IoBufs, Error>> + Send;
+        fn recv(&mut self, len: usize) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 
         /// Peek at buffered data without consuming.
         ///
@@ -597,7 +597,7 @@ stability_scope!(BETA {
         ///
         /// This is useful e.g. for parsing length prefixes without committing to a read
         /// or paying the cost of async.
-        fn peek(&self, max_len: u64) -> &[u8];
+        fn peek(&self, max_len: usize) -> &[u8];
     }
 
     /// Interface to interact with storage.
@@ -686,20 +686,34 @@ stability_scope!(BETA {
     /// before dropping to ensure all changes are durably persisted.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
-        /// Read into caller-provided buffer(s) at the given offset.
+        /// Read `len` bytes at `offset` into caller-provided buffer(s).
         ///
-        /// The caller provides the buffer, and the implementation fills it with data
-        /// read from the blob starting at `offset`. Returns the same buffer, filled
-        /// with data.
+        /// The caller provides the buffer(s), and the implementation fills it with
+        /// exactly `len` bytes of data read from the blob starting at `offset`.
+        /// Returns the same buffer(s), filled with data.
         ///
         /// # Contract
         ///
-        /// - The output `IoBufsMut` is the same as the input, with data filled from offset
-        /// - The total bytes read equals the total initialized length of the input buffer(s)
+        /// - The output `IoBufsMut` is the same as the input, with `len` bytes filled from offset
+        ///
+        /// # Panics
+        ///
+        /// Panics if `len` exceeds the total capacity of `buf`.
+        fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            buf: impl Into<IoBufsMut> + Send,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
+
+        /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
+        /// of data read from the blob starting at `offset`.
+        ///
+        /// To reuse a buffer(s), use [`Blob::read_at_buf`].
         fn read_at(
             &self,
             offset: u64,
-            buf: impl Into<IoBufsMut> + Send,
+            len: usize,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Write `buf` to the blob at the given offset.
@@ -1121,7 +1135,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, IoBufMut::zeroed(data.len()))
+                .read_at(0, data.len())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1144,10 +1158,7 @@ mod tests {
             assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
-            let read = blob
-                .read_at(7, IoBufMut::zeroed(7))
-                .await
-                .expect("Failed to read data");
+            let read = blob.read_at(7, 7).await.expect("Failed to read data");
             assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
@@ -1203,16 +1214,13 @@ mod tests {
                 .expect("Failed to write data2");
 
             // Read data back
-            let read = blob
-                .read_at(0, IoBufMut::zeroed(10))
-                .await
-                .expect("Failed to read data");
+            let read = blob.read_at(0, 10).await.expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
+            let result = blob.read_at(10, 10).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
@@ -1222,16 +1230,13 @@ mod tests {
                 .expect("Failed to write data3");
 
             // Read data back
-            let read = blob
-                .read_at(0, IoBufMut::zeroed(10))
-                .await
-                .expect("Failed to read data");
+            let read = blob.read_at(0, 10).await.expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(10, IoBufMut::zeroed(10)).await;
+            let result = blob.read_at(10, 10).await;
             assert!(result.is_err());
         });
     }
@@ -1272,14 +1277,11 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read_buf = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
-            let extended_part = blob
-                .read_at(data.len() as u64, IoBufMut::zeroed(data.len()))
-                .await
-                .unwrap();
+            let extended_part = blob.read_at(data.len() as u64, data.len()).await.unwrap();
             assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
@@ -1291,7 +1293,7 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(0, IoBufMut::zeroed(data.len())).await.unwrap();
+            let read_buf = blob.read_at(0, data.len()).await.unwrap();
             assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
@@ -1336,7 +1338,7 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(0, IoBufMut::zeroed(10 + additional))
+                    .read_at(0, 10 + additional)
                     .await
                     .expect("Failed to read data");
                 let read = read.coalesce();
@@ -1361,7 +1363,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(0, IoBufMut::zeroed(10)).await;
+            let result = blob.read_at(0, 10).await;
             assert!(result.is_err());
 
             // Write data to the blob
@@ -1371,7 +1373,7 @@ mod tests {
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(0, IoBufMut::zeroed(20)).await;
+            let result = blob.read_at(0, 20).await;
             assert!(result.is_err());
         })
     }
@@ -1405,7 +1407,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, IoBufMut::zeroed(data_len))
+                        .read_at(0, data_len)
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1416,7 +1418,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, IoBufMut::zeroed(data_len))
+                        .read_at(0, data_len)
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1430,7 +1432,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, IoBufMut::zeroed(data.len()))
+                .read_at(0, data.len())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -3379,7 +3381,7 @@ mod tests {
                 stream: &mut St,
                 content_length: usize,
             ) -> Result<String, Error> {
-                let received = stream.recv(content_length as u64).await?;
+                let received = stream.recv(content_length).await?;
                 String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
             }
 
@@ -3482,8 +3484,11 @@ mod tests {
         });
     }
 
-    fn test_buffer_pooler<R: Runner>(runner: R)
-    where
+    fn test_buffer_pooler<R: Runner>(
+        runner: R,
+        expected_network_max_per_class: usize,
+        expected_storage_max_per_class: usize,
+    ) where
         R::Context: BufferPooler,
     {
         runner.start(|context| async move {
@@ -3498,24 +3503,44 @@ mod tests {
             // Verify pools have expected configurations
             assert_eq!(
                 context.network_buffer_pool().config().max_per_class.get(),
-                4096
+                expected_network_max_per_class
             );
             assert_eq!(
                 context.storage_buffer_pool().config().max_per_class.get(),
-                32
+                expected_storage_max_per_class
             );
         });
     }
 
     #[test]
     fn test_deterministic_buffer_pooler() {
-        let runner = deterministic::Runner::default();
-        test_buffer_pooler(runner);
+        test_buffer_pooler(deterministic::Runner::default(), 4096, 32);
+
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
     }
 
     #[test]
     fn test_tokio_buffer_pooler() {
-        let runner = tokio::Runner::default();
-        test_buffer_pooler(runner);
+        test_buffer_pooler(tokio::Runner::default(), 4096, 32);
+
+        let runner = tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
     }
 }
