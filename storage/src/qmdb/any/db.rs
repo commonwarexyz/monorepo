@@ -389,8 +389,8 @@ where
     }
 
     /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip.
-    /// TODO(<https://github.com/commonwarexyz/monorepo/issues/1829>): callers of this method should
-    /// migrate to using [Self::raise_floor_with_bitmap] instead.
+    // TODO(<https://github.com/commonwarexyz/monorepo/issues/1829>): callers of this method should
+    // migrate to using [Self::raise_floor_with_bitmap] instead.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.log.bounds().end;
@@ -408,7 +408,7 @@ where
     }
 
     /// Same as `raise_floor` but uses the status bitmap to more efficiently find active operations
-    /// to move to tip.
+    /// to move to tip. Users of `raise_floor` should migrate to using this method instead.
     pub(crate) async fn raise_floor_with_bitmap<
         F: Storage + Clock + Metrics,
         D: Digest,
@@ -431,6 +431,7 @@ where
         // Scan the bitmap to find (up to) the first `steps_to_take` active locations above the
         // inactivity floor, setting the corresponding bits to false.
         let mut locs = Vec::with_capacity(steps_to_take as usize);
+        let mut futures = Vec::with_capacity(steps_to_take as usize);
         let mut floor = self.inactivity_floor_loc;
         for _ in 0..steps_to_take {
             while *floor < tip && !status.get_bit(*floor) {
@@ -441,11 +442,11 @@ where
             }
             status.set_bit(*floor, false);
             locs.push(floor);
+            futures.push(self.log.read(floor));
             floor += 1;
         }
 
         // Concurrently read the active operations from the log.
-        let futures = locs.iter().map(|&loc| self.log.read(loc));
         let ops = try_join_all(futures).await?;
 
         // Move each to tip, updating the index and bitmap.
