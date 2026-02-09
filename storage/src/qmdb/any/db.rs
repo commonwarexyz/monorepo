@@ -407,8 +407,10 @@ where
         Ok(self.inactivity_floor_loc)
     }
 
-    /// Same as `raise_floor` but uses the status bitmap to more efficiently find active operations
-    /// to move to tip. Users of `raise_floor` should migrate to using this method instead.
+    /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip, using the
+    /// provided bitmap to find the active operations without I/O.
+    ///
+    /// Users of `raise_floor` should migrate to using this method instead.
     pub(crate) async fn raise_floor_with_bitmap<
         F: Storage + Clock + Metrics,
         D: Digest,
