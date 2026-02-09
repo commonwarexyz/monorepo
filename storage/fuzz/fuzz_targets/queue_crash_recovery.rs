@@ -227,6 +227,9 @@ async fn run_operations(
                 let item = make_item(*value);
                 match queue.enqueue(item).await {
                     Ok(pos) => {
+                        // enqueue = append + flush, so success means ALL
+                        // previously unflushed items are now durable too.
+                        state.flush_succeeded();
                         state.enqueue_succeeded(pos, *value);
                     }
                     Err(_) => {
@@ -291,6 +294,9 @@ async fn run_operations(
 
             QueueOperation::Commit => {
                 if queue.commit().await.is_ok() {
+                    // commit = flush + prune, so success means ALL
+                    // previously unflushed items are now durable too.
+                    state.flush_succeeded();
                     state.commit_succeeded(queue.ack_floor());
                 }
             }
