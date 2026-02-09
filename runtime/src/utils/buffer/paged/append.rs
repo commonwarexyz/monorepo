@@ -106,12 +106,8 @@ impl<B: Blob> Append<B> {
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
-        let (partial_page_state, pages, invalid_data_found) = Self::read_last_valid_page(
-            &blob,
-            original_blob_size,
-            cache_ref.page_size(),
-        )
-        .await?;
+        let (partial_page_state, pages, invalid_data_found) =
+            Self::read_last_valid_page(&blob, original_blob_size, cache_ref.page_size()).await?;
         if invalid_data_found {
             // Invalid data was detected, trim it from the blob.
             let new_blob_size = pages * (cache_ref.page_size() + CHECKSUM_SIZE);
@@ -906,12 +902,8 @@ impl<B: Blob> Blob for Append<B> {
 
         if partial_bytes > 0 {
             // There's a partial page. Read its data from disk with CRC validation.
-            let page_data = super::get_page_from_blob(
-                &blob_guard.blob,
-                full_pages,
-                logical_page_size,
-            )
-            .await?;
+            let page_data =
+                super::get_page_from_blob(&blob_guard.blob, full_pages, logical_page_size).await?;
 
             // Ensure the validated data covers what we need.
             if (page_data.len() as u64) < partial_bytes {
