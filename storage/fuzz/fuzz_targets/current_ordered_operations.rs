@@ -118,7 +118,7 @@ fn fuzz(data: FuzzInput) {
                     let v = Value::new(*value);
 
                     let empty = db.is_empty();
-                    db.update(k, v).await.expect("update should not fail");
+                    db.write_batch([(k, Some(v))]).await.expect("update should not fail");
                     let result = expected_state.insert(*key, *value);
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -134,7 +134,7 @@ fn fuzz(data: FuzzInput) {
 
                 CurrentOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    db.delete(k).await.expect("delete should not fail");
+                    db.write_batch([(k, None)]).await.expect("delete should not fail");
                     if expected_state.remove(key).is_some() {
                         all_keys.insert(*key);
                         uncommitted_ops += 1;

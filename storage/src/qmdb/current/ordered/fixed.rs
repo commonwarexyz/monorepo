@@ -123,7 +123,7 @@ pub mod test {
     use super::*;
     use crate::{
         bitmap::MerkleizedBitMap,
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, StandardHasher},
         qmdb::{
             any::ordered::Update,
@@ -177,7 +177,7 @@ pub mod test {
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            db.update(k, v1).await.unwrap();
+            db.write_batch([(k, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
 
@@ -216,7 +216,7 @@ pub mod test {
 
             // Update the key to a new value (v2), which inactivates the previous operation.
             let mut db = db.into_mutable();
-            db.update(k, v2).await.unwrap();
+            db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -510,7 +510,7 @@ pub mod test {
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
                 let mut dirty_db = db.into_mutable();
-                dirty_db.update(k, v).await.unwrap();
+                dirty_db.write_batch([(k, Some(v))]).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (dirty_db, _) = dirty_db.commit(None).await.unwrap();
                 let clean_db = dirty_db.into_merkleized().await.unwrap();
@@ -568,7 +568,7 @@ pub mod test {
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
             let mut db = db.into_mutable();
-            db.update(key_exists_1, v1).await.unwrap();
+            db.write_batch([(key_exists_1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -618,7 +618,7 @@ pub mod test {
             let v2 = Sha256::fill(0xB2);
 
             let mut db = db.into_mutable();
-            db.update(key_exists_2, v2).await.unwrap();
+            db.write_batch([(key_exists_2, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -711,8 +711,8 @@ pub mod test {
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
             let mut db = db.into_mutable();
-            db.delete(key_exists_1).await.unwrap();
-            db.delete(key_exists_2).await.unwrap();
+            db.write_batch([(key_exists_1, None)]).await.unwrap();
+            db.write_batch([(key_exists_2, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let mut db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
@@ -782,9 +782,7 @@ pub mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableCurrentTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
         assert_batchable(db, key, value);
     }
 

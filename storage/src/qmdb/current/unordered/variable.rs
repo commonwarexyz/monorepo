@@ -135,7 +135,7 @@ pub mod partitioned {
 mod test {
     use crate::{
         bitmap::MerkleizedBitMap,
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, Proof, StandardHasher},
         qmdb::{
             any::unordered::variable::Operation,
@@ -194,7 +194,7 @@ mod test {
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            db.update(k, v1).await.unwrap();
+            db.write_batch([(k, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
 
@@ -223,7 +223,7 @@ mod test {
 
             // Update the key to a new value (v2), which inactivates the previous operation.
             let mut db = db.into_mutable();
-            db.update(k, v2).await.unwrap();
+            db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -511,7 +511,7 @@ mod test {
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
                 let mut dirty_db = db.into_mutable();
-                dirty_db.update(k, v).await.unwrap();
+                dirty_db.write_batch([(k, Some(v))]).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (durable_db, _) = dirty_db.commit(None).await.unwrap();
                 db = durable_db.into_merkleized().await.unwrap();
@@ -567,9 +567,7 @@ mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableCurrentTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
         assert_batchable(db, key, value);
     }
 
