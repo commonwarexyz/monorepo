@@ -102,7 +102,7 @@ where
     C: CodingScheme,
     P: PublicKey,
 {
-    /// Create a new [Mailbox] with the given sender.
+    /// Create a new [`Mailbox`] with the given sender.
     pub const fn new(sender: mpsc::Sender<Message<B, C, P>>) -> Self {
         Self { sender }
     }

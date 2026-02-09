@@ -105,6 +105,8 @@
 //!    | Ready                |
 //!    | - has checking_data  |
 //!    | - checked shards     |
+//!    | (frozen; no new weak |
+//!    |  shards accepted)    |
 //!    +----------------------+
 //!               |
 //!               | checked_shards.len() >= minimum_shards
@@ -312,7 +314,7 @@ where
 
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
-    /// These blocks are evicted after we receive a finalization signal.
+    /// These blocks are evicted after a durability signal from the marshal.
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
     reconstructed_blocks: BTreeMap<CodingCommitment, Arc<CodedBlock<B, C>>>,
 
@@ -340,7 +342,7 @@ where
     P: PublicKey,
     T: Strategy,
 {
-    /// Create a new [Engine] with the given configuration.
+    /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, X, C, H, B, T>) -> (Self, Mailbox<B, C, P>) {
         let metrics = ShardMetrics::new(&context, &config.participants);
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
@@ -514,7 +516,6 @@ where
     /// - `Ok(Some(block))` if reconstruction was successful or the block was already reconstructed.
     /// - `Ok(None)` if reconstruction could not be attempted due to insufficient checked shards.
     /// - `Err(_)` if reconstruction was attempted but failed.
-    #[inline]
     async fn try_reconstruct(
         &mut self,
         commitment: CodingCommitment,
@@ -522,7 +523,6 @@ where
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(Arc::clone(block)));
         }
-
         let Some(state) = self.state.get(&commitment) else {
             return Ok(None);
         };
@@ -530,7 +530,6 @@ where
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
         }
-
         let Some(checking_data) = state.checking_data() else {
             unreachable!("checked shards cannot be present without checking data");
         };
@@ -580,7 +579,6 @@ where
     }
 
     /// Handles leader announcements for a commitment and advances reconstruction.
-    #[inline]
     async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -598,7 +596,6 @@ where
             warn!(?leader, %commitment, "leader update for non-participant, ignoring");
             return;
         }
-
         if let Some(state) = self.state.get(&commitment) {
             if state.leader() != &leader {
                 warn!(
@@ -674,7 +671,6 @@ where
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] to all participants and caches the block.
-    #[inline]
     async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -720,7 +716,6 @@ where
     }
 
     /// Broadcasts a [`Shard`] to all participants.
-    #[inline]
     async fn broadcast_weak_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -734,7 +729,6 @@ where
     /// Broadcasts any pending weak shard for the given commitment and attempts
     /// reconstruction. If reconstruction succeeds or fails, the state is cleaned
     /// up and subscribers are notified.
-    #[inline]
     async fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
@@ -774,7 +768,6 @@ where
     }
 
     /// Handles the registry of a shard subscription.
-    #[inline]
     async fn handle_shard_subscription(
         &mut self,
         commitment: CodingCommitment,
@@ -799,7 +792,6 @@ where
     }
 
     /// Handles the registry of a block subscription.
-    #[inline]
     async fn handle_block_subscription(
         &mut self,
         key: BlockSubscriptionKey<B::Digest>,
@@ -828,7 +820,6 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a valid shard.
-    #[inline]
     async fn notify_shard_subscribers(&mut self, commitment: CodingCommitment) {
         if let Some(mut subscribers) = self.shard_subscriptions.remove(&commitment) {
             for subscriber in subscribers.drain(..) {
@@ -838,7 +829,6 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    #[inline]
     async fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C>>) {
         let commitment = block.commitment();
         let digest = block.digest();
@@ -1200,6 +1190,10 @@ where
     /// - MUST pass cryptographic verification via [`CodingScheme::check`].
     /// - Each participant may only contribute ONE weak shard per commitment. Duplicates
     ///   result in blocking the sender.
+    /// - Weak shards that arrive after the state has transitioned to `Ready`
+    ///   (i.e., batch validation has already passed) are silently discarded.
+    ///   The sender's contribution slot is still consumed, preventing future
+    ///   duplicates from the same participant.
     ///
     /// Handle an incoming network shard.
     ///

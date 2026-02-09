@@ -49,9 +49,17 @@
 //! - Genesis blocks are handled specially: epoch 0 returns the application's genesis block,
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
-//! - It is currently assumed that if a notarize vote is received, the shard that was sent
-//!   along with it was valid. The shard was sent in a separate message from the vote, so it
-//!   is possible that this will not be the case.
+//!
+//! # Notarization and Data Availability
+//!
+//! In rare crash cases, it is possible for a notarization certificate to exist without a block being
+//! available to the honest parties (e.g., if the whole network crashed before receiving `f+1` shards
+//! and the proposer went permanently offline). In this case, `certify` will be unable to fetch the
+//! block before timeout and result in a nullification.
+//!
+//! For this reason, it should not be expected that every notarized payload will be certifiable due
+//! to the lack of an available block. However, if even one honest and online party has the block,
+//! they will attempt to forward it to others via marshal's resolver.
 
 use crate::{
     marshal::{
@@ -252,7 +260,6 @@ where
     /// If `prefetched_block` is provided, it will be used directly instead of fetching from
     /// the marshal. This is useful in `certify` when we've already fetched the block to
     /// extract its embedded context.
-    #[inline]
     async fn deferred_verify(
         &mut self,
         context: Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
@@ -1006,7 +1013,6 @@ where
 /// the parent block's availability.
 ///
 /// Returns an error if the marshal subscription is cancelled.
-#[inline]
 async fn fetch_parent<E, S, A, B, C>(
     parent_commitment: CodingCommitment,
     parent_round: Option<Round>,
@@ -1046,7 +1052,6 @@ where
 }
 
 /// Constructs the [`CodingCommitment`] for the genesis block.
-#[inline(always)]
 fn genesis_coding_commitment<B: CertifiableBlock>(block: &B) -> CodingCommitment {
     CodingCommitment::from((
         block.digest(),

@@ -150,7 +150,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         matches!(self.inner, DistributionShard::Weak(_))
     }
 
-    /// Takes the inner [Shard].
+    /// Takes the inner [`DistributionShard`].
     pub fn into_inner(self) -> DistributionShard<C> {
         self.inner
     }
@@ -267,7 +267,7 @@ where
     }
 }
 
-/// An envelope type for an erasure coded [Block].
+/// An envelope type for an erasure coded [`Block`].
 #[derive(Debug)]
 pub struct CodedBlock<B: Block, C: Scheme> {
     /// The inner block type.
@@ -296,7 +296,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
         C::encode(&config, buf.as_slice(), strategy).expect("must encode block successfully")
     }
 
-    /// Create a new [CodedBlock] from a [Block] and a configuration.
+    /// Create a new [`CodedBlock`] from a [`Block`] and a configuration.
     pub fn new(inner: B, config: CodingConfig, strategy: &impl Strategy) -> Self {
         let (commitment, shards) = Self::encode(&inner, config, strategy);
         Self {
@@ -307,7 +307,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
         }
     }
 
-    /// Create a new [CodedBlock] from a [Block] and trusted [CodingCommitment].
+    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`CodingCommitment`].
     pub fn new_trusted(inner: B, commitment: CodingCommitment) -> Self {
         Self {
             inner,
@@ -324,7 +324,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
 
     /// Returns a reference to the shards in this coded block.
     ///
-    /// If the shards have not yet been generated, they will be created via [Scheme::encode].
+    /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
     pub fn shards(&mut self, strategy: &impl Strategy) -> &[C::StrongShard] {
         match self.shards {
             Some(ref shards) => shards,
@@ -342,7 +342,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
         }
     }
 
-    /// Returns a [Shard] at the given index, if the index is valid.
+    /// Returns a [`Shard`] at the given index, if the index is valid.
     pub fn shard<H: Hasher>(&self, index: u16) -> Option<Shard<C, H>>
     where
         B: CertifiableBlock,
@@ -354,12 +354,12 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
         ))
     }
 
-    /// Returns a reference to the inner [Block].
+    /// Returns a reference to the inner [`Block`].
     pub const fn inner(&self) -> &B {
         &self.inner
     }
 
-    /// Takes the inner [Block].
+    /// Takes the inner [`Block`].
     pub fn into_inner(self) -> B {
         self.inner
     }
@@ -481,17 +481,17 @@ impl<B: Block + PartialEq, C: Scheme> PartialEq for CodedBlock<B, C> {
 
 impl<B: Block + Eq, C: Scheme> Eq for CodedBlock<B, C> {}
 
-/// A [CodedBlock] paired with its [CodingCommitment] for efficient storage and retrieval.
+/// A [`CodedBlock`] paired with its [`CodingCommitment`] for efficient storage and retrieval.
 ///
-/// This type should be preferred for storing verified [CodedBlock]s on disk - it
-/// should never be sent over the network. Use [CodedBlock] for network transmission,
-/// as it re-encodes the block with [Scheme::encode] on deserialization to ensure integrity.
+/// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
+/// should never be sent over the network. Use [`CodedBlock`] for network transmission,
+/// as it re-encodes the block with [`Scheme::encode`] on deserialization to ensure integrity.
 ///
 /// When reading from storage, we don't need to re-encode the block to compute
 /// the commitment - we stored it alongside the block when we first verified it.
 /// This avoids expensive erasure coding operations on the read path.
 ///
-/// The [Read] implementation performs a light verification (block digest check)
+/// The [`Read`] implementation performs a light verification (block digest check)
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme> {
     commitment: CodingCommitment,
@@ -500,9 +500,9 @@ pub struct StoredCodedBlock<B: Block, C: Scheme> {
 }
 
 impl<B: CertifiableBlock, C: Scheme> StoredCodedBlock<B, C> {
-    /// Create a [StoredCodedBlock] from a verified [CodedBlock].
+    /// Create a [`StoredCodedBlock`] from a verified [`CodedBlock`].
     ///
-    /// The caller must ensure the [CodedBlock] has been properly verified
+    /// The caller must ensure the [`CodedBlock`] has been properly verified
     /// (i.e., its commitment was computed or validated against a trusted source).
     pub fn new(block: CodedBlock<B, C>) -> Self {
         Self {
@@ -512,10 +512,10 @@ impl<B: CertifiableBlock, C: Scheme> StoredCodedBlock<B, C> {
         }
     }
 
-    /// Convert back to a [CodedBlock] using the trusted commitment.
+    /// Convert back to a [`CodedBlock`] using the trusted commitment.
     ///
-    /// The returned [CodedBlock] will have `shards: None`, meaning shards
-    /// will be lazily generated if needed via [CodedBlock::shards].
+    /// The returned [`CodedBlock`] will have `shards: None`, meaning shards
+    /// will be lazily generated if needed via [`CodedBlock::shards`].
     pub fn into_coded_block(self) -> CodedBlock<B, C> {
         CodedBlock::new_trusted(self.inner, self.commitment)
     }
@@ -619,7 +619,7 @@ impl<B: Block + PartialEq, C: Scheme> PartialEq for StoredCodedBlock<B, C> {
 
 impl<B: Block + Eq, C: Scheme> Eq for StoredCodedBlock<B, C> {}
 
-/// Compute the [CodingConfig] for a given number of participants.
+/// Compute the [`CodingConfig`] for a given number of participants.
 ///
 /// Currently, this function assumes `3f + 1` participants to tolerate at max `f` faults.
 ///
