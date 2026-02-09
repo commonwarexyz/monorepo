@@ -114,10 +114,6 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // to keep peers connected, allowing byzantine actors the ability to continue sending messages.
     disconnect_on_block: bool,
 
-    // Next socket address to assign to a new peer
-    // Incremented for each new peer
-    next_addr: SocketAddr,
-
     // Channel to receive messages from the oracle
     ingress: mpsc::UnboundedReceiver<ingress::Message<P, E>>,
 
@@ -168,7 +164,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during context.
-    pub fn new(mut context: E, cfg: Config) -> (Self, Oracle<P, E>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Oracle<P, E>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (oracle_mailbox, oracle_receiver) = UnboundedMailbox::new();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -180,20 +176,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             received_messages.clone(),
         );
 
-        // Start on loopback with a randomized non-privileged port to avoid invalid binds.
-        const BASE_PORT_MIN: u16 = 1024;
-        const BASE_PORT_MAX: u16 = 32767;
-        let port_span = u32::from(BASE_PORT_MAX - BASE_PORT_MIN + 1);
-        let base_port = BASE_PORT_MIN + (context.next_u32() % port_span) as u16;
-        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
-
         (
             Self {
                 context: ContextCell::new(context),
                 max_size: cfg.max_size,
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
-                next_addr,
                 ingress: oracle_receiver,
                 oracle_mailbox: oracle_mailbox.clone(),
                 sender,
@@ -211,32 +199,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             },
             Oracle::new(oracle_mailbox),
         )
-    }
-
-    /// Returns (and increments) the next available socket address.
-    ///
-    /// The port number is incremented for each call, and the IP address is incremented if the port
-    /// number overflows.
-    fn get_next_socket(&mut self) -> SocketAddr {
-        let result = self.next_addr;
-
-        // Increment the port number, or the IP address if the port number overflows.
-        // Allows the ip address to overflow (wrapping).
-        match self.next_addr.port().checked_add(1) {
-            Some(port) => {
-                self.next_addr.set_port(port);
-            }
-            None => {
-                let ip = match self.next_addr.ip() {
-                    IpAddr::V4(ipv4) => ipv4,
-                    _ => unreachable!(),
-                };
-                let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
-                self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
-            }
-        }
-
-        result
     }
 
     /// Handle an ingress message.
@@ -482,15 +444,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns the socket address of the peer and a boolean indicating if a new peer was created.
     async fn ensure_peer_exists(&mut self, public_key: &P) -> (SocketAddr, bool) {
         if !self.peers.contains_key(public_key) {
-            // Create peer
-            let socket = self.get_next_socket();
+            // Create peer. Bind to port 0 so the OS picks a free port;
+            // Peer::new resolves the real address via local_addr().
+            let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let peer = Peer::new(
                 self.context.with_label("peer"),
                 public_key.clone(),
-                socket,
+                bind_addr,
                 self.max_size,
             )
             .await;
+            let socket = peer.socket;
 
             // Once ready, add to peers
             self.peers.insert(public_key.clone(), peer);
@@ -1143,14 +1107,17 @@ impl<P: PublicKey> Peer<P> {
             }
         });
 
-        // Spawn a task that accepts new connections and spawns a task for each connection
+        // Spawn a task that accepts new connections and spawns a task for each connection.
+        // Bind to the requested address (port 0 lets the OS pick) and send back the
+        // resolved address so the caller knows the real port.
         let (ready_tx, ready_rx) = oneshot::channel();
         context
             .with_label("listener")
             .spawn(move |context| async move {
                 // Initialize listener
                 let mut listener = context.bind(socket).await.unwrap();
-                let _ = ready_tx.send(());
+                let resolved = listener.local_addr().unwrap();
+                let _ = ready_tx.send(resolved);
 
                 // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
@@ -1190,12 +1157,12 @@ impl<P: PublicKey> Peer<P> {
                 }
             });
 
-        // Wait for listener to start before returning
-        let _ = ready_rx.await;
+        // Wait for listener to start and get the resolved address
+        let resolved_socket = ready_rx.await.unwrap();
 
         // Return peer
         Self {
-            socket,
+            socket: resolved_socket,
             control: control_sender,
         }
     }
@@ -1689,41 +1656,6 @@ mod tests {
             assert_eq!(id, 11);
             assert_eq!(new, [pk4.clone()].try_into().unwrap());
             assert_eq!(all, [pk1, pk2, pk4].try_into().unwrap());
-        });
-    }
-
-    #[test]
-    fn test_get_next_socket() {
-        let cfg = Config {
-            max_size: MAX_MESSAGE_SIZE,
-            disconnect_on_block: true,
-            tracked_peer_sets: None,
-        };
-        let runner = deterministic::Runner::default();
-
-        runner.start(|context| async move {
-            type PublicKey = ed25519::PublicKey;
-            let (mut network, _) =
-                Network::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
-
-            // Test that the next socket address is incremented correctly
-            let mut original = network.next_addr;
-            let next = network.get_next_socket();
-            assert_eq!(next, original);
-            let next = network.get_next_socket();
-            original.set_port(1);
-            assert_eq!(next, original);
-
-            // Test that the port number overflows correctly
-            let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
-            network.next_addr = max_addr;
-            let next = network.get_next_socket();
-            assert_eq!(next, max_addr);
-            let next = network.get_next_socket();
-            assert_eq!(
-                next,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
-            );
         });
     }
 
