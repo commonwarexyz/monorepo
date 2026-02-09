@@ -537,10 +537,12 @@ pub(super) mod test {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
+
     const ITEMS_PER_SECTION: u64 = 5;
 
     pub(crate) fn db_config(
         suffix: &str,
+        pool: commonware_runtime::BufferPool,
     ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -554,7 +556,7 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
         }
     }
 
@@ -562,7 +564,8 @@ pub(super) mod test {
     async fn open_db(
         context: deterministic::Context,
     ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
-        Immutable::init(context, db_config("partition"))
+        let pool = commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone();
+        Immutable::init(context, db_config("partition", pool))
             .await
             .unwrap()
     }

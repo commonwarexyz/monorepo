@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
@@ -135,7 +135,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn test_config(
+    test_name: &str,
+    context: &deterministic::Context,
+) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
@@ -148,7 +151,11 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_codec_config: ((0..=100000).into(), ()),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::new(
+            PAGE_SIZE,
+            NZUsize!(1),
+            context.storage_buffer_pool().clone(),
+        ),
     }
 }
 
@@ -159,7 +166,7 @@ fn fuzz(input: FuzzInput) {
         let mut hasher = Standard::<Sha256>::new();
         let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
             context.clone(),
-            test_config("qmdb_any_variable_fuzz_test"),
+            test_config("qmdb_any_variable_fuzz_test", &context),
         )
         .await
         .expect("Failed to init source db")
@@ -286,7 +293,7 @@ fn fuzz(input: FuzzInput) {
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config("qmdb_any_variable_fuzz_test"),
+                        test_config("qmdb_any_variable_fuzz_test", &context),
                     )
                     .await
                     .expect("Failed to init source db")

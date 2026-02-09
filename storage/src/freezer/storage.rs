@@ -7,7 +7,9 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer, Blob, Buf, BufMut, BufferPool, BufferPooler, Clock, Metrics, Storage,
+};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -386,7 +388,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
+pub struct Freezer<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -423,7 +425,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     resizes: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -495,10 +497,11 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
         table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
         table_replay_buffer: NonZeroUsize,
+        pool: BufferPool,
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
+        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer, pool);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
@@ -703,6 +706,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                     config.table_resize_frequency,
                     Some(checkpoint.epoch),
                     config.table_replay_buffer,
+                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
                 )
                 .await?;
                 if table_modified {
@@ -727,6 +731,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                     config.table_resize_frequency,
                     None,
                     config.table_replay_buffer,
+                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
                 )
                 .await?;
 
@@ -1153,7 +1158,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> kv::Gettable
+    for Freezer<E, K, V>
+{
     type Key = K;
     type Value = V;
     type Error = Error;
@@ -1163,14 +1170,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable for Fr
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> kv::Updatable
+    for Freezer<E, K, V>
+{
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable for Freezer<E, K, V> {
+impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Persistable
+    for Freezer<E, K, V>
+{
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {
@@ -1236,7 +1247,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(
+                    NZU16!(1024),
+                    NZUsize!(10),
+                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1291,7 +1306,11 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(
+                    NZU16!(1024),
+                    NZUsize!(10),
+                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

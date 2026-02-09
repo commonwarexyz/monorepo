@@ -30,7 +30,7 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, BufMut, Error as RError, Metrics, Storage};
+use commonware_runtime::{Blob as _, BufMut, BufferPooler, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -65,13 +65,14 @@ pub struct Glob<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
+impl<E: Storage + Metrics + BufferPooler, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
+                pool: commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
             },
         };
         let manager = Manager::init(context, manager_cfg).await?;

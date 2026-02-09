@@ -20,7 +20,11 @@ impl Conformance for Freezer {
             let config = Config {
                 key_partition: format!("freezer-key-conformance-{seed}"),
                 key_write_buffer: WRITE_BUFFER,
-                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                ),
                 value_partition: format!("freezer-value-conformance-{seed}"),
                 value_compression: None,
                 value_write_buffer: WRITE_BUFFER,

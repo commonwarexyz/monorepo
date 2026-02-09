@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
@@ -124,7 +124,10 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
-fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+fn test_config(
+    test_name: &str,
+    context: &deterministic::Context,
+) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
@@ -136,7 +139,11 @@ fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+            context.storage_buffer_pool().clone(),
+        ),
     }
 }
 
@@ -145,7 +152,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+        let mut db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test", &context))
             .await
             .expect("Failed to init keyless db")
             .into_mutable();
@@ -263,7 +270,10 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     drop(db);
 
-                    db = CleanDb::init(context.with_label("db").with_attribute("instance", restarts), test_config("keyless_fuzz_test"))
+                    db = CleanDb::init(
+                        context.with_label("db").with_attribute("instance", restarts),
+                        test_config("keyless_fuzz_test", &context),
+                    )
                         .await
                         .expect("Failed to init keyless db")
                         .into_mutable();

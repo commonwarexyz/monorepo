@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, ThreadPooler};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -86,7 +86,10 @@ type OVariableDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
 type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
-fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn any_cfg(
+    pool: ThreadPool,
+    storage_pool: commonware_runtime::BufferPool,
+) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -99,23 +102,26 @@ fn any_cfg(pool: ThreadPool) -> AConfig<EightCap, (commonware_codec::RangeCfg<us
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
     }
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool);
+    let any_cfg = any_cfg(pool, ctx.storage_buffer_pool().clone());
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool);
+    let any_cfg = any_cfg(pool, ctx.storage_buffer_pool().clone());
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
-fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn current_cfg(
+    pool: ThreadPool,
+    storage_pool: commonware_runtime::BufferPool,
+) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -129,13 +135,13 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCf
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
     }
 }
 
 async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool);
+    let current_cfg = current_cfg(pool, ctx.storage_buffer_pool().clone());
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
@@ -143,7 +149,7 @@ async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
 
 async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool);
+    let current_cfg = current_cfg(pool, ctx.storage_buffer_pool().clone());
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()

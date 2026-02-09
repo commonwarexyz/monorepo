@@ -173,7 +173,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Runner as _,
+        BufferPooler, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
@@ -191,7 +191,8 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, fixed_db_config::<TwoCap>("partition"))
+        let pool = context.storage_buffer_pool().clone();
+        AnyTest::init(context, fixed_db_config::<TwoCap>("partition", pool))
             .await
             .unwrap()
     }
@@ -199,7 +200,8 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        AnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string()))
+        let pool = context.storage_buffer_pool().clone();
+        AnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string(), pool))
             .await
             .unwrap()
     }
@@ -597,13 +599,15 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
 
     async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(context, fixed_db_config("unordered_partitioned_p1"))
+        let pool = context.storage_buffer_pool().clone();
+        PartitionedAnyTestP1::init(context, fixed_db_config("unordered_partitioned_p1", pool))
             .await
             .unwrap()
     }
 
     async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        PartitionedAnyTestP2::init(context, fixed_db_config("unordered_partitioned_p2"))
+        let pool = context.storage_buffer_pool().clone();
+        PartitionedAnyTestP2::init(context, fixed_db_config("unordered_partitioned_p2", pool))
             .await
             .unwrap()
     }

@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::cache::{Cache, Config};
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::{
@@ -140,6 +140,7 @@ fn fuzz(input: FuzzInput) {
             page_cache: CacheRef::new(
                 input.config.page_cache_page_size,
                 NZUsize!(input.config.page_cache_capacity),
+                context.storage_buffer_pool().clone(),
             ),
         };
 

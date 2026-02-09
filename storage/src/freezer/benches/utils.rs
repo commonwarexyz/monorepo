@@ -51,7 +51,11 @@ pub async fn init(ctx: Context) -> FreezerType {
     let cfg = Config {
         key_partition: KEY_PARTITION.into(),
         key_write_buffer: NZUsize!(WRITE_BUFFER),
-        key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        key_page_cache: CacheRef::new(
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+            commonware_runtime::BufferPooler::storage_buffer_pool(&ctx).clone(),
+        ),
         value_partition: VALUE_PARTITION.into(),
         value_compression: None,
         value_write_buffer: NZUsize!(WRITE_BUFFER),

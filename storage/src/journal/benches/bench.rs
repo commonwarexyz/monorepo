@@ -53,7 +53,11 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+        ),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
 }
@@ -91,7 +95,11 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         items_per_section,
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+        ),
         write_buffer: WRITE_BUFFER,
     };
     VariableJournal::init(context, journal_config)

@@ -143,7 +143,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner as _};
     use commonware_utils::NZU64;
     use rand::RngCore;
 
@@ -158,7 +158,8 @@ pub mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, fixed_config::<OneCap>(&partition_prefix))
+        let pool = context.storage_buffer_pool().clone();
+        CleanCurrentTest::init(context, fixed_config::<OneCap>(&partition_prefix, pool))
             .await
             .unwrap()
     }

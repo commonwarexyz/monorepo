@@ -10,7 +10,7 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::status::GaugeExt,
-    Blob, Error as RError, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Metrics, Storage,
 };
 use commonware_utils::hex;
 use futures::future::try_join_all;
@@ -79,13 +79,15 @@ impl<B: Blob> BufferFactory<B> for AppendFactory {
 pub struct WriteFactory {
     /// The capacity of the write buffer.
     pub capacity: NonZeroUsize,
+    /// The storage buffer pool used by write buffers.
+    pub pool: BufferPool,
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
     type Buffer = Write<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(Write::new(blob, size, self.capacity))
+        Ok(Write::new(blob, size, self.capacity, self.pool.clone()))
     }
 }
 
