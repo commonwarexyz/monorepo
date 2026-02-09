@@ -23,8 +23,8 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, Clock, ContextCell, Handle,
-    Metrics, Spawner, Storage as RuntimeStorage,
+    spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Clock,
+    ContextCell, Handle, Metrics, Spawner, Storage as RuntimeStorage,
 };
 use commonware_utils::{channel::mpsc, ordered::Set, Acknowledgement as _, N3f1, NZU32};
 use prometheus_client::{
@@ -111,7 +111,7 @@ pub struct Config<C: Signer, P> {
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage + BufferPooler,
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
@@ -134,7 +134,7 @@ where
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
+    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage + BufferPooler,
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,

@@ -21,8 +21,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell,
-    Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock,
+    ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
 use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
@@ -60,7 +60,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + BufferPooler,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -92,7 +92,7 @@ where
 
 impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + BufferPooler,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -109,7 +109,11 @@ where
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
-        let page_cache_ref = CacheRef::new(NZU16!(16_384), NZUsize!(10_000));
+        let page_cache_ref = CacheRef::new(
+            NZU16!(16_384),
+            NZUsize!(10_000),
+            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+        );
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = Gauge::default();
