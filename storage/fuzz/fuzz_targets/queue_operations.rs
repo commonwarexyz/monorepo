@@ -162,6 +162,10 @@ impl ReferenceQueue {
     fn is_empty(&self) -> bool {
         self.ack_floor() >= self.size()
     }
+
+    fn read_pos(&self) -> u64 {
+        self.read_pos
+    }
 }
 
 fn fuzz(input: FuzzInput) {
@@ -276,6 +280,11 @@ fn fuzz(input: FuzzInput) {
                 queue.ack_floor(),
                 reference.ack_floor(),
                 "ack_floor mismatch after {op:?}"
+            );
+            assert_eq!(
+                queue.read_position(),
+                reference.read_pos(),
+                "read_position mismatch after {op:?}"
             );
             assert_eq!(
                 queue.is_empty(),

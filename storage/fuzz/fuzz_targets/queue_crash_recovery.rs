@@ -103,8 +103,8 @@ struct FuzzInput {
 /// in-memory but not pruned will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
-    /// Items that were successfully enqueued and committed (position -> value).
-    /// Each enqueue() does append + commit, so successful enqueues are durable.
+    /// Items that were successfully enqueued (position -> value).
+    /// Each enqueue() does append + flush, so successful enqueues are durable.
     committed: BTreeMap<u64, u8>,
 
     /// Items that were enqueued but the operation may have failed.
@@ -133,7 +133,7 @@ impl RecoveryState {
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
-        // Enqueue does append + commit, so success means it's durable at `pos`.
+        // Enqueue does append + flush, so success means it's durable at `pos`.
         self.committed.insert(pos, value);
     }
 
