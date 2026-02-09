@@ -270,6 +270,12 @@ mod tests {
 
         #[test_group("slow")]
         #[test]
+        fn property_test_ed25519_connected(input in property_test_strategy()) {
+            fuzz::<SimplexEd25519CustomRoundRobin, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
         fn property_test_secp256r1_connected(input in property_test_strategy()) {
             fuzz::<SimplexSecp256r1, Standard>(input);
         }
@@ -290,6 +296,12 @@ mod tests {
         #[test]
         fn property_test_bls12381_threshold_minpk_connected(input in property_test_strategy()) {
             fuzz::<SimplexBls12381MinPk, Standard>(input);
+        }
+
+        #[test_group("slow")]
+        #[test]
+        fn property_test_bls12381_threshold_selected_minpk_connected(input in property_test_strategy()) {
+            fuzz::<SimplexBls12381MinPkCustomRandom, Standard>(input);
         }
 
         #[test_group("slow")]
