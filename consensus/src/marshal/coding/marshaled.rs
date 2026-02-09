@@ -837,10 +837,10 @@ where
         }
 
         // No in-progress task means we never verified this proposal locally.
-        // We can use the block's embedded context to help complete finalization when Byzantine
-        // validators withhold their finalize votes. If a Byzantine proposer embedded a malicious
-        // context, the f+1 honest validators from the notarizing quorum will verify against the
-        // proper context and reject the mismatch, preventing a 2f+1 finalization quorum.
+        // We can use the block's embedded context to move to the next view. If a Byzantine
+        // proposer embedded a malicious context, the f+1 honest validators from the notarizing quorum
+        // will verify against the proper context and reject the mismatch, preventing a 2f+1
+        // finalization quorum.
         //
         // Subscribe to the block and verify using its embedded context once available.
         debug!(
