@@ -17,8 +17,8 @@ use alloc::{vec, vec::Vec};
 use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
-    blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
+    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
@@ -335,18 +335,6 @@ const ROOT_OF_UNITY: Scalar = Scalar(blst_fr {
         0x5b1b_4c80_1819_d7ec,
         0x0af5_3ae3_52a3_1e64,
         0x5bf3_adda_19e9_b27b,
-    ],
-});
-
-/// 2^-1 in Montgomery form.
-///
-/// Reference: <https://github.com/zkcrypto/bls12_381/blob/main/src/scalar.rs>
-const TWO_INV: Scalar = Scalar(blst_fr {
-    l: [
-        0x0000_0000_ffff_ffff,
-        0xac42_5bfd_0001_a401,
-        0xccc6_27f7_f65e_27fa,
-        0x0c12_58ac_d662_82b7,
     ],
 });
 
@@ -826,7 +814,10 @@ impl FieldNTT for Scalar {
     }
 
     fn div_2(&self) -> Self {
-        self.clone() * &TWO_INV
+        let mut ret = blst_fr::default();
+        // SAFETY: blst_fr_rshift supports in-place (ret==a). Both pointers valid.
+        unsafe { blst_fr_rshift(&mut ret, &self.0, 1) };
+        Self(ret)
     }
 }
 
@@ -1774,7 +1765,7 @@ mod tests {
 
     #[test]
     fn test_scalar_as_field_ntt() {
-        test_suites::test_field_ntt(file!(), &any::<Scalar>());
+        minifuzz::test(test_suites::fuzz_field_ntt::<Scalar>);
     }
 
     #[test]

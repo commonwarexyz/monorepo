@@ -485,22 +485,42 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     ///
     /// Indices `k >= total` are ignored. Duplicate `I` keys are deduped (last one wins).
     pub fn roots_of_unity(total: NonZeroU32, points: impl IntoIterator<Item = (I, u32)>) -> Self {
-        let total_u32 = total.get();
-        let points: Map<I, u32> =
-            Map::from_iter_dedup(points.into_iter().filter(|(_, k)| *k < total_u32));
-        let coeffs: Map<u32, F> = Map::from_iter_dedup(crate::ntt::lagrange_coefficients(
-            total,
-            points.values().iter().copied(),
-        ));
-        let weights = Map::from_iter_dedup(points.into_iter().map(|(i, k)| {
-            debug_assert!(
-                coeffs.get_value(&k).is_some(),
-                "coefficient missing for index {k}"
-            );
-            let coeff = coeffs.get_value(&k).cloned().unwrap_or_else(F::zero);
-            (i, coeff)
-        }));
-        Self { weights }
+        #[cfg(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))]
+        {
+            return Self::roots_of_unity_naive(total, points);
+        }
+
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))]
+        {
+            let total_u32 = total.get();
+            let points: Map<I, u32> =
+                Map::from_iter_dedup(points.into_iter().filter(|(_, k)| *k < total_u32));
+            let coeffs: Map<u32, F> = Map::from_iter_dedup(crate::ntt::lagrange_coefficients(
+                total,
+                points.values().iter().copied(),
+            ));
+            let weights = Map::from_iter_dedup(points.into_iter().map(|(i, k)| {
+                debug_assert!(
+                    coeffs.get_value(&k).is_some(),
+                    "coefficient missing for index {k}"
+                );
+                let coeff = coeffs.get_value(&k).cloned().unwrap_or_else(F::zero);
+                (i, coeff)
+            }));
+            Self { weights }
+        }
     }
 
     /// Create an interpolator for evaluation points at roots of unity using naive O(n^2) algorithm.
