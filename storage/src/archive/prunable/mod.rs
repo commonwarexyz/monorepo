@@ -128,7 +128,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo_index".into(),
-//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone()),
+//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), context.storage_buffer_pool().clone()),
 //!         value_partition: "demo_value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -227,7 +227,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),
@@ -262,7 +262,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),
@@ -304,7 +304,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),
@@ -373,7 +373,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),
@@ -436,7 +436,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),
@@ -528,7 +528,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),
@@ -593,7 +593,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value".into(),
                 codec_config: (),

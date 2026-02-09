@@ -1,7 +1,7 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
@@ -71,7 +71,7 @@ impl Archive {
                     freezer_key_page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&ctx).clone(),
+                        ctx.storage_buffer_pool().clone(),
                     ),
                     freezer_value_partition: "archive_bench_value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
@@ -93,7 +93,7 @@ impl Archive {
                     key_page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&ctx).clone(),
+                        ctx.storage_buffer_pool().clone(),
                     ),
                     value_partition: "archive_bench_value".into(),
                     compression,

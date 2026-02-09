@@ -28,7 +28,7 @@ impl Conformance for ArchivePrunable {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: format!("archive-prunable-value-{seed}"),
                 compression: None,
@@ -77,7 +77,7 @@ impl Conformance for ArchiveImmutable {
                 freezer_key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 freezer_value_partition: format!("archive-immutable-value-{seed}"),
                 freezer_value_target_size: 1024 * 1024,

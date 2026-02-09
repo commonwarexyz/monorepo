@@ -564,7 +564,7 @@ pub(super) mod test {
     async fn open_db(
         context: deterministic::Context,
     ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
-        let pool = commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone();
+        let pool = context.storage_buffer_pool().clone();
         Immutable::init(context, db_config("partition", pool))
             .await
             .unwrap()

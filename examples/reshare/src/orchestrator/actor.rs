@@ -112,7 +112,7 @@ where
         let page_cache_ref = CacheRef::new(
             NZU16!(16_384),
             NZUsize!(10_000),
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         );
 
         // Register latest_epoch gauge for Grafana integration

@@ -172,7 +172,7 @@
 //!     let cfg = Config {
 //!         key_partition: "freezer_key_index".into(),
 //!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone()),
+//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), context.storage_buffer_pool().clone()),
 //!         value_partition: "freezer_value_journal".into(),
 //!         value_compression: Some(3),
 //!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
@@ -302,7 +302,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: compression,
@@ -376,7 +376,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -433,7 +433,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -500,7 +500,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -578,7 +578,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -685,7 +685,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -755,7 +755,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -821,7 +821,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -893,7 +893,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -976,7 +976,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -1052,7 +1052,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -1133,7 +1133,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -1202,7 +1202,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -1364,7 +1364,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,

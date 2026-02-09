@@ -706,7 +706,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Free
                     config.table_resize_frequency,
                     Some(checkpoint.epoch),
                     config.table_replay_buffer,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 )
                 .await?;
                 if table_modified {
@@ -731,7 +731,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Free
                     config.table_resize_frequency,
                     None,
                     config.table_replay_buffer,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 )
                 .await?;
 
@@ -1250,7 +1250,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     NZU16!(1024),
                     NZUsize!(10),
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -1309,7 +1309,7 @@ mod tests {
                 key_page_cache: CacheRef::new(
                     NZU16!(1024),
                     NZUsize!(10),
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,

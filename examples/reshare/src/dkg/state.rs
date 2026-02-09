@@ -189,7 +189,7 @@ impl<E: Clock + RuntimeStorage + Metrics + BufferPooler, V: Variant, P: PublicKe
         let page_cache = CacheRef::new(
             PAGE_SIZE,
             PAGE_CACHE_CAPACITY,
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         );
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(

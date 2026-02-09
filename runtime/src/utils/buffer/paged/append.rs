@@ -925,7 +925,7 @@ impl<B: Blob> Blob for Append<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Runner as _, Storage as _};
+    use crate::{deterministic, BufferPooler, Runner as _, Storage as _};
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -946,7 +946,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Create an Append wrapper.
@@ -984,7 +984,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Create an Append wrapper.
@@ -1108,7 +1108,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Create an Append wrapper and write some data.
@@ -1212,7 +1212,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
@@ -1342,7 +1342,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
@@ -1484,7 +1484,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
@@ -1575,7 +1575,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
@@ -1713,7 +1713,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             // crc2 is at offset: PAGE_SIZE + 6 (for len2) + 2 (skip len2 bytes) = PAGE_SIZE + 8
@@ -1851,7 +1851,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             // crc2 for page 0 is at offset: PAGE_SIZE + 8
@@ -2014,7 +2014,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
@@ -2079,7 +2079,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(4),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             let (blob, size) = context
@@ -2144,7 +2144,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
@@ -2219,7 +2219,7 @@ mod tests {
             let cache_ref = CacheRef::new(
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Step 1: Create blob with valid data

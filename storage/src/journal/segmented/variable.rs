@@ -65,7 +65,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone()),
+//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), context.storage_buffer_pool().clone()),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
@@ -685,7 +685,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -752,7 +752,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -828,7 +828,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -926,7 +926,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1034,7 +1034,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1097,7 +1097,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1133,7 +1133,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1192,7 +1192,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1253,7 +1253,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1319,7 +1319,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1395,7 +1395,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1548,7 +1548,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1619,7 +1619,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1678,7 +1678,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1735,7 +1735,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1800,7 +1800,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1867,7 +1867,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1919,7 +1919,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1963,7 +1963,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2029,7 +2029,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2075,7 +2075,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone()),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, context.storage_buffer_pool().clone()),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2154,7 +2154,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(4096),
             };
@@ -2232,7 +2232,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2355,7 +2355,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2452,7 +2452,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(4096),
             };
@@ -2533,7 +2533,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     SMALL_PAGE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2605,7 +2605,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };

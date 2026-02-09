@@ -1,6 +1,6 @@
 //! Helpers shared by the Freezer benchmarks.
 
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler};
 use commonware_storage::freezer::{Config, Freezer};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -54,7 +54,7 @@ pub async fn init(ctx: Context) -> FreezerType {
         key_page_cache: CacheRef::new(
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            commonware_runtime::BufferPooler::storage_buffer_pool(&ctx).clone(),
+            ctx.storage_buffer_pool().clone(),
         ),
         value_partition: VALUE_PARTITION.into(),
         value_compression: None,

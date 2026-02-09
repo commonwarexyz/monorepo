@@ -44,7 +44,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "key".into(),
-//!         freezer_key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone()),
+//!         freezer_key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), context.storage_buffer_pool().clone()),
 //!         freezer_value_partition: "value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -154,7 +154,7 @@ mod tests {
                 freezer_key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 freezer_value_partition: "test_value2".into(),
                 freezer_value_target_size: 1024 * 1024,

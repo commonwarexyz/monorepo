@@ -11,7 +11,7 @@ pub use write::Write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Blob as _, Error, Runner, Storage};
+    use crate::{deterministic, Blob as _, BufferPooler, Error, Runner, Storage};
     use commonware_macros::test_traced;
     use commonware_utils::NZUsize;
 
@@ -31,7 +31,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read some data
@@ -75,7 +75,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read data that crosses buffer boundaries
@@ -112,7 +112,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read data that crosses buffer boundaries
@@ -152,7 +152,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Check initial remaining bytes
@@ -201,7 +201,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(64 * 1024),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             ); // 64KB buffer
 
             // Read all data in smaller chunks
@@ -253,7 +253,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(buffer_size),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read exactly one buffer size
@@ -294,7 +294,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read some data to advance the position
@@ -351,7 +351,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read some data
@@ -393,7 +393,7 @@ mod tests {
                 blob.clone(),
                 data_len,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Resize the blob to half its size
@@ -409,7 +409,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Read the content
@@ -437,7 +437,7 @@ mod tests {
                 blob,
                 new_size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; new_size as usize];
             new_reader
@@ -468,7 +468,7 @@ mod tests {
                 blob.clone(),
                 data_len,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Resize the blob to zero
@@ -483,7 +483,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Reading from resized blob should fail
@@ -505,7 +505,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(8),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             writer.write_at(0, b"hello").await.unwrap();
             assert_eq!(writer.size().await, 5);
@@ -519,7 +519,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(8),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = [0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
@@ -539,7 +539,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(4),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             writer.write_at(0, b"abc").await.unwrap();
             assert_eq!(writer.size().await, 3);
@@ -554,7 +554,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(4),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = [0u8; 7];
             reader.read_exact(&mut buf, 7).await.unwrap();
@@ -574,7 +574,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(4),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             writer.write_at(0, b"abc").await.unwrap();
             assert_eq!(writer.size().await, 3);
@@ -593,7 +593,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(4),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = [0u8; 26];
             reader.read_exact(&mut buf, 26).await.unwrap();
@@ -611,7 +611,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write data that fits in buffer
@@ -630,7 +630,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 11];
             reader.read_exact(&mut buf, 11).await.unwrap();
@@ -648,7 +648,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Initial write
@@ -667,7 +667,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
@@ -687,7 +687,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
@@ -705,7 +705,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write data at a later offset first
@@ -724,7 +724,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
@@ -746,7 +746,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
@@ -765,7 +765,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write initial data
@@ -791,7 +791,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(5),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
@@ -809,7 +809,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(5),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
@@ -827,7 +827,7 @@ mod tests {
                 blob,
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
@@ -840,7 +840,7 @@ mod tests {
                 blob_zero.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             writer_zero.write_at(0, b"some data").await.unwrap();
             assert_eq!(writer_zero.size().await, 9);
@@ -867,7 +867,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write data that stays in buffer
@@ -919,7 +919,7 @@ mod tests {
                 final_blob,
                 final_size,
                 NZUsize!(30),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut full_content = vec![0u8; 30];
             final_reader
@@ -940,7 +940,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Fill buffer completely
@@ -961,7 +961,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 18];
             reader.read_exact(&mut buf, 18).await.unwrap();
@@ -977,7 +977,7 @@ mod tests {
                 blob2.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             writer2.write_at(0, b"0123456789").await.unwrap();
             assert_eq!(writer2.size().await, 10);
@@ -996,7 +996,7 @@ mod tests {
                 blob_check2,
                 size_check2,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf2 = vec![0u8; 17];
             reader2.read_exact(&mut buf2, 17).await.unwrap();
@@ -1014,7 +1014,7 @@ mod tests {
                 blob_orig.clone(),
                 size,
                 NZUsize!(8),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             writer.write_at(0, b"pending").await.unwrap();
             assert_eq!(writer.size().await, 7);
@@ -1029,7 +1029,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(8),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = [0u8; 7];
             reader.read_exact(&mut buf, 7).await.unwrap();
@@ -1050,7 +1050,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(5),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write data larger than buffer capacity (should write directly)
@@ -1071,7 +1071,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
@@ -1097,7 +1097,7 @@ mod tests {
                 blob_check2,
                 size_check2,
                 NZUsize!(13),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf2 = vec![0u8; 13];
             reader2.read_exact(&mut buf2, 13).await.unwrap();
@@ -1118,7 +1118,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(15),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write initial data
@@ -1145,7 +1145,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(15),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut final_buf = vec![0u8; 15];
             reader.read_exact(&mut final_buf, 15).await.unwrap();
@@ -1163,7 +1163,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(20),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write initial data
@@ -1183,7 +1183,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(13),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 13];
             reader.read_exact(&mut buf, 13).await.unwrap();
@@ -1204,7 +1204,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(5),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             ); // Small buffer
 
             // First write
@@ -1235,7 +1235,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(9),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 9];
             reader.read_exact(&mut buf, 9).await.unwrap();
@@ -1256,7 +1256,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Initial buffered write
@@ -1289,7 +1289,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(35),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 35];
             reader.read_exact(&mut buf, 35).await.unwrap();
@@ -1315,7 +1315,7 @@ mod tests {
                 blob.clone(),
                 size,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Write initial data and sync
@@ -1353,7 +1353,7 @@ mod tests {
                 blob_check,
                 size_check,
                 NZUsize!(10),
-                crate::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();

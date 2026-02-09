@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler};
 use commonware_storage::{
     journal::contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -56,7 +56,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         page_cache: CacheRef::new(
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         ),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
@@ -98,7 +98,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         page_cache: CacheRef::new(
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         ),
         write_buffer: WRITE_BUFFER,
     };

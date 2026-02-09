@@ -29,7 +29,7 @@ impl Conformance for ContiguousFixed {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
             };
@@ -64,7 +64,7 @@ impl Conformance for ContiguousVariable {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
@@ -105,7 +105,7 @@ impl Conformance for SegmentedFixed {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
             };
@@ -189,7 +189,7 @@ impl Conformance for SegmentedVariable {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
@@ -287,7 +287,7 @@ impl Conformance for SegmentedOversized {
                 index_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 index_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,

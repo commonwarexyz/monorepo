@@ -431,7 +431,7 @@ mod test {
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
-        let pool = commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone();
+        let pool = context.storage_buffer_pool().clone();
         CleanDb::init(context, db_config("partition", pool))
             .await
             .unwrap()

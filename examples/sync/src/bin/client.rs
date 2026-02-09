@@ -122,7 +122,7 @@ where
         let initial_target = resolver.get_sync_target().await?;
 
         let db_config = any::create_config(
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         );
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
@@ -184,7 +184,7 @@ where
         let initial_target = resolver.get_sync_target().await?;
 
         let db_config = immutable::create_config(
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         );
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 

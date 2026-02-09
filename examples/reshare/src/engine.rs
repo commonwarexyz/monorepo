@@ -135,7 +135,7 @@ where
         let page_cache = CacheRef::new(
             PAGE_CACHE_PAGE_SIZE,
             PAGE_CACHE_CAPACITY,
-            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+            context.storage_buffer_pool().clone(),
         );
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());

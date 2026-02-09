@@ -470,7 +470,7 @@ where
 {
     // Create and initialize database
     let db_config =
-        any::create_config(commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone());
+        any::create_config(context.storage_buffer_pool().clone());
     let database = any::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -483,7 +483,7 @@ where
 {
     // Create and initialize database
     let db_config = immutable::create_config(
-        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+        context.storage_buffer_pool().clone(),
     );
     let database = immutable::Database::init(context.with_label("database"), db_config).await?;
 

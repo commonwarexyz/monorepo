@@ -23,7 +23,7 @@ impl Conformance for Freezer {
                 key_page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: format!("freezer-value-conformance-{seed}"),
                 value_compression: None,

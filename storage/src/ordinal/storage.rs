@@ -147,7 +147,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cfg = ()>> Ordin
                 blob,
                 len,
                 config.write_buffer,
-                commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
             blobs.insert(index, wrapped_blob);
         }
@@ -175,7 +175,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cfg = ()>> Ordin
                 blob.clone(),
                 size,
                 config.replay_buffer,
-                commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                context.storage_buffer_pool().clone(),
             );
 
             // Iterate over all records in the blob
@@ -275,7 +275,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cfg = ()>> Ordin
                 blob,
                 len,
                 self.config.write_buffer,
-                commonware_runtime::BufferPooler::storage_buffer_pool(&self.context).clone(),
+                self.context.storage_buffer_pool().clone(),
             ));
             debug!(section, "created blob");
         }

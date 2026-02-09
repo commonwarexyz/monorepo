@@ -688,7 +688,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -962,7 +962,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1135,7 +1135,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1331,7 +1331,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1455,7 +1455,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1602,7 +1602,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1851,7 +1851,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2034,7 +2034,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2254,7 +2254,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2471,7 +2471,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2742,7 +2742,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2935,7 +2935,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3120,7 +3120,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3301,7 +3301,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3395,7 +3395,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3633,7 +3633,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3806,7 +3806,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3993,7 +3993,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4149,7 +4149,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4332,7 +4332,7 @@ mod tests {
                 page_cache: CacheRef::new(
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4561,7 +4561,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4811,7 +4811,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine =
@@ -5152,7 +5152,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5306,7 +5306,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5406,7 +5406,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5854,7 +5854,7 @@ mod tests {
                         page_cache: CacheRef::new(
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5915,7 +5915,7 @@ mod tests {
                     page_cache: CacheRef::new(
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);

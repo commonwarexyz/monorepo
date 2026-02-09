@@ -1,7 +1,7 @@
 //! Benchmark read performance at random offsets.
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Blob as _, Runner as _};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Runner as _};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -24,7 +24,7 @@ pub fn bench(c: &mut Criterion) {
                     let cache_ref = CacheRef::new(
                         PAGE_SIZE,
                         NZUsize!(CACHE_SIZE),
-                        commonware_runtime::BufferPooler::storage_buffer_pool(&ctx).clone(),
+                        ctx.storage_buffer_pool().clone(),
                     );
                     // Setup: populate the blob
                     let append = create_append(&ctx, &name, cache_ref.clone()).await;

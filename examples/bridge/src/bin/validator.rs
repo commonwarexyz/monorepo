@@ -261,7 +261,7 @@ fn main() {
                 page_cache: CacheRef::new(
                     NZU16!(16_384),
                     NZUsize!(10_000),
-                    commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone(),
+                    context.storage_buffer_pool().clone(),
                 ),
                 strategy,
             },

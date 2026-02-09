@@ -192,7 +192,7 @@ mod tests {
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let pool = commonware_runtime::BufferPooler::storage_buffer_pool(&context).clone();
+        let pool = context.storage_buffer_pool().clone();
         let config = create_sync_config(&format!("sync_test_{seed}"), pool);
         ImmutableSyncTest::init(context, config).await.unwrap()
     }

@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, NZUsize!(buffer), crate::BufferPooler::storage_buffer_pool(&context).clone());
+///     let mut reader = Read::new(blob, size, NZUsize!(buffer), context.storage_buffer_pool().clone());
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
