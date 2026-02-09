@@ -1,18 +1,56 @@
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
-    elector::{Config as ElectorConfig, RoundRobin},
+    elector::{Config as ElectorConfig, Random, RoundRobin},
     scheme::{
         bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
         Scheme,
     },
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinPk, MinSig},
+    bls12381::primitives::variant::{MinPk, MinSig, Variant},
     certificate::{self, mocks::Fixture},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
+    PublicKey, Sha256,
 };
 use commonware_runtime::deterministic;
+
+#[derive(Clone)]
+pub struct CustomRoundRobinShuffled;
+
+impl Default for CustomRoundRobinShuffled {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for CustomRoundRobinShuffled {
+    type Elector = <RoundRobin<Sha256> as ElectorConfig<S>>::Elector;
+
+    fn build(self, participants: &commonware_utils::ordered::Set<S::PublicKey>) -> Self::Elector {
+        let seed = b"fuzz_shuffled_seed_round_robin";
+        RoundRobin::<Sha256>::shuffled(seed).build(participants)
+    }
+}
+
+#[derive(Clone)]
+pub struct CustomRandomShuffled;
+
+impl Default for CustomRandomShuffled {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl<P: PublicKey, V: Variant> ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>
+    for CustomRandomShuffled
+{
+    type Elector = <Random as ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>>::Elector;
+
+    fn build(self, participants: &commonware_utils::ordered::Set<P>) -> Self::Elector {
+        Random.build(participants)
+    }
+}
 
 pub trait Simplex: 'static
 where
@@ -32,6 +70,21 @@ pub struct SimplexEd25519;
 impl Simplex for SimplexEd25519 {
     type Scheme = ed25519::Scheme;
     type Elector = RoundRobin;
+
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        ed25519::fixture(context, namespace, n)
+    }
+}
+
+pub struct SimplexEd25519CustomRoundRobin;
+
+impl Simplex for SimplexEd25519CustomRoundRobin {
+    type Scheme = ed25519::Scheme;
+    type Elector = CustomRoundRobinShuffled;
 
     fn fixture(
         context: &mut deterministic::Context,
@@ -87,11 +140,26 @@ impl Simplex for SimplexBls12381MinPk {
     }
 }
 
+pub struct SimplexBls12381MinPkCustomRandom;
+
+impl Simplex for SimplexBls12381MinPkCustomRandom {
+    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
+    type Elector = CustomRandomShuffled;
+
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n)
+    }
+}
+
 pub struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
-    type Elector = RoundRobin;
+    type Elector = Random;
 
     fn fixture(
         context: &mut deterministic::Context,
@@ -147,6 +215,12 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
+    fn test_ed25519_shuffled_connected() {
+        fuzz::<SimplexEd25519CustomRoundRobin, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
     fn test_secp256r1_connected() {
         fuzz::<SimplexSecp256r1, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
@@ -167,6 +241,12 @@ mod tests {
     #[test_traced]
     fn test_bls12381_threshold_minpk_connected() {
         fuzz::<SimplexBls12381MinPk, Standard>(test_input(SEED, TEST_CONTAINERS));
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_bls12381_threshold_selected_minpk_connected() {
+        fuzz::<SimplexBls12381MinPkCustomRandom, Standard>(test_input(SEED, TEST_CONTAINERS));
     }
 
     #[test_group("slow")]

@@ -40,8 +40,9 @@ use commonware_runtime::{
 use commonware_utils::{channel::mpsc::Receiver, BytesRng, NZUsize, NZU16};
 use futures::future::join_all;
 pub use simplex::{
-    SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
-    SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
+    SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
+    SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
+    SimplexEd25519CustomRoundRobin, SimplexSecp256r1,
 };
 use std::{
     collections::HashMap,
