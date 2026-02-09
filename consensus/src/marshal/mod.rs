@@ -133,7 +133,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Quota, Runner,
     };
     use commonware_storage::{
         archive::{immutable, prunable},

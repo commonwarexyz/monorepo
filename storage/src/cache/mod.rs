@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};

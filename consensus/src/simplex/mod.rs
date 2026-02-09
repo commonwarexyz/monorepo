@@ -356,8 +356,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
-        Runner, Spawner,
+        buffer::paged::CacheRef, count_running_tasks, deterministic, BufferPooler, Clock, IoBuf,
+        Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;

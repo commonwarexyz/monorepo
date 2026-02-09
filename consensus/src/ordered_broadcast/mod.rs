@@ -96,7 +96,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Metrics, Quota, Runner, Spawner,
+        BufferPooler, Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},

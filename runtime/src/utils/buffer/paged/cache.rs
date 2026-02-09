@@ -455,7 +455,9 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::{super::Checksum, *};
-    use crate::{buffer::paged::CHECKSUM_SIZE, deterministic, BufferPooler, Runner as _, Storage as _};
+    use crate::{
+        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPooler, Runner as _, Storage as _,
+    };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};

@@ -469,8 +469,7 @@ where
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + BufferPooler,
 {
     // Create and initialize database
-    let db_config =
-        any::create_config(context.storage_buffer_pool().clone());
+    let db_config = any::create_config(context.storage_buffer_pool().clone());
     let database = any::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -482,9 +481,7 @@ where
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + BufferPooler,
 {
     // Create and initialize database
-    let db_config = immutable::create_config(
-        context.storage_buffer_pool().clone(),
-    );
+    let db_config = immutable::create_config(context.storage_buffer_pool().clone());
     let database = immutable::Database::init(context.with_label("database"), db_config).await?;
 
     run_helper(context, config, database).await

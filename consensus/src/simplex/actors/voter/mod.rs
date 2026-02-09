@@ -78,7 +78,8 @@ mod tests {
     use commonware_p2p::simulated::{Config as NConfig, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
+        deterministic, telemetry::traces::collector::TraceStorage, BufferPooler, Clock, Metrics,
+        Quota, Runner,
     };
     use commonware_utils::{channel::mpsc, NZUsize, NZU16};
     use futures::FutureExt;
@@ -194,7 +195,7 @@ mod tests {
             page_cache: CacheRef::new(
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
-                *context.storage_buffer_pool().clone(),
+                context.storage_buffer_pool().clone(),
             ),
         };
         let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
