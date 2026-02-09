@@ -1,10 +1,12 @@
+use crate::{BufferPool, IoBufMut};
+
 /// A buffer for caching data written to the tip of a blob.
 ///
 /// The buffer always represents data at the "tip" of the logical blob, starting at `offset` and
 /// extending for `data.len()` bytes.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
-    pub(super) data: Vec<u8>,
+    pub(super) data: IoBufMut,
 
     /// The offset in the blob where the buffered data starts.
     ///
@@ -18,26 +20,31 @@ pub(super) struct Buffer {
     /// Whether this buffer should allow new data.
     // TODO(#2371): Use a distinct state-type for immutable vs immutable.
     pub(super) immutable: bool,
+
+    /// Pool used to allocate backing buffers.
+    pool: BufferPool,
 }
 
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
-    pub(super) fn new(offset: u64, capacity: usize) -> Self {
+    pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
+        let data = pool.alloc(capacity);
         Self {
-            data: Vec::with_capacity(capacity),
+            data,
             offset,
             capacity,
             immutable: false,
+            pool,
         }
     }
 
     /// Returns the current logical size of the blob including any buffered data.
-    pub(super) const fn size(&self) -> u64 {
+    pub(super) fn size(&self) -> u64 {
         self.offset + self.data.len() as u64
     }
 
     /// Returns true if the buffer is empty.
-    pub(super) const fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
@@ -53,7 +60,7 @@ impl Buffer {
     ///
     /// If the new size is less than the current offset, the buffer is reset to the empty state with
     /// an updated offset positioned at the end of the logical blob.
-    pub(super) fn resize(&mut self, len: u64) -> Option<(Vec<u8>, u64)> {
+    pub(super) fn resize(&mut self, len: u64) -> Option<(IoBufMut, u64)> {
         // Handle case where the buffer is empty.
         if self.is_empty() {
             self.offset = len;
@@ -62,10 +69,8 @@ impl Buffer {
 
         // Handle case where there is some data in the buffer.
         if len >= self.size() {
-            let previous = (
-                std::mem::replace(&mut self.data, Vec::with_capacity(self.capacity)),
-                self.offset,
-            );
+            let replacement = self.pool.alloc(self.capacity);
+            let previous = (std::mem::replace(&mut self.data, replacement), self.offset);
             self.offset = len;
             Some(previous)
         } else if len >= self.offset {
@@ -83,11 +88,12 @@ impl Buffer {
     ///
     /// The buffer is reset to the empty state with an updated offset positioned at the end of the
     /// logical blob.
-    pub(super) fn take(&mut self) -> Option<(Vec<u8>, u64)> {
+    pub(super) fn take(&mut self) -> Option<(IoBufMut, u64)> {
         if self.is_empty() {
             return None;
         }
-        let buf = std::mem::replace(&mut self.data, Vec::with_capacity(self.capacity));
+        let replacement = self.pool.alloc(self.capacity);
+        let buf = std::mem::replace(&mut self.data, replacement);
         let offset = self.offset;
         self.offset += buf.len() as u64;
         Some((buf, offset))
@@ -122,7 +128,7 @@ impl Buffer {
         assert!(end <= self.data.len());
 
         // Copy the requested buffered data into the appropriate part of the user-provided slice.
-        buf[remaining..].copy_from_slice(&self.data[start..end]);
+        buf[remaining..].copy_from_slice(&self.data.as_ref()[start..end]);
 
         remaining
     }
@@ -147,11 +153,22 @@ impl Buffer {
 
         // Expand buffer if necessary (fills with zeros).
         if end > self.data.len() {
-            self.data.resize(end, 0);
+            if end > self.data.capacity() {
+                // Grow backing buffer while preserving existing bytes.
+                let mut grown = self.pool.alloc(end);
+                // SAFETY: We immediately initialize all bytes in 0..current_len.
+                unsafe { grown.set_len(self.data.len()) };
+                grown.as_mut()[..self.data.len()].copy_from_slice(self.data.as_ref());
+                self.data = grown;
+            }
+            let prev = self.data.len();
+            // SAFETY: We initialize the newly exposed bytes below.
+            unsafe { self.data.set_len(end) };
+            self.data.as_mut()[prev..end].fill(0);
         }
 
         // Copy the provided data into the buffer.
-        self.data[start..end].copy_from_slice(data.as_ref());
+        self.data.as_mut()[start..end].copy_from_slice(data.as_ref());
 
         true
     }
@@ -162,27 +179,60 @@ impl Buffer {
     /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
     /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
-        self.data.extend_from_slice(data);
+        let start = self.data.len();
+        let end = start + data.len();
+        if end > self.data.capacity() {
+            let mut grown = self.pool.alloc(end);
+            // SAFETY: We initialize the copied range right away.
+            unsafe { grown.set_len(start) };
+            grown.as_mut()[..start].copy_from_slice(self.data.as_ref());
+            self.data = grown;
+        }
+        // SAFETY: We initialize the appended range right away.
+        unsafe { self.data.set_len(end) };
+        self.data.as_mut()[start..end].copy_from_slice(data);
 
         self.over_capacity()
     }
 
     /// Whether the buffer is over capacity and should be taken & flushed to the underlying blob.
-    const fn over_capacity(&self) -> bool {
+    fn over_capacity(&self) -> bool {
         self.data.len() > self.capacity
+    }
+
+    /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `len` exceeds current buffer length.
+    pub(super) fn drop_prefix(&mut self, len: usize) {
+        assert!(len <= self.data.len());
+        if len == 0 {
+            return;
+        }
+        let current_len = self.data.len();
+        if len == current_len {
+            self.data.clear();
+            return;
+        }
+        self.data.as_mut().copy_within(len..current_len, 0);
+        self.data.truncate(current_len - len);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prometheus_client::registry::Registry;
 
     #[test]
     fn test_tip_append() {
-        let mut buffer = Buffer::new(50, 100);
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::new(50, 100, pool);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
-        assert_eq!(buffer.take(), None);
+        assert!(buffer.take().is_none());
 
         // Add some data to the buffer.
         assert!(!buffer.append(&[1, 2, 3]));
@@ -190,9 +240,11 @@ mod tests {
         assert!(!buffer.is_empty());
 
         // Confirm `take()` works as intended.
-        assert_eq!(buffer.take(), Some((vec![1, 2, 3], 50)));
+        let taken = buffer.take().unwrap();
+        assert_eq!(taken.0.as_ref(), &[1, 2, 3]);
+        assert_eq!(taken.1, 50);
         assert_eq!(buffer.size(), 53);
-        assert_eq!(buffer.take(), None);
+        assert!(buffer.take().is_none());
 
         // Fill the buffer to capacity.
         let mut buf = vec![42; 100];
@@ -203,38 +255,46 @@ mod tests {
         assert!(buffer.append(&[43]));
         assert_eq!(buffer.size(), 154);
         buf.push(43);
-        assert_eq!(buffer.take(), Some((buf, 53)));
+        let taken = buffer.take().unwrap();
+        assert_eq!(taken.0.as_ref(), buf.as_slice());
+        assert_eq!(taken.1, 53);
     }
 
     #[test]
     fn test_tip_resize() {
-        let mut buffer = Buffer::new(50, 100);
+        let mut registry = Registry::default();
+        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let mut buffer = Buffer::new(50, 100, pool);
         buffer.append(&[1, 2, 3]);
         assert_eq!(buffer.size(), 53);
 
         // Resize the buffer to correspond to a blob resized to size 60. The returned buffer should
         // match exactly what we'd expect to be returned by `take` since 60 is greater than the
         // current size of 53.
-        assert_eq!(buffer.resize(60), Some((vec![1, 2, 3], 50)));
+        let resized = buffer.resize(60).unwrap();
+        assert_eq!(resized.0.as_ref(), &[1, 2, 3]);
+        assert_eq!(resized.1, 50);
         assert_eq!(buffer.size(), 60);
-        assert_eq!(buffer.take(), None);
+        assert!(buffer.take().is_none());
 
         buffer.append(&[4, 5, 6]);
         assert_eq!(buffer.size(), 63);
 
         // Resize the buffer down to size 61.
-        assert_eq!(buffer.resize(61), None);
+        assert!(buffer.resize(61).is_none());
         assert_eq!(buffer.size(), 61);
-        assert_eq!(buffer.take(), Some((vec![4], 60)));
+        let taken = buffer.take().unwrap();
+        assert_eq!(taken.0.as_ref(), &[4]);
+        assert_eq!(taken.1, 60);
         assert_eq!(buffer.size(), 61);
 
         buffer.append(&[7, 8, 9]);
 
         // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
         // at the new size.
-        assert_eq!(buffer.resize(59), None);
+        assert!(buffer.resize(59).is_none());
         assert_eq!(buffer.size(), 59);
-        assert_eq!(buffer.take(), None);
+        assert!(buffer.take().is_none());
         assert_eq!(buffer.size(), 59);
     }
 }

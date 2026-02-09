@@ -1,4 +1,4 @@
-use crate::{Blob, Error, IoBufMut};
+use crate::{Blob, BufferPool, Error, IoBufMut};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, BufferPooler, Error, Storage, deterministic};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
+///     let mut reader = Read::new(blob, size, NZUsize!(buffer), crate::BufferPooler::storage_buffer_pool(&context).clone());
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
@@ -46,6 +46,8 @@ pub struct Read<B: Blob> {
     buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
+    /// Buffer pool used for internal allocations.
+    pool: BufferPool,
 }
 
 impl<B: Blob> Read<B> {
@@ -54,15 +56,16 @@ impl<B: Blob> Read<B> {
     /// # Panics
     ///
     /// Panics if `buffer_size` is zero.
-    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: IoBufMut::with_capacity(buffer_size.get()),
+            buffer: { pool.alloc(buffer_size.get()) },
             blob_position: 0,
             blob_size,
             buffer_position: 0,
             buffer_valid_len: 0,
             buffer_size: buffer_size.get(),
+            pool,
         }
     }
 
@@ -105,7 +108,7 @@ impl<B: Blob> Read<B> {
         let buf = if buf.capacity() >= bytes_to_read {
             buf
         } else {
-            IoBufMut::with_capacity(bytes_to_read)
+            self.pool.alloc(bytes_to_read)
         };
         let read_result = self
             .blob
