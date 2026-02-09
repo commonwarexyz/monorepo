@@ -41,8 +41,7 @@ fn bench_variable_generate(c: &mut Criterion) {
                             let ctx = context::get::<Context>();
                             let mut total_elapsed = Duration::ZERO;
                             for _ in 0..iters {
-                                let commit_frequency =
-                                    (operations / COMMITS_PER_ITERATION) as u32;
+                                let commit_frequency = (operations / COMMITS_PER_ITERATION) as u32;
                                 let elapsed = match variant {
                                     Variant::AnyUnordered => {
                                         let db = get_any_unordered(ctx.clone()).await;

@@ -41,8 +41,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                             let ctx = context::get::<Context>();
                             let mut total_elapsed = Duration::ZERO;
                             for _ in 0..iters {
-                                let commit_frequency =
-                                    (operations / COMMITS_PER_ITERATION) as u32;
+                                let commit_frequency = (operations / COMMITS_PER_ITERATION) as u32;
                                 let duration = match variant {
                                     Variant::AnyUnorderedFixed => {
                                         let db = get_any_unordered_fixed(ctx.clone()).await;
@@ -81,15 +80,13 @@ fn bench_fixed_generate(c: &mut Criterion) {
                                             .unwrap()
                                     }
                                     Variant::CurrentUnorderedVariable => {
-                                        let db =
-                                            get_current_unordered_variable(ctx.clone()).await;
+                                        let db = get_current_unordered_variable(ctx.clone()).await;
                                         test_db(db, elements, operations, commit_frequency)
                                             .await
                                             .unwrap()
                                     }
                                     Variant::CurrentOrderedVariable => {
-                                        let db =
-                                            get_current_ordered_variable(ctx.clone()).await;
+                                        let db = get_current_ordered_variable(ctx.clone()).await;
                                         test_db(db, elements, operations, commit_frequency)
                                             .await
                                             .unwrap()

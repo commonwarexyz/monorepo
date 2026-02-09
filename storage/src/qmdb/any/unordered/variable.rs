@@ -320,12 +320,14 @@ pub(crate) mod test {
             let db = open_db(context.with_label("open1")).await;
             let root = db.root();
             let mut db = db.into_mutable();
-
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
-            }
+            db.write_batch((0..ELEMENTS).map(|i| {
+                (
+                    Sha256::hash(&i.to_be_bytes()),
+                    Some(vec![(i % 255) as u8; ((i % 13) + 7) as usize]),
+                )
+            }))
+            .await
+            .unwrap();
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
