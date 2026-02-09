@@ -3484,8 +3484,11 @@ mod tests {
         });
     }
 
-    fn test_buffer_pooler<R: Runner>(runner: R)
-    where
+    fn test_buffer_pooler<R: Runner>(
+        runner: R,
+        expected_network_max_per_class: usize,
+        expected_storage_max_per_class: usize,
+    ) where
         R::Context: BufferPooler,
     {
         runner.start(|context| async move {
@@ -3500,24 +3503,44 @@ mod tests {
             // Verify pools have expected configurations
             assert_eq!(
                 context.network_buffer_pool().config().max_per_class.get(),
-                4096
+                expected_network_max_per_class
             );
             assert_eq!(
                 context.storage_buffer_pool().config().max_per_class.get(),
-                32
+                expected_storage_max_per_class
             );
         });
     }
 
     #[test]
     fn test_deterministic_buffer_pooler() {
-        let runner = deterministic::Runner::default();
-        test_buffer_pooler(runner);
+        test_buffer_pooler(deterministic::Runner::default(), 4096, 32);
+
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
     }
 
     #[test]
     fn test_tokio_buffer_pooler() {
-        let runner = tokio::Runner::default();
-        test_buffer_pooler(runner);
+        test_buffer_pooler(tokio::Runner::default(), 4096, 32);
+
+        let runner = tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZUsize!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(8)),
+                ),
+        );
+        test_buffer_pooler(runner, 64, 8);
     }
 }
