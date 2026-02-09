@@ -249,7 +249,7 @@ where
 
                 // Handle the verification result.
                 if application_valid {
-                    marshal.verified(context.round, block).await;
+                    marshal.verified_lossy(context.round, block).await;
                 }
                 tx.send_lossy(application_valid);
             });
@@ -502,7 +502,7 @@ where
 
                     // Valid re-proposal. Create a completed verification task for `certify`
                     let round = context.round;
-                    marshal.verified(round, block).await;
+                    marshal.verified_lossy(round, block).await;
 
                     let (task_tx, task_rx) = oneshot::channel();
                     task_tx.send_lossy(true);
@@ -626,7 +626,7 @@ where
                 if is_reproposal {
                     // NOTE: It is possible that, during crash recovery, we call `marshal.verified`
                     // twice for the same block. That function is idempotent, so this is safe.
-                    marshaled.marshal.verified(round, block).await;
+                    marshaled.marshal.verified_lossy(round, block).await;
                     tx.send_lossy(true);
                     return;
                 }
@@ -676,7 +676,7 @@ where
             height = %block.height(),
             "requested broadcast of built block"
         );
-        self.marshal.proposed(round, block).await;
+        self.marshal.proposed_lossy(round, block).await;
     }
 }
 

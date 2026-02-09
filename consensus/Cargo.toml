@@ -31,6 +31,7 @@ rand_core.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+commonware-actor.workspace = true
 commonware-macros = { workspace = true, features = ["std"] }
 commonware-p2p.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }

@@ -1223,6 +1223,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-conformance",

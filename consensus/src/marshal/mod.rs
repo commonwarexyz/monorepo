@@ -63,7 +63,6 @@
 //!   uncertified blocks from the network.
 
 pub mod actor;
-pub use actor::Actor;
 pub mod cache;
 pub mod config;
 pub use config::Config;
@@ -118,6 +117,7 @@ mod tests {
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
         Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
     };
+    use commonware_actor::service::ServiceBuilder;
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
         bls12381::primitives::variant::MinPk,
@@ -340,7 +340,9 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let (actor, mailbox, processed_height) = actor::Actor::init(
+        let (resolver_rx, resolver) = resolver;
+        let mailbox_size = config.mailbox_size;
+        let (actor, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
             finalized_blocks,
@@ -349,8 +351,15 @@ mod tests {
         .await;
         let application = Application::<B>::default();
 
-        // Start the application
-        actor.start(application.clone(), buffer, resolver);
+        // Build and start the actor service
+        let (mailbox, service) =
+            ServiceBuilder::new(actor).build_with_capacity(context.clone(), mailbox_size);
+        service.start_with(actor::Init {
+            application: application.clone(),
+            buffer,
+            resolver_rx,
+            resolver,
+        });
 
         (application, mailbox, processed_height)
     }
@@ -519,8 +528,8 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height.get() % (NUM_VALIDATORS as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.proposed(round, block.clone()).await;
-                actor.verified(round, block.clone()).await;
+                actor.proposed_lossy(round, block.clone()).await;
+                actor.verified_lossy(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
@@ -669,8 +678,8 @@ mod tests {
                 // Broadcast block by one validator
                 let actor_index: usize = (height.get() % (applications.len() as u64)) as usize;
                 let mut actor = actors[actor_index].clone();
-                actor.proposed(round, block.clone()).await;
-                actor.verified(round, block.clone()).await;
+                actor.proposed_lossy(round, block.clone()).await;
+                actor.verified_lossy(round, block.clone()).await;
 
                 // Wait for the block to be broadcast, but due to jitter, we may or may not receive
                 // the block before continuing.
@@ -736,10 +745,11 @@ mod tests {
             let latest_finalization = second_actor
                 .get_finalization(Height::new(NUM_BLOCKS))
                 .await
+                .unwrap()
                 .unwrap();
 
             // Set the sync height floor of the first actor to block #100.
-            actor.set_floor(Height::new(NEW_SYNC_FLOOR)).await;
+            actor.set_floor_lossy(Height::new(NEW_SYNC_FLOOR)).await;
 
             // Notify the first actor of the latest finalization to the first actor to trigger backfill.
             // The sync should only reach the sync height floor.
@@ -898,7 +908,9 @@ mod tests {
                     .await
                     .expect("failed to initialize finalized blocks archive");
 
-                    let (actor, mailbox, _processed_height) = actor::Actor::init(
+                    let (resolver_rx, resolver) = resolver;
+                    let mailbox_size = config.mailbox_size;
+                    let (actor, _processed_height) = actor::Actor::init(
                         ctx.clone(),
                         finalizations_by_height,
                         finalized_blocks,
@@ -906,7 +918,14 @@ mod tests {
                     )
                     .await;
                     let application = Application::<B>::default();
-                    actor.start(application.clone(), buffer, resolver);
+                    let (mailbox, service) =
+                        ServiceBuilder::new(actor).build_with_capacity(ctx.clone(), mailbox_size);
+                    service.start_with(actor::Init {
+                        application: application.clone(),
+                        buffer,
+                        resolver_rx,
+                        resolver,
+                    });
 
                     (mailbox, application)
                 }
@@ -924,7 +943,7 @@ mod tests {
                 let bounds = epocher.containing(Height::new(i)).unwrap();
                 let round = Round::new(bounds.epoch(), View::new(i));
 
-                mailbox.verified(round, block.clone()).await;
+                mailbox.verified_lossy(round, block.clone()).await;
                 let proposal = Proposal {
                     round,
                     parent: View::new(i - 1),
@@ -949,13 +968,17 @@ mod tests {
                     "block {i} should exist before pruning"
                 );
                 assert!(
-                    mailbox.get_finalization(Height::new(i)).await.is_some(),
+                    mailbox
+                        .get_finalization(Height::new(i))
+                        .await
+                        .unwrap()
+                        .is_some(),
                     "finalization {i} should exist before pruning"
                 );
             }
 
             // All blocks should still be accessible (prune was ignored)
-            mailbox.prune(Height::new(25)).await;
+            mailbox.prune_lossy(Height::new(25)).await;
             context.sleep(Duration::from_millis(50)).await;
             for i in 1..=20u64 {
                 assert!(
@@ -965,7 +988,7 @@ mod tests {
             }
 
             // Pruning at height 10 should prune blocks below 10 (heights 1-9)
-            mailbox.prune(Height::new(10)).await;
+            mailbox.prune_lossy(Height::new(10)).await;
             context.sleep(Duration::from_millis(100)).await;
             for i in 1..10u64 {
                 assert!(
@@ -973,7 +996,11 @@ mod tests {
                     "block {i} should be pruned"
                 );
                 assert!(
-                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    mailbox
+                        .get_finalization(Height::new(i))
+                        .await
+                        .unwrap()
+                        .is_none(),
                     "finalization {i} should be pruned"
                 );
             }
@@ -985,13 +1012,17 @@ mod tests {
                     "block {i} should still exist after pruning"
                 );
                 assert!(
-                    mailbox.get_finalization(Height::new(i)).await.is_some(),
+                    mailbox
+                        .get_finalization(Height::new(i))
+                        .await
+                        .unwrap()
+                        .is_some(),
                     "finalization {i} should still exist after pruning"
                 );
             }
 
             // Pruning at height 20 should prune blocks 10-19
-            mailbox.prune(Height::new(20)).await;
+            mailbox.prune_lossy(Height::new(20)).await;
             context.sleep(Duration::from_millis(100)).await;
             for i in 10..20u64 {
                 assert!(
@@ -999,7 +1030,11 @@ mod tests {
                     "block {i} should be pruned after second prune"
                 );
                 assert!(
-                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    mailbox
+                        .get_finalization(Height::new(i))
+                        .await
+                        .unwrap()
+                        .is_none(),
                     "finalization {i} should be pruned after second prune"
                 );
             }
@@ -1010,7 +1045,11 @@ mod tests {
                 "block 20 should still exist"
             );
             assert!(
-                mailbox.get_finalization(Height::new(20)).await.is_some(),
+                mailbox
+                    .get_finalization(Height::new(20))
+                    .await
+                    .unwrap()
+                    .is_some(),
                 "finalization 20 should still exist"
             );
 
@@ -1025,7 +1064,11 @@ mod tests {
                     "block {i} should still be pruned after restart"
                 );
                 assert!(
-                    mailbox.get_finalization(Height::new(i)).await.is_none(),
+                    mailbox
+                        .get_finalization(Height::new(i))
+                        .await
+                        .unwrap()
+                        .is_none(),
                     "finalization {i} should still be pruned after restart"
                 );
             }
@@ -1036,7 +1079,11 @@ mod tests {
                 "block 20 should still exist after restart"
             );
             assert!(
-                mailbox.get_finalization(Height::new(20)).await.is_some(),
+                mailbox
+                    .get_finalization(Height::new(20))
+                    .await
+                    .unwrap()
+                    .is_some(),
                 "finalization 20 should still exist after restart"
             );
         })
@@ -1077,7 +1124,7 @@ mod tests {
                 .await;
 
             actor
-                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(1)), block.clone())
                 .await;
 
             let proposal = Proposal {
@@ -1140,10 +1187,10 @@ mod tests {
                 .await;
 
             actor
-                .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(1)), block1.clone())
                 .await;
             actor
-                .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
@@ -1215,10 +1262,10 @@ mod tests {
             drop(sub1_rx);
 
             actor
-                .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(1)), block1.clone())
                 .await;
             actor
-                .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
 
             for (view, block) in [(1, block1.clone()), (2, block2.clone())] {
@@ -1282,7 +1329,7 @@ mod tests {
 
             // Block1: Broadcasted by the actor
             actor
-                .proposed(Round::new(Epoch::zero(), View::new(1)), block1.clone())
+                .proposed_lossy(Round::new(Epoch::zero(), View::new(1)), block1.clone())
                 .await;
             context.sleep(Duration::from_millis(20)).await;
 
@@ -1293,7 +1340,7 @@ mod tests {
 
             // Block2: Verified by the actor
             actor
-                .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
 
             // Block2: delivered
@@ -1310,7 +1357,7 @@ mod tests {
             let notarization3 = make_notarization(proposal3.clone(), &schemes, QUORUM);
             actor.report(Activity::Notarization(notarization3)).await;
             actor
-                .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(3)), block3.clone())
                 .await;
 
             // Block3: delivered
@@ -1330,7 +1377,7 @@ mod tests {
             );
             actor.report(Activity::Finalization(finalization4)).await;
             actor
-                .verified(Round::new(Epoch::new(0), View::new(4)), block4.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(4)), block4.clone())
                 .await;
 
             // Block4: delivered
@@ -1341,7 +1388,7 @@ mod tests {
             // Block5: Broadcasted by a remote node (different actor)
             let remote_actor = &mut actors[1].clone();
             remote_actor
-                .proposed(Round::new(Epoch::zero(), View::new(5)), block5.clone())
+                .proposed_lossy(Round::new(Epoch::zero(), View::new(5)), block5.clone())
                 .await;
             context.sleep(Duration::from_millis(20)).await;
 
@@ -1384,7 +1431,7 @@ mod tests {
             let block = make_block(parent, Height::new(1), 1);
             let digest = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
-            actor.verified(round, block.clone()).await;
+            actor.verified_lossy(round, block.clone()).await;
 
             let proposal = Proposal {
                 round,
@@ -1450,7 +1497,7 @@ mod tests {
             let block1 = make_block(parent0, Height::new(1), 1);
             let d1 = block1.digest();
             actor
-                .verified(Round::new(Epoch::new(0), View::new(1)), block1.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(1)), block1.clone())
                 .await;
             let f1 = make_finalization(
                 Proposal {
@@ -1468,7 +1515,7 @@ mod tests {
             let block2 = make_block(d1, Height::new(2), 2);
             let d2 = block2.digest();
             actor
-                .verified(Round::new(Epoch::new(0), View::new(2)), block2.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(2)), block2.clone())
                 .await;
             let f2 = make_finalization(
                 Proposal {
@@ -1486,7 +1533,7 @@ mod tests {
             let block3 = make_block(d2, Height::new(3), 3);
             let d3 = block3.digest();
             actor
-                .verified(Round::new(Epoch::new(0), View::new(3)), block3.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(3)), block3.clone())
                 .await;
             let f3 = make_finalization(
                 Proposal {
@@ -1533,7 +1580,7 @@ mod tests {
             let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
-            actor.verified(round, block.clone()).await;
+            actor.verified_lossy(round, block.clone()).await;
             let proposal = Proposal {
                 round,
                 parent: View::new(0),
@@ -1590,7 +1637,7 @@ mod tests {
             let ver_block = make_block(parent, Height::new(1), 1);
             let ver_commitment = ver_block.digest();
             let round1 = Round::new(Epoch::new(0), View::new(1));
-            actor.verified(round1, ver_block.clone()).await;
+            actor.verified_lossy(round1, ver_block.clone()).await;
             let got = actor
                 .get_block(&ver_commitment)
                 .await
@@ -1601,7 +1648,7 @@ mod tests {
             let fin_block = make_block(ver_commitment, Height::new(2), 2);
             let fin_commitment = fin_block.digest();
             let round2 = Round::new(Epoch::new(0), View::new(2));
-            actor.verified(round2, fin_block.clone()).await;
+            actor.verified_lossy(round2, fin_block.clone()).await;
             let proposal = Proposal {
                 round: round2,
                 parent: View::new(1),
@@ -1644,7 +1691,7 @@ mod tests {
             .await;
 
             // Before any finalization, get_finalization should be None
-            let finalization = actor.get_finalization(Height::new(1)).await;
+            let finalization = actor.get_finalization(Height::new(1)).await.unwrap();
             assert!(finalization.is_none());
 
             // Finalize a block at height 1
@@ -1652,7 +1699,7 @@ mod tests {
             let block = make_block(parent, Height::new(1), 1);
             let commitment = block.digest();
             let round = Round::new(Epoch::new(0), View::new(1));
-            actor.verified(round, block.clone()).await;
+            actor.verified_lossy(round, block.clone()).await;
             let proposal = Proposal {
                 round,
                 parent: View::new(0),
@@ -1665,6 +1712,7 @@ mod tests {
             let finalization = actor
                 .get_finalization(Height::new(1))
                 .await
+                .unwrap()
                 .expect("missing finalization by height");
             assert_eq!(finalization.proposal.parent, View::new(0));
             assert_eq!(
@@ -1673,7 +1721,11 @@ mod tests {
             );
             assert_eq!(finalization.proposal.payload, commitment);
 
-            assert!(actor.get_finalization(Height::new(2)).await.is_none());
+            assert!(actor
+                .get_finalization(Height::new(2))
+                .await
+                .unwrap()
+                .is_none());
         })
     }
 
@@ -1724,7 +1776,7 @@ mod tests {
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
-                actor0.verified(round, block.clone()).await;
+                actor0.verified_lossy(round, block.clone()).await;
                 let proposal = Proposal {
                     round,
                     parent: View::new(i - 1),
@@ -1742,15 +1794,24 @@ mod tests {
             }
 
             // Validator 1 should not have block 5 yet
-            assert!(actor1.get_finalization(Height::new(5)).await.is_none());
+            assert!(actor1
+                .get_finalization(Height::new(5))
+                .await
+                .unwrap()
+                .is_none());
 
             // Validator 1: hint that block 5 is finalized, targeting validator 0
             actor1
-                .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()))
+                .hint_finalized_lossy(Height::new(5), NonEmptyVec::new(participants[0].clone()))
                 .await;
 
             // Wait for the fetch to complete
-            while actor1.get_finalization(Height::new(5)).await.is_none() {
+            while actor1
+                .get_finalization(Height::new(5))
+                .await
+                .unwrap()
+                .is_none()
+            {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -1758,6 +1819,7 @@ mod tests {
             let finalization = actor1
                 .get_finalization(Height::new(5))
                 .await
+                .unwrap()
                 .expect("finalization should be fetched");
             assert_eq!(finalization.proposal.round.view(), View::new(5));
         })
@@ -1789,7 +1851,7 @@ mod tests {
                 let block = make_block(parent, Height::new(i), i);
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
-                actor.verified(round, block.clone()).await;
+                actor.verified_lossy(round, block.clone()).await;
                 let proposal = Proposal {
                     round,
                     parent: View::new(i - 1),
@@ -1897,7 +1959,7 @@ mod tests {
             let parent_round = Round::new(Epoch::new(1), View::new(21));
             marshal
                 .clone()
-                .verified(parent_round, honest_parent.clone())
+                .verified_lossy(parent_round, honest_parent.clone())
                 .await;
 
             // Byzantine proposer broadcasts malicious block at height 35
@@ -1911,7 +1973,7 @@ mod tests {
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
-                .proposed(
+                .proposed_lossy(
                     Round::new(Epoch::new(1), View::new(35)),
                     malicious_block.clone(),
                 )
@@ -1959,7 +2021,7 @@ mod tests {
             let malicious_commitment = malicious_block.commitment();
             marshal
                 .clone()
-                .proposed(
+                .proposed_lossy(
                     Round::new(Epoch::new(1), View::new(22)),
                     malicious_block.clone(),
                 )
@@ -2030,10 +2092,10 @@ mod tests {
 
             // Both validators verify the block
             actors[0]
-                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(1)), block.clone())
                 .await;
             actors[1]
-                .verified(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .verified_lossy(Round::new(Epoch::new(0), View::new(1)), block.clone())
                 .await;
 
             // Validator 0: Finalize with view 1
@@ -2078,8 +2140,16 @@ mod tests {
             assert_eq!(block1, block);
 
             // Verify both validators have finalizations stored
-            let fin0 = actors[0].get_finalization(Height::new(1)).await.unwrap();
-            let fin1 = actors[1].get_finalization(Height::new(1)).await.unwrap();
+            let fin0 = actors[0]
+                .get_finalization(Height::new(1))
+                .await
+                .unwrap()
+                .unwrap();
+            let fin1 = actors[1]
+                .get_finalization(Height::new(1))
+                .await
+                .unwrap()
+                .unwrap();
 
             // Verify the finalizations have the expected different views
             assert_eq!(fin0.proposal.payload, block.commitment());
@@ -2108,11 +2178,19 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Validator 0 should still have the original finalization (v1)
-            let fin0_after = actors[0].get_finalization(Height::new(1)).await.unwrap();
+            let fin0_after = actors[0]
+                .get_finalization(Height::new(1))
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(fin0_after.round().view(), View::new(1));
 
             // Validator 1 should still have the original finalization (v2)
-            let fin0_after = actors[1].get_finalization(Height::new(1)).await.unwrap();
+            let fin0_after = actors[1]
+                .get_finalization(Height::new(1))
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(fin0_after.round().view(), View::new(2));
         })
     }
@@ -2147,7 +2225,7 @@ mod tests {
                 let commitment = block.digest();
                 let round = Round::new(Epoch::new(0), View::new(i));
 
-                actor.verified(round, block.clone()).await;
+                actor.verified_lossy(round, block.clone()).await;
                 let proposal = Proposal {
                     round,
                     parent: View::new(i - 1),
@@ -2166,7 +2244,7 @@ mod tests {
             }
 
             // Set marshal's processed height to 3
-            actor.set_floor(Height::new(3)).await;
+            actor.set_floor_lossy(Height::new(3)).await;
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify application received all blocks
@@ -2291,14 +2369,14 @@ mod tests {
             let parent = make_block(genesis.commitment(), Height::new(19), 1000);
             let parent_commitment = parent.commitment();
             let parent_round = Round::new(Epoch::new(0), View::new(19));
-            marshal.clone().verified(parent_round, parent).await;
+            marshal.clone().verified_lossy(parent_round, parent).await;
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let block = make_block(parent_commitment, Height::new(20), 2000);
             let block_commitment = block.commitment();
             marshal
                 .clone()
-                .proposed(Round::new(Epoch::new(1), View::new(20)), block)
+                .proposed_lossy(Round::new(Epoch::new(1), View::new(20)), block)
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2402,7 +2480,7 @@ mod tests {
             let parent = make_block(genesis.commitment(), Height::new(1), 100);
             let parent_commitment = parent.commitment();
             let parent_round = Round::new(Epoch::new(0), View::new(1));
-            marshal.clone().verified(parent_round, parent).await;
+            marshal.clone().verified_lossy(parent_round, parent).await;
 
             // Block A at view 5 (height 2) - create with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -2414,7 +2492,7 @@ mod tests {
             let block_a =
                 B::new::<Sha256>(context_a.clone(), parent_commitment, Height::new(2), 200);
             let commitment_a = block_a.commitment();
-            marshal.clone().proposed(round_a, block_a).await;
+            marshal.clone().proposed_lossy(round_a, block_a).await;
 
             // Block B at view 10 (height 2, different block same height - could happen with
             // different proposers or re-proposals)
@@ -2427,7 +2505,7 @@ mod tests {
             let block_b =
                 B::new::<Sha256>(context_b.clone(), parent_commitment, Height::new(2), 300);
             let commitment_b = block_b.commitment();
-            marshal.clone().proposed(round_b, block_b).await;
+            marshal.clone().proposed_lossy(round_b, block_b).await;
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2544,7 +2622,7 @@ mod tests {
                     parent: (last_view, parent),
                 };
                 let block = B::new::<Sha256>(ctx.clone(), parent, Height::new(i), i * 100);
-                marshal.clone().verified(round, block.clone()).await;
+                marshal.clone().verified_lossy(round, block.clone()).await;
                 parent = block.commitment();
                 last_view = View::new(i);
             }
@@ -2566,13 +2644,13 @@ mod tests {
             let boundary_commitment = boundary_block.commitment();
             marshal
                 .clone()
-                .verified(boundary_round, boundary_block.clone())
+                .verified_lossy(boundary_round, boundary_block.clone())
                 .await;
 
             // Make the boundary block available for subscription
             marshal
                 .clone()
-                .proposed(boundary_round, boundary_block.clone())
+                .proposed_lossy(boundary_round, boundary_block.clone())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2617,7 +2695,7 @@ mod tests {
             // Make the non-boundary block available
             marshal
                 .clone()
-                .proposed(non_boundary_round, non_boundary_block.clone())
+                .proposed_lossy(non_boundary_round, non_boundary_block.clone())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2691,7 +2769,7 @@ mod tests {
             let normal_commitment = normal_block.commitment();
             marshal
                 .clone()
-                .proposed(normal_round, normal_block.clone())
+                .proposed_lossy(normal_round, normal_block.clone())
                 .await;
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2737,7 +2815,7 @@ mod tests {
 
             // Broadcast the block
             actor
-                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .proposed_lossy(Round::new(Epoch::new(0), View::new(1)), block.clone())
                 .await;
 
             // Ensure the block is cached and retrievable; This should hit the in-memory cache
