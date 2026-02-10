@@ -294,7 +294,7 @@ pub(crate) mod test {
     }
 
     use crate::{
-        kv::{Deletable, Updatable},
+        kv::{Batchable as _, Gettable as _},
         mmr::Location,
         qmdb::{
             any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
@@ -302,7 +302,7 @@ pub(crate) mod test {
         },
         Persistable,
     };
-    use commonware_codec::Codec;
+    use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::{deterministic::Context, BufferPooler};
     use core::{future::Future, pin::Pin};
@@ -312,24 +312,23 @@ pub(crate) mod test {
     pub(crate) async fn test_any_db_steps_not_reset<D>(db: D)
     where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = Digest, Error = crate::qmdb::Error>,
     {
         // Create a db with a couple keys.
         let mut db = db.into_mutable();
 
-        assert!(db
-            .create(Sha256::fill(1u8), Sha256::fill(2u8))
+        assert!(db.get(&Sha256::fill(1u8)).await.unwrap().is_none());
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(2u8)))])
             .await
-            .unwrap());
-        assert!(db
-            .create(Sha256::fill(3u8), Sha256::fill(4u8))
+            .unwrap();
+        assert!(db.get(&Sha256::fill(3u8)).await.unwrap().is_none());
+        db.write_batch([(Sha256::fill(3u8), Some(Sha256::fill(4u8)))])
             .await
-            .unwrap());
+            .unwrap();
         let (clean_db, _) = db.commit(None).await.unwrap();
         let mut db = clean_db.into_mutable();
 
         // Updating an existing key should make steps non-zero.
-        db.update(Sha256::fill(1u8), Sha256::fill(5u8))
+        db.write_batch([(Sha256::fill(1u8), Some(Sha256::fill(5u8)))])
             .await
             .unwrap();
         let steps = db.steps();
@@ -347,14 +346,13 @@ pub(crate) mod test {
     }
 
     /// Test recovery on non-empty db.
-    pub(crate) async fn test_any_db_non_empty_recovery<D, V: Clone>(
+    pub(crate) async fn test_any_db_non_empty_recovery<D, V: Clone + CodecShared>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -362,7 +360,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let mut db = db.into_merkleized().await.unwrap();
@@ -380,7 +378,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.size(), op_count);
@@ -391,7 +389,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            dirty.update(k, v).await.unwrap();
+            dirty.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen3")).await;
         assert_eq!(db.size(), op_count);
@@ -402,7 +400,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = make_value((i + 1) * 10000);
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
         }
         let db = reopen_db(context.with_label("reopen4")).await;
@@ -413,7 +411,7 @@ pub(crate) mod test {
         for i in 0u64..ELEMENTS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let _ = db.commit(None).await.unwrap();
         let db = reopen_db(context.with_label("reopen5")).await;
@@ -425,14 +423,13 @@ pub(crate) mod test {
     }
 
     /// Test recovery on empty db.
-    pub(crate) async fn test_any_db_empty_recovery<D, V: Clone>(
+    pub(crate) async fn test_any_db_empty_recovery<D, V: Clone + CodecShared>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
     {
         let root = db.root();
 
@@ -444,7 +441,7 @@ pub(crate) mod test {
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.size(), 1);
@@ -454,7 +451,7 @@ pub(crate) mod test {
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         drop(db);
         let db = reopen_db(context.with_label("reopen3")).await;
@@ -466,7 +463,7 @@ pub(crate) mod test {
             for i in 0u64..1000 {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = make_value((i + 1) * 10000);
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
         }
         drop(db);
@@ -478,7 +475,7 @@ pub(crate) mod test {
         for i in 0u64..1000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value((i + 1) * 10000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -491,14 +488,16 @@ pub(crate) mod test {
     }
 
     /// Test that replaying multiple updates of the same key on startup preserves correct state.
-    pub(crate) async fn test_any_db_log_replay<D, V: Clone + PartialEq + std::fmt::Debug>(
+    pub(crate) async fn test_any_db_log_replay<
+        D,
+        V: Clone + CodecShared + PartialEq + std::fmt::Debug,
+    >(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
     {
         let mut db = db.into_mutable();
 
@@ -509,7 +508,7 @@ pub(crate) mod test {
         for i in 0u64..UPDATES {
             let v = make_value(i * 1000);
             last_value = Some(v.clone());
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -525,13 +524,12 @@ pub(crate) mod test {
     }
 
     /// Test that historical_proof returns correct proofs for past database states.
-    pub(crate) async fn test_any_db_historical_proof_basic<D, V: Clone>(
+    pub(crate) async fn test_any_db_historical_proof_basic<D, V: Clone + CodecShared>(
         _context: Context,
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -544,7 +542,7 @@ pub(crate) mod test {
         for i in 0u64..OPS {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -577,7 +575,7 @@ pub(crate) mod test {
         for i in OPS..(OPS + 5) {
             let k = Sha256::hash(&(i + 1000).to_be_bytes()); // different keys
             let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -602,13 +600,12 @@ pub(crate) mod test {
     }
 
     /// Test that tampering with historical proofs causes verification to fail.
-    pub(crate) async fn test_any_db_historical_proof_invalid<D, V: Clone>(
+    pub(crate) async fn test_any_db_historical_proof_invalid<D, V: Clone + CodecShared>(
         _context: Context,
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -620,7 +617,7 @@ pub(crate) mod test {
         for i in 0u64..10 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -736,13 +733,12 @@ pub(crate) mod test {
     }
 
     /// Test historical_proof edge cases: singleton db, limited ops, min position.
-    pub(crate) async fn test_any_db_historical_proof_edge_cases<D, V: Clone>(
+    pub(crate) async fn test_any_db_historical_proof_edge_cases<D, V: Clone + CodecShared>(
         _context: Context,
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
@@ -753,7 +749,7 @@ pub(crate) mod test {
         for i in 0u64..50 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = make_value(i * 1000);
-            db.update(k, v).await.unwrap();
+            db.write_batch([(k, Some(v))]).await.unwrap();
         }
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
@@ -804,9 +800,7 @@ pub(crate) mod test {
         make_value: impl Fn(u64) -> V,
     ) where
         D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
-        D::Mutable: Updatable<Key = Digest, Value = V, Error = crate::qmdb::Error>
-            + Deletable<Key = Digest, Error = crate::qmdb::Error>,
-        V: Clone + Eq + std::fmt::Debug,
+        V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let mut map = HashMap::<Digest, V>::default();
         const ELEMENTS: u64 = 10;
@@ -817,7 +811,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = key_at(j, i);
                 let v = make_value(i * 1000);
-                db.update(k, v.clone()).await.unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
                 map.insert(k, v);
             }
             let (clean_db, _) = db.commit(Some(metadata_value.clone())).await.unwrap();
@@ -826,7 +820,7 @@ pub(crate) mod test {
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
-        db.delete(k).await.unwrap();
+        db.write_batch([(k, None)]).await.unwrap();
         let (db, _) = db.commit(None).await.unwrap();
         let db = db.into_merkleized().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);

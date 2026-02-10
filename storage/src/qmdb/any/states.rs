@@ -2,7 +2,7 @@
 //! benchmark code across the variants.
 
 use crate::{
-    kv::{Batchable, Deletable, Gettable},
+    kv::{Batchable, Gettable},
     mmr::Location,
     qmdb::{
         store::{LogStore, MerkleizedStore, PrunableStore},
@@ -88,11 +88,11 @@ pub trait MerkleizedNonDurableAny:
 
 /// Trait for the (Unmerkleized,NonDurable) state.
 ///
-/// This is the only state that allows mutations (create/update/delete). Use `commit` to transition
+/// This is the only state that allows mutations via write_batch. Use `commit` to transition
 /// to the Unmerkleized, Durable state, or `into_merkleized` to transition to the Merkleized,
 /// NonDurable state.
 pub trait MutableAny:
-    LogStore + Deletable<Key: Array, Value = <Self as LogStore>::Value, Error = Error> + Batchable
+    LogStore + Batchable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The digest type used by Merkleized states in this database's state machine.
     type Digest: Digest;

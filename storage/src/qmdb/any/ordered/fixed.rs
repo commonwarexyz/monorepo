@@ -150,7 +150,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         kv::{
-            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            tests::{assert_batchable, assert_gettable, assert_send},
             Batchable as _, Deletable as _, Updatable as _,
         },
         mmr::{Location, StandardHasher as Standard},
@@ -246,10 +246,12 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.update(data.key, data.value).await.unwrap();
+                    db.write_batch([(data.key, Some(data.value))])
+                        .await
+                        .unwrap();
                 }
                 Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 Operation::CommitFloor(_, _) => {
                     // CommitFloor consumes self - not supported in this helper.
@@ -288,8 +290,8 @@ pub(crate) mod test {
             let late_key = FixedBytes::<2>::new([3u8, 0u8]);
             let middle_key = FixedBytes::<2>::new([1u8, 2u8]);
 
-            db.update(key1.clone(), 1).await.unwrap();
-            db.update(key2.clone(), 2).await.unwrap();
+            db.write_batch([(key1.clone(), Some(1))]).await.unwrap();
+            db.write_batch([(key2.clone(), Some(2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
@@ -300,14 +302,14 @@ pub(crate) mod test {
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
             let mut db = db.into_mutable();
-            db.delete(key1.clone()).await.unwrap();
+            db.write_batch([(key1.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key2.clone());
 
-            db.delete(key2.clone()).await.unwrap();
+            db.write_batch([(key2.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
 
@@ -316,8 +318,8 @@ pub(crate) mod test {
 
             // Update the keys in opposite order from earlier.
             let mut db = db.into_mutable();
-            db.update(key2.clone(), 2).await.unwrap();
-            db.update(key1.clone(), 1).await.unwrap();
+            db.write_batch([(key2.clone(), Some(2))]).await.unwrap();
+            db.write_batch([(key1.clone(), Some(1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
@@ -329,14 +331,14 @@ pub(crate) mod test {
 
             // Delete the keys in opposite order from earlier.
             let mut db = db.into_mutable();
-            db.delete(key2.clone()).await.unwrap();
+            db.write_batch([(key2.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
-            db.delete(key1.clone()).await.unwrap();
+            db.write_batch([(key1.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
             let (db, _) = db.commit(None).await.unwrap();
@@ -361,7 +363,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -372,7 +374,7 @@ pub(crate) mod test {
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -382,7 +384,7 @@ pub(crate) mod test {
                     continue;
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
-                db.delete(k).await.unwrap();
+                db.write_batch([(k, None)]).await.unwrap();
                 map.remove(&k);
             }
 
@@ -461,7 +463,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
             let mut db = db.into_merkleized();
@@ -480,7 +482,7 @@ pub(crate) mod test {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                    db.update(k, v).await.unwrap();
+                    db.write_batch([(k, Some(v))]).await.unwrap();
                 }
             }
 
@@ -542,7 +544,7 @@ pub(crate) mod test {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                    db.update(k, v).await.unwrap();
+                    db.write_batch([(k, Some(v))]).await.unwrap();
                 }
             }
 
@@ -597,7 +599,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized();
@@ -629,7 +631,7 @@ pub(crate) mod test {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
                     let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                    db.update(k, v).await.unwrap();
+                    db.write_batch([(k, Some(v))]).await.unwrap();
                     map.insert(k, v);
                 }
                 let (new_db, _) = db.commit(Some(metadata)).await.unwrap();
@@ -640,7 +642,7 @@ pub(crate) mod test {
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
-            db.delete(k).await.unwrap();
+            db.write_batch([(k, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
@@ -860,7 +862,7 @@ pub(crate) mod test {
                 for i in 0..1000 {
                     let key = Digest::random(&mut *rng);
                     keys.insert(key, i);
-                    db.update(key, i).await.unwrap();
+                    db.write_batch([(key, Some(i))]).await.unwrap();
                 }
 
                 let (db, _) = db.commit(None).await.unwrap();
@@ -882,7 +884,7 @@ pub(crate) mod test {
                 for _ in 0..500 {
                     let key = keys.keys().choose(rng).cloned().unwrap();
                     keys.remove(&key);
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
 
                 let mut iter = keys.iter();
@@ -900,7 +902,7 @@ pub(crate) mod test {
                 for _ in 0..500 {
                     let key = keys.keys().choose(rng).cloned().unwrap();
                     keys.remove(&key);
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 assert_eq!(keys.len(), 0);
                 assert!(db.is_empty());
@@ -1014,7 +1016,9 @@ pub(crate) mod test {
 
             let mid_key = FixedBytes::from([0xAAu8; 4]);
             let val = Sha256::fill(1u8);
-            db.create(mid_key.clone(), val).await.unwrap();
+            db.write_batch([(mid_key.clone(), Some(val))])
+                .await
+                .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
 
             // Batch-insert a preceeding non-translated-colliding key.
@@ -1052,9 +1056,9 @@ pub(crate) mod test {
             let val = Sha256::fill(1u8);
 
             // Create three keys in order: A -> B -> C -> A (circular)
-            db.create(key_a.clone(), val).await.unwrap();
-            db.create(key_b.clone(), val).await.unwrap();
-            db.create(key_c.clone(), val).await.unwrap();
+            db.write_batch([(key_a.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key_b.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key_c.clone(), Some(val))]).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             // Verify initial spans
@@ -1096,7 +1100,7 @@ pub(crate) mod test {
             let val = Sha256::fill(1u8);
 
             // Test the single-bucket case.
-            db.create(key1.clone(), val).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val))]).await.unwrap();
             let db = db.commit(None).await.unwrap().0;
 
             // Start key is in the DB.
@@ -1142,9 +1146,9 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
 
             let mut db = db.into_mutable();
-            db.create(key2_1.clone(), val).await.unwrap();
-            db.create(key2_2.clone(), val).await.unwrap();
-            db.create(key3.clone(), val).await.unwrap();
+            db.write_batch([(key2_1.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key2_2.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key3.clone(), Some(val))]).await.unwrap();
             let db = db.commit(None).await.unwrap().0;
 
             // Start key is in the DB.
@@ -1257,9 +1261,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableAnyTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
+        assert_send(db.write_batch([(key, None)]));
         assert_batchable(db, key, value);
         assert_send(db.get_all(&key));
         assert_send(db.get_with_loc(&key));

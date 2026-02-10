@@ -122,13 +122,13 @@ fn fuzz(input: FuzzInput) {
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.update(Digest(*key), value_bytes.clone())
+                    db.write_batch([(Digest(*key), Some(value_bytes.clone()))])
                         .await
                         .expect("Update should not fail");
                 }
 
                 Operation::Delete { key } => {
-                    db.delete(Digest(*key))
+                    db.write_batch([(Digest(*key), None)])
                         .await
                         .expect("Delete should not fail");
                 }

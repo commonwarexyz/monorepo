@@ -124,41 +124,24 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V::Value) -> Result<(), Error> {
-        if let Some(old_loc) = self.any.update_key(key, value).await? {
-            self.status.set_bit(*old_loc, false);
-        }
-        self.status.push(true);
-
-        Ok(())
-    }
-
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
-        if !self.any.create(key, value).await? {
-            return Ok(false);
-        }
-        self.status.push(true);
-
-        Ok(true)
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        let Some(loc) = self.any.delete_key(key).await? else {
-            return Ok(false);
-        };
-
-        self.status.push(false);
-        self.status.set_bit(*loc, false);
-
-        Ok(true)
+    /// Writes a batch of key-value pairs to the database.
+    ///
+    /// For each item in the iterator:
+    /// - `(key, Some(value))` updates or creates the key with the given value
+    /// - `(key, None)` deletes the key
+    pub async fn write_batch(
+        &mut self,
+        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+    ) -> Result<(), Error> {
+        let status = &mut self.status;
+        self.any
+            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
+                status.push(append);
+                if let Some(loc) = loc {
+                    status.set_bit(*loc, false);
+                }
+            })
+            .await
     }
 }
 
@@ -187,44 +170,6 @@ where
     }
 }
 
-// StoreMut for (Unmerkleized, NonDurable) (aka mutable) state
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: UnorderedIndex<Value = Location> + 'static,
-        H: Hasher,
-        const N: usize,
-    > kv::Updatable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.update(key, value).await
-    }
-}
-
-// StoreDeletable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: UnorderedIndex<Value = Location> + 'static,
-        H: Hasher,
-        const N: usize,
-    > kv::Deletable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
-    }
-}
-
 // Batchable for (Unmerkleized, NonDurable) (aka mutable) state
 impl<E, C, K, V, I, H, const N: usize> Batchable
     for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
@@ -240,16 +185,9 @@ where
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter::IntoIter: Send,
     {
-        let status = &mut self.status;
-        self.any
-            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            })
-            .await
+        self.write_batch(iter).await
     }
 }

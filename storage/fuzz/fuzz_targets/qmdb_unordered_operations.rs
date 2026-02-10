@@ -4,6 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
+    kv::{Batchable, Deletable as _, Updatable as _},
     mmr::{Location, StandardHasher as Standard},
     qmdb::{
         any::{unordered::fixed::Db, FixedConfig as Config},
@@ -80,7 +81,9 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    db.update(k, v).await.expect("update should not fail");
+                    let mut batch = db.start_batch();
+                    batch.update(k, v).await.expect("update should not fail");
+                    db.write_batch(batch.into_iter()).await.expect("write_batch should not fail");
                     expected_state.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -88,12 +91,14 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    if db.delete(k).await.expect("delete should not fail") {
+                    let mut batch = db.start_batch();
+                    if batch.delete(k).await.expect("delete should not fail") {
                         // Delete succeeded - mark as deleted, not remove
                         assert!(all_keys.contains(key), "there was no key");
                         expected_state.insert(*key, None);
                         uncommitted_ops += 1;
                     }
+                    db.write_batch(batch.into_iter()).await.expect("write_batch should not fail");
                 }
 
                 QmdbOperation::OpCount => {

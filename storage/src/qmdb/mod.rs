@@ -55,10 +55,8 @@ use crate::{
     journal::contiguous::{Contiguous, MutableContiguous},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
-    UnmerkleizedBitMap,
 };
-use commonware_cryptography::{Digest, DigestOf};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_cryptography::DigestOf;
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
@@ -238,35 +236,6 @@ where
     Ok(None)
 }
 
-/// Create a `key` with location `new_loc` in the snapshot only if it doesn't already exist, and
-/// return false otherwise.
-async fn create_key<I, C>(
-    snapshot: &mut I,
-    log: &C,
-    key: &<C::Item as Operation>::Key,
-    new_loc: Location,
-) -> Result<bool, Error>
-where
-    I: Index<Value = Location>,
-    C: Contiguous<Item: Operation>,
-{
-    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
-    // cursor to look for the key.
-    let Some(mut cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
-        return Ok(true);
-    };
-
-    // Confirm the key doesn't already exist.
-    if find_update_op(log, &mut cursor, key).await?.is_some() {
-        return Ok(false);
-    }
-
-    // The key doesn't exist, so add it to the cursor.
-    cursor.insert(new_loc);
-
-    Ok(true)
-}
-
 /// Find and return the location of the update operation for `key`, if it exists. The cursor is
 /// positioned at the matching location, and can be used to update or delete the key.
 ///
@@ -374,8 +343,6 @@ where
     ///
     /// Expects there is at least one active operation above the inactivity floor, and panics
     /// otherwise.
-    // TODO(https://github.com/commonwarexyz/monorepo/issues/1829): callers of this method should
-    // migrate to using [Self::raise_floor_with_bitmap] instead.
     async fn raise_floor(&mut self, mut inactivity_floor_loc: Location) -> Result<Location, Error>
     where
         I: Index<Value = Location>,
@@ -393,41 +360,5 @@ where
                 return Ok(inactivity_floor_loc);
             }
         }
-    }
-
-    /// Same as `raise_floor` but uses the status bitmap to more efficiently find the first active
-    /// operation above the inactivity floor. The status bitmap is updated to reflect any moved
-    /// operations.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there is not at least one active operation above the inactivity floor.
-    pub(crate) async fn raise_floor_with_bitmap<
-        E: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
-        &mut self,
-        status: &mut UnmerkleizedBitMap<E, D, N>,
-        mut inactivity_floor_loc: Location,
-    ) -> Result<Location, Error>
-    where
-        I: Index<Value = Location>,
-    {
-        // Use the status bitmap to find the first active operation above the inactivity floor.
-        while !status.get_bit(*inactivity_floor_loc) {
-            inactivity_floor_loc += 1;
-        }
-
-        // Move the active operation to tip.
-        let op = self.log.read(*inactivity_floor_loc).await?;
-        assert!(
-            self.move_op_if_active(op, inactivity_floor_loc).await?,
-            "op should be active based on status bitmap"
-        );
-        status.set_bit(*inactivity_floor_loc, false);
-        status.push(true);
-
-        Ok(inactivity_floor_loc + 1)
     }
 }
