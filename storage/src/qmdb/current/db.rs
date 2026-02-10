@@ -471,7 +471,7 @@ where
         let dirty_chunks = &mut self.state.dirty_chunks;
         let inactivity_floor_loc = self
             .any
-            .raise_floor_with_callback(&mut self.status, &mut |old_loc, new_loc| {
+            .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, new_loc| {
                 dirty_chunks.insert(BitMap::<N>::unpruned_chunk(*old_loc));
                 dirty_chunks.insert(BitMap::<N>::unpruned_chunk(*new_loc));
             })
