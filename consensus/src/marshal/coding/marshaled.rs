@@ -913,7 +913,11 @@ where
 
                 // Inform the shard engine of an externally proposed commitment.
                 shards
-                    .external_proposed(payload, embedded_context.leader.clone(), round)
+                    .external_proposed(
+                        payload,
+                        embedded_context.leader.clone(),
+                        embedded_context.round,
+                    )
                     .await;
 
                 // Use the block's embedded context for verification, passing the
