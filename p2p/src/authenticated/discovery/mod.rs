@@ -242,8 +242,8 @@ mod tests {
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        count_running_tasks, deterministic, tokio, BufferPooler, Clock, Handle, IoBuf, Metrics,
-        Network as RNetwork, Quota, Resolver, Runner, SinkOf, Spawner, TcpOptions,
+        count_running_tasks, deterministic, tokio, BufferPooler, Clock, Disconnect, Handle, IoBuf,
+        Metrics, Network as RNetwork, Quota, Resolver, Runner, SinkOf, Spawner,
     };
     use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32};
     use rand_core::{CryptoRngCore, RngCore};
@@ -286,7 +286,7 @@ mod tests {
     async fn run_network<E>(context: E, max_message_size: u32, base_port: u16, n: usize, mode: Mode)
     where
         E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
-        SinkOf<E>: TcpOptions,
+        SinkOf<E>: Disconnect,
     {
         // Create peers
         let mut peers = Vec::new();

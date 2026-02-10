@@ -578,26 +578,26 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
-    /// TCP-specific socket options.
+    /// Connection disconnect control.
     ///
-    /// This trait is implemented by TCP-based sinks and provides access to
-    /// TCP socket options. Non-TCP transports (e.g., QUIC) do not implement
-    /// this trait.
-    pub trait TcpOptions {
-        /// Set the TCP linger option on the underlying socket.
+    /// Provides explicit control over how a connection is closed: gracefully
+    /// (sending FIN) or forcefully (sending RST). Implemented by transport
+    /// sinks that support these operations.
+    pub trait Disconnect {
+        /// Gracefully close the write side of the connection.
         ///
-        /// When `duration` is `Some(Duration::ZERO)`, closing the socket will send
-        /// an RST (reset) instead of a graceful FIN/ACK shutdown. This is useful
-        /// when rejecting connections (e.g., invalid IP, failed handshake, blocked peer)
-        /// to avoid accumulating sockets in TIME_WAIT state.
-        fn set_linger(&self, duration: Option<Duration>);
+        /// For TCP, this sends a FIN to the peer, signaling that no more
+        /// data will be sent. Any subsequent send attempts will fail.
+        fn close(&self);
 
-        /// Set the TCP_NODELAY option (disable Nagle's algorithm).
+        /// Force an immediate connection reset on drop.
         ///
-        /// When enabled, segments are sent as soon as possible, even if there is
-        /// only a small amount of data. This reduces latency at the cost of
-        /// potentially more packets being sent.
-        fn set_nodelay(&self, nodelay: bool) -> Result<(), Error>;
+        /// For TCP, this sets SO_LINGER=0 so that when the connection is
+        /// dropped, an RST is sent instead of a graceful FIN/ACK shutdown.
+        /// This is useful when rejecting connections (e.g., invalid IP, failed
+        /// handshake, blocked peer) to avoid accumulating sockets in TIME_WAIT
+        /// state.
+        fn force_close(&self);
     }
 
     /// Interface that any runtime must implement to receive

@@ -3,14 +3,11 @@
 //! This module provides a `Connection` wrapper that handles connection lifecycle,
 //! including support for abrupt close (RST instead of FIN) when blocking peers.
 
-use commonware_runtime::{Sink, Stream, TcpOptions};
+use commonware_runtime::{Disconnect, Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 /// Type alias for the abrupt close callback.
@@ -83,18 +80,18 @@ impl<S: Sink, R: Stream> Connection<S, R> {
     }
 }
 
-impl<S: Sink + TcpOptions, R: Stream> Connection<S, R> {
-    /// Create a new TCP connection with abrupt close support.
+impl<S: Sink + Disconnect, R: Stream> Connection<S, R> {
+    /// Create a new connection with forced disconnect support.
     ///
     /// When `mark_abrupt()` is called on the sender and it is dropped,
-    /// SO_LINGER=0 will be set to send RST instead of FIN.
-    pub fn new_tcp(sender: Sender<S>, receiver: Receiver<R>) -> Self {
+    /// the connection will be forcefully reset (RST instead of FIN for TCP).
+    pub fn new_abrupt(sender: Sender<S>, receiver: Receiver<R>) -> Self {
         Self {
             sender: ManagedSender {
                 sender,
                 abrupt: Arc::new(AtomicBool::new(false)),
                 on_abrupt: Some(Arc::new(|sender| {
-                    sender.sink().set_linger(Some(Duration::ZERO));
+                    sender.sink().force_close();
                 })),
             },
             receiver,

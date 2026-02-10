@@ -21,16 +21,15 @@ impl crate::Sink for Sink {
     }
 }
 
-// Implement TcpOptions as no-ops for deterministic network.
-// This allows testing TCP-based code without special handling.
-impl crate::TcpOptions for Sink {
-    fn set_linger(&self, _duration: Option<std::time::Duration>) {
+// Implement Disconnect as no-op for deterministic network.
+// This allows testing code that uses disconnect without special handling.
+impl crate::Disconnect for Sink {
+    fn close(&self) {
         // No-op for simulated network
     }
 
-    fn set_nodelay(&self, _nodelay: bool) -> Result<(), Error> {
+    fn force_close(&self) {
         // No-op for simulated network
-        Ok(())
     }
 }
 

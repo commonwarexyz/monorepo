@@ -17,8 +17,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Spawner, StreamOf, TcpOptions,
+    spawn_cell, BufferPooler, Clock, ContextCell, Disconnect, Handle, Metrics, Network, Resolver,
+    SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
@@ -73,7 +73,7 @@ impl<
         C: Signer,
     > Actor<E, C>
 where
-    SinkOf<E>: TcpOptions,
+    SinkOf<E>: Disconnect,
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let attempts = Family::<metrics::Peer, Counter>::default();
@@ -151,7 +151,7 @@ where
                 // Start peer to handle messages
                 let (send, recv) = connection;
                 supervisor
-                    .spawn(Connection::new_tcp(send, recv), reservation)
+                    .spawn(Connection::new_abrupt(send, recv), reservation)
                     .await;
             }
         });

@@ -1,6 +1,6 @@
 use crate::{IoBufs, SinkOf, StreamOf};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Debug)]
 /// Tracks network metrics.
@@ -63,13 +63,13 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
     }
 }
 
-impl<S: crate::Sink + crate::TcpOptions> crate::TcpOptions for Sink<S> {
-    fn set_linger(&self, duration: Option<Duration>) {
-        self.inner.set_linger(duration);
+impl<S: crate::Sink + crate::Disconnect> crate::Disconnect for Sink<S> {
+    fn close(&self) {
+        self.inner.close();
     }
 
-    fn set_nodelay(&self, nodelay: bool) -> Result<(), crate::Error> {
-        self.inner.set_nodelay(nodelay)
+    fn force_close(&self) {
+        self.inner.force_close();
     }
 }
 

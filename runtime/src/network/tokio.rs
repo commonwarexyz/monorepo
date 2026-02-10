@@ -28,19 +28,20 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::TcpOptions for Sink {
-    fn set_linger(&self, duration: Option<Duration>) {
-        // Use socket2's SockRef to set linger on the underlying socket
-        // OwnedWriteHalf::as_ref() returns &TcpStream which implements AsRawFd
+impl crate::Disconnect for Sink {
+    fn close(&self) {
         let socket = SockRef::from(self.sink.as_ref());
-        if let Err(err) = socket.set_linger(duration) {
-            warn!(?err, "failed to set SO_LINGER");
+        if let Err(err) = socket.shutdown(std::net::Shutdown::Write) {
+            warn!(?err, "failed to shutdown write half");
         }
     }
 
-    fn set_nodelay(&self, nodelay: bool) -> Result<(), Error> {
+    fn force_close(&self) {
+        // Set SO_LINGER=0 so that drop sends RST instead of FIN.
         let socket = SockRef::from(self.sink.as_ref());
-        socket.set_nodelay(nodelay).map_err(|_| Error::WriteFailed)
+        if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
+            warn!(?err, "failed to set SO_LINGER");
+        }
     }
 }
 

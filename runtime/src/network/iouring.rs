@@ -322,20 +322,20 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::TcpOptions for Sink {
-    fn set_linger(&self, duration: Option<Duration>) {
-        // Use socket2's SockRef to set linger on the underlying socket
+impl crate::Disconnect for Sink {
+    fn close(&self) {
         let socket = SockRef::from(&*self.fd);
-        if let Err(err) = socket.set_linger(duration) {
-            warn!(?err, "failed to set SO_LINGER");
+        if let Err(err) = socket.shutdown(std::net::Shutdown::Write) {
+            warn!(?err, "failed to shutdown write half");
         }
     }
 
-    fn set_nodelay(&self, nodelay: bool) -> Result<(), crate::Error> {
+    fn force_close(&self) {
+        // Set SO_LINGER=0 so that drop sends RST instead of FIN.
         let socket = SockRef::from(&*self.fd);
-        socket
-            .set_nodelay(nodelay)
-            .map_err(|_| crate::Error::WriteFailed)
+        if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
+            warn!(?err, "failed to set SO_LINGER");
+        }
     }
 }
 
