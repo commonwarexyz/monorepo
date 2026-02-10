@@ -13,8 +13,8 @@ use crate::{
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Disconnect, Handle, Metrics, Network as RNetwork,
-    Quota, Resolver, SinkOf, Spawner,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota,
+    Resolver, Spawner,
 };
 use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::union;
@@ -47,8 +47,6 @@ impl<
         E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
         C: Signer,
     > Network<E, C>
-where
-    SinkOf<E>: Disconnect,
 {
     /// Create a new instance of an `authenticated` network.
     ///

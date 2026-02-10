@@ -50,7 +50,7 @@ mod tests {
 
         // Spawn server
         let server = runtime.spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (_, mut sink, mut stream, _) = listener.accept().await.expect("Failed to accept");
 
             let received = stream
                 .recv(CLIENT_SEND_DATA.len())
@@ -65,7 +65,7 @@ mod tests {
         // Spawn client, connect to server, send and receive data over connection
         let client = runtime.spawn(async move {
             // Connect to the server
-            let (mut sink, mut stream) = network
+            let (mut sink, mut stream, _) = network
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
@@ -102,7 +102,8 @@ mod tests {
         let server = runtime.spawn(async move {
             // Handle multiple clients
             for _ in 0..3 {
-                let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+                let (_, mut sink, mut stream, _) =
+                    listener.accept().await.expect("Failed to accept");
 
                 let received = stream
                     .recv(CLIENT_SEND_DATA.len())
@@ -120,7 +121,7 @@ mod tests {
         let client = runtime.spawn(async move {
             for _ in 0..3 {
                 // Connect to the server
-                let (mut sink, mut stream) = network
+                let (mut sink, mut stream, _) = network
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
@@ -159,7 +160,7 @@ mod tests {
 
         let runtime = tokio::runtime::Handle::current();
         let server = runtime.spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            let (_, mut sink, mut stream, _) = listener.accept().await.expect("Failed to accept");
 
             // Receive and echo large data in chunks
             for _ in 0..NUM_CHUNKS {
@@ -174,7 +175,7 @@ mod tests {
         // Client task
         let client = runtime.spawn(async move {
             // Connect to the server
-            let (mut sink, mut stream) = network
+            let (mut sink, mut stream, _) = network
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
@@ -233,13 +234,13 @@ mod tests {
 
         // Server sends data
         let server = runtime.spawn(async move {
-            let (_, mut sink, _) = listener.accept().await.expect("Failed to accept");
+            let (_, mut sink, _, _) = listener.accept().await.expect("Failed to accept");
             sink.send(IoBuf::from(DATA)).await.expect("Failed to send");
         });
 
         // Client receives and tests peek
         let client = runtime.spawn(async move {
-            let (_, mut stream) = network
+            let (_, mut stream, _) = network
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
@@ -303,7 +304,7 @@ mod tests {
         // Spawn a server task that echoes messages from many clients.
         let server = tokio::spawn(async move {
             for _ in 0..NUM_CLIENTS {
-                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let (_, mut sink, mut stream, _) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE).await.unwrap();
@@ -318,7 +319,7 @@ mod tests {
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
             clients.push(tokio::spawn(async move {
-                let (mut sink, mut stream) = network.dial(addr).await.unwrap();
+                let (mut sink, mut stream, _) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();

@@ -1149,7 +1149,7 @@ impl<P: PublicKey> Peer<P> {
                 let _ = ready_tx.send(());
 
                 // Continually accept new connections
-                while let Ok((_, _, mut stream)) = listener.accept().await {
+                while let Ok((_, _, mut stream, _)) = listener.accept().await {
                     // New connection accepted. Spawn a task for this connection
                     context.with_label("receiver").spawn({
                         let inbox_sender = inbox_sender.clone();
@@ -1240,7 +1240,7 @@ impl Link {
         let (inbox, mut outbox) = mpsc::unbounded_channel::<(Channel, IoBuf, SystemTime)>();
         context.with_label("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
-            let (mut sink, _) = context.dial(socket).await.unwrap();
+            let (mut sink, _, _) = context.dial(socket).await.unwrap();
             if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;

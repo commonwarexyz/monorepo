@@ -21,16 +21,12 @@ impl crate::Sink for Sink {
     }
 }
 
-// Implement Disconnect as no-op for deterministic network.
-// This allows testing code that uses disconnect without special handling.
-impl crate::Disconnect for Sink {
-    fn close(&self) {
-        // No-op for simulated network
-    }
+/// No-op [crate::Closer] for the deterministic network.
+pub struct Closer;
 
-    fn force_close(&self) {
-        // No-op for simulated network
-    }
+impl crate::Closer for Closer {
+    fn close(&self) {}
+    fn force_close(&self) {}
 }
 
 /// Implementation of [crate::Stream] for a deterministic [Network].
@@ -57,10 +53,13 @@ pub struct Listener {
 impl crate::Listener for Listener {
     type Sink = Sink;
     type Stream = Stream;
+    type Closer = Closer;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(
+        &mut self,
+    ) -> Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), Error> {
         let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, Sink { sender }, Stream { receiver }))
+        Ok((socket, Sink { sender }, Stream { receiver }, Closer))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
@@ -122,7 +121,7 @@ impl crate::Network for Network {
         })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream, Closer), Error> {
         // Assign dialer a port from the ephemeral range
         let dialer = {
             let mut ephemeral = self.ephemeral.lock().unwrap();
@@ -153,6 +152,7 @@ impl crate::Network for Network {
             Stream {
                 receiver: dialer_receiver,
             },
+            Closer,
         ))
     }
 }

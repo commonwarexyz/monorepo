@@ -1,6 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{BufMut, Closer as CloserTrait, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::channel::oneshot;
 use std::sync::{Arc, Mutex};
@@ -99,18 +99,6 @@ impl SinkTrait for Sink {
     }
 }
 
-// Implement Disconnect as no-op for mock channel.
-// This allows testing code that uses disconnect without special handling.
-impl crate::Disconnect for Sink {
-    fn close(&self) {
-        // No-op for mock channel
-    }
-
-    fn force_close(&self) {
-        // No-op for mock channel
-    }
-}
-
 impl Drop for Sink {
     fn drop(&mut self) {
         let mut channel = self.channel.lock().unwrap();
@@ -119,6 +107,14 @@ impl Drop for Sink {
         // If there is a waiter, resolve it by dropping the oneshot sender.
         channel.waiter.take();
     }
+}
+
+/// A no-op mock closer.
+pub struct Closer;
+
+impl CloserTrait for Closer {
+    fn close(&self) {}
+    fn force_close(&self) {}
 }
 
 /// A mock stream that implements the Stream trait.

@@ -1525,7 +1525,7 @@ impl crate::Network for Context {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
+    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>, crate::CloserOf<Self>), Error> {
         self.network.dial(socket).await
     }
 }

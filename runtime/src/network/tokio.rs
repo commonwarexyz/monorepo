@@ -28,18 +28,23 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::Disconnect for Sink {
+/// Implementation of [crate::Closer] for the [tokio] runtime.
+///
+/// Holds a duplicated socket handle so it can control connection lifecycle
+/// independently of the [Sink] and [Stream].
+pub struct Closer {
+    socket: socket2::Socket,
+}
+
+impl crate::Closer for Closer {
     fn close(&self) {
-        let socket = SockRef::from(self.sink.as_ref());
-        if let Err(err) = socket.shutdown(std::net::Shutdown::Write) {
+        if let Err(err) = self.socket.shutdown(std::net::Shutdown::Write) {
             warn!(?err, "failed to shutdown write half");
         }
     }
 
     fn force_close(&self) {
-        // Set SO_LINGER=0 so that drop sends RST instead of FIN.
-        let socket = SockRef::from(self.sink.as_ref());
-        if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
+        if let Err(err) = self.socket.set_linger(Some(Duration::ZERO)) {
             warn!(?err, "failed to set SO_LINGER");
         }
     }
@@ -91,8 +96,11 @@ pub struct Listener {
 impl crate::Listener for Listener {
     type Sink = Sink;
     type Stream = Stream;
+    type Closer = Closer;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(
+        &mut self,
+    ) -> Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
 
@@ -103,7 +111,12 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Return the sink and stream
+        // Duplicate the socket for the closer before splitting
+        let closer_socket = SockRef::from(&stream)
+            .try_clone()
+            .map_err(|_| Error::Closed)?;
+
+        // Return the sink, stream, and closer
         let (stream, sink) = stream.into_split();
         Ok((
             addr,
@@ -115,6 +128,9 @@ impl crate::Listener for Listener {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
+            },
+            Closer {
+                socket: closer_socket,
             },
         ))
     }
@@ -234,7 +250,14 @@ impl crate::Network for Network {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
+    ) -> Result<
+        (
+            crate::SinkOf<Self>,
+            crate::StreamOf<Self>,
+            crate::CloserOf<Self>,
+        ),
+        crate::Error,
+    > {
         // Create a new TCP stream
         let stream = TcpStream::connect(socket)
             .await
@@ -247,7 +270,12 @@ impl crate::Network for Network {
             }
         }
 
-        // Return the sink and stream
+        // Duplicate the socket for the closer before splitting
+        let closer_socket = SockRef::from(&stream)
+            .try_clone()
+            .map_err(|_| Error::ConnectionFailed)?;
+
+        // Return the sink, stream, and closer
         let (stream, sink) = stream.into_split();
         Ok((
             Sink {
@@ -258,6 +286,9 @@ impl crate::Network for Network {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
+            },
+            Closer {
+                socket: closer_socket,
             },
         ))
     }
@@ -321,7 +352,7 @@ mod tests {
 
         // Spawn a task to accept and read
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_addr, _sink, mut stream, _) = listener.accept().await.unwrap();
 
             // Read a small message (much smaller than the 64KB buffer)
             let start = Instant::now();
@@ -332,7 +363,7 @@ mod tests {
         });
 
         // Connect and send a small message
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network.dial(addr).await.unwrap();
         let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         sink.send(msg.clone()).await.unwrap();
 
@@ -363,7 +394,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_addr, _sink, mut stream, _) = listener.accept().await.unwrap();
 
             // Try to read 100 bytes, but only 5 will be sent
             let start = Instant::now();
@@ -374,7 +405,7 @@ mod tests {
         });
 
         // Connect and send only partial data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network.dial(addr).await.unwrap();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
 
         // Wait for the reader to complete
@@ -404,7 +435,7 @@ mod tests {
 
         // Spawn a task to accept and read
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_addr, _sink, mut stream, _) = listener.accept().await.unwrap();
 
             // In unbuffered mode, peek should always return empty
             assert!(stream.peek(100).is_empty());
@@ -422,7 +453,7 @@ mod tests {
         });
 
         // Connect and send two messages
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network.dial(addr).await.unwrap();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
         sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
@@ -448,7 +479,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (_addr, _sink, mut stream, _) = listener.accept().await.unwrap();
 
             // Initially peek should be empty (no data received yet)
             assert!(stream.peek(100).is_empty());
@@ -477,7 +508,7 @@ mod tests {
         });
 
         // Connect and send data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        let (mut sink, _stream, _) = network.dial(addr).await.unwrap();
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();

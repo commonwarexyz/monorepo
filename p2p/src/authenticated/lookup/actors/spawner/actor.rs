@@ -9,19 +9,27 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{
+    spawn_cell, Clock, Closer, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
+};
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey> {
+pub struct Actor<
+    E: Spawner + Clock + CryptoRngCore + Metrics,
+    Si: Sink,
+    St: Stream,
+    Cl: Closer,
+    C: PublicKey,
+> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
 
-    receiver: mpsc::Receiver<Message<Si, St, C>>,
+    receiver: mpsc::Receiver<Message<Si, St, Cl, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -30,10 +38,10 @@ pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Str
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey>
-    Actor<E, Si, St, C>
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, Cl: Closer, C: PublicKey>
+    Actor<E, Si, St, Cl, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, Cl, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();

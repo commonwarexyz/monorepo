@@ -510,6 +510,9 @@ stability_scope!(BETA {
     /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
     pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
+    /// Syntactic sugar for the type of [Closer] used by a given [Network] N.
+    pub type CloserOf<N> = <<N as Network>::Listener as Listener>::Closer;
+
     /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
     pub type ListenerOf<N> = <N as crate::Network>::Listener;
 
@@ -517,8 +520,8 @@ stability_scope!(BETA {
     /// network connections.
     pub trait Network: Clone + Send + Sync + 'static {
         /// The type of [Listener] that's returned when binding to a socket.
-        /// Accepting a connection returns a [Sink] and [Stream] which are defined
-        /// by the [Listener] and used to send and receive data over the connection.
+        /// Accepting a connection returns a [Sink], [Stream], and [Closer]
+        /// which are defined by the [Listener].
         type Listener: Listener;
 
         /// Bind to the given socket address.
@@ -531,7 +534,9 @@ stability_scope!(BETA {
         fn dial(
             &self,
             socket: SocketAddr,
-        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
+        ) -> impl Future<
+            Output = Result<(SinkOf<Self>, StreamOf<Self>, CloserOf<Self>), Error>,
+        > + Send;
     }
 
     /// Interface for DNS resolution.
@@ -554,11 +559,16 @@ stability_scope!(BETA {
         /// The type of [Stream] that's returned when accepting a connection.
         /// This is used to receive data from the remote connection.
         type Stream: Stream;
+        /// The type of [Closer] that's returned when accepting a connection.
+        /// This is used to control connection lifecycle (graceful or forced close).
+        type Closer: Closer;
 
         /// Accept an incoming connection.
         fn accept(
             &mut self,
-        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+        ) -> impl Future<
+            Output = Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), Error>,
+        > + Send;
 
         /// Returns the local address of the listener.
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
@@ -578,19 +588,19 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
-    /// Connection disconnect control.
+    /// Handle for controlling connection lifecycle.
     ///
     /// Provides explicit control over how a connection is closed: gracefully
-    /// (sending FIN) or forcefully (sending RST). Implemented by transport
-    /// sinks that support these operations.
-    pub trait Disconnect {
-        /// Gracefully close the write side of the connection.
+    /// (sending FIN) or forcefully (sending RST). Returned alongside [Sink]
+    /// and [Stream] when accepting or dialing a connection.
+    pub trait Closer: Sync + Send + 'static {
+        /// Gracefully close the connection.
         ///
         /// For TCP, this sends a FIN to the peer, signaling that no more
-        /// data will be sent. Any subsequent send attempts will fail.
+        /// data will be sent.
         fn close(&self);
 
-        /// Force an immediate connection reset on drop.
+        /// Force an immediate connection reset.
         ///
         /// For TCP, this sets SO_LINGER=0 so that when the connection is
         /// dropped, an RST is sent instead of a graceful FIN/ACK shutdown.
@@ -3413,7 +3423,7 @@ mod tests {
                 .spawn(move |context| async move {
                     let (mut sink, mut stream) = loop {
                         match context.dial(address).await {
-                            Ok((sink, stream)) => break (sink, stream),
+                            Ok((sink, stream, _)) => break (sink, stream),
                             Err(e) => {
                                 // The client may be polled before the server is ready, that's alright!
                                 error!(err =?e, "failed to connect");

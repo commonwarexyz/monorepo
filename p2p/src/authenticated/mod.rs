@@ -8,7 +8,7 @@
 //! and that they can be looked up by their identifiers.
 
 mod connection;
-pub(crate) use connection::{Connection, ManagedSender};
+pub(crate) use connection::Connection;
 mod data;
 pub mod discovery;
 pub mod lookup;

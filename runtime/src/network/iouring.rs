@@ -149,7 +149,14 @@ impl crate::Network for Network {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
+    ) -> Result<
+        (
+            crate::SinkOf<Self>,
+            crate::StreamOf<Self>,
+            crate::CloserOf<Self>,
+        ),
+        crate::Error,
+    > {
         let stream = TcpStream::connect(socket)
             .await
             .map_err(|_| crate::Error::ConnectionFailed)?
@@ -172,11 +179,12 @@ impl crate::Network for Network {
         Ok((
             Sink::new(fd.clone(), self.send_submitter.clone(), self.pool.clone()),
             Stream::new(
-                fd,
+                fd.clone(),
                 self.recv_submitter.clone(),
                 self.read_buffer_size,
                 self.pool.clone(),
             ),
+            Closer { fd },
         ))
     }
 }
@@ -200,8 +208,11 @@ pub struct Listener {
 impl crate::Listener for Listener {
     type Stream = Stream;
     type Sink = Sink;
+    type Closer = Closer;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
+    async fn accept(
+        &mut self,
+    ) -> Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), crate::Error> {
         let (stream, remote_addr) = self
             .inner
             .accept()
@@ -230,11 +241,12 @@ impl crate::Listener for Listener {
             remote_addr,
             Sink::new(fd.clone(), self.send_submitter.clone(), self.pool.clone()),
             Stream::new(
-                fd,
+                fd.clone(),
                 self.recv_submitter.clone(),
                 self.read_buffer_size,
                 self.pool.clone(),
             ),
+            Closer { fd },
         ))
     }
 
@@ -322,7 +334,15 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::Disconnect for Sink {
+/// Implementation of [crate::Closer] for an io-uring [Network].
+///
+/// Shares the socket file descriptor (via `Arc`) with the [Sink] and
+/// [Stream], providing independent control over connection lifecycle.
+pub struct Closer {
+    fd: Arc<OwnedFd>,
+}
+
+impl crate::Closer for Closer {
     fn close(&self) {
         let socket = SockRef::from(&*self.fd);
         if let Err(err) = socket.shutdown(std::net::Shutdown::Write) {
@@ -331,7 +351,6 @@ impl crate::Disconnect for Sink {
     }
 
     fn force_close(&self) {
-        // Set SO_LINGER=0 so that drop sends RST instead of FIN.
         let socket = SockRef::from(&*self.fd);
         if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
             warn!(?err, "failed to set SO_LINGER");

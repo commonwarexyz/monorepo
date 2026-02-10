@@ -300,15 +300,6 @@ pub struct Sender<O> {
     pool: BufferPool,
 }
 
-impl<O> Sender<O> {
-    /// Returns a reference to the underlying sink.
-    ///
-    /// This is useful for accessing transport-specific options (e.g., TCP socket options).
-    pub const fn sink(&self) -> &O {
-        &self.sink
-    }
-}
-
 impl<O: Sink> Sender<O> {
     /// Encrypts and sends a message to the peer.
     ///

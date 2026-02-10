@@ -8,8 +8,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Disconnect, Handle, KeyedRateLimiter, Listener,
-    Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Closer, CloserOf, Clock, ContextCell, Handle, KeyedRateLimiter,
+    Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -57,10 +57,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C>
-where
-    SinkOf<E>: Disconnect,
-{
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>, mailbox: mpsc::Receiver<HashSet<IpAddr>>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();
@@ -114,8 +111,11 @@ where
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
+        closer: CloserOf<E>,
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut supervisor: Mailbox<
+            spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>,
+        >,
     ) {
         // Perform handshake
         let source_ip = address.ip();
@@ -145,7 +145,7 @@ where
 
         // Start peer to handle messages
         supervisor
-            .spawn(Connection::new_abrupt(send, recv), reservation)
+            .spawn(Connection::new(send, recv, closer), reservation)
             .await;
     }
 
@@ -153,7 +153,7 @@ where
     pub fn start(
         mut self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
@@ -162,7 +162,7 @@ where
     async fn run(
         mut self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>>,
     ) {
         // Setup the rate limiters
         let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
@@ -196,8 +196,8 @@ where
             },
             listener = listener.accept() => {
                 // Accept a new connection
-                let (address, sink, stream) = match listener {
-                    Ok((address, sink, stream)) => (address, sink, stream),
+                let (address, sink, stream, closer) = match listener {
+                    Ok((address, sink, stream, closer)) => (address, sink, stream, closer),
                     Err(e) => {
                         debug!(error = ?e, "failed to accept connection");
                         continue;
@@ -210,7 +210,7 @@ where
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
-                    sink.force_close();
+                    closer.force_close();
                     continue;
                 }
 
@@ -218,7 +218,7 @@ where
                 if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unregistered address");
-                    sink.force_close();
+                    closer.force_close();
                     continue;
                 }
 
@@ -250,7 +250,7 @@ where
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
-                    sink.force_close();
+                    closer.force_close();
                     continue;
                 }
 
@@ -258,7 +258,7 @@ where
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
-                    sink.force_close();
+                    closer.force_close();
                     continue;
                 };
 
@@ -274,6 +274,7 @@ where
                             stream_cfg,
                             sink,
                             stream,
+                            closer,
                             tracker,
                             supervisor,
                         )
@@ -364,9 +365,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener
-            let (sink, mut stream) = loop {
+            let (sink, mut stream, _) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -380,7 +381,7 @@ mod tests {
 
             // Additional attempts should be rate limited immediately
             for _ in 0..3 {
-                let (sink, mut stream) = context.dial(address).await.expect("dial");
+                let (sink, mut stream, _) = context.dial(address).await.expect("dial");
 
                 // Wait for some message or drop
                 let _ = stream.recv(1).await;
@@ -523,9 +524,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener
-            let (sink, mut stream) = loop {
+            let (sink, mut stream, _) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -603,9 +604,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener
-            let (sink, mut stream) = loop {
+            let (sink, mut stream, _) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -691,9 +692,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener from a private IP
-            let (sink, mut stream) = loop {
+            let (sink, mut stream, _) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }

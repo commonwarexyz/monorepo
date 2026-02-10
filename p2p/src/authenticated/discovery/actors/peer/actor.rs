@@ -9,14 +9,15 @@ use crate::authenticated::{
     },
     mailbox::UnboundedMailbox,
     relay::Relay,
-    Connection, Mailbox, ManagedSender,
+    Connection, Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Closer, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,
@@ -89,42 +90,38 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send_payload<Si: Sink>(
-        sender: &mut ManagedSender<Si>,
+        sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
         let msg = payload.encode();
-        sender.inner().send(msg).await.map_err(Error::SendFailed)?;
+        sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
 
     /// Sends pre-encoded bytes directly to the stream.
     async fn send_encoded<Si: Sink>(
-        sender: &mut ManagedSender<Si>,
+        sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
         payload: IoBuf,
     ) -> Result<(), Error> {
-        sender
-            .inner()
-            .send(payload)
-            .await
-            .map_err(Error::SendFailed)?;
+        sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
 
-    pub async fn run<O: Sink, I: Stream>(
+    pub async fn run<O: Sink, I: Stream, Cl: Closer>(
         mut self,
         peer: C,
         greeting: types::Info<C>,
-        connection: Connection<O, I>,
+        connection: Connection<O, I, Cl>,
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
-        let (mut conn_sender, mut conn_receiver) = connection.into_parts();
+        let (mut conn_sender, mut conn_receiver, closer) = connection.into_parts();
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -179,8 +176,8 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                                     types::Payload::Peers(peers),
                                 ),
                                 Message::Kill => {
-                                    // Mark for abrupt close (RST instead of FIN)
-                                    conn_sender.mark_abrupt();
+                                    // Force close (RST instead of FIN)
+                                    closer.force_close();
                                     return Err(Error::PeerKilled(peer.to_string()));
                                 }
                             };
@@ -539,7 +536,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    Connection::new(remote_sender, remote_receiver),
+                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
@@ -642,7 +639,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    Connection::new(remote_sender, remote_receiver),
+                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
@@ -747,7 +744,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    Connection::new(remote_sender, remote_receiver),
+                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
@@ -889,7 +886,7 @@ mod tests {
                 .run(
                     local_pk_clone.clone(),
                     greeting,
-                    Connection::new(remote_sender, remote_receiver),
+                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
