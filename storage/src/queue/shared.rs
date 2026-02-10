@@ -35,7 +35,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for Writer<E, V> {
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
     /// Enqueue an item, returning its position. The lock is held for the
-    /// full append + flush, so no reader can see the item until it is durable.
+    /// full append + commit, so no reader can see the item until it is durable.
     ///
     /// # Errors
     ///
@@ -302,7 +302,7 @@ mod tests {
                 assert_eq!(pos, i as u64);
             }
 
-            // Reader can see them before flush
+            // Reader can see them before commit
             let (pos, item) = reader.recv().await.unwrap().unwrap();
             assert_eq!(pos, 0);
             assert_eq!(item, vec![0]);

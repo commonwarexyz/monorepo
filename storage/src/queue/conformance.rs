@@ -1,7 +1,9 @@
 //! Queue conformance tests
 
-use crate::queue::{Config, Queue};
-use crate::Persistable;
+use crate::{
+    queue::{Config, Queue},
+    Persistable,
+};
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
@@ -31,10 +33,9 @@ impl Conformance for QueueConformance {
     async fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
-            let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed))
-                    .await
-                    .unwrap();
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed))
+                .await
+                .unwrap();
 
             // Enqueue random variable-length items across multiple sections
             let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
@@ -55,15 +56,14 @@ impl Conformance for QueueConformance {
                 queue.ack(pos).unwrap();
             }
 
-            // Prune acked sections, flush, drop
+            // Sync (commit + prune), then drop
             queue.sync().await.unwrap();
             drop(queue);
 
             // Re-open and verify surviving items are readable
-            let mut queue =
-                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed))
-                    .await
-                    .unwrap();
+            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed))
+                .await
+                .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {
                 assert_eq!(item, data[pos as usize]);
                 queue.ack(pos).unwrap();

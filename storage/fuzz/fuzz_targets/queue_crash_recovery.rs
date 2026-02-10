@@ -10,8 +10,10 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
-use commonware_storage::queue::{Config, Queue};
-use commonware_storage::Persistable;
+use commonware_storage::{
+    queue::{Config, Queue},
+    Persistable,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -116,7 +118,7 @@ struct RecoveryState {
     current_ack_floor: u64,
 
     /// Items that were appended but not yet flushed (position -> value).
-    /// These may be lost on crash. On flush, they move to committed.
+    /// These may be lost on crash. On commit, they move to committed.
     unflushed: BTreeMap<u64, u8>,
 }
 
@@ -132,12 +134,12 @@ impl RecoveryState {
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
-        // Enqueue does append + flush, so success means it's durable at `pos`.
+        // Enqueue does append + commit, so success means it's durable at `pos`.
         self.committed.insert(pos, value);
     }
 
     fn enqueue_failed(&mut self, value: u8) {
-        // Enqueue may have partially succeeded (append but not flush).
+        // Enqueue may have partially succeeded (append but not commit).
         // Track as pending - it may or may not be persisted.
         self.pending.push(value);
     }
@@ -151,16 +153,16 @@ impl RecoveryState {
         self.pending.push(value);
     }
 
-    fn flush_succeeded(&mut self) {
-        // All unflushed items are now durable.
+    fn commit_succeeded(&mut self) {
+        // All uncommitted items are now durable.
         let unflushed = std::mem::take(&mut self.unflushed);
         for (pos, value) in unflushed {
             self.committed.insert(pos, value);
         }
     }
 
-    fn flush_failed(&mut self) {
-        // Unflushed items remain unflushed; they may or may not be durable.
+    fn commit_failed(&mut self) {
+        // Uncommitted items remain uncommitted; they may or may not be durable.
         // Move them to pending since we can't be sure.
         let unflushed = std::mem::take(&mut self.unflushed);
         for (_pos, value) in unflushed {
@@ -172,7 +174,7 @@ impl RecoveryState {
         self.current_ack_floor = ack_floor;
     }
 
-    fn commit_succeeded(&mut self, ack_floor: u64) {
+    fn sync_succeeded(&mut self, ack_floor: u64) {
         self.current_ack_floor = ack_floor;
         self.committed_ack_floor = ack_floor;
     }
@@ -215,9 +217,9 @@ async fn run_operations(
                 let item = make_item(*value);
                 match queue.enqueue(item).await {
                     Ok(pos) => {
-                        // enqueue = append + flush, so success means ALL
+                        // enqueue = append + commit, so success means ALL
                         // previously unflushed items are now durable too.
-                        state.flush_succeeded();
+                        state.commit_succeeded();
                         state.enqueue_succeeded(pos, *value);
                     }
                     Err(_) => {
@@ -240,10 +242,10 @@ async fn run_operations(
 
             QueueOperation::Commit => match queue.commit().await {
                 Ok(()) => {
-                    state.flush_succeeded();
+                    state.commit_succeeded();
                 }
                 Err(_) => {
-                    state.flush_failed();
+                    state.commit_failed();
                 }
             },
 
@@ -284,8 +286,8 @@ async fn run_operations(
                 if queue.sync().await.is_ok() {
                     // sync = commit + prune, so success means ALL
                     // previously uncommitted items are now durable too.
-                    state.flush_succeeded();
-                    state.commit_succeeded(queue.ack_floor());
+                    state.commit_succeeded();
+                    state.sync_succeeded(queue.ack_floor());
                 }
             }
 

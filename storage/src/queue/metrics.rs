@@ -22,11 +22,7 @@ impl Metrics {
         let metrics = Self::default();
         context.register("tip", "Highest enqueued position", metrics.tip.clone());
         context.register("floor", "Current ack floor position", metrics.floor.clone());
-        context.register(
-            "next",
-            "Current read position",
-            metrics.next.clone(),
-        );
+        context.register("next", "Current read position", metrics.next.clone());
         metrics
     }
 }

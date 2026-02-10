@@ -342,7 +342,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     pub(crate) const fn pending(&self) -> u64 {
         self.journal.size().saturating_sub(self.read_pos)
     }
-
 }
 
 impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
@@ -445,7 +444,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Append multiple items, then flush once
+            // Append multiple items, then commit once
             for i in 0..5u8 {
                 queue.append(vec![i]).await.unwrap();
             }
@@ -1150,42 +1149,69 @@ mod tests {
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_tip 0"), "expected tip 0: {encoded}");
-            assert!(encoded.contains("test_metrics_floor 0"), "expected floor 0: {encoded}");
-            assert!(encoded.contains("test_metrics_next 0"), "expected next 0: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_tip 0"),
+                "expected tip 0: {encoded}"
+            );
+            assert!(
+                encoded.contains("test_metrics_floor 0"),
+                "expected floor 0: {encoded}"
+            );
+            assert!(
+                encoded.contains("test_metrics_next 0"),
+                "expected next 0: {encoded}"
+            );
 
             // Enqueue items
             for i in 0..5u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_tip 5"), "expected tip 5: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_tip 5"),
+                "expected tip 5: {encoded}"
+            );
 
             // Dequeue advances next
             queue.dequeue().await.unwrap();
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_next 1"), "expected next 1: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_next 1"),
+                "expected next 1: {encoded}"
+            );
 
             // Ack advances floor
             queue.ack(0).unwrap();
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_floor 1"), "expected floor 1: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_floor 1"),
+                "expected floor 1: {encoded}"
+            );
 
             // Ack out of order, then fill gap
             queue.ack(2).unwrap();
             queue.ack(4).unwrap();
             queue.ack(1).unwrap();
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_floor 3"), "expected floor 3: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_floor 3"),
+                "expected floor 3: {encoded}"
+            );
 
             queue.ack(3).unwrap();
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_floor 5"), "expected floor 5: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_floor 5"),
+                "expected floor 5: {encoded}"
+            );
 
             // Reset brings next back to floor
             queue.reset();
             let encoded = context.encode();
-            assert!(encoded.contains("test_metrics_next 5"), "expected next 5: {encoded}");
+            assert!(
+                encoded.contains("test_metrics_next 5"),
+                "expected next 5: {encoded}"
+            );
         });
     }
 }
