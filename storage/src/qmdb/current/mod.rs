@@ -308,6 +308,7 @@ where
     }
 
     let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+    let pool = config.thread_pool.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
     let (bitmap_metadata, pruned_chunks, pinned_nodes) = db::init_bitmap_metadata::<E, H::Digest>(
@@ -338,9 +339,14 @@ where
 
     // Build the grafted digests cache from the bitmap chunks and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
-    let (grafted_digests, grafted_leaf_count) =
-        db::build_grafted_digests::<H, N>(&mut hasher, &status, &pinned_nodes, &any.log.mmr)
-            .await?;
+    let (grafted_digests, grafted_leaf_count) = db::build_grafted_digests::<H, N>(
+        &mut hasher,
+        &status,
+        &pinned_nodes,
+        &any.log.mmr,
+        pool.as_ref(),
+    )
+    .await?;
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr, grafting::height::<N>());
@@ -351,8 +357,8 @@ where
         status,
         grafted_digests,
         grafted_leaf_count,
-
         bitmap_metadata,
+        pool,
         state: db::Merkleized { root },
     })
 }
@@ -392,6 +398,7 @@ where
     }
 
     let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+    let pool = config.thread_pool.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
     let (bitmap_metadata, pruned_chunks, pinned_nodes) = db::init_bitmap_metadata::<E, H::Digest>(
@@ -422,9 +429,14 @@ where
 
     // Build the grafted digests cache from the bitmap and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
-    let (grafted_digests, grafted_leaf_count) =
-        db::build_grafted_digests::<H, N>(&mut hasher, &status, &pinned_nodes, &any.log.mmr)
-            .await?;
+    let (grafted_digests, grafted_leaf_count) = db::build_grafted_digests::<H, N>(
+        &mut hasher,
+        &status,
+        &pinned_nodes,
+        &any.log.mmr,
+        pool.as_ref(),
+    )
+    .await?;
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr, grafting::height::<N>());
@@ -436,6 +448,7 @@ where
         grafted_digests,
         grafted_leaf_count,
         bitmap_metadata,
+        pool,
         state: db::Merkleized { root },
     })
 }

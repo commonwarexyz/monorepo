@@ -46,9 +46,14 @@ use crate::mmr::{
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_parallel::ThreadPool;
 use commonware_utils::bitmap::BitMap;
 use core::cmp::Ordering;
+use rayon::prelude::*;
 use tracing::debug;
+
+/// Minimum number of items before switching from serial to parallel computation.
+pub(super) const MIN_TO_PARALLELIZE: usize = 20;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
 pub(crate) const fn height<const N: usize>() -> u32 {
@@ -93,6 +98,7 @@ pub(super) fn propagate_dirty<H: CHasher>(
     hasher: &mut StandardHasher<H>,
     dirty_positions: &[Position],
     ops_mmr_size: Position,
+    pool: Option<&ThreadPool>,
 ) {
     // Collect all ancestor positions that need recomputation, keyed by (height, position) so
     // BTreeSet sorts by height first (bottom-up processing order).
@@ -123,14 +129,98 @@ pub(super) fn propagate_dirty<H: CHasher>(
         }
     }
 
-    // Process bottom-up: BTreeSet iterates in ascending order of (height, position).
-    for &(height, pos) in &to_recompute {
-        let left = Position::new(*pos - (1u64 << height));
-        let right = Position::new(*pos - 1);
-        let left_digest = grafted_digests[&left];
-        let right_digest = grafted_digests[&right];
-        let digest = hasher.node_digest(pos, &left_digest, &right_digest);
-        grafted_digests.insert(pos, digest);
+    match pool {
+        Some(pool) => propagate_dirty_parallel(grafted_digests, hasher, &to_recompute, pool),
+        None => {
+            // Serial path: process bottom-up directly (BTreeSet iterates in ascending order).
+            for &(height, pos) in &to_recompute {
+                let left = Position::new(*pos - (1u64 << height));
+                let right = Position::new(*pos - 1);
+                let left_digest = grafted_digests[&left];
+                let right_digest = grafted_digests[&right];
+                let digest = hasher.node_digest(pos, &left_digest, &right_digest);
+                grafted_digests.insert(pos, digest);
+            }
+        }
+    }
+}
+
+/// Parallel path for [`propagate_dirty`]: groups nodes by height level and parallelizes
+/// within each level using rayon. Falls back to serial for levels with fewer than
+/// [`MIN_TO_PARALLELIZE`] nodes.
+fn propagate_dirty_parallel<H: CHasher>(
+    grafted_digests: &mut BTreeMap<Position, H::Digest>,
+    hasher: &mut StandardHasher<H>,
+    to_recompute: &BTreeSet<(u32, Position)>,
+    pool: &ThreadPool,
+) {
+    let mut level_positions: Vec<Position> = Vec::new();
+    let mut current_height: Option<u32> = None;
+
+    for &(height, pos) in to_recompute {
+        if current_height != Some(height) {
+            if !level_positions.is_empty() {
+                process_level(
+                    grafted_digests,
+                    hasher,
+                    pool,
+                    &level_positions,
+                    current_height.unwrap(),
+                );
+            }
+            level_positions.clear();
+            current_height = Some(height);
+        }
+        level_positions.push(pos);
+    }
+    if !level_positions.is_empty() {
+        process_level(
+            grafted_digests,
+            hasher,
+            pool,
+            &level_positions,
+            current_height.unwrap(),
+        );
+    }
+}
+
+/// Recompute node digests at a single height level, parallelizing if there are enough nodes.
+fn process_level<H: CHasher>(
+    grafted_digests: &mut BTreeMap<Position, H::Digest>,
+    hasher: &mut StandardHasher<H>,
+    pool: &ThreadPool,
+    positions: &[Position],
+    height: u32,
+) {
+    let shift = 1u64 << height;
+    if positions.len() >= MIN_TO_PARALLELIZE {
+        let computed: Vec<(Position, H::Digest)> = pool.install(|| {
+            positions
+                .par_iter()
+                .map_init(
+                    || hasher.fork(),
+                    |h, &pos| {
+                        let left = Position::new(*pos - shift);
+                        let right = Position::new(*pos - 1);
+                        let digest =
+                            h.node_digest(pos, &grafted_digests[&left], &grafted_digests[&right]);
+                        (pos, digest)
+                    },
+                )
+                .collect()
+        });
+        for (pos, digest) in computed {
+            grafted_digests.insert(pos, digest);
+        }
+    } else {
+        for &pos in positions {
+            let left = Position::new(*pos - shift);
+            let right = Position::new(*pos - 1);
+            let left_digest = grafted_digests[&left];
+            let right_digest = grafted_digests[&right];
+            let digest = hasher.node_digest(pos, &left_digest, &right_digest);
+            grafted_digests.insert(pos, digest);
+        }
     }
 }
 
@@ -316,7 +406,7 @@ mod tests {
             map.insert(ops_pos, digest);
             dirty_positions.push(ops_pos);
         }
-        propagate_dirty(&mut map, standard, &dirty_positions, ops_mmr.size());
+        propagate_dirty(&mut map, standard, &dirty_positions, ops_mmr.size(), None);
         map
     }
 
@@ -415,7 +505,7 @@ mod tests {
         map.insert(pos1, standard.inner().finalize());
 
         // Propagate should add the parent node (at height grafting_height + 1).
-        propagate_dirty(&mut map, &mut standard, &[pos0, pos1], ops_mmr.size());
+        propagate_dirty(&mut map, &mut standard, &[pos0, pos1], ops_mmr.size(), None);
 
         // With 4 ops leaves and grafting height 1, the grafted tree has 2 leaves and 1 root.
         // The root position in ops space is at height 2.
