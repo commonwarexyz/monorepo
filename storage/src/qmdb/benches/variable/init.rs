@@ -9,7 +9,7 @@ use crate::variable::{
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    BufferPooler, Runner as _, ThreadPooler as _,
+    Runner as _, ThreadPooler as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
