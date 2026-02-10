@@ -60,12 +60,13 @@
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
+//!     let pool = context.storage_buffer_pool().clone();
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), context.storage_buffer_pool().clone()),
+//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), pool),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
