@@ -49,9 +49,9 @@
 //!         compression: None,
 //!         codec_config: ((0..).into(), ()), // RangeCfg for Vec length, () for u8
 //!         page_cache: CacheRef::new(
+//!             context.storage_buffer_pool().clone(),
 //!             NonZeroU16::new(1024).unwrap(),
 //!             NonZeroUsize::new(10).unwrap(),
-//!             context.storage_buffer_pool().clone(),
 //!         ),
 //!         write_buffer: NonZeroUsize::new(4096).unwrap(),
 //!     }).await.unwrap();
