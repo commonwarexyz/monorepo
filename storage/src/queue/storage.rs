@@ -329,6 +329,15 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     pub(crate) const fn pending(&self) -> u64 {
         self.journal.size().saturating_sub(self.read_pos)
     }
+
+    /// Returns the count of acknowledged items above the ack floor (test-only).
+    #[cfg(test)]
+    pub(crate) fn acked_above_count(&self) -> usize {
+        self.acked_above
+            .iter()
+            .map(|(&s, &e)| (e - s + 1) as usize)
+            .sum()
+    }
 }
 
 impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
@@ -608,14 +617,17 @@ mod tests {
             // Ack some items out of order first
             queue.ack(7).unwrap();
             queue.ack(8).unwrap();
+            assert_eq!(queue.acked_above_count(), 2);
 
             // Batch ack up to 5
             queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 5);
+            assert_eq!(queue.acked_above_count(), 2);
 
             // Now batch ack up to 9 - should consume the acked_above entries
             queue.ack_up_to(9).unwrap();
             assert_eq!(queue.ack_floor(), 9);
+            assert_eq!(queue.acked_above_count(), 0);
         });
     }
 
@@ -1090,10 +1102,12 @@ mod tests {
 
             // Acked_above should have items 1-8
             assert_eq!(queue.ack_floor(), 0);
+            assert!(queue.acked_above_count() > 0);
 
             // Now ack 0 - floor should advance to 9, consuming all acked_above
             queue.ack(0).unwrap();
             assert_eq!(queue.ack_floor(), 9);
+            assert_eq!(queue.acked_above_count(), 0);
         });
     }
 
