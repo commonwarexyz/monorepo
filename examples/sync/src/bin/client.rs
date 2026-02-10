@@ -121,7 +121,7 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = any::create_config(context.storage_buffer_pool().clone());
+        let db_config = any::create_config(&context);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -181,7 +181,7 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = immutable::create_config(context.storage_buffer_pool().clone());
+        let db_config = immutable::create_config(&context);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {

@@ -107,7 +107,12 @@ type UVCurrentDb = UVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SI
 type OVCurrentDb = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 /// Configuration for any QMDB.
-fn any_cfg(pool: ThreadPool, storage_pool: commonware_runtime::BufferPool) -> AConfig<EightCap> {
+fn any_cfg(
+    pool: ThreadPool,
+    context: &Context,
+    page_cache_page_size: NonZeroU16,
+    page_cache_capacity: NonZeroUsize,
+) -> AConfig<EightCap> {
     AConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
         mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
@@ -118,14 +123,20 @@ fn any_cfg(pool: ThreadPool, storage_pool: commonware_runtime::BufferPool) -> AC
         log_write_buffer: WRITE_BUFFER_SIZE,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 
 /// Configuration for current QMDB.
 fn current_cfg(
     pool: ThreadPool,
-    storage_pool: commonware_runtime::BufferPool,
+    context: &Context,
+    page_cache_page_size: NonZeroU16,
+    page_cache_capacity: NonZeroUsize,
 ) -> CConfig<EightCap> {
     CConfig::<EightCap> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -138,13 +149,19 @@ fn current_cfg(
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 
 fn variable_any_cfg(
     pool: ThreadPool,
-    storage_pool: commonware_runtime::BufferPool,
+    context: &Context,
+    page_cache_page_size: NonZeroU16,
+    page_cache_capacity: NonZeroUsize,
 ) -> VariableAnyConfig<EightCap, ()> {
     VariableAnyConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -158,14 +175,20 @@ fn variable_any_cfg(
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 
 /// Configuration for variable current QMDB.
 fn variable_current_cfg(
     pool: ThreadPool,
-    storage_pool: commonware_runtime::BufferPool,
+    context: &Context,
+    page_cache_page_size: NonZeroU16,
+    page_cache_capacity: NonZeroUsize,
 ) -> VariableCurrentConfig<EightCap, ()> {
     VariableCurrentConfig::<EightCap, ()> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -180,42 +203,46 @@ fn variable_current_cfg(
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 
 /// Get an unordered fixed Any QMDB instance in clean state.
 async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool, ctx.storage_buffer_pool().clone());
+    let any_cfg = any_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     UFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an ordered fixed Any QMDB instance in clean state.
 async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool, ctx.storage_buffer_pool().clone());
+    let any_cfg = any_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     OFixedDb::init(ctx, any_cfg).await.unwrap()
 }
 
 /// Get an unordered variable Any QMDB instance in clean state.
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let variable_any_cfg = variable_any_cfg(pool, ctx.storage_buffer_pool().clone());
+    let variable_any_cfg = variable_any_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an ordered variable Any QMDB instance in clean state.
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let variable_any_cfg = variable_any_cfg(pool, ctx.storage_buffer_pool().clone());
+    let variable_any_cfg = variable_any_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
 }
 
 /// Get an unordered current QMDB instance.
 async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool, ctx.storage_buffer_pool().clone());
+    let current_cfg = current_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
@@ -224,7 +251,7 @@ async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
 /// Get an ordered current QMDB instance.
 async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool, ctx.storage_buffer_pool().clone());
+    let current_cfg = current_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
@@ -233,7 +260,7 @@ async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
 /// Get an unordered variable current QMDB instance.
 async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let variable_current_cfg = variable_current_cfg(pool, ctx.storage_buffer_pool().clone());
+    let variable_current_cfg = variable_current_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, variable_current_cfg)
         .await
         .unwrap()
@@ -242,7 +269,7 @@ async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
 /// Get an ordered variable current QMDB instance.
 async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let variable_current_cfg = variable_current_cfg(pool, ctx.storage_buffer_pool().clone());
+    let variable_current_cfg = variable_current_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, variable_current_cfg)
         .await
         .unwrap()

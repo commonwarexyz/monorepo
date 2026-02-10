@@ -91,9 +91,18 @@ fn bench_variable_init(c: &mut Criterion) {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-                            let storage_pool = ctx.storage_buffer_pool().clone();
-                            let any_cfg = any_cfg(pool.clone(), storage_pool.clone());
-                            let current_cfg = current_cfg(pool, storage_pool);
+                            let any_cfg = any_cfg(
+                                pool.clone(),
+                                &ctx,
+                                crate::variable::PAGE_SIZE,
+                                crate::variable::PAGE_CACHE_SIZE,
+                            );
+                            let current_cfg = current_cfg(
+                                pool,
+                                &ctx,
+                                crate::variable::PAGE_SIZE,
+                                crate::variable::PAGE_CACHE_SIZE,
+                            );
 
                             // Start the timer here to avoid including time to allocate page cache,
                             // thread pool, and other shared structures.

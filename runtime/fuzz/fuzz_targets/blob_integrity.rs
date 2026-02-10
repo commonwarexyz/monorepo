@@ -97,7 +97,8 @@ fn fuzz(input: FuzzInput) {
         let cache_ref = CacheRef::new(
             context.storage_buffer_pool().clone(),
             NZU16!(page_size as u16),
-            NZUsize!(cache_capacity));
+            NZUsize!(cache_capacity),
+        );
 
         // Compute logical size from number of pages.
         let logical_size = input.num_pages as u64 * page_size;

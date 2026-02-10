@@ -109,12 +109,30 @@ fn bench_fixed_init(c: &mut Criterion) {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let pool = ctx.create_thread_pool(THREADS).unwrap();
-                            let storage_pool = ctx.storage_buffer_pool().clone();
-                            let any_cfg = any_cfg(pool.clone(), storage_pool.clone());
-                            let current_cfg = current_cfg(pool.clone(), storage_pool.clone());
-                            let variable_any_cfg =
-                                variable_any_cfg(pool.clone(), storage_pool.clone());
-                            let variable_current_cfg = variable_current_cfg(pool, storage_pool);
+                            let any_cfg = any_cfg(
+                                pool.clone(),
+                                &ctx,
+                                crate::fixed::PAGE_SIZE,
+                                crate::fixed::PAGE_CACHE_SIZE,
+                            );
+                            let current_cfg = current_cfg(
+                                pool.clone(),
+                                &ctx,
+                                crate::fixed::PAGE_SIZE,
+                                crate::fixed::PAGE_CACHE_SIZE,
+                            );
+                            let variable_any_cfg = variable_any_cfg(
+                                pool.clone(),
+                                &ctx,
+                                crate::fixed::PAGE_SIZE,
+                                crate::fixed::PAGE_CACHE_SIZE,
+                            );
+                            let variable_current_cfg = variable_current_cfg(
+                                pool,
+                                &ctx,
+                                crate::fixed::PAGE_SIZE,
+                                crate::fixed::PAGE_CACHE_SIZE,
+                            );
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {

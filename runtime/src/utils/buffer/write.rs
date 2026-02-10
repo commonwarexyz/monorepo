@@ -74,8 +74,7 @@ impl<B: Blob> Write<B> {
 
 impl<B: Blob> Blob for Write<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
-            .await
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
     }
 
     async fn read_at_buf(
