@@ -6,7 +6,7 @@
 //! - [`Variant`]: Describes the types used by a marshal variant
 //! - [`BlockBuffer`]: Abstracts over block dissemination strategies
 
-use crate::Block;
+use crate::{types::Round, Block};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_utils::channel::oneshot;
@@ -124,7 +124,7 @@ pub trait BlockBuffer<V: Variant>: Clone + Send + Sync + 'static {
     /// Broadcast a proposed block to peers.
     ///
     /// This handles the initial dissemination of a newly proposed block.
-    fn proposed(&mut self, block: V::Block) -> impl Future<Output = ()> + Send;
+    fn proposed(&mut self, round: Round, block: V::Block) -> impl Future<Output = ()> + Send;
 }
 
 /// A trait for cached block types that can be converted to the underlying block.

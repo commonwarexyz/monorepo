@@ -1,7 +1,7 @@
 //! Metrics for the shard engine.
 
 use commonware_runtime::Metrics as MetricsTrait;
-use commonware_utils::{ordered::Set, Array};
+use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -39,7 +39,7 @@ pub struct ShardMetrics {
 
 impl ShardMetrics {
     /// Create and register metrics with the given context.
-    pub fn new<P: Array>(context: &impl MetricsTrait, participants: &Set<P>) -> Self {
+    pub fn new(context: &impl MetricsTrait) -> Self {
         let erasure_decode_duration =
             Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
         let reconstructed_blocks_cache_count = Gauge::default();
@@ -77,10 +77,6 @@ impl ShardMetrics {
             "Total number of block reconstruction failures",
             reconstruction_failures_total.clone(),
         );
-        // Pre-create counters for all participants so they appear in metrics even with zero count.
-        for participant in participants.iter() {
-            let _ = shards_received.get_or_create(&Peer::new(participant));
-        }
 
         Self {
             erasure_decode_duration,

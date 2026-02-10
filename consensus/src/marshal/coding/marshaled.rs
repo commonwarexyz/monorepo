@@ -780,7 +780,7 @@ where
 
         // Inform the shard engine of an externally proposed commitment.
         self.shards
-            .external_proposed(payload, context.leader.clone(), context.round.view())
+            .external_proposed(payload, context.leader.clone(), context.round)
             .await;
 
         // Kick off deferred verification early to hide verification latency behind
@@ -913,7 +913,7 @@ where
 
                 // Inform the shard engine of an externally proposed commitment.
                 shards
-                    .external_proposed(payload, embedded_context.leader.clone(), round.view())
+                    .external_proposed(payload, embedded_context.leader.clone(), round)
                     .await;
 
                 // Use the block's embedded context for verification, passing the
@@ -972,7 +972,7 @@ where
             "requested broadcast of built block"
         );
 
-        self.shards.proposed(block).await;
+        self.shards.proposed(round, block).await;
     }
 }
 

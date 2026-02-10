@@ -6,7 +6,7 @@ use crate::{
         },
         core::{BlockBuffer, Variant},
     },
-    types::CodingCommitment,
+    types::{CodingCommitment, Round},
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
@@ -82,7 +82,7 @@ where
         self.prune(commitment).await;
     }
 
-    async fn proposed(&mut self, block: CodedBlock<B, C>) {
-        self.proposed(block).await;
+    async fn proposed(&mut self, round: Round, block: CodedBlock<B, C>) {
+        self.proposed(round, block).await;
     }
 }

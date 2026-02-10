@@ -372,7 +372,7 @@ where
                     }
                     Message::Proposed { round, block } => {
                         self.cache_verified(round, block.digest(), block.clone()).await;
-                        buffer.proposed(block).await;
+                        buffer.proposed(round, block).await;
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.digest(), block).await;

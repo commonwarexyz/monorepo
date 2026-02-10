@@ -5,6 +5,7 @@
 
 use crate::{
     marshal::core::{BlockBuffer, Variant},
+    types::Round,
     Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
@@ -75,7 +76,7 @@ where
         // No cleanup needed in standard mode - the buffer handles its own pruning
     }
 
-    async fn proposed(&mut self, block: B) {
+    async fn proposed(&mut self, _round: Round, block: B) {
         let _peers = Broadcaster::broadcast(self, Recipients::All, block).await;
     }
 }

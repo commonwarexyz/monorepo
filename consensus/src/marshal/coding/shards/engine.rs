@@ -158,12 +158,15 @@ use super::{
 };
 use crate::{
     marshal::coding::types::{CodedBlock, DistributionShard, Shard},
-    types::{CodingCommitment, View},
+    types::{CodingCommitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
 };
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
+use commonware_cryptography::{
+    certificate::{Provider, Scheme as CertificateScheme},
+    Committable, Digestible, Hasher, PublicKey,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
@@ -176,7 +179,7 @@ use commonware_runtime::{
 use commonware_utils::{
     bitmap::BitMap,
     channel::{fallible::OneshotExt, mpsc, oneshot},
-    ordered::{Quorum, Set},
+    ordered::Quorum,
     Participant,
 };
 use rand::Rng;
@@ -216,20 +219,18 @@ enum BlockSubscriptionKey<D> {
 }
 
 /// Configuration for the [`Engine`].
-pub struct Config<P, X, C, H, B, T>
+pub struct Config<P, S, X, C, H, B, T>
 where
     P: PublicKey,
+    S: Provider<Scope = Epoch>,
     X: Blocker<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
     B: CertifiableBlock,
     T: Strategy,
 {
-    /// Self's index in the participant set, if participating.
-    pub me: Option<Participant>,
-
-    /// The set of participants for the active epoch.
-    pub participants: Set<P>,
+    /// The scheme provider.
+    pub scheme_provider: S,
 
     /// The peer blocker.
     pub blocker: X,
@@ -269,9 +270,11 @@ where
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
-pub struct Engine<E, X, C, H, B, P, T>
+pub struct Engine<E, S, X, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,
+    S: Provider<Scope = Epoch>,
+    S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
     C: CodingScheme,
     H: Hasher,
@@ -285,11 +288,8 @@ where
     /// Receiver for incoming messages to the actor.
     mailbox: mpsc::Receiver<Message<B, C, P>>,
 
-    /// Self's index in the participant set, if participating.
-    me: Option<Participant>,
-
-    /// The current set of participants for the active epoch.
-    participants: Set<P>,
+    /// The scheme provider.
+    scheme_provider: S,
 
     /// The peer blocker.
     blocker: X,
@@ -335,9 +335,11 @@ where
     metrics: ShardMetrics,
 }
 
-impl<E, X, C, H, B, P, T> Engine<E, X, C, H, B, P, T>
+impl<E, S, X, C, H, B, P, T> Engine<E, S, X, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,
+    S: Provider<Scope = Epoch>,
+    S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
@@ -346,15 +348,14 @@ where
     T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, X, C, H, B, T>) -> (Self, Mailbox<B, C, P>) {
-        let metrics = ShardMetrics::new(&context, &config.participants);
+    pub fn new(context: E, config: Config<P, S, X, C, H, B, T>) -> (Self, Mailbox<B, C, P>) {
+        let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                me: config.me,
-                participants: config.participants,
+                scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
                 shard_codec_cfg: config.shard_codec_cfg,
                 block_codec_cfg: config.block_codec_cfg,
@@ -421,27 +422,15 @@ where
                 return;
             } => {
                 match message {
-                    Message::UpdateParticipants { me, participants } => {
-                        self.me = participants.index(&me);
-                        self.participants = participants;
-
-                        // Clear reconstruction state and subscriptions
-                        self.state.clear();
-                        self.pre_leader_buffers.clear();
-                        self.shard_subscriptions.clear();
-                        self.block_subscriptions.clear();
-
-                        debug!("updated participant set");
-                    },
-                    Message::Proposed { block } => {
-                        self.broadcast_shards(&mut sender, block).await;
+                    Message::Proposed { block, round } => {
+                        self.broadcast_shards(&mut sender, round, block).await;
                     },
                     Message::ExternalProposed {
                         commitment,
                         leader,
-                        view,
+                        round,
                     } => {
-                        self.handle_external_proposal(&mut sender, commitment, leader, view)
+                        self.handle_external_proposal(&mut sender, commitment, leader, round)
                             .await;
                     },
                     Message::GetByCommitment { commitment, response } => {
@@ -488,13 +477,17 @@ where
                 }
 
                 if let Some(state) = self.state.get_mut(&commitment) {
+                    let round = state.round();
+                    let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+                        warn!(%commitment, "no scheme for epoch, ignoring shard");
+                        continue;
+                    };
                     let progressed = state
                         .on_network_shard(
                             peer,
                             shard,
                             InsertCtx {
-                                me: self.me.as_ref(),
-                                participants: &self.participants,
+                                scheme: scheme.as_ref(),
                                 strategy: &self.strategy,
                             },
                             &mut self.blocker,
@@ -503,9 +496,6 @@ where
                     if progressed {
                         self.try_advance(&mut sender, commitment).await;
                     }
-                } else if self.participants.index(&peer).is_none() {
-                    warn!(?peer, "shard sent by non-participant, blocking peer");
-                    self.blocker.block(peer).await;
                 } else {
                     self.buffer_pre_leader_shard(peer, shard);
                 }
@@ -588,15 +578,19 @@ where
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         commitment: CodingCommitment,
         leader: P,
-        view: View,
+        round: Round,
     ) {
         if self.reconstructed_blocks.contains_key(&commitment) {
             return;
         }
-        if self.me.is_none() {
+        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+            warn!(%commitment, "no scheme for epoch, ignoring external proposal");
+            return;
+        };
+        if scheme.me().is_none() {
             return;
         }
-        if self.participants.index(&leader).is_none() {
+        if scheme.participants().index(&leader).is_none() {
             warn!(?leader, %commitment, "leader update for non-participant, ignoring");
             return;
         }
@@ -613,14 +607,14 @@ where
         }
 
         self.state
-            .insert(commitment, ReconstructionState::new(leader, view));
+            .insert(commitment, ReconstructionState::new(leader, round));
         let buffered_progress = self.ingest_buffered_shards(commitment).await;
         if buffered_progress {
             self.try_advance(sender, commitment).await;
         }
     }
 
-    /// Buffer a shard from a participant until a leader is known.
+    /// Buffer a shard from a peer until a leader is known.
     fn buffer_pre_leader_shard(&mut self, peer: P, shard: Shard<C, H>) {
         let queue = self.pre_leader_buffers.entry(peer).or_default();
         if queue.len() >= self.pre_leader_buffer_size.get() {
@@ -653,6 +647,11 @@ where
         let Some(state) = self.state.get_mut(&commitment) else {
             return false;
         };
+        let round = state.round();
+        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+            warn!(%commitment, "no scheme for epoch, dropping buffered shards");
+            return false;
+        };
 
         // Ingest weak shards first so they populate pending_weak_shards before
         // the strong shard sets checking_data and triggers batch validation.
@@ -663,8 +662,7 @@ where
                     peer,
                     shard,
                     InsertCtx {
-                        me: self.me.as_ref(),
-                        participants: &self.participants,
+                        scheme: scheme.as_ref(),
                         strategy: &self.strategy,
                     },
                     &mut self.blocker,
@@ -678,24 +676,32 @@ where
     async fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
+        round: Round,
         mut block: CodedBlock<B, C>,
     ) {
         let commitment = block.commitment();
 
+        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+            warn!(%commitment, "no scheme available, cannot broadcast shards");
+            return;
+        };
+        let participants = scheme.participants();
+        let me = scheme.me();
+
         let shard_count = block.shards(&self.strategy).len();
-        if shard_count != self.participants.len() {
+        if shard_count != participants.len() {
             warn!(
                 %commitment,
                 shard_count,
-                participants = self.participants.len(),
+                participants = participants.len(),
                 "cannot broadcast shards: participant/shard count mismatch"
             );
             return;
         }
 
         // Broadcast each shard to the corresponding participant.
-        for (index, peer) in self.participants.iter().enumerate() {
-            if self.me.is_some_and(|me| me.get() as usize == index) {
+        for (index, peer) in participants.iter().enumerate() {
+            if me.is_some_and(|m| m.get() as usize == index) {
                 continue;
             }
 
@@ -755,8 +761,8 @@ where
                     height = %block.height(),
                     "successfully reconstructed block from shards"
                 );
-                if let Some(view) = self.state.get(&commitment).map(ReconstructionState::view) {
-                    self.state.retain(|_, state| state.view() > view);
+                if let Some(round) = self.state.get(&commitment).map(ReconstructionState::round) {
+                    self.state.retain(|_, state| state.round() > round);
                 }
                 self.notify_block_subscribers(block).await;
             }
@@ -859,7 +865,8 @@ where
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
-    /// with the given commitment.
+    /// with the given commitment. Also cleans up stale reconstruction state
+    /// and subscriptions.
     fn prune_reconstructed(&mut self, commitment: CodingCommitment) {
         let Some(height) = self
             .reconstructed_blocks
@@ -871,6 +878,21 @@ where
 
         self.reconstructed_blocks
             .retain(|_, block| block.height() > height);
+
+        let Some(round) = self.state.get(&commitment).map(ReconstructionState::round) else {
+            return;
+        };
+        let mut state = std::mem::take(&mut self.state);
+        state.retain(|c, s| {
+            if s.round() > round {
+                return true;
+            }
+            self.shard_subscriptions.remove(c);
+            self.block_subscriptions
+                .remove(&BlockSubscriptionKey::Commitment(*c));
+            false
+        });
+        self.state = state;
     }
 
     /// Syncs gauge metrics for map sizes.
@@ -917,8 +939,8 @@ where
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a valid shard.
     contributed: BitMap,
-    /// The view for which this commitment was externally proposed.
-    view: View,
+    /// The round for which this commitment was externally proposed.
+    round: Round,
     /// The strong shard data received from the leader, retained for equivocation detection.
     received_strong: Option<C::StrongShard>,
 }
@@ -979,14 +1001,14 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// Create a new empty common state for the provided leader and view.
-    const fn new(leader: P, view: View) -> Self {
+    /// Create a new empty common state for the provided leader and round.
+    const fn new(leader: P, round: Round) -> Self {
         Self {
             leader,
             our_weak_shard: None,
             checked_shards: Vec::new(),
             contributed: BitMap::new(),
-            view,
+            round,
             received_strong: None,
         }
     }
@@ -1088,9 +1110,9 @@ where
 
         // Transition to Ready.
         let checking_data = self.checking_data.take().unwrap();
-        let view = self.common.view;
+        let round = self.common.round;
         let leader = self.common.leader.clone();
-        let common = std::mem::replace(&mut self.common, CommonState::new(leader, view));
+        let common = std::mem::replace(&mut self.common, CommonState::new(leader, round));
         Some(ReadyState {
             common,
             checking_data,
@@ -1099,13 +1121,12 @@ where
 }
 
 /// Context required for processing incoming network shards.
-struct InsertCtx<'a, P, S>
+struct InsertCtx<'a, Sch, S>
 where
-    P: PublicKey,
+    Sch: CertificateScheme,
     S: Strategy,
 {
-    me: Option<&'a Participant>,
-    participants: &'a Set<P>,
+    scheme: &'a Sch,
     strategy: &'a S,
 }
 
@@ -1116,9 +1137,9 @@ where
     H: Hasher,
 {
     /// Create an initial reconstruction state for a commitment.
-    const fn new(leader: P, view: View) -> Self {
+    const fn new(leader: P, round: Round) -> Self {
         Self::AwaitingQuorum(AwaitingQuorumState {
-            common: CommonState::new(leader, view),
+            common: CommonState::new(leader, round),
             pending_weak_shards: BTreeMap::new(),
             checking_data: None,
         })
@@ -1156,9 +1177,9 @@ where
         }
     }
 
-    /// Return the proposal view associated with this state.
-    const fn view(&self) -> View {
-        self.common().view
+    /// Return the proposal round associated with this state.
+    const fn round(&self) -> Round {
+        self.common().round
     }
 
     /// Returns all verified shards accumulated for reconstruction.
@@ -1209,18 +1230,19 @@ where
     ///
     /// Returns `true` only when the shard caused state progress (buffered,
     /// validated, or transitioned), and `false` when rejected/blocked.
-    async fn on_network_shard<S, X>(
+    async fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
         shard: Shard<C, H>,
-        ctx: InsertCtx<'_, P, S>,
+        ctx: InsertCtx<'_, Sch, S>,
         blocker: &mut X,
     ) -> bool
     where
+        Sch: CertificateScheme<PublicKey = P>,
         S: Strategy,
         X: Blocker<PublicKey = P>,
     {
-        let Some(sender_index) = ctx.participants.index(&sender) else {
+        let Some(sender_index) = ctx.scheme.participants().index(&sender) else {
             warn!(?sender, "shard sent by non-participant, blocking peer");
             blocker.block(sender).await;
             return false;
@@ -1228,7 +1250,8 @@ where
         let commitment = shard.commitment();
         let index = shard.index();
 
-        self.common_mut().ensure_contributed(ctx.participants.len());
+        self.common_mut()
+            .ensure_contributed(ctx.scheme.participants().len());
 
         let progressed = match shard.into_inner() {
             DistributionShard::Strong(data) => {
@@ -1237,7 +1260,7 @@ where
                     index,
                     data,
                 };
-                self.insert_strong_shard(ctx.me, sender, strong, blocker)
+                self.insert_strong_shard(ctx.scheme.me().as_ref(), sender, strong, blocker)
                     .await
             }
             DistributionShard::Weak(data) => {
@@ -1392,7 +1415,9 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
+        certificate::Subject,
         ed25519::{PrivateKey, PublicKey},
+        impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
         Committable, Digest, Sha256, Signer,
     };
@@ -1404,6 +1429,27 @@ mod tests {
         channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
     };
     use std::{future::Future, num::NonZeroU32, time::Duration};
+
+    #[derive(Clone, Debug)]
+    pub struct TestSubject {
+        pub message: Bytes,
+    }
+
+    impl Subject for TestSubject {
+        type Namespace = Vec<u8>;
+
+        fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
+            derived
+        }
+
+        fn message(&self) -> Bytes {
+            self.message.clone()
+        }
+    }
+
+    impl_certificate_ed25519!(TestSubject, Vec<u8>);
+
+    const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
     /// The max size of a shard sent over the wire.
     const MAX_SHARD_SIZE: usize = 1024 * 1024; // 1 MiB
@@ -1421,6 +1467,38 @@ mod tests {
     /// The parallelization strategy used for tests.
     const STRATEGY: Sequential = Sequential;
 
+    /// A scheme provider that maps each epoch to a potentially different scheme.
+    ///
+    /// For most tests only epoch 0 is registered, matching the previous
+    /// `ConstantProvider` behaviour. Cross-epoch tests register additional
+    /// epochs with different participant sets.
+    #[derive(Clone)]
+    struct MultiEpochProvider {
+        schemes: BTreeMap<Epoch, Arc<Scheme>>,
+    }
+
+    impl MultiEpochProvider {
+        fn single(scheme: Scheme) -> Self {
+            let mut schemes = BTreeMap::new();
+            schemes.insert(Epoch::zero(), Arc::new(scheme));
+            Self { schemes }
+        }
+
+        fn with_epoch(mut self, epoch: Epoch, scheme: Scheme) -> Self {
+            self.schemes.insert(epoch, Arc::new(scheme));
+            self
+        }
+    }
+
+    impl Provider for MultiEpochProvider {
+        type Scope = Epoch;
+        type Scheme = Scheme;
+
+        fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
+            self.schemes.get(&scope).cloned()
+        }
+    }
+
     // Type aliases for test convenience.
     type B = MockBlock<Sha256Digest, ()>;
     type H = Sha256;
@@ -1428,8 +1506,9 @@ mod tests {
     type C = ReedSolomon<H>;
     type X = Control<P, deterministic::Context>;
     type O = Oracle<P, deterministic::Context>;
+    type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
-    type ShardEngine = Engine<deterministic::Context, X, C, H, B, P, Sequential>;
+    type ShardEngine = Engine<deterministic::Context, Prov, X, C, H, B, P, Sequential>;
     type ShardMailbox = Mailbox<B, C, P>;
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
@@ -1486,11 +1565,11 @@ mod tests {
                 );
                 network.start();
 
-                let mut schemes = (0..self.num_peers)
+                let mut private_keys = (0..self.num_peers)
                     .map(|i| PrivateKey::from_seed(i as u64))
                     .collect::<Vec<_>>();
-                schemes.sort_by_key(|s| s.public_key());
-                let peer_keys: Vec<P> = schemes.iter().map(|c| c.public_key()).collect();
+                private_keys.sort_by_key(|s| s.public_key());
+                let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
                 let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
 
@@ -1527,9 +1606,16 @@ mod tests {
                     let participant = Participant::new(idx as u32);
                     let engine_context = context.with_label(&format!("peer_{}", idx));
 
+                    let scheme = Scheme::signer(
+                        SCHEME_NAMESPACE,
+                        participants.clone(),
+                        private_keys[idx].clone(),
+                    )
+                    .expect("signer scheme should be created");
+                    let scheme_provider: Prov = MultiEpochProvider::single(scheme);
+
                     let config = Config {
-                        me: Some(participant),
-                        participants: participants.clone(),
+                        scheme_provider,
                         blocker: control.clone(),
                         shard_codec_cfg: CodecConfig {
                             maximum_shard_size: MAX_SHARD_SIZE,
@@ -1571,12 +1657,13 @@ mod tests {
             let commitment = coded_block.commitment();
 
             let leader = peers[0].public_key.clone();
-            peers[0].mailbox.proposed(coded_block.clone()).await;
+            let round = Round::new(Epoch::zero(), View::new(1));
+            peers[0].mailbox.proposed(round, coded_block.clone()).await;
 
             // Inform all peers of the leader so strong shards are processed.
             for peer in peers[1..].iter_mut() {
                 peer.mailbox
-                    .external_proposed(commitment, leader.clone(), View::new(1))
+                    .external_proposed(commitment, leader.clone(), round)
                     .await;
             }
             context.sleep(config.link.latency).await;
@@ -1616,17 +1703,18 @@ mod tests {
             let digest = coded_block.digest();
 
             let leader = peers[0].public_key.clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe before broadcasting.
             let commitment_sub = peers[1].mailbox.subscribe_block(commitment).await;
             let digest_sub = peers[2].mailbox.subscribe_block_by_digest(digest).await;
 
-            peers[0].mailbox.proposed(coded_block.clone()).await;
+            peers[0].mailbox.proposed(round, coded_block.clone()).await;
 
             // Inform all peers of the leader so strong shards are processed.
             for peer in peers[1..].iter_mut() {
                 peer.mailbox
-                    .external_proposed(commitment, leader.clone(), View::new(1))
+                    .external_proposed(commitment, leader.clone(), round)
                     .await;
             }
             context.sleep(config.link.latency * 2).await;
@@ -1680,7 +1768,7 @@ mod tests {
                 let leader = peers[1].public_key.clone();
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let mut shard_sub = peers[2].mailbox.subscribe_shard(commitment).await;
 
@@ -1749,9 +1837,10 @@ mod tests {
 
             // Cache all blocks via `proposed`.
             let peer = &mut peers[0];
-            peer.mailbox.proposed(block1).await;
-            peer.mailbox.proposed(block2).await;
-            peer.mailbox.proposed(block3).await;
+            let round = Round::new(Epoch::zero(), View::new(1));
+            peer.mailbox.proposed(round, block1).await;
+            peer.mailbox.proposed(round, block2).await;
+            peer.mailbox.proposed(round, block3).await;
             context.sleep(Duration::from_millis(10)).await;
 
             // Verify all blocks are in the cache.
@@ -1814,7 +1903,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Send peer 2 their strong shard from peer 0 (leader, first time - should succeed).
@@ -1884,7 +1973,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Send peer 2 their strong shard from the leader (first time - succeeds).
@@ -1934,7 +2023,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Peer 1 (not the leader) sends peer 2 their strong shard.
@@ -1994,7 +2083,7 @@ mod tests {
                 let leader = peers[0].public_key.clone();
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2030,12 +2119,12 @@ mod tests {
                 // First leader update should stick.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader_a.clone(), View::new(1))
+                    .external_proposed(commitment, leader_a.clone(), Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 // Conflicting update should be ignored.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader_b, View::new(1))
+                    .external_proposed(commitment, leader_b, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Original leader sends strong shard; this should still be accepted.
@@ -2109,7 +2198,11 @@ mod tests {
                 // A non-participant leader update should be ignored.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, non_participant_leader, View::new(1))
+                    .external_proposed(
+                        commitment,
+                        non_participant_leader,
+                        Round::new(Epoch::zero(), View::new(1)),
+                    )
                     .await;
 
                 // Leader unknown path: this strong shard should be buffered, not blocked.
@@ -2136,7 +2229,7 @@ mod tests {
                 // A valid leader update should then process buffered shards and resolve subscription.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 context.sleep(config.link.latency * 2).await;
 
@@ -2146,6 +2239,119 @@ mod tests {
                         panic!("subscription did not complete after valid leader update");
                     }
                 };
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_shard_from_non_participant_blocks_peer() {
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                let leader = peers[0].public_key.clone();
+                let receiver_pk = peers[2].public_key.clone();
+
+                let non_participant_key = PrivateKey::from_seed(10_000);
+                let non_participant_pk = non_participant_key.public_key();
+
+                let non_participant_control = oracle.control(non_participant_pk.clone());
+                let (mut non_participant_sender, _non_participant_receiver) =
+                    non_participant_control
+                        .register(0, TEST_QUOTA)
+                        .await
+                        .expect("registration should succeed");
+                oracle
+                    .add_link(
+                        non_participant_pk.clone(),
+                        receiver_pk.clone(),
+                        DEFAULT_LINK,
+                    )
+                    .await
+                    .expect("link should be added");
+
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .await;
+
+                let peer2_index = peers[2].index.get() as u16;
+                let strong_shard = coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let weak_shard = strong_shard
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+                let weak_bytes = weak_shard.encode();
+
+                non_participant_sender
+                    .send(Recipients::One(receiver_pk), weak_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                assert_blocked(&oracle, &peers[2].public_key, &non_participant_pk).await;
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_buffered_shard_from_non_participant_blocks_peer() {
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+
+                let leader = peers[0].public_key.clone();
+                let receiver_pk = peers[2].public_key.clone();
+
+                let non_participant_key = PrivateKey::from_seed(10_000);
+                let non_participant_pk = non_participant_key.public_key();
+
+                let non_participant_control = oracle.control(non_participant_pk.clone());
+                let (mut non_participant_sender, _non_participant_receiver) =
+                    non_participant_control
+                        .register(0, TEST_QUOTA)
+                        .await
+                        .expect("registration should succeed");
+                oracle
+                    .add_link(
+                        non_participant_pk.clone(),
+                        receiver_pk.clone(),
+                        DEFAULT_LINK,
+                    )
+                    .await
+                    .expect("link should be added");
+
+                let peer2_index = peers[2].index.get() as u16;
+                let strong_shard = coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let weak_shard = strong_shard
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+                let weak_bytes = weak_shard.encode();
+
+                non_participant_sender
+                    .send(Recipients::One(receiver_pk), weak_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .await;
+                context.sleep(config.link.latency * 2).await;
+
+                assert_blocked(&oracle, &peers[2].public_key, &non_participant_pk).await;
             },
         );
     }
@@ -2182,7 +2388,11 @@ mod tests {
                 // Inform peer 2 of the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(coded_block.commitment(), leader, View::new(1))
+                    .external_proposed(
+                        coded_block.commitment(),
+                        leader,
+                        Round::new(Epoch::zero(), View::new(1)),
+                    )
                     .await;
 
                 // Send peer 2 their strong shard (initializes checking_data, 1 checked shard).
@@ -2275,7 +2485,11 @@ mod tests {
                 // Inform peer 2 of the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(coded_block1.commitment(), leader, View::new(1))
+                    .external_proposed(
+                        coded_block1.commitment(),
+                        leader,
+                        Round::new(Epoch::zero(), View::new(1)),
+                    )
                     .await;
 
                 // Send peer 2 their strong shard (initializes checking_data).
@@ -2343,7 +2557,11 @@ mod tests {
                 // Create state for A and ingest one weak shard from peer1.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment_a, leader.clone(), View::new(1))
+                    .external_proposed(
+                        commitment_a,
+                        leader.clone(),
+                        Round::new(Epoch::zero(), View::new(1)),
+                    )
                     .await;
                 let peer1_strong_a = block_a
                     .shard::<H>(peers[1].index.get() as u16)
@@ -2362,7 +2580,11 @@ mod tests {
                 // Create/reconstruct B at higher view.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment_b, leader, View::new(2))
+                    .external_proposed(
+                        commitment_b,
+                        leader,
+                        Round::new(Epoch::zero(), View::new(2)),
+                    )
                     .await;
                 // Strong shard for peer2 from leader.
                 let strong_b = block_b
@@ -2479,7 +2701,7 @@ mod tests {
                 let leader = peers[2].public_key.clone();
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Now send peer 2's strong shard. This should:
@@ -2586,7 +2808,7 @@ mod tests {
                 // Announce leader, which drains buffered shards and should progress immediately.
                 peers[receiver_idx]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 select! {
@@ -2636,7 +2858,11 @@ mod tests {
                     .await;
                 peers[receiver_idx]
                     .mailbox
-                    .external_proposed(commitment, leader.clone(), View::new(1))
+                    .external_proposed(
+                        commitment,
+                        leader.clone(),
+                        Round::new(Epoch::zero(), View::new(1)),
+                    )
                     .await;
 
                 // Send leader strong shard after leader is known.
@@ -2690,91 +2916,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_update_participants_clears_state() {
-        // Test that UpdateParticipants clears reconstruction state and subscriptions.
-        let fixture = Fixture {
-            num_peers: 5,
-            ..Default::default()
-        };
-
-        fixture.start(
-            |config, context, oracle, mut peers, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
-                let commitment = coded_block.commitment();
-
-                // Send some shards to peer 0 to create reconstruction state.
-                let peer0_pk = peers[0].public_key.clone();
-                for peer in peers[1..3].iter_mut() {
-                    let weak_shard = coded_block
-                        .shard::<H>(peer.index.get() as u16)
-                        .expect("missing shard")
-                        .verify_into_weak()
-                        .expect("verify_into_weak failed");
-                    let weak_shard_bytes = weak_shard.encode();
-                    peer
-                        .sender
-                        .send(Recipients::One(peer0_pk.clone()), weak_shard_bytes, true)
-                        .await
-                        .expect("send failed");
-                }
-                context.sleep(config.link.latency * 2).await;
-
-                // Create a subscription that should be cleared.
-                let sub = peers[0].mailbox.subscribe_block(commitment).await;
-
-                // Send UpdateParticipants to clear state.
-                // Use a new participant set (same keys, just triggers the clear).
-                let new_participants: Set<P> =
-                    Set::from_iter_dedup(peers.iter().map(|p| p.public_key.clone()));
-                peers[0]
-                    .mailbox
-                    .update_participants(peer0_pk.clone(), new_participants)
-                    .await;
-
-                // Give time for the message to be processed.
-                context.sleep(Duration::from_millis(10)).await;
-
-                // The subscription should now be dropped (sender closed).
-                // Try to await it with a timeout - it should not resolve with a block.
-                select! {
-                    result = sub => {
-                        // If we get a result, it should be an error (subscription was dropped).
-                        assert!(result.is_err(), "subscription should be cleared after UpdateParticipants");
-                    },
-                    _ = context.sleep(Duration::from_millis(100)) => {
-                        // Timeout is also acceptable - subscription was cleared.
-                    }
-                }
-
-                // Now send the same shards again - they should be treated as new
-                // (state was cleared), not duplicates.
-                for peer in peers[1..3].iter_mut() {
-                    let weak_shard = coded_block
-                        .shard::<H>(peer.index.get() as u16)
-                        .expect("missing shard")
-                        .verify_into_weak()
-                        .expect("verify_into_weak failed");
-                    let weak_shard_bytes = weak_shard.encode();
-                    peer
-                        .sender
-                        .send(Recipients::One(peer0_pk.clone()), weak_shard_bytes, true)
-                        .await
-                        .expect("send failed");
-                }
-                context.sleep(config.link.latency * 2).await;
-
-                // No peers should be blocked (shards treated as new after state clear).
-                let blocked = oracle.blocked().await.unwrap();
-                assert!(
-                    blocked.is_empty(),
-                    "no peers should be blocked after UpdateParticipants cleared state"
-                );
-            },
-        );
-    }
-
-    #[test_traced]
     fn test_invalid_shard_codec_blocks_peer() {
         // Test that receiving an invalid shard (codec failure) blocks the sender.
         let fixture = Fixture {
@@ -2799,55 +2940,6 @@ mod tests {
 
                 // Peer 1 should be blocked by peer 0 for sending invalid shard.
                 assert_blocked(&oracle, &peer0_pk, &peer1_pk).await;
-            },
-        );
-    }
-
-    #[test_traced]
-    fn test_shard_from_non_participant_blocks_peer() {
-        // Test that receiving a shard from a non-participant blocks the sender.
-        // We simulate this by having a peer send a shard after being removed
-        // from the participant set.
-        let fixture = Fixture {
-            num_peers: 4,
-            ..Default::default()
-        };
-
-        fixture.start(
-            |config, context, oracle, mut peers, coding_config| async move {
-                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
-
-                let peer0_pk = peers[0].public_key.clone();
-                let peer3_pk = peers[3].public_key.clone();
-
-                // Update participants to exclude peer 3.
-                let new_participants: Set<P> =
-                    Set::from_iter_dedup(peers.iter().take(3).map(|p| p.public_key.clone()));
-                peers[0]
-                    .mailbox
-                    .update_participants(peer0_pk.clone(), new_participants)
-                    .await;
-
-                context.sleep(Duration::from_millis(10)).await;
-
-                // Peer 3 (now non-participant) sends a shard to peer 0.
-                let weak_shard = coded_block
-                    .shard::<H>(peers[3].index.get() as u16)
-                    .expect("missing shard")
-                    .verify_into_weak()
-                    .expect("verify_into_weak failed");
-                let weak_shard_bytes = weak_shard.encode();
-                peers[3]
-                    .sender
-                    .send(Recipients::One(peer0_pk.clone()), weak_shard_bytes, true)
-                    .await
-                    .expect("send failed");
-
-                context.sleep(config.link.latency * 2).await;
-
-                // Peer 3 should be blocked by peer 0 for being a non-participant.
-                assert_blocked(&oracle, &peer0_pk, &peer3_pk).await;
             },
         );
     }
@@ -2941,7 +3033,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment1, leader, View::new(1))
+                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Leader (peer 0) sends the invalid strong shard.
@@ -2995,7 +3087,7 @@ mod tests {
                 // Inform peer 3 of the leader and send them the strong shard.
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment, leader, View::new(1))
+                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let strong_bytes = peer3_strong_shard.encode();
                 peers[0]
@@ -3060,7 +3152,7 @@ mod tests {
                 // Inform peer 3 of the leader and send the valid strong shard.
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment1, leader, View::new(1))
+                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let strong_bytes = peer3_strong_shard.encode();
                 peers[0]
@@ -3139,7 +3231,7 @@ mod tests {
                 let leader = peers[0].public_key.clone();
                 peers[receiver_idx]
                     .mailbox
-                    .external_proposed(commitment1, leader, View::new(1))
+                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let receiver_strong = coded_block1
                     .shard::<H>(peers[receiver_idx].index.get() as u16)
@@ -3288,7 +3380,7 @@ mod tests {
                 let leader = peers[0].public_key.clone();
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment1, leader, View::new(1))
+                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let peer3_index = peers[3].index.get() as u16;
                 let peer3_strong_shard =
@@ -3306,5 +3398,134 @@ mod tests {
                 assert_blocked(&oracle, &peers[3].public_key, &peers[1].public_key).await;
             },
         );
+    }
+
+    #[test_traced]
+    fn test_cross_epoch_buffered_shard_not_blocked() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Epoch 0 participants: peers 0..4 (seeds 0..4).
+            // Epoch 1 participants: peers 0..3 + peer 4 (seed 4 replaces seed 3).
+            let mut epoch0_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            epoch0_keys.sort_by_key(|s| s.public_key());
+            let epoch0_pks: Vec<P> = epoch0_keys.iter().map(|c| c.public_key()).collect();
+            let epoch0_set: Set<P> = Set::from_iter_dedup(epoch0_pks.clone());
+
+            let future_peer_key = PrivateKey::from_seed(4);
+            let future_peer_pk = future_peer_key.public_key();
+            let mut epoch1_pks: Vec<P> = epoch0_pks[..3]
+                .iter()
+                .cloned()
+                .chain(std::iter::once(future_peer_pk.clone()))
+                .collect();
+            epoch1_pks.sort();
+            let epoch1_set: Set<P> = Set::from_iter_dedup(epoch1_pks);
+
+            let receiver_idx_in_epoch0 = epoch0_set
+                .index(&epoch0_pks[0])
+                .expect("receiver must be in epoch 0")
+                .get() as usize;
+            let receiver_key = epoch0_keys[receiver_idx_in_epoch0].clone();
+            let receiver_pk = receiver_key.public_key();
+
+            let receiver_control = oracle.control(receiver_pk.clone());
+            let (sender_handle, receiver_handle) = receiver_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let future_peer_control = oracle.control(future_peer_pk.clone());
+            let (mut future_peer_sender, _future_peer_receiver) = future_peer_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+            oracle
+                .add_link(future_peer_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
+                .await
+                .expect("link should be added");
+
+            // Set up the receiver's engine with a multi-epoch provider.
+            let scheme_epoch0 =
+                Scheme::signer(SCHEME_NAMESPACE, epoch0_set.clone(), receiver_key.clone())
+                    .expect("signer scheme should be created");
+            let scheme_epoch1 =
+                Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
+                    .expect("signer scheme should be created");
+            let scheme_provider =
+                MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
+
+            let config = Config {
+                scheme_provider,
+                blocker: receiver_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                pre_leader_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+            };
+
+            let (engine, mut mailbox) = ShardEngine::new(context.with_label("receiver"), config);
+            engine.start((sender_handle, receiver_handle));
+
+            // Build a coded block using epoch 1's participant set.
+            let coding_config = coding_config_for_participants(epoch1_set.len() as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            // The future peer creates a weak shard at their epoch 1 index.
+            let future_peer_index = epoch1_set
+                .index(&future_peer_pk)
+                .expect("future peer must be in epoch 1");
+            let strong_shard = coded_block
+                .shard::<H>(future_peer_index.get() as u16)
+                .expect("missing shard");
+            let weak_shard = strong_shard
+                .verify_into_weak()
+                .expect("verify_into_weak failed");
+            let weak_bytes = weak_shard.encode();
+
+            // Send the shard BEFORE external_proposed (goes to pre-leader buffer).
+            future_peer_sender
+                .send(Recipients::One(receiver_pk.clone()), weak_bytes, true)
+                .await
+                .expect("send failed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // No one should be blocked yet (shard is buffered, leader unknown).
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "no peers should be blocked while shard is buffered"
+            );
+
+            // Announce the leader with an epoch 1 round.
+            let leader = epoch0_pks[1].clone();
+            mailbox
+                .external_proposed(commitment, leader, Round::new(Epoch::new(1), View::new(1)))
+                .await;
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            // The future peer is a valid participant in epoch 1, so they must NOT
+            // be blocked after their buffered shard is ingested.
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked.is_empty(),
+                "future-epoch participant should not be blocked: {blocked:?}"
+            );
+        });
     }
 }

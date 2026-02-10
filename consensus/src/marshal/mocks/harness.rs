@@ -28,7 +28,7 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
+    certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
@@ -43,7 +43,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{ordered::Quorum, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -772,10 +772,8 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let scheme = provider.all().unwrap();
-        let shard_config: shards::Config<_, _, _, Sha256, _, _> = shards::Config {
-            me: scheme.participants().index(&validator),
-            participants: scheme.participants().clone(),
+        let shard_config: shards::Config<_, _, _, _, Sha256, _, _> = shards::Config {
+            scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
                 maximum_shard_size: 1024 * 1024,
@@ -951,10 +949,8 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-        let scheme = provider.all().unwrap();
-        let shard_config: shards::Config<_, _, _, Sha256, _, _> = shards::Config {
-            me: scheme.participants().index(&validator),
-            participants: scheme.participants().clone(),
+        let shard_config: shards::Config<_, _, _, _, Sha256, _, _> = shards::Config {
+            scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             shard_codec_cfg: CodecConfig {
                 maximum_shard_size: 1024 * 1024,

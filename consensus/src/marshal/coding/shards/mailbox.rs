@@ -2,15 +2,12 @@
 
 use crate::{
     marshal::coding::types::CodedBlock,
-    types::{CodingCommitment, View},
+    types::{CodingCommitment, Round},
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::PublicKey;
-use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc, oneshot},
-    ordered::Set,
-};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
 use std::sync::Arc;
 
 /// A message that can be sent to the coding [`Engine`].
@@ -22,12 +19,12 @@ where
     C: CodingScheme,
     P: PublicKey,
 {
-    /// A request to update the participant set.
-    UpdateParticipants { me: P, participants: Set<P> },
     /// A request to broadcast a proposed [`CodedBlock`] to all peers.
     Proposed {
         /// The erasure coded block.
         block: CodedBlock<B, C>,
+        /// The round in which the block was proposed.
+        round: Round,
     },
     /// A notification from consensus that a [`CodingCommitment`] was externally proposed.
     ExternalProposed {
@@ -35,8 +32,8 @@ where
         commitment: CodingCommitment,
         /// The leader's public key.
         leader: P,
-        /// The view in which the commitment was proposed.
-        view: View,
+        /// The round in which the commitment was proposed.
+        round: Round,
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
@@ -107,24 +104,23 @@ where
         Self { sender }
     }
 
-    /// Update the participant set.
-    pub async fn update_participants(&mut self, me: P, participants: Set<P>) {
-        let msg = Message::UpdateParticipants { me, participants };
-        self.sender.send_lossy(msg).await;
-    }
-
     /// Broadcast a proposed erasure coded block's shards to the participants.
-    pub async fn proposed(&mut self, block: CodedBlock<B, C>) {
-        let msg = Message::Proposed { block };
+    pub async fn proposed(&mut self, round: Round, block: CodedBlock<B, C>) {
+        let msg = Message::Proposed { block, round };
         self.sender.send_lossy(msg).await;
     }
 
     /// Inform the engine of an externally proposed [`CodingCommitment`].
-    pub async fn external_proposed(&mut self, commitment: CodingCommitment, leader: P, view: View) {
+    pub async fn external_proposed(
+        &mut self,
+        commitment: CodingCommitment,
+        leader: P,
+        round: Round,
+    ) {
         let msg = Message::ExternalProposed {
             commitment,
             leader,
-            view,
+            round,
         };
         self.sender.send_lossy(msg).await;
     }
