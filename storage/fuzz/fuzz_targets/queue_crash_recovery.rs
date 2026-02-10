@@ -375,10 +375,6 @@ async fn verify_recovery(
 }
 
 fn fuzz(input: FuzzInput) {
-    if input.operations.is_empty() {
-        return;
-    }
-
     let page_size = NonZeroU16::new(input.page_size).unwrap();
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
