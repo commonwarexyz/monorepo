@@ -132,66 +132,6 @@ fn collect_usage_from_fields(fields: &[Field], names: &GenericParamNames) -> Gen
     usage
 }
 
-fn collect_usage_for_items(items: &[Item], names: &GenericParamNames) -> GenericUsage {
-    let mut usage = GenericUsage::default();
-    for item in items {
-        usage.merge(collect_usage_from_fields(&item.fields, names));
-        if let Some(response) = item.kind.response() {
-            usage.merge(collect_usage_from_type(response, names));
-        }
-    }
-    usage
-}
-
-fn ensure_mailbox_generics_are_used(
-    generics: &Generics,
-    usage: &GenericUsage,
-    mailbox: &Ident,
-) -> Result<()> {
-    let mut error: Option<syn::Error> = None;
-
-    for param in &generics.params {
-        let (used, span, render) = match param {
-            GenericParam::Type(param) => (
-                usage.type_params.contains(&param.ident.to_string()),
-                param.ident.span(),
-                param.ident.to_string(),
-            ),
-            GenericParam::Lifetime(param) => (
-                usage
-                    .lifetime_params
-                    .contains(&param.lifetime.ident.to_string()),
-                param.lifetime.span(),
-                format!("'{}", param.lifetime.ident),
-            ),
-            GenericParam::Const(param) => (
-                usage.const_params.contains(&param.ident.to_string()),
-                param.ident.span(),
-                param.ident.to_string(),
-            ),
-        };
-
-        if !used {
-            let next = syn::Error::new(
-                span,
-                format!(
-                    "mailbox generic `{render}` is unused by ingress fields/responses in `{mailbox}`"
-                ),
-            );
-            match &mut error {
-                Some(err) => err.combine(next),
-                None => error = Some(next),
-            }
-        }
-    }
-
-    if let Some(err) = error {
-        return Err(err);
-    }
-
-    Ok(())
-}
-
 fn wrapper_generics_tokens(
     generics: &Generics,
     usage: &GenericUsage,
@@ -322,37 +262,64 @@ fn method_values(fields: &[Field]) -> Vec<TokenStream2> {
         .collect()
 }
 
-/// Emit a single ingress enum variant.
-///
-/// Tell items become either unit or struct variants.
-/// Ask items always add an implicit `response` field.
-fn emit_variant(item: &Item, actor: &TokenStream2) -> TokenStream2 {
+fn emit_readonly_variant(item: &Item, actor: &TokenStream2) -> Option<TokenStream2> {
+    let ItemKind::Ask {
+        response,
+        read_write: false,
+    } = &item.kind
+    else {
+        return None;
+    };
+
     let attrs = &item.attrs;
     let name = &item.name;
     let entries = variant_fields(&item.fields);
 
-    match item.kind.response() {
-        None if item.is_unit() => quote! {
+    Some(quote! {
+        #(#attrs)*
+        #name {
+            #(#entries)*
+            response: #actor::oneshot::Sender<#response>,
+        },
+    })
+}
+
+fn emit_read_write_variant(item: &Item, actor: &TokenStream2) -> Option<TokenStream2> {
+    let attrs = &item.attrs;
+    let name = &item.name;
+    let entries = variant_fields(&item.fields);
+
+    Some(match &item.kind {
+        ItemKind::Tell if item.is_unit() => quote! {
             #(#attrs)*
             #name,
         },
-        None => quote! {
+        ItemKind::Tell => quote! {
             #(#attrs)*
             #name { #(#entries)* },
         },
-        Some(response) => quote! {
+        ItemKind::Ask {
+            response,
+            read_write: true,
+        }
+        | ItemKind::Subscribe { response } => quote! {
             #(#attrs)*
             #name {
                 #(#entries)*
                 response: #actor::oneshot::Sender<#response>,
             },
         },
-    }
+        ItemKind::Ask {
+            read_write: false, ..
+        } => return None,
+    })
 }
 
 struct WrapperEmitCtx<'a> {
     actor: &'a TokenStream2,
     ingress: &'a Ident,
+    readonly_ingress: &'a Ident,
+    read_write_ingress: &'a Ident,
     impl_generics: TokenStream2,
     ty_generics: TokenStream2,
     where_clause: Option<&'a syn::WhereClause>,
@@ -369,6 +336,8 @@ struct WrapperEmitCtx<'a> {
 fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
     let actor = ctx.actor;
     let ingress = ctx.ingress;
+    let readonly_ingress = ctx.readonly_ingress;
+    let read_write_ingress = ctx.read_write_ingress;
     let impl_generics = &ctx.impl_generics;
     let ty_generics = &ctx.ty_generics;
     let where_clause = ctx.where_clause;
@@ -389,7 +358,7 @@ fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
 
                     impl #impl_generics #actor::Tell<#ingress #ty_generics> for #name #where_clause {
                         fn into_ingress(self) -> #ingress #ty_generics {
-                            #ingress::#name
+                            #ingress::ReadWrite(#read_write_ingress::#name)
                         }
                     }
                 }
@@ -404,18 +373,26 @@ fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
 
                     impl #impl_generics #actor::Tell<#ingress #ty_generics> for #name #wrapper_generics_args #where_clause {
                         fn into_ingress(self) -> #ingress #ty_generics {
-                            #ingress::#name { #(#assign_fields)* }
+                            #ingress::ReadWrite(#read_write_ingress::#name { #(#assign_fields)* })
                         }
                     }
                 }
             }
         }
-        ItemKind::Ask { response } => {
+        ItemKind::Ask {
+            response,
+            read_write,
+        } => {
             let usage = collect_usage_from_fields(&item.fields, ctx.names);
             let (wrapper_generics_decl, wrapper_generics_args) =
                 wrapper_generics_tokens(ctx.generics, &usage);
 
             if item.is_unit() {
+                let constructor = if *read_write {
+                    quote!(#ingress::ReadWrite(#read_write_ingress::#name { response }))
+                } else {
+                    quote!(#ingress::ReadOnly(#readonly_ingress::#name { response }))
+                };
                 quote! {
                     #(#attrs)*
                     pub(crate) struct #name;
@@ -427,13 +404,24 @@ fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
                             self,
                             response: #actor::oneshot::Sender<Self::Response>,
                         ) -> #ingress #ty_generics {
-                            #ingress::#name { response }
+                            #constructor
                         }
                     }
                 }
             } else {
                 let struct_fields = wrapper_fields(&item.fields);
                 let assign_fields = field_assignments(&item.fields);
+                let constructor = if *read_write {
+                    quote!(#ingress::ReadWrite(#read_write_ingress::#name {
+                        #(#assign_fields)*
+                        response,
+                    }))
+                } else {
+                    quote!(#ingress::ReadOnly(#readonly_ingress::#name {
+                        #(#assign_fields)*
+                        response,
+                    }))
+                };
                 quote! {
                     #(#attrs)*
                     pub(crate) struct #name #wrapper_generics_decl #where_clause {
@@ -447,10 +435,7 @@ fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
                             self,
                             response: #actor::oneshot::Sender<Self::Response>,
                         ) -> #ingress #ty_generics {
-                            #ingress::#name {
-                                #(#assign_fields)*
-                                response,
-                            }
+                            #constructor
                         }
                     }
                 }
@@ -476,10 +461,10 @@ fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
 
                 impl #impl_generics #actor::Tell<#ingress #ty_generics> for #name #wrapper_generics_args #where_clause {
                     fn into_ingress(self) -> #ingress #ty_generics {
-                        #ingress::#name {
+                        #ingress::ReadWrite(#read_write_ingress::#name {
                             #(#assign_fields)*
                             response: self.response,
-                        }
+                        })
                     }
                 }
             }
@@ -491,7 +476,9 @@ fn emit_wrapper(item: &Item, ctx: &WrapperEmitCtx<'_>) -> TokenStream2 {
 ///
 /// - `pub tell` produces `method`, `method_lossy`, and `try_method` (bounded only)
 /// - `pub ask` produces `method` and `method_timeout`
-/// - `pub subscribe` produces `method` returning `oneshot::Receiver<Response>`
+/// - `pub subscribe` produces:
+///   - `method` (lossy enqueue, returns `oneshot::Receiver<Response>`)
+///   - `try_method` (delivery-checked, returns `Result<oneshot::Receiver<Response>, MailboxError>`)
 /// - `unbounded` tell methods are synchronous
 fn emit_mailbox_method(
     item: &Item,
@@ -521,34 +508,34 @@ fn emit_mailbox_method(
     match (&item.kind, mailbox_kind, item.is_unit()) {
         (ItemKind::Tell, MailboxKind::Unbounded, true) => quote! {
             #(#attrs)*
-            pub fn #method(&mut self) -> Result<(), #actor::mailbox::MailboxError> {
+            pub fn #method(&self) -> Result<(), #actor::mailbox::MailboxError> {
                 self.0.tell(#unit_constructor)
             }
 
             #(#attrs)*
-            pub fn #lossy_method(&mut self) -> bool {
+            pub fn #lossy_method(&self) -> bool {
                 self.0.tell_lossy(#unit_constructor)
             }
         },
         (ItemKind::Tell, MailboxKind::Unbounded, false) => quote! {
             #(#attrs)*
-            pub fn #method(&mut self, #(#args),*) -> Result<(), #actor::mailbox::MailboxError> {
+            pub fn #method(&self, #(#args),*) -> Result<(), #actor::mailbox::MailboxError> {
                 self.0.tell(#variant { #(#values),* })
             }
 
             #(#attrs)*
-            pub fn #lossy_method(&mut self, #(#args),*) -> bool {
+            pub fn #lossy_method(&self, #(#args),*) -> bool {
                 self.0.tell_lossy(#variant { #(#values),* })
             }
         },
         (ItemKind::Tell, MailboxKind::Bounded, true) => quote! {
             #(#attrs)*
-            pub async fn #method(&mut self) -> Result<(), #actor::mailbox::MailboxError> {
+            pub async fn #method(&self) -> Result<(), #actor::mailbox::MailboxError> {
                 self.0.tell(#unit_constructor).await
             }
 
             #(#attrs)*
-            pub async fn #lossy_method(&mut self) -> bool {
+            pub async fn #lossy_method(&self) -> bool {
                 self.0.tell_lossy(#unit_constructor).await
             }
 
@@ -559,12 +546,12 @@ fn emit_mailbox_method(
         },
         (ItemKind::Tell, MailboxKind::Bounded, false) => quote! {
             #(#attrs)*
-            pub async fn #method(&mut self, #(#args),*) -> Result<(), #actor::mailbox::MailboxError> {
+            pub async fn #method(&self, #(#args),*) -> Result<(), #actor::mailbox::MailboxError> {
                 self.0.tell(#variant { #(#values),* }).await
             }
 
             #(#attrs)*
-            pub async fn #lossy_method(&mut self, #(#args),*) -> bool {
+            pub async fn #lossy_method(&self, #(#args),*) -> bool {
                 self.0.tell_lossy(#variant { #(#values),* }).await
             }
 
@@ -573,15 +560,15 @@ fn emit_mailbox_method(
                 self.0.try_tell(#variant { #(#values),* })
             }
         },
-        (ItemKind::Ask { response }, _, true) => quote! {
+        (ItemKind::Ask { response, .. }, _, true) => quote! {
             #(#attrs)*
-            pub async fn #method(&mut self) -> Result<#response, #actor::mailbox::MailboxError> {
+            pub async fn #method(&self) -> Result<#response, #actor::mailbox::MailboxError> {
                 self.0.ask(#unit_constructor).await
             }
 
             /// Like [`Self::#method`] but races the response against `timeout`.
             pub async fn #timeout_method<__Timeout>(
-                &mut self,
+                &self,
                 timeout: __Timeout,
             ) -> Result<#response, #actor::mailbox::MailboxError>
             where
@@ -590,15 +577,15 @@ fn emit_mailbox_method(
                 self.0.ask_timeout(#unit_constructor, timeout).await
             }
         },
-        (ItemKind::Ask { response }, _, false) => quote! {
+        (ItemKind::Ask { response, .. }, _, false) => quote! {
             #(#attrs)*
-            pub async fn #method(&mut self, #(#args),*) -> Result<#response, #actor::mailbox::MailboxError> {
+            pub async fn #method(&self, #(#args),*) -> Result<#response, #actor::mailbox::MailboxError> {
                 self.0.ask(#variant { #(#values),* }).await
             }
 
             /// Like [`Self::#method`] but races the response against `timeout`.
             pub async fn #timeout_method<__Timeout>(
-                &mut self,
+                &self,
                 #(#args,)*
                 timeout: __Timeout,
             ) -> Result<#response, #actor::mailbox::MailboxError>
@@ -610,34 +597,62 @@ fn emit_mailbox_method(
         },
         (ItemKind::Subscribe { response }, MailboxKind::Bounded, true) => quote! {
             #(#attrs)*
-            pub async fn #method(&mut self) -> #actor::oneshot::Receiver<#response> {
+            pub async fn #method(&self) -> #actor::oneshot::Receiver<#response> {
                 let (tx, rx) = #actor::oneshot::channel();
                 self.0.tell_lossy(#variant { response: tx }).await;
                 rx
             }
+
+            #(#attrs)*
+            pub async fn #try_method(&self) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
+                let (tx, rx) = #actor::oneshot::channel();
+                self.0.tell(#variant { response: tx }).await?;
+                Ok(rx)
+            }
         },
         (ItemKind::Subscribe { response }, MailboxKind::Bounded, false) => quote! {
             #(#attrs)*
-            pub async fn #method(&mut self, #(#args),*) -> #actor::oneshot::Receiver<#response> {
+            pub async fn #method(&self, #(#args),*) -> #actor::oneshot::Receiver<#response> {
                 let (tx, rx) = #actor::oneshot::channel();
                 self.0.tell_lossy(#variant { #(#values,)* response: tx }).await;
                 rx
             }
+
+            #(#attrs)*
+            pub async fn #try_method(&self, #(#args),*) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
+                let (tx, rx) = #actor::oneshot::channel();
+                self.0.tell(#variant { #(#values,)* response: tx }).await?;
+                Ok(rx)
+            }
         },
         (ItemKind::Subscribe { response }, MailboxKind::Unbounded, true) => quote! {
             #(#attrs)*
-            pub fn #method(&mut self) -> #actor::oneshot::Receiver<#response> {
+            pub fn #method(&self) -> #actor::oneshot::Receiver<#response> {
                 let (tx, rx) = #actor::oneshot::channel();
                 self.0.tell_lossy(#variant { response: tx });
                 rx
             }
+
+            #(#attrs)*
+            pub fn #try_method(&self) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
+                let (tx, rx) = #actor::oneshot::channel();
+                self.0.tell(#variant { response: tx })?;
+                Ok(rx)
+            }
         },
         (ItemKind::Subscribe { response }, MailboxKind::Unbounded, false) => quote! {
             #(#attrs)*
-            pub fn #method(&mut self, #(#args),*) -> #actor::oneshot::Receiver<#response> {
+            pub fn #method(&self, #(#args),*) -> #actor::oneshot::Receiver<#response> {
                 let (tx, rx) = #actor::oneshot::channel();
                 self.0.tell_lossy(#variant { #(#values,)* response: tx });
                 rx
+            }
+
+            #(#attrs)*
+            pub fn #try_method(&self, #(#args),*) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
+                let (tx, rx) = #actor::oneshot::channel();
+                self.0.tell(#variant { #(#values,)* response: tx })?;
+                Ok(rx)
             }
         },
     }
@@ -658,18 +673,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     } = input;
 
     let ingress = format_ident!("{}Message", mailbox);
+    let readonly_ingress = format_ident!("{}ReadOnlyMessage", mailbox);
+    let read_write_ingress = format_ident!("{}ReadWriteMessage", mailbox);
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let names = GenericParamNames::from_generics(&generics);
-    let global_usage = collect_usage_for_items(&items, &names);
-    if let Err(err) = ensure_mailbox_generics_are_used(&generics, &global_usage, &mailbox) {
-        return err.to_compile_error().into();
-    }
 
-    let variants = items.iter().map(|item| emit_variant(item, &actor));
+    let readonly_variants = items
+        .iter()
+        .filter_map(|item| emit_readonly_variant(item, &actor));
+    let read_write_variants = items
+        .iter()
+        .filter_map(|item| emit_read_write_variant(item, &actor));
     let wrappers = items.iter().map(|item| {
         let ctx = WrapperEmitCtx {
             actor: &actor,
             ingress: &ingress,
+            readonly_ingress: &readonly_ingress,
+            read_write_ingress: &read_write_ingress,
             impl_generics: quote!(#impl_generics),
             ty_generics: quote!(#ty_generics),
             where_clause,
@@ -682,15 +702,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .filter(|item| item.expose_on_mailbox)
         .map(|item| emit_mailbox_method(item, &actor, mailbox_kind, false));
-
     let mailbox_inner_ty = match mailbox_kind {
         MailboxKind::Bounded => quote!(#actor::mailbox::Mailbox<#ingress #ty_generics>),
         MailboxKind::Unbounded => quote!(#actor::mailbox::UnboundedMailbox<#ingress #ty_generics>),
     };
 
     quote! {
+        pub enum #readonly_ingress #generics #where_clause {
+            #(#readonly_variants)*
+        }
+
+        pub enum #read_write_ingress #generics #where_clause {
+            #(#read_write_variants)*
+        }
+
         pub enum #ingress #generics #where_clause {
-            #(#variants)*
+            ReadOnly(#readonly_ingress #ty_generics),
+            ReadWrite(#read_write_ingress #ty_generics),
         }
 
         pub struct #mailbox #generics #where_clause (#mailbox_inner_ty);
@@ -715,6 +743,18 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
         impl #impl_generics #mailbox #ty_generics #where_clause {
             #(#methods)*
+        }
+
+        impl #impl_generics #actor::IntoIngressEnvelope for #ingress #ty_generics #where_clause {
+            type ReadOnlyIngress = #readonly_ingress #ty_generics;
+            type ReadWriteIngress = #read_write_ingress #ty_generics;
+
+            fn into_ingress_envelope(self) -> #actor::IngressEnvelope<Self::ReadOnlyIngress, Self::ReadWriteIngress> {
+                match self {
+                    Self::ReadOnly(message) => #actor::IngressEnvelope::ReadOnly(message),
+                    Self::ReadWrite(message) => #actor::IngressEnvelope::ReadWrite(message),
+                }
+            }
         }
 
         #(#wrappers)*
