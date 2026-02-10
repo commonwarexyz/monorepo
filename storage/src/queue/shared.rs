@@ -59,19 +59,19 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
     /// # Errors
     ///
     /// Returns an error if any append or the final commit fails.
-    pub async fn enqueue_bulk(&self, items: &[V]) -> Result<Range<u64>, Error>
-    where
-        V: Clone,
-    {
+    pub async fn enqueue_bulk(
+        &self,
+        items: impl IntoIterator<Item = V>,
+    ) -> Result<Range<u64>, Error> {
         let mut queue = self.queue.lock().await;
         let start = queue.size();
         for item in items {
-            queue.append(item.clone()).await?;
-        }
-        if !items.is_empty() {
-            queue.commit().await?;
+            queue.append(item).await?;
         }
         let end = queue.size();
+        if end > start {
+            queue.commit().await?;
+        }
         drop(queue);
 
         if start < end {
@@ -291,10 +291,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_shared_append_flush() {
+    fn test_shared_append_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_append_flush");
+            let cfg = test_config("test_shared_append_commit");
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // Append several items without committing
@@ -331,8 +331,10 @@ mod tests {
             let cfg = test_config("test_shared_bulk");
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
-            let items: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i]).collect();
-            let range = writer.enqueue_bulk(&items).await.unwrap();
+            let range = writer
+                .enqueue_bulk((0..5u8).map(|i| vec![i]))
+                .await
+                .unwrap();
             assert_eq!(range, 0..5);
 
             for i in 0..5 {

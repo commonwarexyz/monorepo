@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_append_flush_batch() {
+    fn test_append_commit_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch");
@@ -458,7 +458,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_append_flush_persistence() {
+    fn test_append_commit_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch_persist");
