@@ -251,9 +251,9 @@ mod tests {
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
                     journal_page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                     strategy: Sequential,
                 },
@@ -499,9 +499,9 @@ mod tests {
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
                                 journal_page_cache: CacheRef::new(
+                                    context.storage_buffer_pool().clone(),
                                     PAGE_SIZE,
                                     PAGE_CACHE_SIZE,
-                                    context.storage_buffer_pool().clone(),
                                 ),
                                 strategy: Sequential,
                             },
@@ -652,9 +652,9 @@ mod tests {
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
                             journal_page_cache: CacheRef::new(
+                                context.storage_buffer_pool().clone(),
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
-                                context.storage_buffer_pool().clone(),
                             ),
                             strategy: Sequential,
                         },
@@ -739,9 +739,9 @@ mod tests {
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
                             journal_page_cache: CacheRef::new(
+                                context.storage_buffer_pool().clone(),
                                 PAGE_SIZE,
                                 PAGE_CACHE_SIZE,
-                                context.storage_buffer_pool().clone(),
                             ),
                             strategy: Sequential,
                         },
@@ -1083,7 +1083,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, context.storage_buffer_pool().clone()),
+                        journal_page_cache: CacheRef::new(context.storage_buffer_pool().clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
                         strategy: Sequential,
                     },
                 );

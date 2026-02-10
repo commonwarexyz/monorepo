@@ -382,9 +382,9 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref = super::super::CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
-                context.storage_buffer_pool().clone(),
             );
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
@@ -423,9 +423,9 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
             let cache_ref = super::super::CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
-                context.storage_buffer_pool().clone(),
             );
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
@@ -455,9 +455,9 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref = super::super::CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
-                context.storage_buffer_pool().clone(),
             );
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
@@ -514,9 +514,9 @@ mod tests {
             assert_eq!(blob_size, 0);
 
             let cache_ref = super::super::CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
-                context.storage_buffer_pool().clone(),
             );
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
@@ -556,9 +556,9 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
             let cache_ref = super::super::CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_PAGES),
-                context.storage_buffer_pool().clone(),
             );
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await

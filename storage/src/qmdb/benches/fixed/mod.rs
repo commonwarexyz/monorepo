@@ -118,7 +118,7 @@ fn any_cfg(pool: ThreadPool, storage_pool: commonware_runtime::BufferPool) -> AC
         log_write_buffer: WRITE_BUFFER_SIZE,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -138,7 +138,7 @@ fn current_cfg(
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -158,7 +158,7 @@ fn variable_any_cfg(
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -180,7 +180,7 @@ fn variable_current_cfg(
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

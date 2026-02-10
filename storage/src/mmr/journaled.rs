@@ -812,7 +812,7 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1512,9 +1512,9 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 },
             )
@@ -1569,9 +1569,9 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 },
             )
@@ -1600,9 +1600,9 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 },
             )
@@ -1986,9 +1986,9 @@ mod tests {
                 write_buffer: NZUsize!(64),
                 thread_pool: None,
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
             };
 

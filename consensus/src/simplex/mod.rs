@@ -686,9 +686,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -960,9 +960,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1133,9 +1133,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1329,9 +1329,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1453,9 +1453,9 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1600,9 +1600,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -1849,9 +1849,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2032,9 +2032,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2252,9 +2252,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2469,9 +2469,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2740,9 +2740,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -2933,9 +2933,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3118,9 +3118,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3299,9 +3299,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3393,9 +3393,9 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3631,9 +3631,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3804,9 +3804,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -3991,9 +3991,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4147,9 +4147,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4330,9 +4330,9 @@ mod tests {
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4559,9 +4559,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -4809,9 +4809,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine =
@@ -5150,9 +5150,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5304,9 +5304,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5404,9 +5404,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5852,9 +5852,9 @@ mod tests {
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
@@ -5913,9 +5913,9 @@ mod tests {
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);

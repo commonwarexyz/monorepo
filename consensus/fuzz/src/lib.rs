@@ -381,9 +381,9 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            context.storage_buffer_pool().clone(),
         ),
         strategy: Sequential,
     };
@@ -612,9 +612,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::new(
+                    primary_context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    primary_context.storage_buffer_pool().clone(),
                 ),
                 strategy: Sequential,
             };

@@ -226,9 +226,9 @@ mod tests {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
-                context.storage_buffer_pool().clone(),
             ),
             strategy: Sequential,
         };
@@ -802,9 +802,9 @@ mod tests {
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
             let page_cache = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
-                context.storage_buffer_pool().clone(),
             );
             let control = oracle.control(validator.clone());
 

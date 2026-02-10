@@ -52,9 +52,9 @@ pub async fn init(ctx: Context) -> FreezerType {
         key_partition: KEY_PARTITION.into(),
         key_write_buffer: NZUsize!(WRITE_BUFFER),
         key_page_cache: CacheRef::new(
+            ctx.storage_buffer_pool().clone(),
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            ctx.storage_buffer_pool().clone(),
         ),
         value_partition: VALUE_PARTITION.into(),
         value_compression: None,

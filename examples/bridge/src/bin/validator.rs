@@ -259,9 +259,9 @@ fn main() {
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(16_384),
                     NZUsize!(10_000),
-                    context.storage_buffer_pool().clone(),
                 ),
                 strategy,
             },

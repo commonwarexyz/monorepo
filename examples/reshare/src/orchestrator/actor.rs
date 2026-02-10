@@ -110,9 +110,9 @@ where
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         let page_cache_ref = CacheRef::new(
+            context.storage_buffer_pool().clone(),
             NZU16!(16_384),
             NZUsize!(10_000),
-            context.storage_buffer_pool().clone(),
         );
 
         // Register latest_epoch gauge for Grafana integration

@@ -102,9 +102,9 @@ fn mmr_config(
         write_buffer,
         thread_pool: None,
         page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             page_size,
             page_cache_size,
-            context.storage_buffer_pool().clone(),
         ),
     }
 }

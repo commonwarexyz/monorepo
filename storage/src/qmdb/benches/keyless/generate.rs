@@ -50,7 +50,7 @@ fn keyless_cfg(
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

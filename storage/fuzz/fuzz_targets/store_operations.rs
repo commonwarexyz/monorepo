@@ -102,9 +102,9 @@ fn test_config(
         log_items_per_section: NZU64!(7),
         translator: TwoCap,
         page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
-            context.storage_buffer_pool().clone(),
         ),
     }
 }

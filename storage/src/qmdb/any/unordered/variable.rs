@@ -204,7 +204,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -601,7 +601,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(NZU16!(77), NZUsize!(9), pool),
+            page_cache: CacheRef::new(pool, NZU16!(77), NZUsize!(9)),
         }
     }
 

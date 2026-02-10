@@ -54,9 +54,9 @@ fn fuzz(input: FuzzInput) {
             key_partition: "fuzz_key".into(),
             key_write_buffer: NZUsize!(1024 * 1024),
             key_page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
-                context.storage_buffer_pool().clone(),
             ),
             value_partition: "fuzz_value".into(),
             value_compression: None,

@@ -51,10 +51,9 @@ fn fuzz(data: FuzzInput) {
             translator: EightCap,
             key_partition: "test_key".into(),
             key_page_cache: CacheRef::new(
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
                 context.storage_buffer_pool().clone(),
-            ),
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE),
             value_partition: "test_value".into(),
             items_per_section: NZU64!(1024),
             key_write_buffer: NZUsize!(1024),

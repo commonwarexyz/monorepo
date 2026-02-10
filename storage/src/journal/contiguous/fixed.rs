@@ -803,7 +803,7 @@ mod tests {
         Config {
             partition: "test_partition".into(),
             items_per_blob,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1803,9 +1803,9 @@ mod tests {
                 partition: "single_item_per_blob".into(),
                 items_per_blob: NZU64!(1),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(2048),
             };

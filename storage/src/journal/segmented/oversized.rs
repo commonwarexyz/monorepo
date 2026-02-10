@@ -520,7 +520,7 @@ mod tests {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
-            index_page_cache: CacheRef::new(NZU16!(64), NZUsize!(8), pool),
+            index_page_cache: CacheRef::new(pool, NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -919,9 +919,9 @@ mod tests {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
                 index_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
-                    context.storage_buffer_pool().clone(),
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
@@ -1459,9 +1459,9 @@ mod tests {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
                 index_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
-                    context.storage_buffer_pool().clone(),
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
@@ -1744,9 +1744,9 @@ mod tests {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
                 index_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
-                    context.storage_buffer_pool().clone(),
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
@@ -2477,9 +2477,9 @@ mod tests {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
                 index_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
-                    context.storage_buffer_pool().clone(),
                 ),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),

@@ -101,13 +101,13 @@ pub struct CacheRef {
 impl CacheRef {
     /// Returns a new [CacheRef] that will buffer up to `capacity` pages with the
     /// given `page_size` and explicitly provided `pool`.
-    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize, pool: BufferPool) -> Self {
+    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64 = page_size.get() as u64;
 
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(page_size, capacity, pool.clone()))),
+            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             pool,
         }
     }
@@ -333,7 +333,7 @@ impl CacheRef {
 impl Cache {
     /// Return a new empty page cache with an initial next-blob id of 0, and a max cache capacity
     /// of `capacity` pages, each of size `page_size` bytes.
-    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize, pool: BufferPool) -> Self {
+    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
         let capacity = capacity.get();
         let mut slots = Vec::with_capacity(capacity);
@@ -473,7 +473,7 @@ mod tests {
     fn test_cache_basic() {
         let mut registry = Registry::default();
         let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
-        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(10), pool);
+        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
@@ -545,9 +545,9 @@ mod tests {
 
             // Fill the page cache with the blob's data via CacheRef::read.
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(10),
-                context.storage_buffer_pool().clone(),
             );
             assert_eq!(cache_ref.next_id().await, 0);
             assert_eq!(cache_ref.next_id().await, 1);
@@ -582,9 +582,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(2),
-                context.storage_buffer_pool().clone(),
             );
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
@@ -615,9 +615,9 @@ mod tests {
             // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 NZU16!(MIN_PAGE_SIZE as u16),
                 NZUsize!(2),
-                context.storage_buffer_pool().clone(),
             );
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical

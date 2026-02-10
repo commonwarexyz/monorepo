@@ -55,9 +55,9 @@ fn fuzz(data: FuzzInput) {
             translator: EightCap,
             thread_pool: None,
             page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
-                context.storage_buffer_pool().clone(),
             ),
         };
 

@@ -263,9 +263,9 @@ mod tests {
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
                     journal_page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        context.storage_buffer_pool().clone(),
                     ),
                     strategy: Sequential,
                 },
@@ -793,9 +793,9 @@ mod tests {
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                         strategy: Sequential,
                     },
@@ -955,9 +955,9 @@ mod tests {
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
                         journal_page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                         strategy: Sequential,
                     },
@@ -1013,9 +1013,9 @@ mod tests {
                         ),
                         journal_compression: Some(3),
                         journal_page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
-                            context.storage_buffer_pool().clone(),
                         ),
                         strategy: Sequential,
                     },

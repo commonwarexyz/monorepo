@@ -1248,9 +1248,9 @@ mod tests {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(1024),
                     NZUsize!(10),
-                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
@@ -1307,9 +1307,9 @@ mod tests {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     NZU16!(1024),
                     NZUsize!(10),
-                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,

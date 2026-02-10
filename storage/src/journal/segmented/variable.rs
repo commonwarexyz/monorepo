@@ -66,7 +66,7 @@
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10), pool),
+//!         page_cache: CacheRef::new(pool, NZU16!(1024), NZUsize!(10)),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
@@ -684,9 +684,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -751,9 +751,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -827,9 +827,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -925,9 +925,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1033,9 +1033,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1096,9 +1096,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1132,9 +1132,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1191,9 +1191,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1252,9 +1252,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1318,9 +1318,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1394,9 +1394,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1547,9 +1547,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1618,9 +1618,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1677,9 +1677,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1734,9 +1734,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1799,9 +1799,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1866,9 +1866,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1918,9 +1918,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -1962,9 +1962,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2028,9 +2028,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2076,7 +2076,7 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, context.storage_buffer_pool().clone()),
+                page_cache: CacheRef::new(context.storage_buffer_pool().clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2153,9 +2153,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(4096),
             };
@@ -2231,9 +2231,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2354,9 +2354,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2451,9 +2451,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(4096),
             };
@@ -2532,9 +2532,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     SMALL_PAGE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };
@@ -2604,9 +2604,9 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };

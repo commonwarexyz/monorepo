@@ -29,9 +29,9 @@ impl Conformance for ContiguousFixed {
                 partition: format!("contiguous-fixed-conformance-{seed}"),
                 items_per_blob: ITEMS_PER_BLOB,
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
             };
@@ -64,9 +64,9 @@ impl Conformance for ContiguousVariable {
                 partition: format!("contiguous-variable-conformance-{seed}"),
                 items_per_section: ITEMS_PER_BLOB,
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
@@ -105,9 +105,9 @@ impl Conformance for SegmentedFixed {
             let config = segmented_fixed::Config {
                 partition: format!("segmented-fixed-conformance-{seed}"),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
             };
@@ -189,9 +189,9 @@ impl Conformance for SegmentedVariable {
             let config = segmented_variable::Config {
                 partition: format!("segmented-variable-conformance-{seed}"),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
@@ -287,9 +287,9 @@ impl Conformance for SegmentedOversized {
                 index_partition: format!("segmented-oversized-index-conformance-{seed}"),
                 value_partition: format!("segmented-oversized-value-conformance-{seed}"),
                 index_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 index_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,

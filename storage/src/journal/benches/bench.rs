@@ -54,9 +54,9 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         items_per_blob,
         write_buffer: WRITE_BUFFER,
         page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            context.storage_buffer_pool().clone(),
         ),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
@@ -96,9 +96,9 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         compression: None,
         codec_config: (),
         page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            context.storage_buffer_pool().clone(),
         ),
         write_buffer: WRITE_BUFFER,
     };

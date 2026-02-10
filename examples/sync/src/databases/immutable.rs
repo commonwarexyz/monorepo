@@ -38,9 +38,9 @@ pub fn create_config(pool: BufferPool) -> Config<Translator, ()> {
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
         page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+            pool,
             NZU16!(1024),
             NZUsize!(10),
-            pool,
         ),
     }
 }

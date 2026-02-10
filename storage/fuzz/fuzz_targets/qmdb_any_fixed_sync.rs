@@ -103,9 +103,9 @@ fn test_config(test_name: &str, context: &deterministic::Context) -> Config<TwoC
         translator: TwoCap,
         thread_pool: None,
         page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             NZUsize!(1),
-            context.storage_buffer_pool().clone(),
         ),
     }
 }

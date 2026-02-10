@@ -36,7 +36,7 @@
 //!         log_codec_config: (),
 //!         log_items_per_section: NZU64!(4),
 //!         translator: TwoCap,
-//!         page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE), ctx.storage_buffer_pool().clone()),
+//!         page_cache: CacheRef::new(ctx.storage_buffer_pool().clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -583,9 +583,9 @@ mod test {
             log_items_per_section: NZU64!(7),
             translator: TwoCap,
             page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 PAGE_CACHE_SIZE,
-                context.storage_buffer_pool().clone(),
             ),
         };
         TestStore::init(context, cfg).await.unwrap()

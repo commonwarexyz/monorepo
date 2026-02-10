@@ -187,9 +187,9 @@ impl<E: Clock + RuntimeStorage + Metrics + BufferPooler, V: Variant, P: PublicKe
     /// Replays metadata and journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
         let page_cache = CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             PAGE_CACHE_CAPACITY,
-            context.storage_buffer_pool().clone(),
         );
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(

@@ -123,9 +123,9 @@ fn fixed_config(
         partition: partition.to_string(),
         items_per_blob: NZU64!(items_per_section),
         page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+            pool,
             page_size,
             page_cache_size,
-            pool,
         ),
         write_buffer,
     }
@@ -145,9 +145,9 @@ fn variable_config(
         compression: None,
         codec_config: (),
         page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+            pool,
             page_size,
             page_cache_size,
-            pool,
         ),
         write_buffer,
     }

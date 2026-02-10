@@ -372,7 +372,7 @@ mod tests {
     fn test_cfg(pool: commonware_runtime::BufferPool) -> Config {
         Config {
             partition: "test_partition".into(),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1166,9 +1166,9 @@ mod tests {
             let cfg = Config {
                 partition: "clear_test".into(),
                 page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 write_buffer: NZUsize!(1024),
             };

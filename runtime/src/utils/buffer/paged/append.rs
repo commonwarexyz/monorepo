@@ -944,9 +944,9 @@ mod tests {
 
             // Create a page cache reference.
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
 
             // Create an Append wrapper.
@@ -982,9 +982,9 @@ mod tests {
 
             // Create a page cache reference.
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
 
             // Create an Append wrapper.
@@ -1106,9 +1106,9 @@ mod tests {
 
             // Create a page cache reference.
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
 
             // Create an Append wrapper and write some data.
@@ -1210,9 +1210,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
@@ -1340,9 +1340,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
@@ -1482,9 +1482,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
@@ -1573,9 +1573,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             let slot0_offset = PAGE_SIZE.get() as u64;
@@ -1711,9 +1711,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             // crc2 is at offset: PAGE_SIZE + 6 (for len2) + 2 (skip len2 bytes) = PAGE_SIZE + 8
@@ -1849,9 +1849,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
             // crc2 for page 0 is at offset: PAGE_SIZE + 8
@@ -2012,9 +2012,9 @@ mod tests {
 
         executor.start(|context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
@@ -2077,9 +2077,9 @@ mod tests {
             const BUFFER_SIZE: usize = 256;
 
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(4),
-                context.storage_buffer_pool().clone(),
             );
 
             let (blob, size) = context
@@ -2142,9 +2142,9 @@ mod tests {
 
         executor.start(|context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
 
@@ -2217,9 +2217,9 @@ mod tests {
 
         executor.start(|context| async move {
             let cache_ref = CacheRef::new(
+                context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
                 NZUsize!(BUFFER_SIZE),
-                context.storage_buffer_pool().clone(),
             );
 
             // Step 1: Create blob with valid data

@@ -397,9 +397,9 @@ fn fuzz(input: FuzzInput) {
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
                 page_cache: CacheRef::new(
+                    ctx.storage_buffer_pool().clone(),
                     page_size,
                     page_cache_size,
-                    ctx.storage_buffer_pool().clone(),
                 ),
                 write_buffer,
             };
@@ -433,9 +433,9 @@ fn fuzz(input: FuzzInput) {
             compression: None,
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::new(
+                ctx.storage_buffer_pool().clone(),
                 page_size,
                 page_cache_size,
-                ctx.storage_buffer_pool().clone(),
             ),
             write_buffer,
         };

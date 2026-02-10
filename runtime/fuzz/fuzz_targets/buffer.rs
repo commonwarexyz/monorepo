@@ -177,9 +177,9 @@ fn fuzz(input: FuzzInput) {
                     if cache_ref.is_none() {
                         let cache_page_size = cache_page_size.clamp(1, u16::MAX);
                         cache_ref = Some(CacheRef::new(
+                            context.storage_buffer_pool().clone(),
                             NZU16!(cache_page_size),
                             cache_capacity,
-                            context.storage_buffer_pool().clone(),
                         ));
                         cache_page_size_ref = Some(cache_page_size);
                     }

@@ -166,9 +166,9 @@ fn test_cfg(context: &deterministic::Context) -> Config<()> {
         index_partition: INDEX_PARTITION.to_string(),
         value_partition: VALUE_PARTITION.to_string(),
         index_page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_SIZE,
             PAGE_CACHE_SIZE,
-            context.storage_buffer_pool().clone(),
         ),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),

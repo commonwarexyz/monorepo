@@ -21,9 +21,9 @@ impl Conformance for Freezer {
                 key_partition: format!("freezer-key-conformance-{seed}"),
                 key_write_buffer: WRITE_BUFFER,
                 key_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: format!("freezer-value-conformance-{seed}"),
                 value_compression: None,

@@ -26,9 +26,9 @@ impl Conformance for ArchivePrunable {
                 translator: TwoCap,
                 key_partition: format!("archive-prunable-key-{seed}"),
                 key_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 value_partition: format!("archive-prunable-value-{seed}"),
                 compression: None,
@@ -75,9 +75,9 @@ impl Conformance for ArchiveImmutable {
                 freezer_table_resize_chunk_size: 32,
                 freezer_key_partition: format!("archive-immutable-key-{seed}"),
                 freezer_key_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
                     PAGE_SIZE,
                     PAGE_CACHE_SIZE,
-                    context.storage_buffer_pool().clone(),
                 ),
                 freezer_value_partition: format!("archive-immutable-value-{seed}"),
                 freezer_value_target_size: 1024 * 1024,

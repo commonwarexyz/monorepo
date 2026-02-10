@@ -16,9 +16,9 @@ pub fn bench(c: &mut Criterion) {
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
                     let cache_ref = CacheRef::new(
+                        ctx.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         NZUsize!(CACHE_SIZE),
-                        ctx.storage_buffer_pool().clone(),
                     );
                     let append = create_append(&ctx, &name, cache_ref).await;
 

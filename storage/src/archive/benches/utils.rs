@@ -69,9 +69,9 @@ impl Archive {
                     freezer_table_resize_chunk_size: 1024,
                     freezer_key_partition: "archive_bench_key".into(),
                     freezer_key_page_cache: CacheRef::new(
+                        ctx.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        ctx.storage_buffer_pool().clone(),
                     ),
                     freezer_value_partition: "archive_bench_value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
@@ -91,9 +91,9 @@ impl Archive {
                     translator: TwoCap,
                     key_partition: "archive_bench_key".into(),
                     key_page_cache: CacheRef::new(
+                        ctx.storage_buffer_pool().clone(),
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
-                        ctx.storage_buffer_pool().clone(),
                     ),
                     value_partition: "archive_bench_value".into(),
                     compression,

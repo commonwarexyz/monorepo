@@ -133,9 +133,9 @@ where
 {
     pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
         let page_cache = CacheRef::new(
+            context.storage_buffer_pool().clone(),
             PAGE_CACHE_PAGE_SIZE,
             PAGE_CACHE_CAPACITY,
-            context.storage_buffer_pool().clone(),
         );
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());

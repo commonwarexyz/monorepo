@@ -102,7 +102,7 @@ fn any_cfg(
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -135,7 +135,7 @@ fn current_cfg(
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, storage_pool),
+        page_cache: CacheRef::new(storage_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

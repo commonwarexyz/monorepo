@@ -93,10 +93,9 @@ fn fuzz(data: FuzzInput) {
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
             page_cache: CacheRef::new(
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
                 context.storage_buffer_pool().clone(),
-            ),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,
         };
 
