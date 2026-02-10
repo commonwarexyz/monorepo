@@ -8,7 +8,7 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Closer, CloserOf, Clock, ContextCell, Handle, KeyedRateLimiter,
+    spawn_cell, BufferPooler, Clock, Closer, CloserOf, ContextCell, Handle, KeyedRateLimiter,
     Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};

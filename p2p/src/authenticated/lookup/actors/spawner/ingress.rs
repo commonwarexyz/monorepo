@@ -21,11 +21,7 @@ impl<Si: Sink, St: Stream, Cl: Closer, P: PublicKey> Mailbox<Message<Si, St, Cl,
     ///
     /// This may fail during shutdown if the spawner has already exited,
     /// which is harmless since no new connections need to be spawned.
-    pub async fn spawn(
-        &mut self,
-        connection: Connection<Si, St, Cl>,
-        reservation: Reservation<P>,
-    ) {
+    pub async fn spawn(&mut self, connection: Connection<Si, St, Cl>, reservation: Reservation<P>) {
         self.0
             .send_lossy(Message::Spawn {
                 peer: reservation.metadata().public_key().clone(),

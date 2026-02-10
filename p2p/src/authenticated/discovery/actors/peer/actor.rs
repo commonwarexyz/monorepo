@@ -17,7 +17,7 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, Closer, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::encrypted::Sender;
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,

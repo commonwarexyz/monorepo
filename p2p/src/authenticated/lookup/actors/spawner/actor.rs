@@ -38,8 +38,13 @@ pub struct Actor<
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, Cl: Closer, C: PublicKey>
-    Actor<E, Si, St, Cl, C>
+impl<
+        E: Spawner + Clock + CryptoRngCore + Metrics,
+        Si: Sink,
+        St: Stream,
+        Cl: Closer,
+        C: PublicKey,
+    > Actor<E, Si, St, Cl, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, Cl, C>>) {
         let connections = Gauge::default();

@@ -46,8 +46,13 @@ pub struct Actor<
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, Cl: Closer, C: PublicKey>
-    Actor<E, O, I, Cl, C>
+impl<
+        E: Spawner + Clock + CryptoRngCore + Metrics,
+        O: Sink,
+        I: Stream,
+        Cl: Closer,
+        C: PublicKey,
+    > Actor<E, O, I, Cl, C>
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, Cl, C>>) {

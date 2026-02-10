@@ -1,6 +1,8 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BufMut, Closer as CloserTrait, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{
+    BufMut, Closer as CloserTrait, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait,
+};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::channel::oneshot;
 use std::sync::{Arc, Mutex};
