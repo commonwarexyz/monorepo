@@ -105,9 +105,9 @@ impl<
         NetR: Receiver<PublicKey = P>,
     > Engine<E, P, D, B, Key, Con, Pro, NetS, NetR>
 {
-    /// Creates a new `Actor` with the given configuration.
+    /// Creates a new `Engine` with the given configuration.
     ///
-    /// Returns the actor and a mailbox to send messages to it.
+    /// Returns the engine and a mailbox to send messages to it.
     pub fn new(context: E, cfg: Config<P, D, B, Key, Con, Pro>) -> (Self, Mailbox<Key, P>) {
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
 
