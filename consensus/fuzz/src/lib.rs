@@ -360,6 +360,7 @@ fn spawn_honest_validator<P: simplex::Simplex>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator_with_network<P: simplex::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
@@ -438,6 +439,7 @@ fn spawn_honest_validator_with_network<P: simplex::Simplex>(
     reporter
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,

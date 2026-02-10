@@ -59,8 +59,8 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
     }
 
     fn should_drop_honest_message(&self) -> bool {
-        let mut context = self.context.lock().expect("mutex not poisoned");
-        let sample = (context.gen::<u8>() % 100) as u8;
+        let mut context = self.context.lock().unwrap();
+        let sample = context.gen::<u8>() % 100;
         sample < self.honest_messages_drop_ratio
     }
 }
@@ -128,13 +128,11 @@ where
         loop {
             match (self.primary_closed, self.secondary_closed) {
                 (true, true) => {
-                    // Both closed; delegate to primary for the canonical error.
                     return self.primary.recv().await;
                 }
                 (false, true) => return self.primary.recv().await,
                 (true, false) => return self.secondary.recv().await,
                 (false, false) => {
-                    // Biased select: if both have a buffered message, primary wins.
                     let result = select! {
                         msg = self.primary.recv() => (true, msg),
                         msg = self.secondary.recv() => (false, msg),
@@ -149,8 +147,6 @@ where
                             } else {
                                 self.secondary_closed = true;
                             }
-                            // Keep looping; if the other lane is open, it may still yield.
-                            // Otherwise we will fall through to the both-closed case.
                             if self.primary_closed && self.secondary_closed {
                                 return Err(e);
                             }
