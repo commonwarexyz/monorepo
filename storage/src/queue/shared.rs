@@ -156,8 +156,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain pending notifications before checking the queue.
-        while self.notify.try_recv().is_ok() {}
+        // Drain pending notification (capacity is 1, so at most 1 buffered).
+        let _ = self.notify.try_recv();
 
         self.queue.lock().await.dequeue().await
     }
