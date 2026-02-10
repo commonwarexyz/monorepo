@@ -7,6 +7,7 @@
 //! Writers can be cloned to allow multiple tasks to enqueue items concurrently.
 
 use super::{Config, Error, Queue};
+use crate::Persistable;
 use commonware_codec::CodecShared;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::channel::mpsc;
@@ -51,13 +52,13 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
         Ok(pos)
     }
 
-    /// Enqueue a batch of items with a single flush, returning positions
+    /// Enqueue a batch of items with a single commit, returning positions
     /// `[start, end)`. The lock is held for the full batch, so no reader can
     /// see any item until the entire batch is durable.
     ///
     /// # Errors
     ///
-    /// Returns an error if any append or the final flush fails.
+    /// Returns an error if any append or the final commit fails.
     pub async fn enqueue_bulk(&self, items: &[V]) -> Result<Range<u64>, Error>
     where
         V: Clone,
@@ -68,7 +69,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
             queue.append(item.clone()).await?;
         }
         if !items.is_empty() {
-            queue.flush().await?;
+            queue.commit().await?;
         }
         let end = queue.size();
         drop(queue);
@@ -80,9 +81,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
         Ok(start..end)
     }
 
-    /// Append an item without flushing, returning its position. The item
+    /// Append an item without committing, returning its position. The item
     /// is immediately visible to the reader but is **not durable** until
-    /// [Self::flush] is called or the underlying journal auto-syncs at a
+    /// [Self::commit] is called or the underlying journal auto-syncs at a
     /// section boundary (see [`variable::Journal`](crate::journal::contiguous::variable::Journal)
     /// invariant 1).
     ///
@@ -96,14 +97,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
         Ok(pos)
     }
 
-    /// Flush all previously appended items to disk. After this returns
-    /// successfully, all appended items are durable.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn flush(&self) -> Result<(), Error> {
-        self.queue.lock().await.flush().await
+    /// See [Queue::commit](super::Queue::commit).
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.queue.lock().await.commit().await
     }
 
     /// Returns the total number of items that have been enqueued.
@@ -311,8 +307,8 @@ mod tests {
             assert_eq!(pos, 0);
             assert_eq!(item, vec![0]);
 
-            // Flush to make durable
-            writer.flush().await.unwrap();
+            // Commit to make durable
+            writer.commit().await.unwrap();
 
             // Remaining items still readable
             for i in 1..5 {

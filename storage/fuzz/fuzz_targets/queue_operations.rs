@@ -3,6 +3,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::queue::{Config, Queue};
+use commonware_storage::Persistable;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
@@ -30,12 +31,12 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
-    /// Enqueue a new item (append + flush).
+    /// Enqueue a new item (append + commit).
     Enqueue { value: u8 },
-    /// Append a new item without flushing.
+    /// Append a new item without committing.
     Append { value: u8 },
-    /// Flush appended items to disk.
-    Flush,
+    /// Commit appended items to disk.
+    Commit,
     /// Dequeue the next unacked item.
     Dequeue,
     /// Acknowledge a specific position.
@@ -46,8 +47,8 @@ enum QueueOperation {
     Reset,
     /// Prune acknowledged items.
     Prune,
-    /// Commit (flush and prune).
-    Commit,
+    /// Sync (commit and prune).
+    Sync,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -192,8 +193,8 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(pos, ref_pos, "append position mismatch");
                 }
 
-                QueueOperation::Flush => {
-                    queue.flush().await.unwrap();
+                QueueOperation::Commit => {
+                    queue.commit().await.unwrap();
                 }
 
                 QueueOperation::Dequeue => {
@@ -254,8 +255,8 @@ fn fuzz(input: FuzzInput) {
                     queue.prune().await.unwrap();
                 }
 
-                QueueOperation::Commit => {
-                    queue.commit().await.unwrap();
+                QueueOperation::Sync => {
+                    queue.sync().await.unwrap();
                 }
             }
 

@@ -1,7 +1,7 @@
 //! Queue storage implementation.
 
 use super::{metrics, Error};
-use crate::{journal::contiguous::variable, rmap::RMap};
+use crate::{journal::contiguous::variable, rmap::RMap, Persistable};
 use commonware_codec::CodecShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -43,13 +43,13 @@ pub struct Config<C> {
 ///
 /// # Operations
 ///
-/// - [append](Self::append) / [flush](Self::flush): Write items to the journal
-///   buffer, then persist. Items are readable immediately after append (before flush),
-///   but are lost on restart if not flushed.
-/// - [enqueue](Self::enqueue): Append + flush in one step; the item is durable before return.
+/// - [append](Self::append) / [commit](Self::commit): Write items to the journal
+///   buffer, then persist. Items are readable immediately after append (before commit),
+///   but are lost on restart if not committed.
+/// - [enqueue](Self::enqueue): Append + commit in one step; the item is durable before return.
 /// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
-/// - [commit](Self::commit): Flush, then prune completed sections below the ack floor.
+/// - [sync](Self::sync): Commit, then prune completed sections below the ack floor.
 ///
 /// # Acknowledgment
 ///
@@ -143,9 +143,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         position < self.ack_floor || self.acked_above.get(&position).is_some()
     }
 
-    /// Append an item without persisting. Call [Self::flush] or [Self::commit]
+    /// Append an item without persisting. Call [Self::commit] or [Self::sync]
     /// afterwards to make it durable. The item is readable immediately but
-    /// is not guaranteed to survive a crash until flushed or the journal
+    /// is not guaranteed to survive a crash until committed or the journal
     /// auto-syncs at a section boundary (see [`variable::Journal`] invariant 1).
     ///
     /// # Errors
@@ -158,7 +158,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         Ok(pos)
     }
 
-    /// Append and flush an item in one step, returning its position.
+    /// Append and commit an item in one step, returning its position.
     /// The item is durable before this method returns.
     ///
     /// # Errors
@@ -166,7 +166,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Returns an error if the underlying storage operation fails.
     pub async fn enqueue(&mut self, item: V) -> Result<u64, Error> {
         let pos = self.append(item).await?;
-        self.flush().await?;
+        self.commit().await?;
         Ok(pos)
     }
 
@@ -337,37 +337,32 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         );
     }
 
-    /// Persist appended items without pruning. Use [Self::commit] to
-    /// also prune acknowledged sections.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn flush(&mut self) -> Result<(), Error> {
-        self.journal.commit().await?;
-        Ok(())
-    }
-
-    /// Flush appended items, then prune completed sections below the ack floor.
-    ///
-    /// Flush-then-prune ordering ensures a crash between steps cannot delete
-    /// old sections while the current section is still unflushed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.commit().await?;
-        self.journal.prune(self.ack_floor).await?;
-        Ok(())
-    }
-
     /// Returns the number of items not yet read (test-only).
     #[cfg(test)]
     pub(crate) const fn pending(&self) -> u64 {
         self.journal.size().saturating_sub(self.read_pos)
     }
 
+}
+
+impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
+    type Error = Error;
+
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.journal.commit().await?;
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.journal.commit().await?;
+        self.journal.prune(self.ack_floor).await?;
+        Ok(())
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -454,7 +449,7 @@ mod tests {
             for i in 0..5u8 {
                 queue.append(vec![i]).await.unwrap();
             }
-            queue.flush().await.unwrap();
+            queue.commit().await.unwrap();
             assert_eq!(queue.size(), 5);
 
             // Dequeue and verify order
@@ -468,7 +463,7 @@ mod tests {
             for i in 5..8u8 {
                 queue.append(vec![i]).await.unwrap();
             }
-            queue.flush().await.unwrap();
+            queue.commit().await.unwrap();
             queue.enqueue(vec![8]).await.unwrap();
             assert_eq!(queue.size(), 9);
 
@@ -490,8 +485,8 @@ mod tests {
                 for i in 0..4u8 {
                     queue.append(vec![i]).await.unwrap();
                 }
-                queue.flush().await.unwrap();
                 queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
             }
 
             {
@@ -763,7 +758,7 @@ mod tests {
             for i in 0..25u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
 
             // Read and ack some items
             for i in 0..15 {
@@ -792,7 +787,7 @@ mod tests {
             for i in 0..50u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
 
             // First batch: ack items 0-14
             for i in 0..15 {
@@ -856,7 +851,7 @@ mod tests {
                 queue.ack(2).unwrap();
                 assert_eq!(queue.ack_floor(), 3);
 
-                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
             }
 
             // Second session: all items are re-delivered (no pruning occurred)
@@ -903,7 +898,7 @@ mod tests {
                 assert_eq!(queue.ack_floor(), 15);
 
                 // Sync triggers pruning
-                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
 
                 // Verify pruning occurred
                 let pruning_boundary = queue.journal.bounds().start;
@@ -1036,7 +1031,7 @@ mod tests {
 
                 queue.enqueue(b"item0".to_vec()).await.unwrap();
                 queue.enqueue(b"item1".to_vec()).await.unwrap();
-                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
             }
 
             // Second session - data should persist

@@ -1,6 +1,7 @@
 //! Queue conformance tests
 
 use crate::queue::{Config, Queue};
+use crate::Persistable;
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
@@ -55,7 +56,7 @@ impl Conformance for QueueConformance {
             }
 
             // Prune acked sections, flush, drop
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
             drop(queue);
 
             // Re-open and verify surviving items are readable
@@ -67,7 +68,7 @@ impl Conformance for QueueConformance {
                 assert_eq!(item, data[pos as usize]);
                 queue.ack(pos).unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
             drop(queue);
 
             context.storage_audit().to_vec()

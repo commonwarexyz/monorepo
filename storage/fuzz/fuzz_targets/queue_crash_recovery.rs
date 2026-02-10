@@ -11,6 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::queue::{Config, Queue};
+use commonware_storage::Persistable;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -49,10 +50,10 @@ fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
 enum QueueOperation {
     /// Enqueue a new item with the given value (repeated to fill ITEM_SIZE).
     Enqueue { value: u8 },
-    /// Append a new item without flushing (not durable until Flush).
+    /// Append a new item without committing (not durable until Commit).
     Append { value: u8 },
-    /// Flush appended items to disk.
-    Flush,
+    /// Commit appended items to disk.
+    Commit,
     /// Dequeue and acknowledge the next item.
     DequeueAndAck,
     /// Dequeue without acknowledging (item should be re-delivered on recovery).
@@ -61,8 +62,8 @@ enum QueueOperation {
     AckOffset { offset: u8 },
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
-    /// Commit the queue (flush and prune).
-    Commit,
+    /// Sync the queue (commit and prune).
+    Sync,
     /// Reset read position to ack floor.
     Reset,
 }
@@ -237,7 +238,7 @@ async fn run_operations(
                 }
             }
 
-            QueueOperation::Flush => match queue.flush().await {
+            QueueOperation::Commit => match queue.commit().await {
                 Ok(()) => {
                     state.flush_succeeded();
                 }
@@ -279,10 +280,10 @@ async fn run_operations(
                 }
             }
 
-            QueueOperation::Commit => {
-                if queue.commit().await.is_ok() {
-                    // commit = flush + prune, so success means ALL
-                    // previously unflushed items are now durable too.
+            QueueOperation::Sync => {
+                if queue.sync().await.is_ok() {
+                    // sync = commit + prune, so success means ALL
+                    // previously uncommitted items are now durable too.
                     state.flush_succeeded();
                     state.commit_succeeded(queue.ack_floor());
                 }
