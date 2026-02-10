@@ -251,7 +251,7 @@ of randomness in what follows, according to the _Fiat-Shamir_ paradigm.
 
 Whereas in the plain coding scheme, we received one particular row of $Y$,
 here we receive $S$ rows, sampled at random.
-(We may modify $m$ and $n$ to accomodate this fact).
+(We may modify $m$ and $n$ to accommodate this fact).
 We also receive proofs of inclusion for each row.
 
 In order to convince us that our rows $Y_S$ came from $G X$,

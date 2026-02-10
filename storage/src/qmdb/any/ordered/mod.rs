@@ -280,7 +280,7 @@ where
         //   - `created`
         //   - `updated`
         //
-        // Populate the the deleted and updated sets, and for deleted keys only, immediately update
+        // Populate the deleted and updated sets, and for deleted keys only, immediately update
         // the log and snapshot.
         let mut deleted = Vec::new();
         let mut updated = BTreeMap::new();
