@@ -250,20 +250,22 @@ mod tests {
     use super::*;
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Spawner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Runner, Spawner,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config(partition: &str) -> Config<(RangeCfg<usize>, ())> {
+    fn test_config(partition: &str, pool: BufferPool) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.to_string(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
             write_buffer: NZUsize!(4096),
         }
     }
@@ -272,7 +274,7 @@ mod tests {
     fn test_shared_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_basic");
+            let cfg = test_config("test_shared_basic", context.storage_buffer_pool().clone());
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // Enqueue from writer
@@ -294,7 +296,10 @@ mod tests {
     fn test_shared_append_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_append_commit");
+            let cfg = test_config(
+                "test_shared_append_commit",
+                context.storage_buffer_pool().clone(),
+            );
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // Append several items without committing
@@ -328,7 +333,7 @@ mod tests {
     fn test_shared_enqueue_bulk() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_bulk");
+            let cfg = test_config("test_shared_bulk", context.storage_buffer_pool().clone());
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             let range = writer
@@ -351,7 +356,10 @@ mod tests {
     fn test_shared_concurrent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_concurrent");
+            let cfg = test_config(
+                "test_shared_concurrent",
+                context.storage_buffer_pool().clone(),
+            );
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Spawn writer task
@@ -384,7 +392,7 @@ mod tests {
     fn test_shared_select() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_select");
+            let cfg = test_config("test_shared_select", context.storage_buffer_pool().clone());
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Enqueue an item
@@ -395,7 +403,7 @@ mod tests {
                 item = reader.recv() => item,
                 _ = context.sleep(std::time::Duration::from_secs(1)) => {
                     panic!("timeout")
-                }
+                },
             };
 
             let (pos, item) = result.unwrap().unwrap();
@@ -410,7 +418,10 @@ mod tests {
     fn test_shared_writer_dropped() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_writer_dropped");
+            let cfg = test_config(
+                "test_shared_writer_dropped",
+                context.storage_buffer_pool().clone(),
+            );
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Enqueue items then drop writer
@@ -441,7 +452,10 @@ mod tests {
     fn test_shared_try_recv() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_try_recv");
+            let cfg = test_config(
+                "test_shared_try_recv",
+                context.storage_buffer_pool().clone(),
+            );
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
             // try_recv on empty queue returns None
@@ -462,7 +476,10 @@ mod tests {
     fn test_shared_multiple_writers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_multi_writer");
+            let cfg = test_config(
+                "test_shared_multi_writer",
+                context.storage_buffer_pool().clone(),
+            );
             let (writer, mut reader) = init(context.clone(), cfg).await.unwrap();
 
             // Clone writer for second task

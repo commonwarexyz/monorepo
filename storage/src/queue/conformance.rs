@@ -6,7 +6,9 @@ use crate::{
 };
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Metrics, Runner,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -16,11 +18,11 @@ const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-fn config(seed: u64) -> Config<(RangeCfg<usize>, ())> {
+fn config(seed: u64, pool: BufferPool) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
         items_per_section: ITEMS_PER_SECTION,
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE, pool),
         write_buffer: WRITE_BUFFER,
         compression: None,
         codec_config: (RangeCfg::new(0..256), ()),
@@ -33,9 +35,11 @@ impl Conformance for QueueConformance {
     async fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
-            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed))
-                .await
-                .unwrap();
+            let pool = context.storage_buffer_pool().clone();
+            let mut queue =
+                Queue::<_, Vec<u8>>::init(context.with_label("queue"), config(seed, pool.clone()))
+                    .await
+                    .unwrap();
 
             // Enqueue random variable-length items across multiple sections
             let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
@@ -61,9 +65,10 @@ impl Conformance for QueueConformance {
             drop(queue);
 
             // Re-open and verify surviving items are readable
-            let mut queue = Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed))
-                .await
-                .unwrap();
+            let mut queue =
+                Queue::<_, Vec<u8>>::init(context.with_label("queue2"), config(seed, pool))
+                    .await
+                    .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {
                 assert_eq!(item, data[pos as usize]);
                 queue.ack(pos).unwrap();
