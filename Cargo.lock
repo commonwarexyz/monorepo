@@ -1008,7 +1008,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "thiserror 2.0.17",
- "tokio",
  "tracing",
 ]
 

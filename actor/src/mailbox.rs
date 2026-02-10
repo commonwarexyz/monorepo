@@ -3,7 +3,6 @@
 use crate::{Ask, Tell};
 use commonware_macros::select;
 use commonware_utils::channel::{mpsc, oneshot};
-use futures::future::pending;
 use std::{
     fmt::{self, Debug, Formatter},
     future::Future,
@@ -26,6 +25,21 @@ pub enum MailboxError {
     /// The caller waited longer than the configured timeout for the response.
     #[error("request timed out")]
     Timeout,
+}
+
+async fn await_response_or_timeout<A, T>(
+    rx: oneshot::Receiver<A>,
+    timeout: T,
+) -> Result<A, MailboxError>
+where
+    T: Future<Output = ()> + Send,
+{
+    let mut timeout = pin!(timeout);
+    let mut rx = pin!(rx);
+    select! {
+        _ = &mut timeout => Err(MailboxError::Timeout),
+        response = &mut rx => response.map_err(|_| MailboxError::Cancelled),
+    }
 }
 
 /// Bounded mailbox endpoint used by callers to deliver ingress values to an actor.
@@ -58,7 +72,7 @@ impl<I> Mailbox<I> {
     /// Send a fire-and-forget message.
     ///
     /// Returns [`MailboxError::Closed`] if the actor is no longer receiving.
-    pub async fn tell<T>(&mut self, msg: T) -> Result<(), MailboxError>
+    pub async fn tell<T>(&self, msg: T) -> Result<(), MailboxError>
     where
         T: Tell<I>,
     {
@@ -88,7 +102,7 @@ impl<I> Mailbox<I> {
     /// Send a fire-and-forget message, ignoring closed-mailbox errors.
     ///
     /// Returns `true` when ingress was delivered and `false` if the mailbox was closed.
-    pub async fn tell_lossy<T>(&mut self, msg: T) -> bool
+    pub async fn tell_lossy<T>(&self, msg: T) -> bool
     where
         T: Tell<I>,
     {
@@ -98,11 +112,16 @@ impl<I> Mailbox<I> {
     /// Send a request and wait for a response.
     ///
     /// Waits indefinitely unless the actor closes or drops the response channel.
-    pub async fn ask<A>(&mut self, msg: A) -> Result<A::Response, MailboxError>
+    pub async fn ask<A>(&self, msg: A) -> Result<A::Response, MailboxError>
     where
         A: Ask<I>,
     {
-        self.ask_timeout(msg, pending::<()>()).await
+        let (tx, rx) = oneshot::channel::<A::Response>();
+        self.tx
+            .send(msg.into_ingress(tx))
+            .await
+            .map_err(|_| MailboxError::Closed)?;
+        rx.await.map_err(|_| MailboxError::Cancelled)
     }
 
     /// Send a request and race the response against `timeout`.
@@ -111,11 +130,7 @@ impl<I> Mailbox<I> {
     /// - [`MailboxError::Closed`] if ingress cannot be delivered
     /// - [`MailboxError::Timeout`] if `timeout` resolves first
     /// - [`MailboxError::Cancelled`] if actor drops the response sender
-    pub async fn ask_timeout<A, T>(
-        &mut self,
-        msg: A,
-        timeout: T,
-    ) -> Result<A::Response, MailboxError>
+    pub async fn ask_timeout<A, T>(&self, msg: A, timeout: T) -> Result<A::Response, MailboxError>
     where
         A: Ask<I>,
         T: Future<Output = ()> + Send,
@@ -126,12 +141,7 @@ impl<I> Mailbox<I> {
             .await
             .map_err(|_| MailboxError::Closed)?;
 
-        let mut timeout = pin!(timeout);
-        let mut rx = pin!(rx);
-        select! {
-            _ = &mut timeout => Err(MailboxError::Timeout),
-            response = &mut rx => response.map_err(|_| MailboxError::Cancelled),
-        }
+        await_response_or_timeout(rx, timeout).await
     }
 }
 
@@ -171,20 +181,7 @@ impl<I> UnboundedMailbox<I> {
     /// Send a fire-and-forget message.
     ///
     /// Returns [`MailboxError::Closed`] if the actor is no longer receiving.
-    pub fn tell<T>(&mut self, msg: T) -> Result<(), MailboxError>
-    where
-        T: Tell<I>,
-    {
-        self.tx
-            .send(msg.into_ingress())
-            .map_err(|_| MailboxError::Closed)
-    }
-
-    /// Try to send a fire-and-forget message without blocking.
-    ///
-    /// For unbounded mailboxes this is equivalent to [`UnboundedMailbox::tell`],
-    /// but is provided for API symmetry with [`Mailbox::try_tell`].
-    pub fn try_tell<T>(&self, msg: T) -> Result<(), MailboxError>
+    pub fn tell<T>(&self, msg: T) -> Result<(), MailboxError>
     where
         T: Tell<I>,
     {
@@ -196,7 +193,7 @@ impl<I> UnboundedMailbox<I> {
     /// Send a fire-and-forget message, ignoring closed-mailbox errors.
     ///
     /// Returns `true` when ingress was delivered and `false` if the mailbox was closed.
-    pub fn tell_lossy<T>(&mut self, msg: T) -> bool
+    pub fn tell_lossy<T>(&self, msg: T) -> bool
     where
         T: Tell<I>,
     {
@@ -206,11 +203,15 @@ impl<I> UnboundedMailbox<I> {
     /// Send a request and wait for a response.
     ///
     /// Waits indefinitely unless the actor closes or drops the response channel.
-    pub async fn ask<A>(&mut self, msg: A) -> Result<A::Response, MailboxError>
+    pub async fn ask<A>(&self, msg: A) -> Result<A::Response, MailboxError>
     where
         A: Ask<I>,
     {
-        self.ask_timeout(msg, pending::<()>()).await
+        let (tx, rx) = oneshot::channel::<A::Response>();
+        self.tx
+            .send(msg.into_ingress(tx))
+            .map_err(|_| MailboxError::Closed)?;
+        rx.await.map_err(|_| MailboxError::Cancelled)
     }
 
     /// Send a request and race the response against `timeout`.
@@ -219,11 +220,7 @@ impl<I> UnboundedMailbox<I> {
     /// - [`MailboxError::Closed`] if ingress cannot be delivered
     /// - [`MailboxError::Timeout`] if `timeout` resolves first
     /// - [`MailboxError::Cancelled`] if actor drops the response sender
-    pub async fn ask_timeout<A, T>(
-        &mut self,
-        msg: A,
-        timeout: T,
-    ) -> Result<A::Response, MailboxError>
+    pub async fn ask_timeout<A, T>(&self, msg: A, timeout: T) -> Result<A::Response, MailboxError>
     where
         A: Ask<I>,
         T: Future<Output = ()> + Send,
@@ -233,12 +230,7 @@ impl<I> UnboundedMailbox<I> {
             .send(msg.into_ingress(tx))
             .map_err(|_| MailboxError::Closed)?;
 
-        let mut timeout = pin!(timeout);
-        let mut rx = pin!(rx);
-        select! {
-            _ = &mut timeout => Err(MailboxError::Timeout),
-            response = &mut rx => response.map_err(|_| MailboxError::Cancelled),
-        }
+        await_response_or_timeout(rx, timeout).await
     }
 }
 
@@ -251,6 +243,7 @@ impl<I> From<mpsc::UnboundedSender<I>> for UnboundedMailbox<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_runtime::{deterministic, Runner};
 
     enum TestIngress {
         Tell,
@@ -275,53 +268,57 @@ mod tests {
 
     #[test]
     fn tell_returns_closed_when_receiver_dropped() {
-        let (tx, rx) = mpsc::channel::<TestIngress>(1);
-        drop(rx);
-        let mut mailbox = Mailbox::new(tx);
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (tx, rx) = mpsc::channel::<TestIngress>(1);
+            drop(rx);
+            let mailbox = Mailbox::new(tx);
 
-        let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-        let err = runtime.block_on(async move { mailbox.tell(TellMsg).await.unwrap_err() });
-        assert_eq!(err, MailboxError::Closed);
+            let err = mailbox.tell(TellMsg).await.unwrap_err();
+            assert_eq!(err, MailboxError::Closed);
+        });
     }
 
     #[test]
     fn ask_timeout_returns_timeout() {
-        let (tx, _rx) = mpsc::channel::<TestIngress>(1);
-        let mut mailbox = Mailbox::new(tx);
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (tx, _rx) = mpsc::channel::<TestIngress>(1);
+            let mailbox = Mailbox::new(tx);
 
-        let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-        let err = runtime
-            .block_on(async move { mailbox.ask_timeout(AskMsg, async {}).await.unwrap_err() });
-        assert_eq!(err, MailboxError::Timeout);
+            let err = mailbox.ask_timeout(AskMsg, async {}).await.unwrap_err();
+            assert_eq!(err, MailboxError::Timeout);
+        });
     }
 
     #[test]
     fn unbounded_tell_returns_closed_when_receiver_dropped() {
         let (tx, rx) = mpsc::unbounded_channel::<TestIngress>();
         drop(rx);
-        let mut mailbox = UnboundedMailbox::new(tx);
+        let mailbox = UnboundedMailbox::new(tx);
         let err = mailbox.tell(TellMsg).unwrap_err();
         assert_eq!(err, MailboxError::Closed);
     }
 
     #[test]
     fn unbounded_ask_timeout_returns_timeout() {
-        let (tx, _rx) = mpsc::unbounded_channel::<TestIngress>();
-        let mut mailbox = UnboundedMailbox::new(tx);
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (tx, _rx) = mpsc::unbounded_channel::<TestIngress>();
+            let mailbox = UnboundedMailbox::new(tx);
 
-        let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-        let err = runtime
-            .block_on(async move { mailbox.ask_timeout(AskMsg, async {}).await.unwrap_err() });
-        assert_eq!(err, MailboxError::Timeout);
+            let err = mailbox.ask_timeout(AskMsg, async {}).await.unwrap_err();
+            assert_eq!(err, MailboxError::Timeout);
+        });
     }
 
     #[test]
     fn request_roundtrip_succeeds_when_actor_replies() {
-        let (tx, mut rx) = mpsc::channel::<TestIngress>(1);
-        let mut mailbox = Mailbox::new(tx);
+        let runner = deterministic::Runner::default();
+        runner.start(|_context| async move {
+            let (tx, mut rx) = mpsc::channel::<TestIngress>(1);
+            let mailbox = Mailbox::new(tx);
 
-        let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-        let value = runtime.block_on(async move {
             let requester =
                 async move { mailbox.ask(AskMsg).await.expect("request should succeed") };
             let responder = async move {
@@ -329,8 +326,8 @@ mod tests {
                     let _ = response.send(9);
                 }
             };
-            futures::join!(requester, responder).0
+            let value = futures::join!(requester, responder).0;
+            assert_eq!(value, 9);
         });
-        assert_eq!(value, 9);
     }
 }
