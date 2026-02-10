@@ -237,6 +237,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "queue_operations"
+path = "fuzz_targets/queue_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "queue_crash_recovery"
+path = "fuzz_targets/queue_crash_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mmr_journaled_crash_recovery"
 path = "fuzz_targets/mmr_journaled_crash_recovery.rs"
 test = false
