@@ -58,7 +58,7 @@ pub struct Config<C> {
 /// contiguously from the floor, the floor advances automatically.
 ///
 /// Acks are **not** persisted. The durable equivalent is the journal's pruning
-/// boundary, advanced by [commit](Self::commit). On restart, all non-pruned
+/// boundary, advanced by [sync](Self::sync). On restart, all non-pruned
 /// items are re-delivered regardless of prior ack state.
 ///
 /// # Crash Recovery

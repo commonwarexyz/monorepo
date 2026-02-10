@@ -104,11 +104,11 @@ struct FuzzInput {
 /// in-memory but not pruned will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
-    /// Items that were successfully enqueued or flushed (position -> value).
+    /// Items that were successfully enqueued or committed (position -> value).
     committed: BTreeMap<u64, u8>,
 
     /// Items that were enqueued/appended but the operation may have failed,
-    /// or were appended but not yet flushed.
+    /// or were appended but not yet committed.
     pending: Vec<u8>,
 
     /// The ack floor at the time of last successful commit.
@@ -117,9 +117,9 @@ struct RecoveryState {
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
 
-    /// Items that were appended but not yet flushed (position -> value).
-    /// These may be lost on crash. On commit, they move to committed.
-    unflushed: BTreeMap<u64, u8>,
+    /// Items that were appended but not yet committed (position -> value).
+    /// These may be lost on crash. On commit, they move to `committed`.
+    uncommitted: BTreeMap<u64, u8>,
 }
 
 impl RecoveryState {
@@ -129,7 +129,7 @@ impl RecoveryState {
             pending: Vec::new(),
             committed_ack_floor: 0,
             current_ack_floor: 0,
-            unflushed: BTreeMap::new(),
+            uncommitted: BTreeMap::new(),
         }
     }
 
@@ -145,8 +145,8 @@ impl RecoveryState {
     }
 
     fn append_succeeded(&mut self, pos: u64, value: u8) {
-        // Append only - not durable until flushed.
-        self.unflushed.insert(pos, value);
+        // Append only - not durable until committed.
+        self.uncommitted.insert(pos, value);
     }
 
     fn append_failed(&mut self, value: u8) {
@@ -155,8 +155,8 @@ impl RecoveryState {
 
     fn commit_succeeded(&mut self) {
         // All uncommitted items are now durable.
-        let unflushed = std::mem::take(&mut self.unflushed);
-        for (pos, value) in unflushed {
+        let uncommitted = std::mem::take(&mut self.uncommitted);
+        for (pos, value) in uncommitted {
             self.committed.insert(pos, value);
         }
     }
@@ -164,8 +164,8 @@ impl RecoveryState {
     fn commit_failed(&mut self) {
         // Uncommitted items remain uncommitted; they may or may not be durable.
         // Move them to pending since we can't be sure.
-        let unflushed = std::mem::take(&mut self.unflushed);
-        for (_pos, value) in unflushed {
+        let uncommitted = std::mem::take(&mut self.uncommitted);
+        for (_pos, value) in uncommitted {
             self.pending.push(value);
         }
     }
@@ -186,7 +186,7 @@ impl RecoveryState {
 
     /// Returns the maximum size we expect after recovery.
     fn max_recovered_size(&self) -> u64 {
-        (self.committed.len() + self.pending.len() + self.unflushed.len()) as u64
+        (self.committed.len() + self.pending.len() + self.uncommitted.len()) as u64
     }
 
     /// Returns the minimum ack floor we expect after recovery.
@@ -218,7 +218,7 @@ async fn run_operations(
                 match queue.enqueue(item).await {
                     Ok(pos) => {
                         // enqueue = append + commit, so success means ALL
-                        // previously unflushed items are now durable too.
+                        // previously uncommitted items are now durable too.
                         state.commit_succeeded();
                         state.enqueue_succeeded(pos, *value);
                     }

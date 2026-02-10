@@ -297,7 +297,7 @@ mod tests {
             let cfg = test_config("test_shared_append_flush");
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
-            // Append several items without flushing
+            // Append several items without committing
             for i in 0..5u8 {
                 let pos = writer.append(vec![i]).await.unwrap();
                 assert_eq!(pos, i as u64);
