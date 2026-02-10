@@ -63,6 +63,10 @@ test-docs *args='--all':
 check-docs *args='':
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items $@
 
+# Build workspace library docs (excluding examples and fuzz crates)
+build-library-docs *args='':
+    cargo doc --no-deps --lib $(./scripts/list_library_crates.sh | xargs -I{} printf -- '-p %s ' "{}") $@
+
 # Run all fuzz tests in a given directory
 fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
