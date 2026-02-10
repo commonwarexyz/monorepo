@@ -578,7 +578,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// The semantics are that this function returns true if every index in the
     /// range is either out of bounds, or such that [`Self::get`] returns true.
-    /// In particular, indices that are out of bounds of this bitmap do not.
+    /// In particular, indices that are out of bounds of this bitmap do not
     /// affect the result, and if no indices are in bounds (which includes the
     /// case where the range is empty) then the result is `true`.
     pub fn is_unset_in_range(&self, range: Range<u64>) -> bool {
