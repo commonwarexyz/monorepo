@@ -47,8 +47,6 @@ enum QueueOperation {
     AckUpTo { pos_offset: u8 },
     /// Reset the read position.
     Reset,
-    /// Prune acknowledged items.
-    Prune,
     /// Sync (commit and prune).
     Sync,
 }
@@ -251,10 +249,6 @@ fn fuzz(input: FuzzInput) {
                 QueueOperation::Reset => {
                     queue.reset();
                     reference.reset();
-                }
-
-                QueueOperation::Prune => {
-                    queue.prune().await.unwrap();
                 }
 
                 QueueOperation::Sync => {

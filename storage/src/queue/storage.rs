@@ -310,20 +310,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.ack_floor >= self.journal.size()
     }
 
-    /// Prune completed sections below the ack floor without flushing.
-    /// Returns `true` if any data was pruned.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn prune(&mut self) -> Result<bool, Error> {
-        let pruned = self.journal.prune(self.ack_floor).await?;
-        if pruned {
-            debug!(ack_floor = self.ack_floor, "pruned acknowledged items");
-        }
-        Ok(pruned)
-    }
-
     /// Reset the read position to the ack floor so [Self::dequeue] re-delivers
     /// all unacknowledged items from the beginning.
     pub fn reset(&mut self) {
@@ -1011,7 +997,7 @@ mod tests {
             // Operations on empty queue
             assert!(queue.is_empty());
             assert!(queue.dequeue().await.unwrap().is_none());
-            queue.prune().await.unwrap();
+            queue.sync().await.unwrap();
             queue.reset();
         });
     }

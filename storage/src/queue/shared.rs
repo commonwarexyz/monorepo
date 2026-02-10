@@ -102,6 +102,11 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
         self.queue.lock().await.commit().await
     }
 
+    /// See [Queue::sync](super::Queue::sync).
+    pub async fn sync(&self) -> Result<(), Error> {
+        self.queue.lock().await.sync().await
+    }
+
     /// Returns the total number of items that have been enqueued.
     pub async fn size(&self) -> u64 {
         self.queue.lock().await.size()
@@ -194,10 +199,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
         self.queue.lock().await.reset();
     }
 
-    /// See [Queue::prune].
-    pub async fn prune(&self) -> Result<bool, Error> {
-        self.queue.lock().await.prune().await
-    }
 }
 
 /// Initialize a shared queue and split into writer and reader handles.
