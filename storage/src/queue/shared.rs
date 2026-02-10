@@ -199,7 +199,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
     pub async fn reset(&self) {
         self.queue.lock().await.reset();
     }
-
 }
 
 /// Initialize a shared queue and split into writer and reader handles.
@@ -499,5 +498,4 @@ mod tests {
             handle2.await.unwrap();
         });
     }
-
 }

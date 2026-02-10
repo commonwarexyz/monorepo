@@ -1159,42 +1159,54 @@ mod tests {
                 "expected next 0: {encoded}"
             );
 
-            // Enqueue items
-            for i in 0..5u8 {
+            // Append updates tip without enqueue
+            queue.append(vec![0]).await.unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_tip 1"),
+                "expected tip 1: {encoded}"
+            );
+            queue.commit().await.unwrap();
+
+            // Enqueue updates tip further
+            for i in 1..10u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_tip 5"),
-                "expected tip 5: {encoded}"
+                encoded.contains("test_metrics_tip 10"),
+                "expected tip 10: {encoded}"
             );
 
-            // Dequeue advances next
+            // Multiple dequeues advance next
+            queue.dequeue().await.unwrap();
             queue.dequeue().await.unwrap();
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_next 1"),
-                "expected next 1: {encoded}"
+                encoded.contains("test_metrics_next 2"),
+                "expected next 2: {encoded}"
             );
 
-            // Ack advances floor
+            // Sequential ack advances floor
             queue.ack(0).unwrap();
-            let encoded = context.encode();
-            assert!(
-                encoded.contains("test_metrics_floor 1"),
-                "expected floor 1: {encoded}"
-            );
-
-            // Ack out of order, then fill gap
-            queue.ack(2).unwrap();
-            queue.ack(4).unwrap();
             queue.ack(1).unwrap();
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_floor 3"),
-                "expected floor 3: {encoded}"
+                encoded.contains("test_metrics_floor 2"),
+                "expected floor 2: {encoded}"
             );
 
+            // Out-of-order ack: floor stays until gap fills
+            queue.ack(4).unwrap();
+            queue.ack(6).unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_floor 2"),
+                "expected floor still 2: {encoded}"
+            );
+
+            // Fill gap coalesces floor forward
+            queue.ack(2).unwrap();
             queue.ack(3).unwrap();
             let encoded = context.encode();
             assert!(
@@ -1202,12 +1214,29 @@ mod tests {
                 "expected floor 5: {encoded}"
             );
 
+            // ack_up_to advances floor past sparse ack at 6
+            queue.ack_up_to(8).unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_floor 8"),
+                "expected floor 8: {encoded}"
+            );
+
+            // Ack remaining
+            queue.ack(8).unwrap();
+            queue.ack(9).unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_floor 10"),
+                "expected floor 10: {encoded}"
+            );
+
             // Reset brings next back to floor
             queue.reset();
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_next 5"),
-                "expected next 5: {encoded}"
+                encoded.contains("test_metrics_next 10"),
+                "expected next 10: {encoded}"
             );
         });
     }
