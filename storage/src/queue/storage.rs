@@ -191,6 +191,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             self.read_pos = end.saturating_add(1);
         }
 
+        // If the read position is greater than the size of the journal, return None.
+        self.metrics.next.set(self.read_pos as i64);
         if self.read_pos >= size {
             return Ok(None);
         }
@@ -198,7 +200,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         let item = self.journal.read(self.read_pos).await?;
         let pos = self.read_pos;
         self.read_pos += 1;
-
         self.metrics.next.set(self.read_pos as i64);
         debug!(position = pos, "dequeued item");
         Ok(Some((pos, item)))
@@ -1237,6 +1238,49 @@ mod tests {
             assert!(
                 encoded.contains("test_metrics_next 10"),
                 "expected next 10: {encoded}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_metrics_next_updates_on_fast_forward() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_ff");
+            let ctx = context.with_label("test_ff");
+            let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
+
+            // Enqueue 3 items, dequeue and ack only the first
+            for i in 0..3u8 {
+                queue.enqueue(vec![i]).await.unwrap();
+            }
+            let (pos, _) = queue.dequeue().await.unwrap().unwrap();
+            queue.ack(pos).unwrap();
+
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_ff_next 1"),
+                "expected next 1: {encoded}"
+            );
+
+            // Ack remaining items out-of-order to advance floor to 3
+            queue.ack(2).unwrap();
+            queue.ack(1).unwrap();
+            assert_eq!(queue.ack_floor(), 3);
+
+            // next metric is still 1 (no dequeue yet)
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_ff_next 1"),
+                "expected next still 1: {encoded}"
+            );
+
+            // Dequeue returns None but fast-forwards read_pos to ack_floor
+            assert!(queue.dequeue().await.unwrap().is_none());
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_ff_next 3"),
+                "expected next 3 after fast-forward: {encoded}"
             );
         });
     }
