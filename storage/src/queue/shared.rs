@@ -1,7 +1,7 @@
 //! Shared queue with split writer/reader handles.
 //!
 //! Provides concurrent access to a [Queue] with multiple writers and a single reader.
-//! The reader can await new items using [QueueReader::recv], which integrates
+//! The reader can await new items using [Reader::recv], which integrates
 //! with `select!` for multiplexing with other futures.
 //!
 //! Writers can be cloned to allow multiple tasks to enqueue items concurrently.
@@ -18,12 +18,12 @@ use tracing::debug;
 ///
 /// This handle can be cloned to allow multiple tasks to enqueue items concurrently.
 /// All clones share the same underlying queue and notification channel.
-pub struct QueueWriter<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Writer<E: Clock + Storage + Metrics, V: CodecShared> {
     queue: Arc<Mutex<Queue<E, V>>>,
     notify: mpsc::Sender<()>,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for Writer<E, V> {
     fn clone(&self) -> Self {
         Self {
             queue: self.queue.clone(),
@@ -32,7 +32,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
     /// Enqueue an item, returning its position. The lock is held for the
     /// full append + flush, so no reader can see the item until it is durable.
     ///
@@ -42,7 +42,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
     pub async fn enqueue(&self, item: V) -> Result<u64, Error> {
         let pos = self.queue.lock().await.enqueue(item).await?;
 
-        // Notify reader (ignore errors: full means already notified, disconnected means reader dropped)
+        // Fire-and-forget: the notification is a wake-up hint, not a counter.
+        // The reader always checks the queue under lock, so a missed
+        // notification never causes a missed item.
         let _ = self.notify.try_send(());
 
         debug!(position = pos, "writer: enqueued item");
@@ -113,12 +115,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
 /// Reader handle for dequeuing and acknowledging items.
 ///
 /// There should only be one reader per shared queue.
-pub struct QueueReader<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Reader<E: Clock + Storage + Metrics, V: CodecShared> {
     queue: Arc<Mutex<Queue<E, V>>>,
     notify: mpsc::Receiver<()>,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
     /// Receive the next unacknowledged item, waiting if necessary.
     ///
     /// This method is designed for use with `select!`. It will:
@@ -153,10 +155,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain any pending notifications to keep the channel state consistent
-        // with the queue state when polling via try_recv.
-        while self.notify.try_recv().is_ok() {}
-
+        // Drain pending notification (capacity is 1, so at most one buffered)
+        let _ = self.notify.try_recv();
         self.queue.lock().await.dequeue().await
     }
 
@@ -176,11 +176,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     /// Returns [super::Error::PositionOutOfRange] if `up_to` is invalid.
     pub async fn ack_up_to(&self, up_to: u64) -> Result<(), Error> {
         self.queue.lock().await.ack_up_to(up_to)
-    }
-
-    /// See [Queue::peek].
-    pub async fn peek(&self) -> Result<Option<(u64, V)>, Error> {
-        self.queue.lock().await.peek().await
     }
 
     /// Returns the current ack floor.
@@ -204,8 +199,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     }
 
     /// See [Queue::prune].
-    ///
-    /// See [Queue::prune] for details.
     pub async fn prune(&self) -> Result<bool, Error> {
         self.queue.lock().await.prune().await
     }
@@ -238,16 +231,16 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
 pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
     context: E,
     cfg: Config<V::Cfg>,
-) -> Result<(QueueWriter<E, V>, QueueReader<E, V>), Error> {
+) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
     let queue = Arc::new(Mutex::new(Queue::init(context, cfg).await?));
     let (notify_tx, notify_rx) = mpsc::channel(1);
 
-    let writer = QueueWriter {
+    let writer = Writer {
         queue: queue.clone(),
         notify: notify_tx,
     };
 
-    let reader = QueueReader {
+    let reader = Reader {
         queue,
         notify: notify_rx,
     };

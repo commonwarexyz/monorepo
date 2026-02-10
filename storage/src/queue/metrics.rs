@@ -6,18 +6,12 @@ use prometheus_client::metrics::gauge::Gauge;
 /// Metrics for [super::Queue].
 #[derive(Default)]
 pub struct Metrics {
-    /// Total number of items enqueued (monotonic position counter).
-    pub size: Gauge,
-
+    /// Highest enqueued position (journal size).
+    pub tip: Gauge,
     /// Current ack floor position.
-    ///
-    /// All items below this position are considered acknowledged.
-    pub ack_floor: Gauge,
-
-    /// Number of out-of-order ack ranges currently tracked.
-    ///
-    /// High values indicate many sparse acknowledgments, which increases memory usage.
-    pub acked_above_ranges: Gauge,
+    pub floor: Gauge,
+    /// Current read position (next item to dequeue).
+    pub next: Gauge,
 }
 
 impl Metrics {
@@ -26,16 +20,12 @@ impl Metrics {
     /// Metric names will be prefixed with the context's label.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         let metrics = Self::default();
-        context.register("size", "Total items enqueued", metrics.size.clone());
+        context.register("tip", "Highest enqueued position", metrics.tip.clone());
+        context.register("floor", "Current ack floor position", metrics.floor.clone());
         context.register(
-            "ack_floor",
-            "Current ack floor position",
-            metrics.ack_floor.clone(),
-        );
-        context.register(
-            "acked_above_ranges",
-            "Out-of-order ack ranges tracked",
-            metrics.acked_above_ranges.clone(),
+            "next",
+            "Current read position",
+            metrics.next.clone(),
         );
         metrics
     }

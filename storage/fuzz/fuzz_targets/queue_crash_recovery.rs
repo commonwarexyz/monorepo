@@ -49,28 +49,20 @@ fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
 enum QueueOperation {
     /// Enqueue a new item with the given value (repeated to fill ITEM_SIZE).
     Enqueue { value: u8 },
-
     /// Append a new item without flushing (not durable until Flush).
     Append { value: u8 },
-
     /// Flush appended items to disk.
     Flush,
-
     /// Dequeue and acknowledge the next item.
     DequeueAndAck,
-
     /// Dequeue without acknowledging (item should be re-delivered on recovery).
     DequeueNoAck,
-
     /// Acknowledge a specific position offset from ack_floor.
     AckOffset { offset: u8 },
-
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
-
     /// Commit the queue (flush and prune).
     Commit,
-
     /// Reset read position to ack floor.
     Reset,
 }
@@ -122,22 +114,18 @@ struct RecoveryState {
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
 
-    /// Items per section (reserved for recovery bound calculations).
-    _items_per_section: u64,
-
     /// Items that were appended but not yet flushed (position -> value).
     /// These may be lost on crash. On flush, they move to committed.
     unflushed: BTreeMap<u64, u8>,
 }
 
 impl RecoveryState {
-    fn new(items_per_section: u64) -> Self {
+    fn new() -> Self {
         Self {
             committed: BTreeMap::new(),
             pending: Vec::new(),
             committed_ack_floor: 0,
             current_ack_floor: 0,
-            _items_per_section: items_per_section,
             unflushed: BTreeMap::new(),
         }
     }
@@ -217,9 +205,8 @@ fn make_item(value: u8) -> Vec<u8> {
 async fn run_operations(
     queue: &mut Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
-    items_per_section: u64,
 ) -> RecoveryState {
-    let mut state = RecoveryState::new(items_per_section);
+    let mut state = RecoveryState::new();
 
     for op in operations {
         match op {
@@ -401,7 +388,6 @@ fn fuzz(input: FuzzInput) {
 
     let runner = deterministic::Runner::new(cfg);
 
-    let items_per_section_val = input.items_per_section;
     let (state, checkpoint) = runner.start_and_recover(|ctx| {
         let partition_name = partition_name.clone();
         let operations = operations.clone();
@@ -428,7 +414,7 @@ fn fuzz(input: FuzzInput) {
             let faults = ctx.storage_fault_config();
             *faults.write().unwrap() = fault_config;
 
-            run_operations(&mut queue, &operations, items_per_section_val).await
+            run_operations(&mut queue, &operations).await
         }
     });
 

@@ -67,11 +67,13 @@
 //! });
 //! ```
 
+#[cfg(test)]
+mod conformance;
 mod metrics;
 pub mod shared;
 mod storage;
 
-pub use shared::{QueueReader, QueueWriter};
+pub use shared::{Reader, Writer};
 pub use storage::{Config, Queue};
 use thiserror::Error;
 
@@ -80,7 +82,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
-
     #[error("position out of range: {0} (queue size is {1})")]
     PositionOutOfRange(u64, u64),
 }
