@@ -34,16 +34,16 @@ impl<S: Scheme<Sha256Digest>> ElectorConfig<S> for CustomRoundRobinShuffled {
 }
 
 #[derive(Clone)]
-pub struct CustomRandomShuffled;
+pub struct CustomRandomSelected;
 
-impl Default for CustomRandomShuffled {
+impl Default for CustomRandomSelected {
     fn default() -> Self {
         Self
     }
 }
 
 impl<P: PublicKey, V: Variant> ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>
-    for CustomRandomShuffled
+    for CustomRandomSelected
 {
     type Elector = <Random as ElectorConfig<bls12381_threshold_vrf::Scheme<P, V>>>::Elector;
 
@@ -144,7 +144,7 @@ pub struct SimplexBls12381MinPkCustomRandom;
 
 impl Simplex for SimplexBls12381MinPkCustomRandom {
     type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
-    type Elector = CustomRandomShuffled;
+    type Elector = CustomRandomSelected;
 
     fn fixture(
         context: &mut deterministic::Context,
