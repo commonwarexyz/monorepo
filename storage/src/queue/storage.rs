@@ -125,6 +125,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
         debug!(ack_floor, size = journal.size(), "queue initialized");
 
+        // Set initial metric values
         metrics.tip.set(journal.size() as i64);
         metrics.floor.set(ack_floor as i64);
         metrics.next.set(ack_floor as i64);
@@ -339,7 +340,7 @@ impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.journal.commit().await?;
+        self.journal.sync().await?;
         self.journal.prune(self.ack_floor).await?;
         Ok(())
     }
