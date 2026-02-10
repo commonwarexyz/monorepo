@@ -178,22 +178,22 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
         self.queue.lock().await.ack_up_to(up_to)
     }
 
-    /// Returns the current ack floor.
+    /// See [Queue::ack_floor].
     pub async fn ack_floor(&self) -> u64 {
         self.queue.lock().await.ack_floor()
     }
 
-    /// Returns the current read position.
+    /// See [Queue::read_position].
     pub async fn read_position(&self) -> u64 {
         self.queue.lock().await.read_position()
     }
 
-    /// Returns whether all enqueued items have been acknowledged.
+    /// See [Queue::is_empty].
     pub async fn is_empty(&self) -> bool {
         self.queue.lock().await.is_empty()
     }
 
-    /// Reset the read position to re-deliver all unacknowledged items.
+    /// See [Queue::reset].
     pub async fn reset(&self) {
         self.queue.lock().await.reset();
     }
