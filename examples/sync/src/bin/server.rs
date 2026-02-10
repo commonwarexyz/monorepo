@@ -443,7 +443,7 @@ where
         },
         client_result = listener.accept() => {
             match client_result {
-                Ok((client_addr, sink, stream, _)) => {
+                Ok((client_addr, sink, stream)) => {
                     let state = state.clone();
                     context.with_label("client").spawn(move|context|async move {
                         if let Err(err) =

@@ -111,10 +111,7 @@ impl Drop for Sink {
     }
 }
 
-/// A no-op mock closer.
-pub struct Closer;
-
-impl CloserTrait for Closer {
+impl CloserTrait for Sink {
     fn force_close(&self) {}
 }
 

@@ -31,7 +31,7 @@ where
     where
         E: Network + Spawner,
     {
-        let (sink, stream, _) = context.dial(server_addr).await?;
+        let (sink, stream) = context.dial(server_addr).await?;
         let (request_tx, _handle) = io::run(context, sink, stream)?;
         Ok(Self {
             request_id_generator: request_id::Generator::new(),

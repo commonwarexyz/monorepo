@@ -21,10 +21,7 @@ impl crate::Sink for Sink {
     }
 }
 
-/// No-op [crate::Closer] for the deterministic network.
-pub struct Closer;
-
-impl crate::Closer for Closer {
+impl crate::Closer for Sink {
     fn force_close(&self) {}
 }
 
@@ -52,13 +49,10 @@ pub struct Listener {
 impl crate::Listener for Listener {
     type Sink = Sink;
     type Stream = Stream;
-    type Closer = Closer;
 
-    async fn accept(
-        &mut self,
-    ) -> Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), Error> {
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, Sink { sender }, Stream { receiver }, Closer))
+        Ok((socket, Sink { sender }, Stream { receiver }))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
@@ -120,7 +114,7 @@ impl crate::Network for Network {
         })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream, Closer), Error> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
         // Assign dialer a port from the ephemeral range
         let dialer = {
             let mut ephemeral = self.ephemeral.lock().unwrap();
@@ -151,7 +145,6 @@ impl crate::Network for Network {
             Stream {
                 receiver: dialer_receiver,
             },
-            Closer,
         ))
     }
 }

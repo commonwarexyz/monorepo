@@ -9,7 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Closer, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -101,10 +101,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         Ok(())
     }
 
-    pub async fn run<Si: Sink, St: Stream, Cl: Closer>(
+    pub async fn run<Si: Sink, St: Stream>(
         mut self,
         peer: C,
-        (mut conn_sender, mut conn_receiver, closer): (Sender<Si>, Receiver<St>, Cl),
+        (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
         channels: Channels<C>,
     ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
@@ -151,11 +151,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                         Some(msg) = self.control.recv() else {
                             return Err(Error::PeerDisconnected);
                         } => match msg {
-                            Message::Kill => {
-                                // Force close (RST instead of FIN)
-                                closer.force_close();
-                                return Err(Error::PeerKilled(peer.to_string()));
-                            }
+                            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                         },
                         msg_high = self.high.recv() => {
                             // Data is already pre-encoded, just forward to stream

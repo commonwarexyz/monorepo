@@ -8,8 +8,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, Closer, CloserOf, ContextCell, Handle, KeyedRateLimiter,
-    Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, Closer, ContextCell, Handle, KeyedRateLimiter, Listener,
+    Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -93,18 +93,15 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         }
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     async fn handshake(
         context: E,
         address: SocketAddr,
         stream_cfg: StreamConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
-        closer: CloserOf<E>,
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        mut supervisor: Mailbox<
-            spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>,
-        >,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let (peer, send, recv) = match listen(
             context,
@@ -131,14 +128,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
-        supervisor.spawn((send, recv, closer), reservation).await;
+        supervisor.spawn((send, recv), reservation).await;
     }
 
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
@@ -147,7 +144,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     async fn run(
         self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Create the rate limiters
         let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
@@ -175,8 +172,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             },
             conn = listener.accept() => {
                 // Accept a new connection
-                let (address, sink, stream, closer) = match conn {
-                    Ok((address, sink, stream, closer)) => (address, sink, stream, closer),
+                let (address, sink, stream) = match conn {
+                    Ok((address, sink, stream)) => (address, sink, stream),
                     Err(e) => {
                         debug!(error = ?e, "failed to accept connection");
                         continue;
@@ -189,7 +186,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
-                    closer.force_close();
+                    sink.force_close();
                     continue;
                 }
 
@@ -219,7 +216,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
-                    closer.force_close();
+                    sink.force_close();
                     continue;
                 }
 
@@ -227,7 +224,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
-                    closer.force_close();
+                    sink.force_close();
                     continue;
                 };
 
@@ -243,7 +240,6 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                             stream_cfg,
                             sink,
                             stream,
-                            closer,
                             tracker,
                             supervisor,
                         )
@@ -324,7 +320,7 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Allow a single handshake attempt from this IP.
-            let (sink, mut stream, _) = loop {
+            let (sink, mut stream) = loop {
                 match context.dial(address).await {
                     Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
@@ -340,7 +336,7 @@ mod tests {
 
             // Additional attempts should be rate limited immediately.
             for _ in 0..3 {
-                let (sink, mut stream, _) = context.dial(address).await.expect("dial");
+                let (sink, mut stream) = context.dial(address).await.expect("dial");
 
                 // Wait for some message or drop.
                 let _ = stream.recv(1).await;
@@ -465,7 +461,7 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener from a private IP
-            let (sink, mut stream, _) = loop {
+            let (sink, mut stream) = loop {
                 match context.dial(address).await {
                     Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {

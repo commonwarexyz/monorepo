@@ -1,4 +1,4 @@
-use crate::{CloserOf, IoBufs, SinkOf, StreamOf};
+use crate::{IoBufs, SinkOf, StreamOf};
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -53,6 +53,12 @@ pub struct Sink<S: crate::Sink> {
     metrics: Arc<Metrics>,
 }
 
+impl<S: crate::Sink + crate::Closer> crate::Closer for Sink<S> {
+    fn force_close(&self) {
+        self.inner.force_close();
+    }
+}
+
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, data: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
         let bufs = data.into();
@@ -91,12 +97,9 @@ pub struct Listener<L: crate::Listener> {
 impl<L: crate::Listener> crate::Listener for Listener<L> {
     type Sink = Sink<L::Sink>;
     type Stream = Stream<L::Stream>;
-    type Closer = L::Closer;
 
-    async fn accept(
-        &mut self,
-    ) -> Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), crate::Error> {
-        let (addr, sink, stream, closer) = self.inner.accept().await?;
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
+        let (addr, sink, stream) = self.inner.accept().await?;
         self.metrics.inbound_connections.inc();
         Ok((
             addr,
@@ -108,7 +111,6 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
                 inner: stream,
                 metrics: self.metrics.clone(),
             },
-            closer,
         ))
     }
 
@@ -155,8 +157,8 @@ impl<N: crate::Network> crate::Network for Network<N> {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(SinkOf<Self>, StreamOf<Self>, CloserOf<Self>), crate::Error> {
-        let (sink, stream, closer) = self.inner.dial(socket).await?;
+    ) -> Result<(SinkOf<Self>, StreamOf<Self>), crate::Error> {
+        let (sink, stream) = self.inner.dial(socket).await?;
         self.metrics.outbound_connections.inc();
         Ok((
             Sink {
@@ -167,7 +169,6 @@ impl<N: crate::Network> crate::Network for Network<N> {
                 inner: stream,
                 metrics: self.metrics.clone(),
             },
-            closer,
         ))
     }
 }
@@ -224,13 +225,13 @@ mod tests {
 
         // Create a server task that accepts one connection and echoes data
         let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream, _) = listener.accept().await.unwrap();
+            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
             let received = stream.recv(MSG_SIZE).await.unwrap();
             sink.send(received).await.unwrap();
         });
 
         // Send and receive data as client
-        let (mut client_sink, mut client_stream, _) = network.dial(addr).await.unwrap();
+        let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE];

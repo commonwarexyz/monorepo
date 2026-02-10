@@ -14,8 +14,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, CloserOf, ContextCell, Handle, Metrics, Network, Resolver,
-    SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
+    Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
@@ -93,9 +93,7 @@ impl<
     async fn dial_peer(
         &mut self,
         reservation: Reservation<C::PublicKey>,
-        supervisor: &mut Mailbox<
-            spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>,
-        >,
+        supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, ingress) = reservation.metadata().clone() else {
@@ -125,7 +123,7 @@ impl<
                 };
 
                 // Attempt to dial peer
-                let (sink, stream, closer) = match context.dial(address).await {
+                let (sink, stream) = match context.dial(address).await {
                     Ok(result) => result,
                     Err(err) => {
                         debug!(?err, "failed to dial peer");
@@ -145,8 +143,7 @@ impl<
                 debug!(?peer, ?ingress, "upgraded connection");
 
                 // Start peer to handle messages
-                let (send, recv) = instance;
-                supervisor.spawn((send, recv, closer), reservation).await;
+                supervisor.spawn(instance, reservation).await;
             }
         });
     }
@@ -156,7 +153,7 @@ impl<
     pub fn start(
         mut self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>>,
+        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
@@ -165,9 +162,7 @@ impl<
     async fn run(
         mut self,
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        mut supervisor: Mailbox<
-            spawner::Message<SinkOf<E>, StreamOf<E>, CloserOf<E>, C::PublicKey>,
-        >,
+        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
@@ -266,7 +261,7 @@ mod tests {
 
             // Create a supervisor that just drops spawn messages
             let (supervisor, mut supervisor_rx) =
-                Mailbox::<spawner::Message<_, _, _, PublicKey>>::new(100);
+                Mailbox::<spawner::Message<_, _, PublicKey>>::new(100);
             context
                 .with_label("supervisor")
                 .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });

@@ -248,7 +248,7 @@ fn main() {
         };
         loop {
             // Listen for connection
-            let Ok((_, sink, stream, _)) = listener.accept().await else {
+            let Ok((_, sink, stream)) = listener.accept().await else {
                 debug!("failed to accept connection");
                 continue;
             };

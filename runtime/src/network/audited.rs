@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, CloserOf, Error, IoBufs, SinkOf, StreamOf};
+use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -7,6 +7,12 @@ pub struct Sink<S: crate::Sink> {
     auditor: Arc<Auditor>,
     inner: S,
     remote_addr: SocketAddr,
+}
+
+impl<S: crate::Sink + crate::Closer> crate::Closer for Sink<S> {
+    fn force_close(&self) {
+        self.inner.force_close();
+    }
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
@@ -80,16 +86,13 @@ pub struct Listener<L: crate::Listener> {
 impl<L: crate::Listener> crate::Listener for Listener<L> {
     type Sink = Sink<L::Sink>;
     type Stream = Stream<L::Stream>;
-    type Closer = L::Closer;
 
-    async fn accept(
-        &mut self,
-    ) -> Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), Error> {
+    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         self.auditor.event(b"accept_attempt", |hasher| {
             hasher.update(self.local_addr.to_string().as_bytes());
         });
 
-        let (addr, sink, stream, closer) = self.inner.accept().await.inspect_err(|e| {
+        let (addr, sink, stream) = self.inner.accept().await.inspect_err(|e| {
             self.auditor.event(b"accept_failure", |hasher| {
                 hasher.update(self.local_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -113,7 +116,6 @@ impl<L: crate::Listener> crate::Listener for Listener<L> {
                 inner: stream,
                 remote_addr: addr,
             },
-            closer,
         ))
     }
 
@@ -163,15 +165,12 @@ impl<N: crate::Network> crate::Network for Network<N> {
         })
     }
 
-    async fn dial(
-        &self,
-        remote_addr: SocketAddr,
-    ) -> Result<(SinkOf<Self>, StreamOf<Self>, CloserOf<Self>), Error> {
+    async fn dial(&self, remote_addr: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
         self.auditor.event(b"dial_attempt", |hasher| {
             hasher.update(remote_addr.to_string().as_bytes());
         });
 
-        let (sink, stream, closer) = self.inner.dial(remote_addr).await.inspect_err(|e| {
+        let (sink, stream) = self.inner.dial(remote_addr).await.inspect_err(|e| {
             self.auditor.event(b"dial_failure", |hasher| {
                 hasher.update(remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -193,7 +192,6 @@ impl<N: crate::Network> crate::Network for Network<N> {
                 inner: stream,
                 remote_addr,
             },
-            closer,
         ))
     }
 }
@@ -272,7 +270,7 @@ mod tests {
         let mut server_handles = Vec::new();
         for mut listener in listeners {
             let handle = tokio::spawn(async move {
-                let (_, mut sink, mut stream, _) = listener.accept().await.unwrap();
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
 
                 // Receive data from client
                 let received = stream.recv(CLIENT_MSG.len()).await.unwrap();
@@ -290,7 +288,7 @@ mod tests {
         for network in &networks {
             let network = network.clone();
             let handle = tokio::spawn(async move {
-                let (mut sink, mut stream, _) = network.dial(listener_addr).await.unwrap();
+                let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
                 sink.send(CLIENT_MSG.as_bytes()).await.unwrap();

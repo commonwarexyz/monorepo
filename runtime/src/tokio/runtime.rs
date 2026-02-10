@@ -18,7 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
-    BufferPool, BufferPoolConfig, Clock, CloserOf, Error, Execution, Handle, Metrics as _, SinkOf,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
@@ -714,10 +714,7 @@ impl crate::Network for Context {
         self.network.bind(socket).await
     }
 
-    async fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> Result<(SinkOf<Self>, StreamOf<Self>, CloserOf<Self>), Error> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
         self.network.dial(socket).await
     }
 }

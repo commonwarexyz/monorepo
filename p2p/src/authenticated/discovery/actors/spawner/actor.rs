@@ -13,22 +13,14 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    spawn_cell, Clock, Closer, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + Clock + CryptoRngCore + Metrics,
-    O: Sink,
-    I: Stream,
-    Cl: Closer,
-    C: PublicKey,
-> {
+pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
@@ -37,7 +29,7 @@ pub struct Actor<
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
 
-    receiver: mpsc::Receiver<Message<O, I, Cl, C>>,
+    receiver: mpsc::Receiver<Message<O, I, C>>,
 
     connections: Gauge,
     sent_messages: Family<metrics::Message, Counter>,
@@ -46,16 +38,11 @@ pub struct Actor<
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
-        E: Spawner + Clock + CryptoRngCore + Metrics,
-        O: Sink,
-        I: Stream,
-        Cl: Closer,
-        C: PublicKey,
-    > Actor<E, O, I, Cl, C>
+impl<E: Spawner + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
+    Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, Cl, C>>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let connections = Gauge::default();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
@@ -150,8 +137,6 @@ impl<
                                 let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
                                 else {
                                     debug!(?peer, "peer not eligible");
-                                    // Force close (RST instead of FIN) for blocked peers
-                                    connection.2.force_close();
                                     connections.dec();
                                     drop(reservation);
                                     return;

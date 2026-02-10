@@ -510,9 +510,6 @@ stability_scope!(BETA {
     /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
     pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
-    /// Syntactic sugar for the type of [Closer] used by a given [Network] N.
-    pub type CloserOf<N> = <<N as Network>::Listener as Listener>::Closer;
-
     /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
     pub type ListenerOf<N> = <N as crate::Network>::Listener;
 
@@ -520,8 +517,8 @@ stability_scope!(BETA {
     /// network connections.
     pub trait Network: Clone + Send + Sync + 'static {
         /// The type of [Listener] that's returned when binding to a socket.
-        /// Accepting a connection returns a [Sink], [Stream], and [Closer]
-        /// which are defined by the [Listener].
+        /// Accepting a connection returns a [Sink] and [Stream] which are
+        /// defined by the [Listener].
         type Listener: Listener;
 
         /// Bind to the given socket address.
@@ -531,13 +528,10 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
         /// Dial the given socket address.
-        #[allow(clippy::type_complexity)]
         fn dial(
             &self,
             socket: SocketAddr,
-        ) -> impl Future<
-            Output = Result<(SinkOf<Self>, StreamOf<Self>, CloserOf<Self>), Error>,
-        > + Send;
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
     }
 
     /// Interface for DNS resolution.
@@ -555,22 +549,17 @@ stability_scope!(BETA {
     /// incoming network connections.
     pub trait Listener: Sync + Send + 'static {
         /// The type of [Sink] that's returned when accepting a connection.
-        /// This is used to send data to the remote connection.
-        type Sink: Sink;
+        /// This is used to send data to the remote connection. Also
+        /// implements [Closer] for connection lifecycle control.
+        type Sink: Sink + Closer;
         /// The type of [Stream] that's returned when accepting a connection.
         /// This is used to receive data from the remote connection.
         type Stream: Stream;
-        /// The type of [Closer] that's returned when accepting a connection.
-        /// This is used to control connection lifecycle (graceful or forced close).
-        type Closer: Closer;
 
         /// Accept an incoming connection.
-        #[allow(clippy::type_complexity)]
         fn accept(
             &mut self,
-        ) -> impl Future<
-            Output = Result<(SocketAddr, Self::Sink, Self::Stream, Self::Closer), Error>,
-        > + Send;
+        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
 
         /// Returns the local address of the listener.
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
@@ -592,12 +581,11 @@ stability_scope!(BETA {
 
     /// Handle for forcing an immediate connection reset.
     ///
-    /// Returned alongside [Sink] and [Stream] when accepting or dialing
-    /// a connection. For TCP, calling [Closer::force_close] sets SO_LINGER=0
-    /// so that when the connection is dropped, an RST is sent instead of a
-    /// graceful FIN/ACK shutdown. This is useful when rejecting connections
-    /// (e.g., invalid IP, failed handshake, blocked peer) to avoid
-    /// accumulating sockets in TIME_WAIT state.
+    /// Implemented by [Sink] types to allow callers to set SO_LINGER=0
+    /// before dropping a connection, causing an RST instead of a graceful
+    /// FIN/ACK shutdown. This is useful when rejecting connections
+    /// (e.g., invalid IP, rate-limited handshake) to avoid accumulating
+    /// sockets in TIME_WAIT state.
     pub trait Closer: Sync + Send + 'static {
         /// Force an immediate connection reset.
         fn force_close(&self);
@@ -3416,7 +3404,7 @@ mod tests {
                 .spawn(move |context| async move {
                     let (mut sink, mut stream) = loop {
                         match context.dial(address).await {
-                            Ok((sink, stream, _)) => break (sink, stream),
+                            Ok((sink, stream)) => break (sink, stream),
                             Err(e) => {
                                 // The client may be polled before the server is ready, that's alright!
                                 error!(err =?e, "failed to connect");

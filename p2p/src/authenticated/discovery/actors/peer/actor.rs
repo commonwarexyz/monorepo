@@ -15,7 +15,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Closer, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -113,11 +113,11 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         Ok(())
     }
 
-    pub async fn run<O: Sink, I: Stream, Cl: Closer>(
+    pub async fn run<O: Sink, I: Stream>(
         mut self,
         peer: C,
         greeting: types::Info<C>,
-        (mut conn_sender, mut conn_receiver, closer): (Sender<O>, Receiver<I>, Cl),
+        (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
@@ -174,11 +174,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                                     metrics::Message::new_peers(&peer),
                                     types::Payload::Peers(peers),
                                 ),
-                                Message::Kill => {
-                                    // Force close (RST instead of FIN)
-                                    closer.force_close();
-                                    return Err(Error::PeerKilled(peer.to_string()));
-                                }
+                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             };
                             Self::send_payload(
                                 &mut conn_sender,
@@ -535,7 +531,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    (remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver),
                     tracker_mailbox,
                     channels,
                 )
@@ -638,7 +634,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    (remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver),
                     tracker_mailbox,
                     channels,
                 )
@@ -743,7 +739,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    (remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver),
                     tracker_mailbox,
                     channels,
                 )
@@ -885,7 +881,7 @@ mod tests {
                 .run(
                     local_pk_clone.clone(),
                     greeting,
-                    (remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver),
                     tracker_mailbox,
                     channels,
                 )

@@ -198,7 +198,7 @@ where
 }
 
 commonware_macros::stability_scope!(BETA {
-    use crate::{CloserOf, SinkOf, StreamOf};
+    use crate::{SinkOf, StreamOf};
     use commonware_parallel::ThreadPool;
     use rayon::ThreadPoolBuildError;
 
@@ -230,8 +230,7 @@ commonware_macros::stability_scope!(BETA {
         fn dial(
             &self,
             socket: SocketAddr,
-        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>, CloserOf<Self>), Error>> + Send
-        {
+        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send {
             self.as_present().dial(socket)
         }
     }
