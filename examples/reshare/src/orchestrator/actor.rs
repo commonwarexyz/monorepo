@@ -60,7 +60,7 @@ where
 
 pub struct Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + BufferPooler,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
@@ -92,7 +92,7 @@ where
 
 impl<E, B, V, C, H, A, S, L, T> Actor<E, B, V, C, H, A, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + BufferPooler,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     B: Blocker<PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,

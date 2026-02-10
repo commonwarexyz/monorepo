@@ -94,12 +94,12 @@ pub struct Config<C> {
 ///
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
-pub struct Oversized<E: Storage + Metrics + BufferPooler, I: Record, V: Codec> {
+pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
 }
 
-impl<E: Storage + Metrics + BufferPooler, I: Record + Send + Sync, V: CodecShared>
+impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
     Oversized<E, I, V>
 {
     /// Initialize with crash recovery validation.

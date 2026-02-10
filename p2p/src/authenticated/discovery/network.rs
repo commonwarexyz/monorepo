@@ -29,7 +29,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+    E: BufferPooler + Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
     C: Signer,
 > {
     context: ContextCell<E>,
@@ -44,7 +44,7 @@ pub struct Network<
 }
 
 impl<
-        E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+        E: BufferPooler + Spawner + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
         C: Signer,
     > Network<E, C>
 {

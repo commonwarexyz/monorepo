@@ -388,7 +388,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> {
+pub struct Freezer<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -425,7 +425,7 @@ pub struct Freezer<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: Cod
     resizes: Counter,
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -1158,7 +1158,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Free
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> kv::Gettable
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable
     for Freezer<E, K, V>
 {
     type Key = K;
@@ -1170,7 +1170,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> kv::
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> kv::Updatable
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable
     for Freezer<E, K, V>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -1179,7 +1179,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> kv::
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Persistable
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable
     for Freezer<E, K, V>
 {
     type Error = Error;

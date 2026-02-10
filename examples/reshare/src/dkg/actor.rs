@@ -111,7 +111,7 @@ pub struct Config<C: Signer, P> {
 
 pub struct Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage + BufferPooler,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
@@ -134,7 +134,7 @@ where
 
 impl<E, P, H, C, V> Actor<E, P, H, C, V>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage + BufferPooler,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + RuntimeStorage,
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,

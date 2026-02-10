@@ -83,7 +83,7 @@ impl EncodeSize for Record {
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
-pub struct Archive<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> {
+pub struct Archive<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -102,7 +102,7 @@ pub struct Archive<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: Cod
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Archive<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
@@ -230,7 +230,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> Arch
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, K: Array, V: CodecShared> crate::archive::Archive
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Archive
     for Archive<E, K, V>
 {
     type Key = K;

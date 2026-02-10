@@ -76,7 +76,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + BufferPooler,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -120,7 +120,7 @@ where
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network + BufferPooler,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,

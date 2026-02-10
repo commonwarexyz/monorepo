@@ -171,7 +171,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// Wraps metadata storage for epoch state and journaled storage for protocol messages,
 /// with in-memory BTreeMaps for fast lookups. Using metadata with epoch keys eliminates
 /// the position/epoch confusion that can occur with position-based journals.
-pub struct Storage<E: Clock + RuntimeStorage + Metrics + BufferPooler, V: Variant, P: PublicKey> {
+pub struct Storage<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey> {
     states: Metadata<E, u64, Epoch<V, P>>,
     msgs: SVJournal<E, Event<V, P>>,
 
@@ -180,7 +180,7 @@ pub struct Storage<E: Clock + RuntimeStorage + Metrics + BufferPooler, V: Varian
     epochs: BTreeMap<EpochNum, EpochCache<V, P>>,
 }
 
-impl<E: Clock + RuntimeStorage + Metrics + BufferPooler, V: Variant, P: PublicKey>
+impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKey>
     Storage<E, V, P>
 {
     /// Initialize storage, creating partitions if needed.
@@ -528,7 +528,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ///
     /// If the ack is valid and new, persists it to storage.
     /// Returns true if the ack was successfully processed.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics + BufferPooler>(
+    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,
@@ -607,7 +607,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Handle an incoming dealer message.
     ///
     /// If this is a new valid dealer message, persists it to storage before returning.
-    pub async fn handle<E: Clock + RuntimeStorage + Metrics + BufferPooler, M: Faults>(
+    pub async fn handle<E: BufferPooler + Clock + RuntimeStorage + Metrics, M: Faults>(
         &mut self,
         storage: &mut Storage<E, V, C::PublicKey>,
         epoch: EpochNum,

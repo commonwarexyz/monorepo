@@ -55,7 +55,7 @@ pub struct Config<C> {
 /// Uses [`buffer::Write`](commonware_runtime::buffer::Write) for batching writes.
 /// Reads go directly to blobs without any caching (ideal for large values that
 /// shouldn't pollute a page cache).
-pub struct Glob<E: Storage + Metrics + BufferPooler, V: Codec> {
+pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec> {
     manager: Manager<E, WriteFactory>,
 
     /// Compression level (if enabled).
@@ -65,7 +65,7 @@ pub struct Glob<E: Storage + Metrics + BufferPooler, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics + BufferPooler, V: CodecShared> Glob<E, V> {
+impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {

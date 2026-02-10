@@ -69,7 +69,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cfg = ()>> {
+pub struct Ordinal<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -93,7 +93,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cf
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -430,7 +430,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixed<Cfg = ()>> Ordin
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixedShared> kv::Gettable
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable
     for Ordinal<E, V>
 {
     type Key = u64;
@@ -442,7 +442,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixedShared> kv::Getta
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixedShared> kv::Updatable
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable
     for Ordinal<E, V>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
@@ -450,7 +450,7 @@ impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixedShared> kv::Updat
     }
 }
 
-impl<E: Storage + Metrics + Clock + BufferPooler, V: CodecFixedShared> Persistable
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> Persistable
     for Ordinal<E, V>
 {
     type Error = Error;

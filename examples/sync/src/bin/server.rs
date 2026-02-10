@@ -466,7 +466,7 @@ where
 /// Run the Any database server.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + BufferPooler,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
     let db_config = any::create_config(context.storage_buffer_pool().clone());
@@ -478,7 +478,7 @@ where
 /// Run the Immutable database server.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone + BufferPooler,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     // Create and initialize database
     let db_config = immutable::create_config(context.storage_buffer_pool().clone());

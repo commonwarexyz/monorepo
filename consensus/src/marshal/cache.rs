@@ -34,7 +34,7 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + Storage + BufferPooler, B: Block, S: Scheme> {
+struct Cache<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -45,7 +45,7 @@ struct Cache<R: Rng + Spawner + Metrics + Clock + Storage + BufferPooler, B: Blo
     finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<S, B::Commitment>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + Storage + BufferPooler, B: Block, S: Scheme>
+impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme>
     Cache<R, B, S>
 {
     /// Prune the archives to the given view.
@@ -64,7 +64,7 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage + BufferPooler, B: Block, S: S
 
 /// Manages prunable caches and their metadata.
 pub(crate) struct Manager<
-    R: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     B: Block,
     S: Scheme,
 > {
@@ -85,7 +85,7 @@ pub(crate) struct Manager<
     caches: BTreeMap<Epoch, Cache<R, B, S>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + Storage + BufferPooler, B: Block, S: Scheme>
+impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme>
     Manager<R, B, S>
 {
     /// Initialize the cache manager and its metadata store.

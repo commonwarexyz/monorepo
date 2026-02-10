@@ -108,7 +108,7 @@ where
 /// Repeatedly sync an Any database to the server's state.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + BufferPooler,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Any database sync process");
     let mut iteration = 0u32;
@@ -168,7 +168,7 @@ where
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner + BufferPooler,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Immutable database sync process");
     let mut iteration = 0u32;

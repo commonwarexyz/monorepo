@@ -50,7 +50,7 @@ pub struct Config<C: Signer> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metrics, C: Signer> {
+pub struct Actor<E: BufferPooler + Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     // ---------- State ----------
@@ -69,7 +69,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + Resolver + Metric
 }
 
 impl<
-        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
+        E: BufferPooler + Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics,
         C: Signer,
     > Actor<E, C>
 {

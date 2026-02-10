@@ -101,7 +101,7 @@ struct BlockSubscription<B: Block> {
 /// behind.
 pub struct Actor<E, B, P, FC, FB, ES, T, A = Exact>
 where
-    E: CryptoRngCore + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
@@ -162,7 +162,7 @@ where
 
 impl<E, B, P, FC, FB, ES, T, A> Actor<E, B, P, FC, FB, ES, T, A>
 where
-    E: CryptoRngCore + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     B: Block,
     P: Provider<Scope = Epoch, Scheme: Scheme<B::Commitment>>,
     FC: Certificates<Commitment = B::Commitment, Scheme = P::Scheme>,
