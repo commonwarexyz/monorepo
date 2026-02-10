@@ -1,12 +1,13 @@
 //! Shared queue with split writer/reader handles.
 //!
 //! Provides concurrent access to a [Queue] with multiple writers and a single reader.
-//! The reader can await new items using [QueueReader::recv], which integrates
+//! The reader can await new items using [Reader::recv], which integrates
 //! with `select!` for multiplexing with other futures.
 //!
 //! Writers can be cloned to allow multiple tasks to enqueue items concurrently.
 
 use super::{Config, Error, Queue};
+use crate::Persistable;
 use commonware_codec::CodecShared;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::channel::mpsc;
@@ -18,12 +19,12 @@ use tracing::debug;
 ///
 /// This handle can be cloned to allow multiple tasks to enqueue items concurrently.
 /// All clones share the same underlying queue and notification channel.
-pub struct QueueWriter<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Writer<E: Clock + Storage + Metrics, V: CodecShared> {
     queue: Arc<Mutex<Queue<E, V>>>,
     notify: mpsc::Sender<()>,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for Writer<E, V> {
     fn clone(&self) -> Self {
         Self {
             queue: self.queue.clone(),
@@ -32,9 +33,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for QueueWriter<E, V> {
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
     /// Enqueue an item, returning its position. The lock is held for the
-    /// full append + flush, so no reader can see the item until it is durable.
+    /// full append + commit, so no reader can see the item until it is durable.
     ///
     /// # Errors
     ///
@@ -42,33 +43,35 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
     pub async fn enqueue(&self, item: V) -> Result<u64, Error> {
         let pos = self.queue.lock().await.enqueue(item).await?;
 
-        // Notify reader (ignore errors: full means already notified, disconnected means reader dropped)
+        // Fire-and-forget so the writer never blocks on reader wake-up.
+        // The reader always checks the queue under lock, so a missed
+        // notification never causes a missed item.
         let _ = self.notify.try_send(());
 
         debug!(position = pos, "writer: enqueued item");
         Ok(pos)
     }
 
-    /// Enqueue a batch of items with a single flush, returning positions
+    /// Enqueue a batch of items with a single commit, returning positions
     /// `[start, end)`. The lock is held for the full batch, so no reader can
     /// see any item until the entire batch is durable.
     ///
     /// # Errors
     ///
-    /// Returns an error if any append or the final flush fails.
-    pub async fn enqueue_bulk(&self, items: &[V]) -> Result<Range<u64>, Error>
-    where
-        V: Clone,
-    {
+    /// Returns an error if any append or the final commit fails.
+    pub async fn enqueue_bulk(
+        &self,
+        items: impl IntoIterator<Item = V>,
+    ) -> Result<Range<u64>, Error> {
         let mut queue = self.queue.lock().await;
         let start = queue.size();
         for item in items {
-            queue.append(item.clone()).await?;
-        }
-        if !items.is_empty() {
-            queue.flush().await?;
+            queue.append(item).await?;
         }
         let end = queue.size();
+        if end > start {
+            queue.commit().await?;
+        }
         drop(queue);
 
         if start < end {
@@ -78,9 +81,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
         Ok(start..end)
     }
 
-    /// Append an item without flushing, returning its position. The item
+    /// Append an item without committing, returning its position. The item
     /// is immediately visible to the reader but is **not durable** until
-    /// [Self::flush] is called or the underlying journal auto-syncs at a
+    /// [Self::commit] is called or the underlying journal auto-syncs at a
     /// section boundary (see [`variable::Journal`](crate::journal::contiguous::variable::Journal)
     /// invariant 1).
     ///
@@ -94,14 +97,14 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
         Ok(pos)
     }
 
-    /// Flush all previously appended items to disk. After this returns
-    /// successfully, all appended items are durable.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn flush(&self) -> Result<(), Error> {
-        self.queue.lock().await.flush().await
+    /// See [Queue::commit](super::Queue::commit).
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.queue.lock().await.commit().await
+    }
+
+    /// See [Queue::sync](super::Queue::sync).
+    pub async fn sync(&self) -> Result<(), Error> {
+        self.queue.lock().await.sync().await
     }
 
     /// Returns the total number of items that have been enqueued.
@@ -113,12 +116,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueWriter<E, V> {
 /// Reader handle for dequeuing and acknowledging items.
 ///
 /// There should only be one reader per shared queue.
-pub struct QueueReader<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Reader<E: Clock + Storage + Metrics, V: CodecShared> {
     queue: Arc<Mutex<Queue<E, V>>>,
     notify: mpsc::Receiver<()>,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
     /// Receive the next unacknowledged item, waiting if necessary.
     ///
     /// This method is designed for use with `select!`. It will:
@@ -153,9 +156,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain any pending notifications to keep the channel state consistent
-        // with the queue state when polling via try_recv.
-        while self.notify.try_recv().is_ok() {}
+        // Drain pending notification (capacity is 1, so at most 1 buffered).
+        let _ = self.notify.try_recv();
 
         self.queue.lock().await.dequeue().await
     }
@@ -178,36 +180,24 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
         self.queue.lock().await.ack_up_to(up_to)
     }
 
-    /// See [Queue::peek].
-    pub async fn peek(&self) -> Result<Option<(u64, V)>, Error> {
-        self.queue.lock().await.peek().await
-    }
-
-    /// Returns the current ack floor.
+    /// See [Queue::ack_floor].
     pub async fn ack_floor(&self) -> u64 {
         self.queue.lock().await.ack_floor()
     }
 
-    /// Returns the current read position.
+    /// See [Queue::read_position].
     pub async fn read_position(&self) -> u64 {
         self.queue.lock().await.read_position()
     }
 
-    /// Returns whether all enqueued items have been acknowledged.
+    /// See [Queue::is_empty].
     pub async fn is_empty(&self) -> bool {
         self.queue.lock().await.is_empty()
     }
 
-    /// Reset the read position to re-deliver all unacknowledged items.
+    /// See [Queue::reset].
     pub async fn reset(&self) {
         self.queue.lock().await.reset();
-    }
-
-    /// See [Queue::prune].
-    ///
-    /// See [Queue::prune] for details.
-    pub async fn prune(&self) -> Result<bool, Error> {
-        self.queue.lock().await.prune().await
     }
 }
 
@@ -238,16 +228,16 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> QueueReader<E, V> {
 pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
     context: E,
     cfg: Config<V::Cfg>,
-) -> Result<(QueueWriter<E, V>, QueueReader<E, V>), Error> {
+) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
     let queue = Arc::new(Mutex::new(Queue::init(context, cfg).await?));
     let (notify_tx, notify_rx) = mpsc::channel(1);
 
-    let writer = QueueWriter {
+    let writer = Writer {
         queue: queue.clone(),
         notify: notify_tx,
     };
 
-    let reader = QueueReader {
+    let reader = Reader {
         queue,
         notify: notify_rx,
     };
@@ -301,25 +291,25 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_shared_append_flush() {
+    fn test_shared_append_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_shared_append_flush");
+            let cfg = test_config("test_shared_append_commit");
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
-            // Append several items without flushing
+            // Append several items without committing
             for i in 0..5u8 {
                 let pos = writer.append(vec![i]).await.unwrap();
                 assert_eq!(pos, i as u64);
             }
 
-            // Reader can see them before flush
+            // Reader can see them before commit
             let (pos, item) = reader.recv().await.unwrap().unwrap();
             assert_eq!(pos, 0);
             assert_eq!(item, vec![0]);
 
-            // Flush to make durable
-            writer.flush().await.unwrap();
+            // Commit to make durable
+            writer.commit().await.unwrap();
 
             // Remaining items still readable
             for i in 1..5 {
@@ -341,8 +331,10 @@ mod tests {
             let cfg = test_config("test_shared_bulk");
             let (writer, mut reader) = init(context, cfg).await.unwrap();
 
-            let items: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i]).collect();
-            let range = writer.enqueue_bulk(&items).await.unwrap();
+            let range = writer
+                .enqueue_bulk((0..5u8).map(|i| vec![i]))
+                .await
+                .unwrap();
             assert_eq!(range, 0..5);
 
             for i in 0..5 {

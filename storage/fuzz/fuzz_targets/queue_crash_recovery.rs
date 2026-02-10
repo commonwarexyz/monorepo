@@ -10,7 +10,10 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
-use commonware_storage::queue::{Config, Queue};
+use commonware_storage::{
+    queue::{Config, Queue},
+    Persistable,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -49,28 +52,20 @@ fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
 enum QueueOperation {
     /// Enqueue a new item with the given value (repeated to fill ITEM_SIZE).
     Enqueue { value: u8 },
-
-    /// Append a new item without flushing (not durable until Flush).
+    /// Append a new item without committing (not durable until Commit).
     Append { value: u8 },
-
-    /// Flush appended items to disk.
-    Flush,
-
+    /// Commit appended items to disk.
+    Commit,
     /// Dequeue and acknowledge the next item.
     DequeueAndAck,
-
     /// Dequeue without acknowledging (item should be re-delivered on recovery).
     DequeueNoAck,
-
     /// Acknowledge a specific position offset from ack_floor.
     AckOffset { offset: u8 },
-
     /// Acknowledge all items up to a position.
     AckUpToOffset { offset: u8 },
-
-    /// Commit the queue (flush and prune).
-    Commit,
-
+    /// Sync the queue (commit and prune).
+    Sync,
     /// Reset read position to ack floor.
     Reset,
 }
@@ -109,11 +104,11 @@ struct FuzzInput {
 /// in-memory but not pruned will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
-    /// Items that were successfully enqueued or flushed (position -> value).
+    /// Items that were successfully enqueued or committed (position -> value).
     committed: BTreeMap<u64, u8>,
 
     /// Items that were enqueued/appended but the operation may have failed,
-    /// or were appended but not yet flushed.
+    /// or were appended but not yet committed.
     pending: Vec<u8>,
 
     /// The ack floor at the time of last successful commit.
@@ -122,59 +117,55 @@ struct RecoveryState {
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
 
-    /// Items per section (reserved for recovery bound calculations).
-    _items_per_section: u64,
-
-    /// Items that were appended but not yet flushed (position -> value).
-    /// These may be lost on crash. On flush, they move to committed.
-    unflushed: BTreeMap<u64, u8>,
+    /// Items that were appended but not yet committed (position -> value).
+    /// These may be lost on crash. On commit, they move to `committed`.
+    uncommitted: BTreeMap<u64, u8>,
 }
 
 impl RecoveryState {
-    fn new(items_per_section: u64) -> Self {
+    fn new() -> Self {
         Self {
             committed: BTreeMap::new(),
             pending: Vec::new(),
             committed_ack_floor: 0,
             current_ack_floor: 0,
-            _items_per_section: items_per_section,
-            unflushed: BTreeMap::new(),
+            uncommitted: BTreeMap::new(),
         }
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
-        // Enqueue does append + flush, so success means it's durable at `pos`.
+        // Enqueue does append + commit, so success means it's durable at `pos`.
         self.committed.insert(pos, value);
     }
 
     fn enqueue_failed(&mut self, value: u8) {
-        // Enqueue may have partially succeeded (append but not flush).
+        // Enqueue may have partially succeeded (append but not commit).
         // Track as pending - it may or may not be persisted.
         self.pending.push(value);
     }
 
     fn append_succeeded(&mut self, pos: u64, value: u8) {
-        // Append only - not durable until flushed.
-        self.unflushed.insert(pos, value);
+        // Append only - not durable until committed.
+        self.uncommitted.insert(pos, value);
     }
 
     fn append_failed(&mut self, value: u8) {
         self.pending.push(value);
     }
 
-    fn flush_succeeded(&mut self) {
-        // All unflushed items are now durable.
-        let unflushed = std::mem::take(&mut self.unflushed);
-        for (pos, value) in unflushed {
+    fn commit_succeeded(&mut self) {
+        // All uncommitted items are now durable.
+        let uncommitted = std::mem::take(&mut self.uncommitted);
+        for (pos, value) in uncommitted {
             self.committed.insert(pos, value);
         }
     }
 
-    fn flush_failed(&mut self) {
-        // Unflushed items remain unflushed; they may or may not be durable.
+    fn commit_failed(&mut self) {
+        // Uncommitted items remain uncommitted; they may or may not be durable.
         // Move them to pending since we can't be sure.
-        let unflushed = std::mem::take(&mut self.unflushed);
-        for (_pos, value) in unflushed {
+        let uncommitted = std::mem::take(&mut self.uncommitted);
+        for (_pos, value) in uncommitted {
             self.pending.push(value);
         }
     }
@@ -183,7 +174,7 @@ impl RecoveryState {
         self.current_ack_floor = ack_floor;
     }
 
-    fn commit_succeeded(&mut self, ack_floor: u64) {
+    fn sync_succeeded(&mut self, ack_floor: u64) {
         self.current_ack_floor = ack_floor;
         self.committed_ack_floor = ack_floor;
     }
@@ -195,7 +186,7 @@ impl RecoveryState {
 
     /// Returns the maximum size we expect after recovery.
     fn max_recovered_size(&self) -> u64 {
-        (self.committed.len() + self.pending.len() + self.unflushed.len()) as u64
+        (self.committed.len() + self.pending.len() + self.uncommitted.len()) as u64
     }
 
     /// Returns the minimum ack floor we expect after recovery.
@@ -217,9 +208,8 @@ fn make_item(value: u8) -> Vec<u8> {
 async fn run_operations(
     queue: &mut Queue<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
-    items_per_section: u64,
 ) -> RecoveryState {
-    let mut state = RecoveryState::new(items_per_section);
+    let mut state = RecoveryState::new();
 
     for op in operations {
         match op {
@@ -227,9 +217,9 @@ async fn run_operations(
                 let item = make_item(*value);
                 match queue.enqueue(item).await {
                     Ok(pos) => {
-                        // enqueue = append + flush, so success means ALL
-                        // previously unflushed items are now durable too.
-                        state.flush_succeeded();
+                        // enqueue = append + commit, so success means ALL
+                        // previously uncommitted items are now durable too.
+                        state.commit_succeeded();
                         state.enqueue_succeeded(pos, *value);
                     }
                     Err(_) => {
@@ -250,12 +240,12 @@ async fn run_operations(
                 }
             }
 
-            QueueOperation::Flush => match queue.flush().await {
+            QueueOperation::Commit => match queue.commit().await {
                 Ok(()) => {
-                    state.flush_succeeded();
+                    state.commit_succeeded();
                 }
                 Err(_) => {
-                    state.flush_failed();
+                    state.commit_failed();
                 }
             },
 
@@ -292,12 +282,12 @@ async fn run_operations(
                 }
             }
 
-            QueueOperation::Commit => {
-                if queue.commit().await.is_ok() {
-                    // commit = flush + prune, so success means ALL
-                    // previously unflushed items are now durable too.
-                    state.flush_succeeded();
-                    state.commit_succeeded(queue.ack_floor());
+            QueueOperation::Sync => {
+                if queue.sync().await.is_ok() {
+                    // sync = commit + prune, so success means ALL
+                    // previously uncommitted items are now durable too.
+                    state.commit_succeeded();
+                    state.sync_succeeded(queue.ack_floor());
                 }
             }
 
@@ -401,7 +391,6 @@ fn fuzz(input: FuzzInput) {
 
     let runner = deterministic::Runner::new(cfg);
 
-    let items_per_section_val = input.items_per_section;
     let (state, checkpoint) = runner.start_and_recover(|ctx| {
         let partition_name = partition_name.clone();
         let operations = operations.clone();
@@ -428,7 +417,7 @@ fn fuzz(input: FuzzInput) {
             let faults = ctx.storage_fault_config();
             *faults.write().unwrap() = fault_config;
 
-            run_operations(&mut queue, &operations, items_per_section_val).await
+            run_operations(&mut queue, &operations).await
         }
     });
 

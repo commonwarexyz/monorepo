@@ -1,7 +1,7 @@
 //! Queue storage implementation.
 
 use super::{metrics, Error};
-use crate::{journal::contiguous::variable, rmap::RMap};
+use crate::{journal::contiguous::variable, rmap::RMap, Persistable};
 use commonware_codec::CodecShared;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -43,13 +43,13 @@ pub struct Config<C> {
 ///
 /// # Operations
 ///
-/// - [append](Self::append) / [flush](Self::flush): Write items to the journal
-///   buffer, then persist. Items are readable immediately after append (before flush),
-///   but are lost on restart if not flushed.
-/// - [enqueue](Self::enqueue): Append + flush in one step; the item is durable before return.
-/// - [dequeue](Self::dequeue) / [peek](Self::peek): Return the next unacked item in FIFO order.
+/// - [append](Self::append) / [commit](Self::commit): Write items to the journal
+///   buffer, then persist. Items are readable immediately after append (before commit),
+///   but are lost on restart if not committed.
+/// - [enqueue](Self::enqueue): Append + commit in one step; the item is durable before return.
+/// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
-/// - [commit](Self::commit): Flush, then prune completed sections below the ack floor.
+/// - [sync](Self::sync): Commit, then prune completed sections below the ack floor.
 ///
 /// # Acknowledgment
 ///
@@ -58,7 +58,7 @@ pub struct Config<C> {
 /// contiguously from the floor, the floor advances automatically.
 ///
 /// Acks are **not** persisted. The durable equivalent is the journal's pruning
-/// boundary, advanced by [commit](Self::commit). On restart, all non-pruned
+/// boundary, advanced by [sync](Self::sync). On restart, all non-pruned
 /// items are re-delivered regardless of prior ack state.
 ///
 /// # Crash Recovery
@@ -126,9 +126,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         debug!(ack_floor, size = journal.size(), "queue initialized");
 
         // Set initial metric values
-        metrics.size.set(journal.size() as i64);
-        metrics.ack_floor.set(ack_floor as i64);
-        metrics.acked_above_ranges.set(0);
+        metrics.tip.set(journal.size() as i64);
+        metrics.floor.set(ack_floor as i64);
+        metrics.next.set(ack_floor as i64);
 
         Ok(Self {
             journal,
@@ -144,9 +144,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         position < self.ack_floor || self.acked_above.get(&position).is_some()
     }
 
-    /// Append an item without persisting. Call [Self::flush] or [Self::commit]
+    /// Append an item without persisting. Call [Self::commit] or [Self::sync]
     /// afterwards to make it durable. The item is readable immediately but
-    /// is not guaranteed to survive a crash until flushed or the journal
+    /// is not guaranteed to survive a crash until committed or the journal
     /// auto-syncs at a section boundary (see [`variable::Journal`] invariant 1).
     ///
     /// # Errors
@@ -154,12 +154,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Returns an error if the underlying storage operation fails.
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         let pos = self.journal.append(item).await?;
-        self.metrics.size.set(self.journal.size() as i64);
+        self.metrics.tip.set(self.journal.size() as i64);
         debug!(position = pos, "appended item");
         Ok(pos)
     }
 
-    /// Append and flush an item in one step, returning its position.
+    /// Append and commit an item in one step, returning its position.
     /// The item is durable before this method returns.
     ///
     /// # Errors
@@ -167,7 +167,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Returns an error if the underlying storage operation fails.
     pub async fn enqueue(&mut self, item: V) -> Result<u64, Error> {
         let pos = self.append(item).await?;
-        self.flush().await?;
+        self.commit().await?;
         Ok(pos)
     }
 
@@ -191,6 +191,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             self.read_pos = end.saturating_add(1);
         }
 
+        // If the read position is greater than the size of the journal, return None.
+        self.metrics.next.set(self.read_pos as i64);
         if self.read_pos >= size {
             return Ok(None);
         }
@@ -198,35 +200,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         let item = self.journal.read(self.read_pos).await?;
         let pos = self.read_pos;
         self.read_pos += 1;
-
+        self.metrics.next.set(self.read_pos as i64);
         debug!(position = pos, "dequeued item");
-        Ok(Some((pos, item)))
-    }
-
-    /// Like [Self::dequeue], but does not advance the read position.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn peek(&self) -> Result<Option<(u64, V)>, Error> {
-        let size = self.journal.size();
-        let mut pos = self.read_pos;
-
-        // Fast-forward above ack floor
-        if pos < self.ack_floor {
-            pos = self.ack_floor;
-        }
-
-        // Fast-forward past the ack range containing pos (if any).
-        if let Some((_, end)) = self.acked_above.get(&pos) {
-            pos = end.saturating_add(1);
-        }
-
-        if pos >= size {
-            return Ok(None);
-        }
-
-        let item = self.journal.read(pos).await?;
         Ok(Some((pos, item)))
     }
 
@@ -263,19 +238,13 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             };
             self.acked_above.remove(next, final_floor - 1);
             self.ack_floor = final_floor;
+            self.metrics.floor.set(self.ack_floor as i64);
             debug!(ack_floor = self.ack_floor, "advanced ack floor");
         } else {
             // Floor is not advancing, so add to acked_above
             self.acked_above.insert(position);
             debug!(position, "acked item above floor");
         }
-
-        // Update metrics
-        self.metrics.ack_floor.set(self.ack_floor as i64);
-        self.metrics
-            .acked_above_ranges
-            .set(self.acked_above.iter().count() as i64);
-
         Ok(())
     }
 
@@ -305,13 +274,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         // Remove all entries covered by the new floor and advance
         self.acked_above.remove(self.ack_floor, final_floor - 1);
         self.ack_floor = final_floor;
-
-        // Update metrics
-        self.metrics.ack_floor.set(self.ack_floor as i64);
-        self.metrics
-            .acked_above_ranges
-            .set(self.acked_above.iter().count() as i64);
-
+        self.metrics.floor.set(self.ack_floor as i64);
         debug!(ack_floor = self.ack_floor, "batch acked up to");
         Ok(())
     }
@@ -345,55 +308,17 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.ack_floor >= self.journal.size()
     }
 
-    /// Prune completed sections below the ack floor without flushing.
-    /// Returns `true` if any data was pruned.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn prune(&mut self) -> Result<bool, Error> {
-        let pruned = self.journal.prune(self.ack_floor).await?;
-        if pruned {
-            debug!(ack_floor = self.ack_floor, "pruned acknowledged items");
-        }
-        Ok(pruned)
-    }
-
     /// Reset the read position to the ack floor so [Self::dequeue] re-delivers
     /// all unacknowledged items from the beginning.
     pub fn reset(&mut self) {
         let old_pos = self.read_pos;
         self.read_pos = self.ack_floor;
+        self.metrics.next.set(self.read_pos as i64);
         debug!(
             old_read_pos = old_pos,
             new_read_pos = self.read_pos,
             "reset read position"
         );
-    }
-
-    /// Persist appended items without pruning. Use [Self::commit] to
-    /// also prune acknowledged sections.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn flush(&mut self) -> Result<(), Error> {
-        self.journal.commit().await?;
-        Ok(())
-    }
-
-    /// Flush appended items, then prune completed sections below the ack floor.
-    ///
-    /// Flush-then-prune ordering ensures a crash between steps cannot delete
-    /// old sections while the current section is still unflushed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the underlying storage operation fails.
-    pub async fn commit(&mut self) -> Result<(), Error> {
-        self.journal.commit().await?;
-        self.journal.prune(self.ack_floor).await?;
-        Ok(())
     }
 
     /// Returns the number of items not yet read (test-only).
@@ -409,6 +334,26 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             .iter()
             .map(|(&s, &e)| (e - s + 1) as usize)
             .sum()
+    }
+}
+
+impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
+    type Error = Error;
+
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.journal.commit().await?;
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.journal.sync().await?;
+        self.journal.prune(self.ack_floor).await?;
+        Ok(())
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        self.journal.destroy().await?;
+        Ok(())
     }
 }
 
@@ -484,7 +429,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_append_flush_batch() {
+    fn test_append_commit_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch");
@@ -492,11 +437,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Append multiple items, then flush once
+            // Append multiple items, then commit once
             for i in 0..5u8 {
                 queue.append(vec![i]).await.unwrap();
             }
-            queue.flush().await.unwrap();
+            queue.commit().await.unwrap();
             assert_eq!(queue.size(), 5);
 
             // Dequeue and verify order
@@ -510,7 +455,7 @@ mod tests {
             for i in 5..8u8 {
                 queue.append(vec![i]).await.unwrap();
             }
-            queue.flush().await.unwrap();
+            queue.commit().await.unwrap();
             queue.enqueue(vec![8]).await.unwrap();
             assert_eq!(queue.size(), 9);
 
@@ -520,7 +465,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_append_flush_persistence() {
+    fn test_append_commit_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_batch_persist");
@@ -532,8 +477,8 @@ mod tests {
                 for i in 0..4u8 {
                     queue.append(vec![i]).await.unwrap();
                 }
-                queue.flush().await.unwrap();
                 queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
             }
 
             {
@@ -674,7 +619,6 @@ mod tests {
             // Batch ack up to 5
             queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 5);
-            // Items 7, 8 should still be tracked in acked_above
             assert_eq!(queue.acked_above_count(), 2);
 
             // Now batch ack up to 9 - should consume the acked_above entries
@@ -772,36 +716,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peek() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_config("test_peek");
-            let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), cfg)
-                .await
-                .unwrap();
-
-            // Peek on empty queue
-            assert!(queue.peek().await.unwrap().is_none());
-
-            // Enqueue and peek
-            queue.enqueue(b"item0".to_vec()).await.unwrap();
-            let (p, item) = queue.peek().await.unwrap().unwrap();
-            assert_eq!(p, 0);
-            assert_eq!(item, b"item0");
-
-            // Peek doesn't advance position
-            let (p, item) = queue.peek().await.unwrap().unwrap();
-            assert_eq!(p, 0);
-            assert_eq!(item, b"item0");
-
-            // Dequeue returns same item
-            let (p, item) = queue.dequeue().await.unwrap().unwrap();
-            assert_eq!(p, 0);
-            assert_eq!(item, b"item0");
-        });
-    }
-
-    #[test_traced]
     fn test_ack_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -839,7 +753,7 @@ mod tests {
             for i in 0..25u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
 
             // Read and ack some items
             for i in 0..15 {
@@ -868,7 +782,7 @@ mod tests {
             for i in 0..50u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
-            queue.commit().await.unwrap();
+            queue.sync().await.unwrap();
 
             // First batch: ack items 0-14
             for i in 0..15 {
@@ -932,7 +846,7 @@ mod tests {
                 queue.ack(2).unwrap();
                 assert_eq!(queue.ack_floor(), 3);
 
-                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
             }
 
             // Second session: all items are re-delivered (no pruning occurred)
@@ -979,7 +893,7 @@ mod tests {
                 assert_eq!(queue.ack_floor(), 15);
 
                 // Sync triggers pruning
-                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
 
                 // Verify pruning occurred
                 let pruning_boundary = queue.journal.bounds().start;
@@ -1093,8 +1007,7 @@ mod tests {
             // Operations on empty queue
             assert!(queue.is_empty());
             assert!(queue.dequeue().await.unwrap().is_none());
-            assert!(queue.peek().await.unwrap().is_none());
-            queue.prune().await.unwrap();
+            queue.sync().await.unwrap();
             queue.reset();
         });
     }
@@ -1113,7 +1026,7 @@ mod tests {
 
                 queue.enqueue(b"item0".to_vec()).await.unwrap();
                 queue.enqueue(b"item1".to_vec()).await.unwrap();
-                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
             }
 
             // Second session - data should persist
@@ -1233,74 +1146,141 @@ mod tests {
             let ctx = context.with_label("test_metrics");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
-            // Check initial metrics via encode
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_size 0"),
-                "expected size 0: {encoded}"
+                encoded.contains("test_metrics_tip 0"),
+                "expected tip 0: {encoded}"
             );
             assert!(
-                encoded.contains("test_metrics_ack_floor 0"),
-                "expected ack_floor 0: {encoded}"
+                encoded.contains("test_metrics_floor 0"),
+                "expected floor 0: {encoded}"
             );
             assert!(
-                encoded.contains("test_metrics_acked_above_ranges 0"),
-                "expected acked_above_ranges 0: {encoded}"
+                encoded.contains("test_metrics_next 0"),
+                "expected next 0: {encoded}"
             );
 
-            // Enqueue items - size should update
-            for i in 0..5u8 {
+            // Append updates tip without enqueue
+            queue.append(vec![0]).await.unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_tip 1"),
+                "expected tip 1: {encoded}"
+            );
+            queue.commit().await.unwrap();
+
+            // Enqueue updates tip further
+            for i in 1..10u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_size 5"),
-                "expected size 5: {encoded}"
+                encoded.contains("test_metrics_tip 10"),
+                "expected tip 10: {encoded}"
             );
 
-            // Ack out of order - acked_above_ranges should increase
-            queue.ack(2).unwrap();
-            queue.ack(4).unwrap();
+            // Multiple dequeues advance next
+            queue.dequeue().await.unwrap();
+            queue.dequeue().await.unwrap();
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_ack_floor 0"),
-                "expected ack_floor 0: {encoded}"
-            );
-            assert!(
-                encoded.contains("test_metrics_acked_above_ranges 2"),
-                "expected acked_above_ranges 2: {encoded}"
+                encoded.contains("test_metrics_next 2"),
+                "expected next 2: {encoded}"
             );
 
-            // Ack 0 - floor advances to 1
+            // Sequential ack advances floor
             queue.ack(0).unwrap();
-            let encoded = context.encode();
-            assert!(
-                encoded.contains("test_metrics_ack_floor 1"),
-                "expected ack_floor 1: {encoded}"
-            );
-
-            // Ack 1 - floor advances to 3 (consuming 2)
             queue.ack(1).unwrap();
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_ack_floor 3"),
-                "expected ack_floor 3: {encoded}"
+                encoded.contains("test_metrics_floor 2"),
+                "expected floor 2: {encoded}"
             );
-            assert!(
-                encoded.contains("test_metrics_acked_above_ranges 1"),
-                "expected acked_above_ranges 1: {encoded}"
-            ); // Only 4 remains
 
-            // Ack 3 - floor advances to 5 (consuming 4)
+            // Out-of-order ack: floor stays until gap fills
+            queue.ack(4).unwrap();
+            queue.ack(6).unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_floor 2"),
+                "expected floor still 2: {encoded}"
+            );
+
+            // Fill gap coalesces floor forward
+            queue.ack(2).unwrap();
             queue.ack(3).unwrap();
             let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_ack_floor 5"),
-                "expected ack_floor 5: {encoded}"
+                encoded.contains("test_metrics_floor 5"),
+                "expected floor 5: {encoded}"
             );
+
+            // ack_up_to advances floor past sparse ack at 6
+            queue.ack_up_to(8).unwrap();
+            let encoded = context.encode();
             assert!(
-                encoded.contains("test_metrics_acked_above_ranges 0"),
-                "expected acked_above_ranges 0: {encoded}"
+                encoded.contains("test_metrics_floor 8"),
+                "expected floor 8: {encoded}"
+            );
+
+            // Ack remaining
+            queue.ack(8).unwrap();
+            queue.ack(9).unwrap();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_floor 10"),
+                "expected floor 10: {encoded}"
+            );
+
+            // Reset brings next back to floor
+            queue.reset();
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_metrics_next 10"),
+                "expected next 10: {encoded}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_metrics_next_updates_on_fast_forward() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_ff");
+            let ctx = context.with_label("test_ff");
+            let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
+
+            // Enqueue 3 items, dequeue and ack only the first
+            for i in 0..3u8 {
+                queue.enqueue(vec![i]).await.unwrap();
+            }
+            let (pos, _) = queue.dequeue().await.unwrap().unwrap();
+            queue.ack(pos).unwrap();
+
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_ff_next 1"),
+                "expected next 1: {encoded}"
+            );
+
+            // Ack remaining items out-of-order to advance floor to 3
+            queue.ack(2).unwrap();
+            queue.ack(1).unwrap();
+            assert_eq!(queue.ack_floor(), 3);
+
+            // next metric is still 1 (no dequeue yet)
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_ff_next 1"),
+                "expected next still 1: {encoded}"
+            );
+
+            // Dequeue returns None but fast-forwards read_pos to ack_floor
+            assert!(queue.dequeue().await.unwrap().is_none());
+            let encoded = context.encode();
+            assert!(
+                encoded.contains("test_ff_next 3"),
+                "expected next 3 after fast-forward: {encoded}"
             );
         });
     }

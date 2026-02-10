@@ -2,7 +2,10 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
-use commonware_storage::queue::{Config, Queue};
+use commonware_storage::{
+    queue::{Config, Queue},
+    Persistable,
+};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
@@ -30,35 +33,22 @@ fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
-    /// Enqueue a new item (append + flush).
+    /// Enqueue a new item (append + commit).
     Enqueue { value: u8 },
-
-    /// Append a new item without flushing.
+    /// Append a new item without committing.
     Append { value: u8 },
-
-    /// Flush appended items to disk.
-    Flush,
-
+    /// Commit appended items to disk.
+    Commit,
     /// Dequeue the next unacked item.
     Dequeue,
-
     /// Acknowledge a specific position.
     Ack { pos_offset: u8 },
-
     /// Acknowledge all items up to a position.
     AckUpTo { pos_offset: u8 },
-
-    /// Peek at the next unacked item.
-    Peek,
-
     /// Reset the read position.
     Reset,
-
-    /// Prune acknowledged items.
-    Prune,
-
-    /// Commit (flush and prune).
-    Commit,
+    /// Sync (commit and prune).
+    Sync,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -135,17 +125,6 @@ impl ReferenceQueue {
         None
     }
 
-    fn peek(&self) -> Option<(u64, u8)> {
-        let mut pos = self.read_pos;
-        while pos < self.size() {
-            if !self.is_acked(pos) {
-                return Some((pos, self.items[pos as usize]));
-            }
-            pos += 1;
-        }
-        None
-    }
-
     fn ack(&mut self, pos: u64) -> bool {
         if pos >= self.size() {
             return false;
@@ -214,8 +193,8 @@ fn fuzz(input: FuzzInput) {
                     assert_eq!(pos, ref_pos, "append position mismatch");
                 }
 
-                QueueOperation::Flush => {
-                    queue.flush().await.unwrap();
+                QueueOperation::Commit => {
+                    queue.commit().await.unwrap();
                 }
 
                 QueueOperation::Dequeue => {
@@ -267,33 +246,13 @@ fn fuzz(input: FuzzInput) {
                     );
                 }
 
-                QueueOperation::Peek => {
-                    let result = queue.peek().await.unwrap();
-                    let ref_result = reference.peek();
-
-                    match (result, ref_result) {
-                        (Some((pos, item)), Some((ref_pos, ref_item))) => {
-                            assert_eq!(pos, ref_pos, "peek position mismatch");
-                            assert_eq!(item, vec![ref_item], "peek value mismatch");
-                        }
-                        (None, None) => {}
-                        (actual, expected) => {
-                            panic!("peek mismatch: got {actual:?}, expected {expected:?}");
-                        }
-                    }
-                }
-
                 QueueOperation::Reset => {
                     queue.reset();
                     reference.reset();
                 }
 
-                QueueOperation::Prune => {
-                    queue.prune().await.unwrap();
-                }
-
-                QueueOperation::Commit => {
-                    queue.commit().await.unwrap();
+                QueueOperation::Sync => {
+                    queue.sync().await.unwrap();
                 }
             }
 
