@@ -389,8 +389,8 @@ where
     }
 
     /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip.
-    // TODO(<https://github.com/commonwarexyz/monorepo/issues/1829>): callers of this method should
-    // migrate to using [Self::raise_floor_with_bitmap] instead.
+    // TODO(<https://github.com/commonwarexyz/monorepo/issues/1829>): migrate all callers to use
+    // `raise_floor_with_bitmap`.
     pub(crate) async fn raise_floor(&mut self) -> Result<Location, Error> {
         if self.is_empty() {
             self.inactivity_floor_loc = self.log.bounds().end;
@@ -409,8 +409,6 @@ where
 
     /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip, using the
     /// provided bitmap to find the active operations without I/O.
-    ///
-    /// Users of `raise_floor` should migrate to using this method instead.
     pub(crate) async fn raise_floor_with_bitmap<
         F: Storage + Clock + Metrics,
         D: Digest,
@@ -447,8 +445,6 @@ where
             futures.push(self.log.read(floor));
             floor += 1;
         }
-
-        // Concurrently read the active operations from the log.
         let ops = try_join_all(futures).await?;
 
         // Move each to tip, updating the index and bitmap.

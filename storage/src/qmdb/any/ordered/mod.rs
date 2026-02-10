@@ -670,8 +670,8 @@ where
                 possible_previous.insert(key, (value, old_loc));
             } else {
                 // This is a delete of an existing key.
-                possible_previous.insert(key.clone(), (value, old_loc));
                 deleted.push(key.clone());
+                possible_previous.insert(key.clone(), (value, old_loc));
 
                 // Update the log and snapshot.
                 delete_known_loc(&mut self.snapshot, &key, old_loc);
