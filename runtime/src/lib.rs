@@ -517,8 +517,8 @@ stability_scope!(BETA {
     /// network connections.
     pub trait Network: Clone + Send + Sync + 'static {
         /// The type of [Listener] that's returned when binding to a socket.
-        /// Accepting a connection returns a [Sink] and [Stream] which are
-        /// defined by the [Listener].
+        /// Accepting a connection returns a [Sink] and [Stream] which are defined
+        /// by the [Listener] and used to send and receive data over the connection.
         type Listener: Listener;
 
         /// Bind to the given socket address.
@@ -549,12 +549,12 @@ stability_scope!(BETA {
     /// incoming network connections.
     pub trait Listener: Sync + Send + 'static {
         /// The type of [Sink] that's returned when accepting a connection.
-        /// This is used to send data to the remote connection. Also
-        /// implements [Closer] for connection lifecycle control.
-        type Sink: Sink + Closer;
+        /// This is used to send data to the remote connection.
+        type Sink: Sink;
         /// The type of [Stream] that's returned when accepting a connection.
         /// This is used to receive data from the remote connection.
-        type Stream: Stream;
+        /// Also implements [Closer] to allow for connection lifecycle control.
+        type Stream: Stream + Closer;
 
         /// Accept an incoming connection.
         fn accept(
@@ -581,9 +581,9 @@ stability_scope!(BETA {
 
     /// Handle for forcing an immediate connection reset.
     ///
-    /// Implemented by [Sink] types to allow callers to set SO_LINGER=0
+    /// Implemented by [Stream] types to allow callers to set SO_LINGER=0
     /// before dropping a connection, causing an RST instead of a graceful
-    /// FIN/ACK shutdown. This is useful when rejecting connections
+    /// FIN/ACK shutdown. This is useful when rejecting incoming connections
     /// (e.g., invalid IP, rate-limited handshake) to avoid accumulating
     /// sockets in TIME_WAIT state.
     pub trait Closer: Sync + Send + 'static {

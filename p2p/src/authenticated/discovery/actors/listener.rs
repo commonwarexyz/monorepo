@@ -186,7 +186,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
-                    sink.force_close();
+                    stream.force_close();
                     continue;
                 }
 
@@ -216,7 +216,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
-                    sink.force_close();
+                    stream.force_close();
                     continue;
                 }
 
@@ -224,7 +224,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
-                    sink.force_close();
+                    stream.force_close();
                     continue;
                 };
 
@@ -322,7 +322,7 @@ mod tests {
             // Allow a single handshake attempt from this IP.
             let (sink, mut stream) = loop {
                 match context.dial(address).await {
-                    Ok(result) => break result,
+                    Ok(pair) => break pair,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -463,7 +463,7 @@ mod tests {
             // Connect to the listener from a private IP
             let (sink, mut stream) = loop {
                 match context.dial(address).await {
-                    Ok(result) => break result,
+                    Ok(pair) => break pair,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }

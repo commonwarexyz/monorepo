@@ -9,12 +9,6 @@ pub struct Sink<S: crate::Sink> {
     remote_addr: SocketAddr,
 }
 
-impl<S: crate::Sink + crate::Closer> crate::Closer for Sink<S> {
-    fn force_close(&self) {
-        self.inner.force_close();
-    }
-}
-
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let buf = buf.into().coalesce();
@@ -42,6 +36,12 @@ pub struct Stream<S: crate::Stream> {
     auditor: Arc<Auditor>,
     inner: S,
     remote_addr: SocketAddr,
+}
+
+impl<S: crate::Stream + crate::Closer> crate::Closer for Stream<S> {
+    fn force_close(&self) {
+        self.inner.force_close();
+    }
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {

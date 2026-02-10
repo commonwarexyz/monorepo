@@ -322,15 +322,6 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::Closer for Sink {
-    fn force_close(&self) {
-        let socket = SockRef::from(&*self.fd);
-        if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
-            warn!(?err, "failed to set SO_LINGER");
-        }
-    }
-}
-
 /// Implementation of [crate::Stream] for an io-uring [Network].
 ///
 /// Uses an internal buffer to reduce syscall overhead. Multiple small reads
@@ -494,6 +485,15 @@ impl crate::Stream for Stream {
         let buffered = self.buffer_len - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]
+    }
+}
+
+impl crate::Closer for Stream {
+    fn force_close(&self) {
+        let socket = SockRef::from(&*self.fd);
+        if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
+            warn!(?err, "failed to set SO_LINGER");
+        }
     }
 }
 

@@ -21,10 +21,6 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::Closer for Sink {
-    fn force_close(&self) {}
-}
-
 /// Implementation of [crate::Stream] for a deterministic [Network].
 pub struct Stream {
     receiver: mocks::Stream,
@@ -38,6 +34,10 @@ impl crate::Stream for Stream {
     fn peek(&self, max_len: usize) -> &[u8] {
         self.receiver.peek(max_len)
     }
+}
+
+impl crate::Closer for Stream {
+    fn force_close(&self) {}
 }
 
 /// Implementation of [crate::Listener] for a deterministic [Network].

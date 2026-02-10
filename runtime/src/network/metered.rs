@@ -53,12 +53,6 @@ pub struct Sink<S: crate::Sink> {
     metrics: Arc<Metrics>,
 }
 
-impl<S: crate::Sink + crate::Closer> crate::Closer for Sink<S> {
-    fn force_close(&self) {
-        self.inner.force_close();
-    }
-}
-
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, data: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
         let bufs = data.into();
@@ -73,6 +67,12 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
 pub struct Stream<S: crate::Stream> {
     inner: S,
     metrics: Arc<Metrics>,
+}
+
+impl<S: crate::Stream + crate::Closer> crate::Closer for Stream<S> {
+    fn force_close(&self) {
+        self.inner.force_close();
+    }
 }
 
 impl<S: crate::Stream> crate::Stream for Stream<S> {

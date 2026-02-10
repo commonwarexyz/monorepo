@@ -128,7 +128,7 @@ impl<
 
                 // Attempt to dial peer
                 let (sink, stream) = match context.dial(address).await {
-                    Ok(result) => result,
+                    Ok(stream) => stream,
                     Err(err) => {
                         debug!(?err, "failed to dial peer");
                         return;

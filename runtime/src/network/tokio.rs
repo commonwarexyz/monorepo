@@ -11,14 +11,10 @@ use tokio::{
 };
 use tracing::warn;
 
-/// Implementation of [crate::Sink] and [crate::Closer] for the [tokio] runtime.
-///
-/// Holds a duplicated socket handle so that [crate::Closer::force_close] can
-/// set SO_LINGER=0 independently of the write half.
+/// Implementation of [crate::Sink] for the [tokio] runtime.
 pub struct Sink {
     write_timeout: Duration,
     sink: OwnedWriteHalf,
-    socket: socket2::Socket,
 }
 
 impl crate::Sink for Sink {
@@ -32,22 +28,26 @@ impl crate::Sink for Sink {
     }
 }
 
-impl crate::Closer for Sink {
+/// Implementation of [crate::Stream] and [crate::Closer] for the [tokio] runtime.
+///
+/// Uses a [`BufReader`] to reduce syscall overhead. Multiple small reads
+/// can be satisfied from the buffer without additional network operations.
+///
+/// Holds a duplicated socket handle so that [crate::Closer::force_close] can
+/// set SO_LINGER=0 independently of the read half.
+pub struct Stream {
+    read_timeout: Duration,
+    stream: BufReader<OwnedReadHalf>,
+    pool: BufferPool,
+    socket: socket2::Socket,
+}
+
+impl crate::Closer for Stream {
     fn force_close(&self) {
         if let Err(err) = self.socket.set_linger(Some(Duration::ZERO)) {
             warn!(?err, "failed to set SO_LINGER");
         }
     }
-}
-
-/// Implementation of [crate::Stream] for the [tokio] runtime.
-///
-/// Uses a [`BufReader`] to reduce syscall overhead. Multiple small reads
-/// can be satisfied from the buffer without additional network operations.
-pub struct Stream {
-    read_timeout: Duration,
-    stream: BufReader<OwnedReadHalf>,
-    pool: BufferPool,
 }
 
 impl crate::Stream for Stream {
@@ -99,7 +99,7 @@ impl crate::Listener for Listener {
         }
 
         // Duplicate the socket for the closer before splitting
-        let closer_socket = SockRef::from(&stream)
+        let socket = SockRef::from(&stream)
             .try_clone()
             .map_err(|_| Error::Closed)?;
 
@@ -110,12 +110,12 @@ impl crate::Listener for Listener {
             Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
-                socket: closer_socket,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
+                socket,
             },
         ))
     }
@@ -249,7 +249,7 @@ impl crate::Network for Network {
         }
 
         // Duplicate the socket for the closer before splitting
-        let closer_socket = SockRef::from(&stream)
+        let socket = SockRef::from(&stream)
             .try_clone()
             .map_err(|_| Error::ConnectionFailed)?;
 
@@ -259,12 +259,12 @@ impl crate::Network for Network {
             Sink {
                 write_timeout: self.cfg.write_timeout,
                 sink,
-                socket: closer_socket,
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
                 stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
                 pool: self.pool.clone(),
+                socket,
             },
         ))
     }

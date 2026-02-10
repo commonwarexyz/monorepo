@@ -111,10 +111,6 @@ impl Drop for Sink {
     }
 }
 
-impl CloserTrait for Sink {
-    fn force_close(&self) {}
-}
-
 /// A mock stream that implements the Stream trait.
 pub struct Stream {
     channel: Arc<Mutex<Channel>>,
@@ -177,6 +173,10 @@ impl Drop for Stream {
         let mut channel = self.channel.lock().unwrap();
         channel.stream_alive = false;
     }
+}
+
+impl CloserTrait for Stream {
+    fn force_close(&self) {}
 }
 
 #[cfg(test)]
