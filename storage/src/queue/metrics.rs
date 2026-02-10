@@ -6,11 +6,11 @@ use prometheus_client::metrics::gauge::Gauge;
 /// Metrics for [super::Queue].
 #[derive(Default)]
 pub struct Metrics {
-    /// Highest enqueued position (journal size).
+    /// Total enqueued items.
     pub tip: Gauge,
-    /// Current ack floor position.
+    /// Acknowledged items.
     pub floor: Gauge,
-    /// Current read position (next item to dequeue).
+    /// Next item to dequeue.
     pub next: Gauge,
 }
 
@@ -20,9 +20,9 @@ impl Metrics {
     /// Metric names will be prefixed with the context's label.
     pub fn init<E: RuntimeMetrics>(context: &E) -> Self {
         let metrics = Self::default();
-        context.register("tip", "Highest enqueued position", metrics.tip.clone());
-        context.register("floor", "Current ack floor position", metrics.floor.clone());
-        context.register("next", "Current read position", metrics.next.clone());
+        context.register("tip", "Total enqueued items", metrics.tip.clone());
+        context.register("floor", "Acknowledged items", metrics.floor.clone());
+        context.register("next", "Next item to dequeue", metrics.next.clone());
         metrics
     }
 }
