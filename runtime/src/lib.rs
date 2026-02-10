@@ -531,6 +531,7 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
         /// Dial the given socket address.
+        #[allow(clippy::type_complexity)]
         fn dial(
             &self,
             socket: SocketAddr,
@@ -564,6 +565,7 @@ stability_scope!(BETA {
         type Closer: Closer;
 
         /// Accept an incoming connection.
+        #[allow(clippy::type_complexity)]
         fn accept(
             &mut self,
         ) -> impl Future<
