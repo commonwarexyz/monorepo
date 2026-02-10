@@ -136,6 +136,9 @@
 //!   the shard index.
 //! - All shards MUST pass cryptographic verification against the commitment.
 //! - Each participant may only contribute ONE weak shard per commitment.
+//! - Sending a second shard (strong or weak) with different data than the
+//!   first (equivocation) results in blocking. Exact duplicates are silently
+//!   ignored.
 //!
 //! Peers violating these rules are blocked via the [`Blocker`] trait.
 //! Validation and blocking rules are applied while a commitment is actively
@@ -916,6 +919,8 @@ where
     contributed: BitMap,
     /// The view for which this commitment was externally proposed.
     view: View,
+    /// The strong shard data received from the leader, retained for equivocation detection.
+    received_strong: Option<C::StrongShard>,
 }
 
 /// Phase data for `ReconstructionState::AwaitingQuorum`.
@@ -982,6 +987,7 @@ where
             checked_shards: Vec::new(),
             contributed: BitMap::new(),
             view,
+            received_strong: None,
         }
     }
 
@@ -1018,6 +1024,7 @@ where
             index,
             data,
         } = shard;
+        self.common.received_strong = Some(data.clone());
         let Ok((checking_data, checked, weak_shard_data)) = C::weaken(
             &commitment.config(),
             &commitment.coding_digest(),
@@ -1178,8 +1185,9 @@ where
     /// - MUST correspond to self's index (self must be a participant).
     /// - MUST be sent by the leader (when the leader is known). Non-leader senders
     ///   are blocked.
-    /// - The leader may only send ONE strong shard. Duplicates result in blocking
-    ///   the sender.
+    /// - The leader may only send ONE strong shard. Sending a second strong shard
+    ///   with different data (equivocation) results in blocking the sender. Exact
+    ///   duplicates are silently ignored.
     /// - MUST pass cryptographic verification via [`CodingScheme::weaken`].
     /// - When leader is unknown, buffering happens at the engine level in
     ///   bounded pre-leader queues until [`ExternalProposed`](super::Message::ExternalProposed)
@@ -1189,12 +1197,13 @@ where
     /// - MUST be sent by a participant.
     /// - MUST be sent by the participant whose index matches the shard index.
     /// - MUST pass cryptographic verification via [`CodingScheme::check`].
-    /// - Each participant may only contribute ONE weak shard per commitment. Duplicates
-    ///   result in blocking the sender.
+    /// - Each participant may only contribute ONE weak shard per commitment.
+    ///   Sending a second weak shard with different data (equivocation) results
+    ///   in blocking the sender. Exact duplicates are silently ignored.
     /// - Weak shards that arrive after the state has transitioned to `Ready`
     ///   (i.e., batch validation has already passed) are silently discarded.
     ///   The sender's contribution slot is still consumed, preventing future
-    ///   duplicates from the same participant.
+    ///   submissions from the same participant.
     ///
     /// Handle an incoming network shard.
     ///
@@ -1286,38 +1295,33 @@ where
             return false;
         }
 
+        let common = self.common();
+        if sender != common.leader {
+            warn!(
+                ?sender,
+                leader = ?common.leader,
+                "strong shard from non-leader, blocking peer"
+            );
+            blocker.block(sender).await;
+            return false;
+        }
+        if let Some(received_strong) = common.received_strong.as_ref() {
+            if received_strong != &shard.data {
+                warn!(
+                    ?sender,
+                    "strong shard equivocation from leader, blocking peer"
+                );
+                blocker.block(sender).await;
+            }
+            return false;
+        }
+
         match self {
             Self::AwaitingQuorum(state) => {
-                if sender != state.common.leader {
-                    warn!(
-                        ?sender,
-                        leader = ?state.common.leader,
-                        "strong shard from non-leader, blocking peer"
-                    );
-                    blocker.block(sender).await;
-                    return false;
-                }
-                if state.checking_data.is_some() {
-                    warn!(?sender, "duplicate strong shard from leader, blocking peer");
-                    blocker.block(sender).await;
-                    return false;
-                }
                 state.common.contributed.set(u64::from(me.get()), true);
                 state.verify_strong_shard(sender, shard, blocker).await
             }
-            Self::Ready(state) => {
-                if sender != state.common.leader {
-                    warn!(
-                        ?sender,
-                        leader = ?state.common.leader,
-                        "strong shard from non-leader, blocking peer"
-                    );
-                } else {
-                    warn!(?sender, "duplicate strong shard from leader, blocking peer");
-                }
-                blocker.block(sender).await;
-                false
-            }
+            Self::Ready(_) => false,
         }
     }
 
@@ -1347,11 +1351,18 @@ where
         }
 
         if self.common().contributed.get(u64::from(sender_index.get())) {
-            warn!(
-                ?sender,
-                "duplicate weak shard from participant, blocking peer"
+            let equivocated = matches!(
+                self,
+                Self::AwaitingQuorum(state)
+                    if state.pending_weak_shards.get(&sender).is_some_and(|existing| existing.data != shard.data)
             );
-            blocker.block(sender).await;
+            if equivocated {
+                warn!(
+                    ?sender,
+                    "duplicate weak shard with different data, blocking peer"
+                );
+                blocker.block(sender).await;
+            }
             return false;
         }
         self.common_mut()
@@ -1780,7 +1791,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_duplicate_leader_strong_shard_blocked() {
+    fn test_duplicate_leader_strong_shard_ignored() {
         let fixture = Fixture {
             ..Default::default()
         };
@@ -1818,7 +1829,7 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // Send the same strong shard again from peer 0 (leader duplicate - blocked).
+                // Send the same strong shard again from peer 0 (leader duplicate - ignored).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), strong_bytes, true)
@@ -1826,7 +1837,73 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // The leader's duplicate strong shard should result in blocking.
+                // The leader should NOT be blocked for sending an identical duplicate.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let is_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &peers[2].public_key && b == &peers[0].public_key);
+                assert!(
+                    !is_blocked,
+                    "leader should not be blocked for duplicate strong shard"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_equivocating_leader_strong_shard_blocks_peer() {
+        let fixture = Fixture {
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let commitment = coded_block1.commitment();
+
+                // Create a second block with different payload to get different shard data.
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 2's strong shard from both blocks.
+                let peer2_index = peers[2].index.get() as u16;
+                let strong_bytes1 = coded_block1
+                    .shard::<H>(peer2_index)
+                    .expect("missing shard")
+                    .encode();
+                let mut equivocating_shard =
+                    coded_block2.shard::<H>(peer2_index).expect("missing shard");
+                // Override the commitment so it targets the same reconstruction state.
+                equivocating_shard.commitment = commitment;
+                let strong_bytes2 = equivocating_shard.encode();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 2 that peer 0 is the leader.
+                peers[2]
+                    .mailbox
+                    .external_proposed(commitment, leader, View::new(1))
+                    .await;
+
+                // Send peer 2 their strong shard from the leader (first time - succeeds).
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk.clone()), strong_bytes1, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Send a different strong shard from the leader (equivocation - should block).
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk), strong_bytes2, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 2 should have blocked the leader for equivocation.
                 assert_blocked(&oracle, &peers[2].public_key, &peers[0].public_key).await;
             },
         );
@@ -2074,7 +2151,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_duplicate_weak_shard_blocks_peer() {
+    fn test_duplicate_weak_shard_ignored() {
         // Use 10 peers so minimum_shards=4, giving us time to send duplicate before reconstruction.
         let fixture = Fixture {
             num_peers: 10,
@@ -2130,7 +2207,7 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // Send peer 1's weak shard to peer 2 again (duplicate - should block).
+                // Send the same weak shard again (exact duplicate - should be ignored, not blocked).
                 // With 10 peers, minimum_shards=4, so we haven't reconstructed yet.
                 peers[1]
                     .sender
@@ -2139,7 +2216,96 @@ mod tests {
                     .expect("send failed");
                 context.sleep(config.link.latency * 2).await;
 
-                // Peer 2 should have blocked peer 1 for sending a duplicate weak shard.
+                // Peer 1 should NOT be blocked for sending an identical duplicate.
+                let blocked_peers = oracle.blocked().await.unwrap();
+                let is_blocked = blocked_peers
+                    .iter()
+                    .any(|(a, b)| a == &peers[2].public_key && b == &peers[1].public_key);
+                assert!(
+                    !is_blocked,
+                    "peer should not be blocked for exact duplicate weak shard"
+                );
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_equivocating_weak_shard_blocks_peer() {
+        // Use 10 peers so minimum_shards=4, giving us time to send equivocating shard.
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+
+                // Create a second block with different payload to get different shard data.
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+
+                // Get peer 2's strong shard from block 1 (to initialize their checking_data).
+                let peer2_index = peers[2].index.get() as u16;
+                let peer2_strong_shard =
+                    coded_block1.shard::<H>(peer2_index).expect("missing shard");
+
+                // Get peer 1's weak shard from block 1.
+                let peer1_index = peers[1].index.get() as u16;
+                let peer1_strong_shard =
+                    coded_block1.shard::<H>(peer1_index).expect("missing shard");
+                let peer1_weak_shard = peer1_strong_shard
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+
+                // Get peer 1's weak shard from block 2 (different data, same index).
+                let peer1_strong_shard2 =
+                    coded_block2.shard::<H>(peer1_index).expect("missing shard");
+                let mut peer1_equivocating_shard = peer1_strong_shard2
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+                // Override the commitment to match block 1 so the shard targets
+                // the same reconstruction state.
+                peer1_equivocating_shard.commitment = coded_block1.commitment();
+
+                let peer2_pk = peers[2].public_key.clone();
+                let leader = peers[0].public_key.clone();
+
+                // Inform peer 2 of the leader.
+                peers[2]
+                    .mailbox
+                    .external_proposed(coded_block1.commitment(), leader, View::new(1))
+                    .await;
+
+                // Send peer 2 their strong shard (initializes checking_data).
+                let strong_bytes = peer2_strong_shard.encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(peer2_pk.clone()), strong_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Send peer 1's valid weak shard to peer 2 (first time - succeeds).
+                let weak_shard_bytes = peer1_weak_shard.encode();
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk.clone()), weak_shard_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Send a different weak shard from peer 1 (equivocation - should block).
+                let equivocating_bytes = peer1_equivocating_shard.encode();
+                peers[1]
+                    .sender
+                    .send(Recipients::One(peer2_pk), equivocating_bytes, true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                // Peer 2 should have blocked peer 1 for equivocation.
                 assert_blocked(&oracle, &peers[2].public_key, &peers[1].public_key).await;
             },
         );
