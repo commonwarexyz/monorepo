@@ -207,6 +207,7 @@ mod tests {
             required_containers: containers,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
+            honest_messages_drop_percent: 0,
         }
     }
 

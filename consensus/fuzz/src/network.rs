@@ -5,7 +5,7 @@
 //! functionality.
 //!
 //! Messages originating from a configured set of Byzantine public keys are routed to the
-//! "primary" receiver; all other messages are routed to the "secondary" receiver.
+//! "primary" receiver; all other messages are routed to the "secondary" receiver and may be dropped.
 //! A [`ByzantineFirstReceiver`] then uses a biased select to always service the primary
 //! receiver first when both have buffered messages.
 //!
@@ -17,22 +17,31 @@
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{simulated::SplitTarget, Message, Receiver};
+use rand::Rng;
+use rand_core::CryptoRngCore;
 use std::{
     collections::HashSet,
     fmt::{self, Debug},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
-/// A split-router that routes messages by origin public key.
-#[derive(Clone)]
-pub struct Router<P: PublicKey> {
+/// A filtering split-router that routes messages by origin public key.
+pub struct Router<P: PublicKey, E: CryptoRngCore + Send + 'static> {
     byzantine: Arc<HashSet<P>>,
+    honest_messages_drop_ratio: u8,
+    context: Arc<Mutex<E>>,
 }
 
-impl<P: PublicKey> Router<P> {
-    pub fn new(byzantine: impl IntoIterator<Item = P>) -> Self {
+impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
+    pub fn new(
+        context: E,
+        byzantine: impl IntoIterator<Item = P>,
+        honest_messages_drop_ratio: u8,
+    ) -> Self {
         Self {
             byzantine: Arc::new(byzantine.into_iter().collect()),
+            honest_messages_drop_ratio: honest_messages_drop_ratio.min(90),
+            context: Arc::new(Mutex::new(context)),
         }
     }
 
@@ -42,7 +51,26 @@ impl<P: PublicKey> Router<P> {
         if self.byzantine.contains(sender) {
             SplitTarget::Primary
         } else {
+            if self.honest_messages_drop_ratio > 0 && self.should_drop_honest_message() {
+                return SplitTarget::None;
+            }
             SplitTarget::Secondary
+        }
+    }
+
+    fn should_drop_honest_message(&self) -> bool {
+        let mut context = self.context.lock().expect("mutex not poisoned");
+        let sample = (context.gen::<u8>() % 100) as u8;
+        sample < self.honest_messages_drop_ratio
+    }
+}
+
+impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Clone for Router<P, E> {
+    fn clone(&self) -> Self {
+        Self {
+            byzantine: self.byzantine.clone(),
+            honest_messages_drop_ratio: self.honest_messages_drop_ratio,
+            context: self.context.clone(),
         }
     }
 }

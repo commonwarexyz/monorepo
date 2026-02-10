@@ -101,13 +101,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_secp256r1_twin"
-path = "fuzz_targets/simplex_secp256r1_twin.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "simplex_bls12381_threshold_minpk"
 path = "fuzz_targets/simplex_bls12381_threshold_minpk.rs"
 test = false
@@ -138,6 +131,20 @@ bench = false
 [[bin]]
 name = "simplex_secp256r1"
 path = "fuzz_targets/simplex_secp256r1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_twin"
+path = "fuzz_targets/simplex_secp256r1_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_adv"
+path = "fuzz_targets/simplex_secp256r1_adv.rs"
 test = false
 doc = false
 bench = false

@@ -1,7 +1,7 @@
-pub mod network;
 pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
+pub mod network;
 pub mod simplex;
 pub mod strategy;
 pub mod types;
@@ -59,9 +59,11 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
-const MIN_REQUIRED_CONTAINERS: u64 = 5;
-const MAX_REQUIRED_CONTAINERS: u64 = 50;
-const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
+const MIN_REQUIRED_CONTAINERS: u64 = 1;
+const MAX_REQUIRED_CONTAINERS: u64 = 30;
+const MIN_HONEST_MESSAGES_DROP_RATIO: u8 = 0;
+const MAX_HONEST_MESSAGES_DROP_RATIO: u8 = 5;
+const MAX_SLEEP_DURATION: Duration = Duration::from_secs(5);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
@@ -130,6 +132,7 @@ pub struct FuzzInput {
     pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
+    pub honest_messages_drop_percent: u8,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -160,9 +163,9 @@ impl Arbitrary<'_> for FuzzInput {
         // AnyScope mutations - 10%,
         // FutureScope mutations with round-based injections - 10%
         let fault_rounds_bound = u.int_in_range(1..=required_containers)?;
-        let max_faults = fault_rounds_bound / FAULT_INJECTION_RATIO;
-        let min_faults = MIN_NUMBER_OF_FAULTS.min(fault_rounds_bound);
-        let fault_rounds = u.int_in_range(0..=max_faults)?.max(min_faults);
+        let max_fault_rounds = fault_rounds_bound / FAULT_INJECTION_RATIO;
+        let min_fault_rounds = MIN_NUMBER_OF_FAULTS.min(fault_rounds_bound);
+        let fault_rounds = u.int_in_range(0..=max_fault_rounds)?.max(min_fault_rounds);
         let strategy = match u.int_in_range(0..=9)? {
             0 => StrategyChoice::AnyScope,
             1 => StrategyChoice::FutureScope {
@@ -179,6 +182,10 @@ impl Arbitrary<'_> for FuzzInput {
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
 
+        // Only used by `Mode::AdversarialNetwork`.
+        let honest_messages_drop_ratio =
+            u.int_in_range(MIN_HONEST_MESSAGES_DROP_RATIO..=MAX_HONEST_MESSAGES_DROP_RATIO)?;
+
         Ok(Self {
             raw_bytes,
             partition,
@@ -186,6 +193,7 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             strategy,
+            honest_messages_drop_percent: honest_messages_drop_ratio,
         })
     }
 }
@@ -436,7 +444,7 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     participants: &[Ed25519PublicKey],
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
-    byzantine_router: crate::network::Router<Ed25519PublicKey>,
+    byzantine_router: crate::network::Router<Ed25519PublicKey, deterministic::Context>,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
@@ -542,7 +550,10 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
-fn run_with_adversarial_network<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_adversarial_network<P: simplex::Simplex>(mut input: FuzzInput) {
+    // Partition will be connected, but we will randomly delete messages in the adversarial network wrapper.
+    input.partition = Partition::Connected;
+
     let rng = BytesRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -554,12 +565,14 @@ fn run_with_adversarial_network<P: simplex::Simplex>(input: FuzzInput) {
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
-        let byzantine_router = crate::network::Router::new(
+        let byzantine_router = network::Router::new(
+            context.clone(),
             participants
                 .iter()
                 .take(config.faults as usize)
                 .cloned()
                 .collect::<Vec<_>>(),
+            input.honest_messages_drop_percent,
         );
 
         // Spawn Byzantine nodes (Disrupters only)
