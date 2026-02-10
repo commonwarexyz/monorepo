@@ -316,9 +316,11 @@ const SIG_LOG: &[u8] = b"log";
 
 /// The error type for the DKG protocol.
 ///
-/// The only error which can happen through no fault of your own is
-/// [`Error::DkgFailed`]. Everything else only happens if you use a configuration
-/// for [`Info`] or [`Dealer`] which is invalid in some way.
+/// The only errors which can happen through no fault of your own are
+/// [`Error::InsufficientCommitments`] (not enough valid dealer commitments) and
+/// [`Error::PublicKeyMismatch`] (reconstructed key differs from previous round).
+/// Everything else only happens if you use a configuration for [`Info`] or
+/// [`Dealer`] which is invalid in some way.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -331,8 +333,10 @@ pub enum Error {
     NumDealers(usize),
     #[error("invalid number of players: {0}")]
     NumPlayers(usize),
-    #[error("dkg failed for some reason")]
-    DkgFailed,
+    #[error("insufficient valid commitments: got {got}, need {required}")]
+    InsufficientCommitments { got: usize, required: usize },
+    #[error("public key mismatch with previous round during reshare")]
+    PublicKeyMismatch,
 }
 
 /// The output of a successful DKG.
@@ -1344,7 +1348,10 @@ fn select<V: Variant, P: PublicKey, M: Faults>(
         .try_collect::<Map<_, _>>()
         .expect("logs has at most one entry per dealer");
     if out.len() < required_commitments {
-        return Err(Error::DkgFailed);
+        return Err(Error::InsufficientCommitments {
+            got: out.len(),
+            required: required_commitments,
+        });
     }
     Ok(out)
 }
@@ -1408,7 +1415,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
                 .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
             if previous.public().public() != public.constant() {
-                return Err(Error::DkgFailed);
+                return Err(Error::PublicKeyMismatch);
             }
             (public, Some(weights))
         } else {
@@ -1437,7 +1444,7 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// From this log, we can (potentially, as the DKG can fail) compute the public output.
 ///
-/// This will only ever return [`Error::DkgFailed`].
+/// This will only ever return [`Error::InsufficientCommitments`] or [`Error::PublicKeyMismatch`].
 pub fn observe<V: Variant, P: PublicKey, M: Faults>(
     info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
@@ -1514,7 +1521,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// This will only ever return [`Error::DkgFailed`].
+    /// This will only ever return [`Error::InsufficientCommitments`] or [`Error::PublicKeyMismatch`].
     pub fn finalize<M: Faults>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
