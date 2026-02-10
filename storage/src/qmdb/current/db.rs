@@ -36,6 +36,7 @@ use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, Array};
 use core::{num::NonZeroU64, ops::Range};
+use futures::future::try_join_all;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
 use tracing::{error, warn};
@@ -722,43 +723,46 @@ async fn recompute_grafted_leaves<H: Hasher, const N: usize>(
     let grafting_height = grafting::height::<N>();
 
     // Pre-collect inputs: (ops_pos, chunk_bytes, ops_subtree_root).
-    // Reads are in-memory so pre-collection is cheap.
-    let mut inputs = Vec::with_capacity(chunks.size_hint().0);
+    // Fetch all ops MMR nodes concurrently.
+    let mut futures = Vec::with_capacity(chunks.size_hint().0);
     for chunk_idx in chunks {
         let relative_idx = chunk_idx - bitmap.pruned_chunks();
         let chunk = *bitmap.get_chunk(relative_idx);
         let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
-        let ops_digest =
-            ops_mmr
-                .get_node(ops_pos)
-                .await?
-                .ok_or(mmr::Error::MissingGraftedDigest(Location::new_unchecked(
-                    chunk_idx as u64,
-                )))?;
-        inputs.push((ops_pos, chunk, ops_digest));
+        futures.push(async move {
+            let ops_digest =
+                ops_mmr
+                    .get_node(ops_pos)
+                    .await?
+                    .ok_or(mmr::Error::MissingGraftedDigest(Location::new_unchecked(
+                        chunk_idx as u64,
+                    )))?;
+            Ok::<_, Error>((ops_pos, chunk, ops_digest))
+        });
     }
+    let inputs = try_join_all(futures).await?;
 
     // Compute grafted leaves: hash(chunk || ops_subtree_root) for each input.
     let leaves: Vec<_> = match pool.filter(|_| inputs.len() >= grafting::MIN_TO_PARALLELIZE) {
         Some(pool) => pool.install(|| {
             inputs
-                .par_iter()
+                .into_par_iter()
                 .map_init(
                     || hasher.fork(),
                     |h, (ops_pos, chunk, ops_digest)| {
-                        h.inner().update(chunk);
-                        h.inner().update(ops_digest);
-                        (*ops_pos, h.inner().finalize())
+                        h.inner().update(&chunk);
+                        h.inner().update(&ops_digest);
+                        (ops_pos, h.inner().finalize())
                     },
                 )
                 .collect()
         }),
         None => inputs
-            .iter()
+            .into_iter()
             .map(|(ops_pos, chunk, ops_digest)| {
-                hasher.inner().update(chunk);
-                hasher.inner().update(ops_digest);
-                (*ops_pos, hasher.inner().finalize())
+                hasher.inner().update(&chunk);
+                hasher.inner().update(&ops_digest);
+                (ops_pos, hasher.inner().finalize())
             })
             .collect(),
     };
