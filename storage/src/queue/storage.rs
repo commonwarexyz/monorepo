@@ -237,15 +237,13 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             };
             self.acked_above.remove(next, final_floor - 1);
             self.ack_floor = final_floor;
+            self.metrics.floor.set(self.ack_floor as i64);
             debug!(ack_floor = self.ack_floor, "advanced ack floor");
         } else {
             // Floor is not advancing, so add to acked_above
             self.acked_above.insert(position);
             debug!(position, "acked item above floor");
         }
-
-        self.metrics.floor.set(self.ack_floor as i64);
-
         Ok(())
     }
 
@@ -275,9 +273,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         // Remove all entries covered by the new floor and advance
         self.acked_above.remove(self.ack_floor, final_floor - 1);
         self.ack_floor = final_floor;
-
         self.metrics.floor.set(self.ack_floor as i64);
-
         debug!(ack_floor = self.ack_floor, "batch acked up to");
         Ok(())
     }
