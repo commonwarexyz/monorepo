@@ -66,6 +66,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_adv"
+path = "fuzz_targets/simplex_ed25519_adv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_bls12381_threshold_selected_minpk_twin"
 path = "fuzz_targets/simplex_bls12381_threshold_selected_minpk_twin.rs"
 test = false

@@ -1,3 +1,4 @@
+pub mod network;
 pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
@@ -328,7 +329,6 @@ fn spawn_disrupter<P: simplex::Simplex>(
     );
 }
 
-/// Spawn an honest validator with application, reporter, and engine.
 fn spawn_honest_validator<P: simplex::Simplex>(
     context: deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
@@ -338,6 +338,40 @@ fn spawn_honest_validator<P: simplex::Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    let (vote_network, certificate_network, resolver_network) = channels;
+    spawn_honest_validator_with_network::<P>(
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        relay,
+        vote_network,
+        certificate_network,
+        resolver_network,
+    )
+}
+
+fn spawn_honest_validator_with_network<P: simplex::Simplex>(
+    context: deterministic::Context,
+    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
+    participants: &[Ed25519PublicKey],
+    scheme: P::Scheme,
+    validator: Ed25519PublicKey,
+    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
+    vote_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+    certificate_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+    resolver_network: (
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+    ),
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
@@ -346,7 +380,9 @@ fn spawn_honest_validator<P: simplex::Simplex>(
     };
     let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
 
-    let (pending, recovered, resolver) = channels;
+    let (vote_sender, vote_receiver) = vote_network;
+    let (certificate_sender, certificate_receiver) = certificate_network;
+    let (resolver_sender, resolver_receiver) = resolver_network;
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -385,9 +421,65 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         strategy: Sequential,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
-    engine.start(pending, recovered, resolver);
+    engine.start(
+        (vote_sender, vote_receiver),
+        (certificate_sender, certificate_receiver),
+        (resolver_sender, resolver_receiver),
+    );
 
     reporter
+}
+
+fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
+    context: deterministic::Context,
+    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
+    participants: &[Ed25519PublicKey],
+    scheme: P::Scheme,
+    validator: Ed25519PublicKey,
+    byzantine_router: crate::network::Router<Ed25519PublicKey>,
+    relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
+    channels: NetworkChannels,
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    use crate::network::ByzantineFirstReceiver;
+
+    let (vote_network, certificate_network, resolver_network) = channels;
+    let (vote_sender, vote_receiver) = vote_network;
+    let (certificate_sender, certificate_receiver) = certificate_network;
+    let (resolver_sender, resolver_receiver) = resolver_network;
+
+    let vote_router = byzantine_router.clone();
+    let (vote_primary, vote_secondary) = vote_receiver
+        .split_with(context.with_label("byz_first_vote"), move |msg| {
+            vote_router.route(msg)
+        });
+    let vote_receiver = ByzantineFirstReceiver::new(vote_primary, vote_secondary);
+
+    let certificate_router = byzantine_router.clone();
+    let (certificate_primary, certificate_secondary) = certificate_receiver
+        .split_with(context.with_label("byz_first_certificate"), move |msg| {
+            certificate_router.route(msg)
+        });
+    let certificate_receiver =
+        ByzantineFirstReceiver::new(certificate_primary, certificate_secondary);
+
+    let resolver_router = byzantine_router;
+    let (resolver_primary, resolver_secondary) = resolver_receiver
+        .split_with(context.with_label("byz_first_resolver"), move |msg| {
+            resolver_router.route(msg)
+        });
+    let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
+
+    spawn_honest_validator_with_network::<P>(
+        context,
+        oracle,
+        participants,
+        scheme,
+        validator,
+        relay,
+        (vote_sender, vote_receiver),
+        (certificate_sender, certificate_receiver),
+        (resolver_sender, resolver_receiver),
+    )
 }
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
@@ -422,6 +514,74 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &participants,
                 schemes[i].clone(),
                 validator,
+                relay.clone(),
+                channels,
+            );
+            reporters.push(reporter);
+        }
+
+        // Wait for finalization or timeout
+        if input.partition == Partition::Connected && config.can_finalize() {
+            let mut finalizers = Vec::new();
+            for reporter in reporters.iter_mut() {
+                let required_containers = input.required_containers;
+                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                    while latest.get() < required_containers {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        } else {
+            context.sleep(MAX_SLEEP_DURATION).await;
+        }
+
+        let states = invariants::extract(reporters, config.n as usize);
+        invariants::check::<P>(config.n, states);
+    });
+}
+
+fn run_with_adversarial_network<P: simplex::Simplex>(input: FuzzInput) {
+    let rng = BytesRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    executor.start(|mut context| async move {
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<P>(&mut context, &input).await;
+
+        let relay = Arc::new(relay::Relay::new());
+        let mut reporters = Vec::new();
+        let config = input.configuration;
+        let byzantine_router = crate::network::Router::new(
+            participants
+                .iter()
+                .take(config.faults as usize)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+
+        // Spawn Byzantine nodes (Disrupters only)
+        for i in 0..config.faults as usize {
+            let validator = participants[i].clone();
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+        }
+
+        // Spawn honest validators
+        for i in (config.faults as usize)..(config.n as usize) {
+            let validator = participants[i].clone();
+            let channels = registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            let reporter = spawn_honest_validator_in_adversarial_network::<P>(
+                ctx,
+                &oracle,
+                &participants,
+                schemes[i].clone(),
+                validator,
+                byzantine_router.clone(),
                 relay.clone(),
                 channels,
             );
@@ -669,32 +829,43 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Standard,
+    Twin,
+    AdversarialNetwork,
+}
+
 pub trait FuzzMode {
-    const TWIN: bool;
+    const MODE: Mode;
 }
 
 pub struct Standard;
-
 impl FuzzMode for Standard {
-    const TWIN: bool = false;
+    const MODE: Mode = Mode::Standard;
 }
 
 pub struct Twinable;
-
 impl FuzzMode for Twinable {
-    const TWIN: bool = true;
+    const MODE: Mode = Mode::Twin;
+}
+
+pub struct AdversarialNetwork;
+impl FuzzMode for AdversarialNetwork {
+    const MODE: Mode = Mode::AdversarialNetwork;
 }
 
 pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
     let raw_bytes = input.raw_bytes.clone();
-    let run_result = if M::TWIN {
-        panic::catch_unwind(panic::AssertUnwindSafe(|| {
+    let run_result = match M::MODE {
+        Mode::Standard => panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input))),
+        Mode::AdversarialNetwork => panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            run_with_adversarial_network::<P>(input)
+        })),
+        Mode::Twin => panic::catch_unwind(panic::AssertUnwindSafe(|| {
             run_with_twin_mutator::<P>(input)
-        }))
-    } else {
-        panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
+        })),
     };
-
     match run_result {
         Ok(()) => {}
         Err(payload) => {
