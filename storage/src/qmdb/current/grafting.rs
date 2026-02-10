@@ -193,6 +193,7 @@ fn process_level<H: CHasher>(
     height: u32,
 ) {
     let shift = 1u64 << height;
+
     if positions.len() >= MIN_TO_PARALLELIZE {
         let computed: Vec<(Position, H::Digest)> = pool.install(|| {
             positions
@@ -202,8 +203,9 @@ fn process_level<H: CHasher>(
                     |h, &pos| {
                         let left = Position::new(*pos - shift);
                         let right = Position::new(*pos - 1);
-                        let digest =
-                            h.node_digest(pos, &grafted_digests[&left], &grafted_digests[&right]);
+                        let left_digest = grafted_digests[&left];
+                        let right_digest = grafted_digests[&right];
+                        let digest = h.node_digest(pos, &left_digest, &right_digest);
                         (pos, digest)
                     },
                 )
