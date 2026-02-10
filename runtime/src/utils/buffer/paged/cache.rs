@@ -67,7 +67,7 @@ struct Cache {
     page_fetches: HashMap<(u64, u64), PageFetchFut>,
 }
 
-/// Metadata for a single cache entry (page data stored in arena).
+/// Metadata for a single cache entry (page data stored in per-slot buffers).
 struct CacheEntry {
     /// The cache key which is composed of the blob id and page number of the page.
     key: (u64, u64),
@@ -339,8 +339,9 @@ impl Cache {
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             let mut slot = pool.alloc(page_size);
-            // SAFETY: cache writes always initialize full logical pages.
+            // SAFETY: We immediately initialize all bytes below.
             unsafe { slot.set_len(page_size) };
+            slot.as_mut().fill(0);
             slots.push(slot);
         }
         Self {

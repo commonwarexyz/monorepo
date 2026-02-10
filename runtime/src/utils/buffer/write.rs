@@ -44,7 +44,7 @@ pub struct Write<B: Blob> {
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
     buffer: Arc<RwLock<Buffer>>,
     /// Buffer pool used for internal allocations.
-    _pool: BufferPool,
+    pool: BufferPool,
 }
 
 impl<B: Blob> Write<B> {
@@ -58,7 +58,7 @@ impl<B: Blob> Write<B> {
         Self {
             blob,
             buffer: Arc::new(RwLock::new(Buffer::new(size, capacity.get(), pool.clone()))),
-            _pool: pool,
+            pool,
         }
     }
 
@@ -117,7 +117,7 @@ impl<B: Blob> Blob for Write<B> {
             }
             // For chunked buffers, read into temp and copy back to preserve structure.
             IoBufsMut::Chunked(chunks) => {
-                let mut temp = self._pool.alloc(len);
+                let mut temp = self.pool.alloc(len);
                 // SAFETY: We initialize all bytes via extract/blob read before copying out.
                 unsafe { temp.set_len(len) };
                 // Extract any bytes from the buffer that overlap with the
