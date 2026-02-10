@@ -581,11 +581,10 @@ stability_scope!(BETA {
 
     /// Handle for forcing an immediate connection reset.
     ///
-    /// Implemented by [Stream] types to allow callers to set SO_LINGER=0
-    /// before dropping a connection, causing an RST instead of a graceful
-    /// FIN/ACK shutdown. This is useful when rejecting incoming connections
-    /// (e.g., invalid IP, rate-limited handshake) to avoid accumulating
-    /// sockets in TIME_WAIT state.
+    /// Implemented by [Stream] types to allow callers to force an
+    /// immediate connection teardown instead of a graceful shutdown.
+    /// This is useful when rejecting incoming connections (e.g., invalid
+    /// IP, rate-limited handshake) to free resources without delay.
     pub trait Closer: Sync + Send + 'static {
         /// Force an immediate connection reset.
         fn force_close(&self);
