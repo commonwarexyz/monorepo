@@ -10,6 +10,7 @@ mod kw {
     syn::custom_keyword!(ask);
     syn::custom_keyword!(subscribe);
     syn::custom_keyword!(unbounded);
+    syn::custom_keyword!(read_write);
 }
 
 #[derive(Clone, Copy)]
@@ -22,21 +23,13 @@ pub(crate) enum ItemKind {
     Tell,
     Ask {
         response: Box<Type>,
+        read_write: bool,
     },
     /// Like `ask`, but the generated mailbox method returns the
     /// `oneshot::Receiver` immediately instead of awaiting the response.
     Subscribe {
         response: Box<Type>,
     },
-}
-
-impl ItemKind {
-    pub(crate) const fn response(&self) -> Option<&Type> {
-        match self {
-            Self::Tell => None,
-            Self::Ask { response } | Self::Subscribe { response } => Some(response),
-        }
-    }
 }
 
 pub(crate) struct Field {
@@ -101,13 +94,14 @@ fn parse_item(input: ParseStream<'_>) -> Result<Item> {
     let kind = if input.peek(kw::tell) {
         input.parse::<kw::tell>()?;
         ItemKind::Tell
-    } else if input.peek(kw::ask) || input.peek(kw::subscribe) {
-        let is_subscribe = input.peek(kw::subscribe);
-        if is_subscribe {
-            input.parse::<kw::subscribe>()?;
+    } else if input.peek(kw::ask) {
+        input.parse::<kw::ask>()?;
+        let read_write = if input.peek(kw::read_write) {
+            input.parse::<kw::read_write>()?;
+            true
         } else {
-            input.parse::<kw::ask>()?;
-        }
+            false
+        };
         let name: Ident = input.parse()?;
         let fields = parse_fields(input)?;
         if let Some(field) = fields.iter().find(|f| f.name == "response") {
@@ -119,14 +113,9 @@ fn parse_item(input: ParseStream<'_>) -> Result<Item> {
         input.parse::<Token![->]>()?;
         let response: Type = input.parse()?;
         input.parse::<Token![;]>()?;
-        let kind = if is_subscribe {
-            ItemKind::Subscribe {
-                response: Box::new(response),
-            }
-        } else {
-            ItemKind::Ask {
-                response: Box::new(response),
-            }
+        let kind = ItemKind::Ask {
+            response: Box::new(response),
+            read_write,
         };
         return Ok(Item {
             attrs,
@@ -134,6 +123,28 @@ fn parse_item(input: ParseStream<'_>) -> Result<Item> {
             fields,
             expose_on_mailbox,
             kind,
+        });
+    } else if input.peek(kw::subscribe) {
+        input.parse::<kw::subscribe>()?;
+        let name: Ident = input.parse()?;
+        let fields = parse_fields(input)?;
+        if let Some(field) = fields.iter().find(|f| f.name == "response") {
+            return Err(syn::Error::new(
+                field.name.span(),
+                "`response` is reserved for the implicit response channel in ask/subscribe items",
+            ));
+        }
+        input.parse::<Token![->]>()?;
+        let response: Type = input.parse()?;
+        input.parse::<Token![;]>()?;
+        return Ok(Item {
+            attrs,
+            name,
+            fields,
+            expose_on_mailbox,
+            kind: ItemKind::Subscribe {
+                response: Box::new(response),
+            },
         });
     } else {
         return Err(input.error("expected `tell`, `ask`, or `subscribe` item"));

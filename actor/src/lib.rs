@@ -27,18 +27,19 @@ stability_scope!(ALPHA {
     ///
     /// In driver mode ([`service::ServiceBuilder`]), hooks run in this order:
     ///
-    /// 1. `on_startup` once (receives [`Actor::Init`] data).
+    /// 1. `on_startup` once (receives [`Actor::Args`] data).
     /// 2. Per iteration: `preprocess`, then race lanes against
     ///    `on_external` for one event. If a message is received (`Some`),
-    ///    dispatch to `on_ingress`, then `postprocess`. If the source
+    ///    dispatch to `on_readonly` (concurrent) or `on_read_write` (serial),
+    ///    then `postprocess`. If the source
     ///    yields `None` (lane closed or `on_external` exhaustion), skip
     ///    directly to `on_shutdown`.
     /// 3. `on_shutdown` once, on graceful exit (runtime stop, lane closure,
     ///    or `on_external` returning `None`).
     ///
-    /// Returning `Err` from `on_ingress` is fatal: the error is logged and the
-    /// loop exits **without** calling `on_shutdown`. Resource cleanup that must
-    /// happen regardless of the exit path should use `Drop`.
+    /// Returning `Err` from `on_readonly` or `on_read_write` is fatal: the error is logged,
+    /// remaining in-flight reads are drained, and then `on_shutdown` is called
+    /// before the loop exits.
     pub trait Actor<E>: Send + 'static {
         /// Typed mailbox returned by the service builder.
         ///
@@ -47,45 +48,52 @@ stability_scope!(ALPHA {
         /// directly.
         type Mailbox: Send + Clone + 'static;
 
-        /// Ingress message type consumed by this actor.
-        type Ingress: Send + 'static;
-
-        /// Fatal error type returned by [`Actor::on_ingress`].
+        /// Envelope ingress type consumed by the service mailbox.
         ///
-        /// Returning `Err` from `on_ingress` logs the error and stops the
+        /// Generated mailbox wrappers from [`ingress!`] set this to
+        /// `<MailboxName>Message`.
+        type Ingress: IntoIngressEnvelope;
+
+        /// Fatal error type returned by [`Actor::on_readonly`] and [`Actor::on_read_write`].
+        ///
+        /// Returning `Err` from read/write handlers logs the error and stops the
         /// actor.
         type Error: Debug + Display + Send + 'static;
 
-        /// Initialization data passed to [`Actor::on_startup`].
+        /// Snapshot type used by concurrent read-only ingress handlers.
         ///
-        /// Use `()` for actors that do not need external initialization data.
-        /// Actors with non-unit `Init` must be started via
+        /// Must be cheap to create and clone. Prefer `Arc`-backed structures
+        /// or `Copy` types; avoid deep cloning large data structures.
+        type Snapshot: Clone + Send + 'static;
+
+        /// Data provided to the service on start up.
+        ///
+        /// Use `()` for actors that do not need external start-up data.
+        /// Actors with non-unit `Args` must be started via
         /// [`service::ActorService::start_with`].
-        type Init: Send + 'static;
+        type Args: Send + 'static;
 
         /// Runs once when the control loop starts.
         ///
-        /// `init` carries externally-provided data that the actor needs before
+        /// `args` carries externally-provided data that the actor needs before
         /// processing messages (e.g., connection handles, peer identity).
         fn on_startup(
             &mut self,
             _context: &mut E,
-            _init: &mut Self::Init,
+            _args: &mut Self::Args,
         ) -> impl Future<Output = ()> + Send {
             async {}
         }
 
         /// Runs once when the control loop stops gracefully.
         ///
-        /// Called on: runtime shutdown signal, lane closure, or
-        /// [`Actor::on_external`] returning `None`.
-        ///
-        /// NOT called when [`Actor::on_ingress`] returns `Err`; the actor
-        /// exits immediately in that case.
+        /// Called on: runtime shutdown signal, lane closure,
+        /// [`Actor::on_external`] returning `None`, or after a fatal handler
+        /// error from [`Actor::on_readonly`] or [`Actor::on_read_write`].
         fn on_shutdown(
             &mut self,
             _context: &mut E,
-            _init: &mut Self::Init,
+            _args: &mut Self::Args,
         ) -> impl Future<Output = ()> + Send {
             async {}
         }
@@ -98,27 +106,58 @@ stability_scope!(ALPHA {
         fn preprocess(
             &mut self,
             _context: &mut E,
-            _init: &mut Self::Init,
+            _args: &mut Self::Args,
         ) -> impl Future<Output = ()> + Send {
             async {}
         }
 
-        /// Handle one ingress message.
+        /// Create a snapshot for handling read-only ingress concurrently.
         ///
-        /// Returning `Err` is fatal: the service loop logs the error and
-        /// exits without calling [`Actor::on_shutdown`].
-        fn on_ingress(
+        /// The service loop captures this snapshot when a read-only message is
+        /// admitted, then executes [`Actor::on_readonly`] in a spawned task.
+        ///
+        /// This must be cheap to create. Prefer `Arc`-backed structures or
+        /// `Copy` types. Avoid deep cloning large data structures, as
+        /// `snapshot` is called on every read-only message.
+        fn snapshot(&self, args: &Self::Args) -> Self::Snapshot;
+
+        /// Handle one read-only ingress message.
+        ///
+        /// Read-only handlers execute concurrently on spawned tasks, receive only
+        /// the captured `snapshot`, and must not mutate actor state. The
+        /// `context` parameter is a clone of the actor's runtime context,
+        /// suitable for spawning sub-tasks, accessing metrics, etc.
+        ///
+        /// Returning `Err` is fatal: the service loop logs the error, drains
+        /// remaining in-flight reads, and then calls [`Actor::on_shutdown`]
+        /// before exiting.
+        fn on_readonly(
+            context: E,
+            snapshot: Self::Snapshot,
+            message: <Self::Ingress as IntoIngressEnvelope>::ReadOnlyIngress,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+        /// Handle one ingress message that may mutate actor state.
+        ///
+        /// Read-write handlers execute serially on the actor loop and are fenced
+        /// behind in-flight read-only handlers that were dispatched before the
+        /// write arrived. Reads dispatched after are not waited on.
+        ///
+        /// Returning `Err` is fatal: the service loop logs the error, drains
+        /// remaining in-flight reads, and then calls [`Actor::on_shutdown`]
+        /// before exiting.
+        fn on_read_write(
             &mut self,
             context: &mut E,
-            init: &mut Self::Init,
-            message: Self::Ingress,
+            args: &mut Self::Args,
+            message: <Self::Ingress as IntoIngressEnvelope>::ReadWriteIngress,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
         /// Poll external per-iteration sources and map them to ingress.
         ///
         /// The service loop recreates this future each iteration and races it
         /// against lane receivers. Returning `Some(ingress)` dispatches one
-        /// event via [`Actor::on_ingress`]. Returning `None` signals
+        /// event via [`Actor::on_read_write`]. Returning `None` signals
         /// exhaustion and stops the actor (calls [`Actor::on_shutdown`]).
         ///
         /// # Cancellation safety
@@ -127,12 +166,12 @@ stability_scope!(ALPHA {
         /// the race. Implementations must be **cancellation-safe**: any work
         /// done before an internal `.await` point may be lost if the future
         /// is cancelled at that point. Hold intermediate state in `self` or
-        /// `init` rather than in local variables across `.await` boundaries.
+        /// `args` rather than in local variables across `.await` boundaries.
         fn on_external(
             &mut self,
             _context: &mut E,
-            _init: &mut Self::Init,
-        ) -> impl Future<Output = Option<Self::Ingress>> + Send {
+            _args: &mut Self::Args,
+        ) -> impl Future<Output = Option<<Self::Ingress as IntoIngressEnvelope>::ReadWriteIngress>> + Send {
             futures::future::pending()
         }
 
@@ -140,10 +179,32 @@ stability_scope!(ALPHA {
         fn postprocess(
             &mut self,
             _context: &mut E,
-            _init: &mut Self::Init,
+            _args: &mut Self::Args,
         ) -> impl Future<Output = ()> + Send {
             async {}
         }
+    }
+
+    /// Envelope class used by the service loop scheduler.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum IngressEnvelope<R, W> {
+        /// Read-only ingress executed concurrently on a snapshot.
+        ReadOnly(R),
+        /// Read-write ingress executed serially on the control loop.
+        ReadWrite(W),
+    }
+
+    /// Conversion trait from mailbox ingress into a scheduler envelope.
+    pub trait IntoIngressEnvelope: Send + 'static {
+        /// Read-only ingress branch.
+        type ReadOnlyIngress: Send + 'static;
+        /// Read-write ingress branch.
+        type ReadWriteIngress: Send + 'static;
+
+        /// Convert this value into either a read-only or read-write envelope.
+        fn into_ingress_envelope(
+            self,
+        ) -> IngressEnvelope<Self::ReadOnlyIngress, Self::ReadWriteIngress>;
     }
 
     /// Ask-response conversion trait for mailbox APIs.

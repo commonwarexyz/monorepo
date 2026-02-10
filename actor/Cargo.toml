@@ -22,9 +22,6 @@ futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-tokio = { workspace = true, features = ["rt", "sync"] }
-
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
