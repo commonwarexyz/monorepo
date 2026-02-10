@@ -64,11 +64,10 @@
 //!   uncertified blocks from the network.
 
 use crate::{
-    types::{Epoch, Epocher, Height, Round},
+    types::{Height, Round},
     Block,
 };
 use commonware_cryptography::Digest;
-use commonware_macros::stability_mod;
 use commonware_storage::archive;
 use commonware_utils::{acknowledgement::Exact, Acknowledgement};
 
@@ -81,7 +80,19 @@ pub mod resolver;
 pub mod standard;
 pub mod store;
 
-stability_mod!(ALPHA, pub mod coding);
+commonware_macros::stability_scope!(ALPHA {
+    use crate::types::{Epoch, Epocher};
+
+    pub mod coding;
+
+    /// Returns true if the block is at an epoch boundary (last block in its epoch).
+    ///
+    /// This is used to validate re-proposals, which are only allowed for boundary blocks.
+    #[inline]
+    fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
+        epocher.last(epoch).is_some_and(|last| last == block_height)
+    }
+});
 
 #[cfg(test)]
 pub mod mocks;
@@ -138,12 +149,4 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// Because the [Acknowledgement] is clonable, the application can pass [Update] to multiple consumers
     /// (and marshal will only consider the block delivered once all consumers have acknowledged it).
     Block(B, A),
-}
-
-/// Returns true if the block is at an epoch boundary (last block in its epoch).
-///
-/// This is used to validate re-proposals, which are only allowed for boundary blocks.
-#[inline]
-fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
-    epocher.last(epoch).is_some_and(|last| last == block_height)
 }

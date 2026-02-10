@@ -297,7 +297,7 @@ where
     /// [`Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
 
-    /// The strategy used for parallel computation.
+    /// The strategy used for parallel shard verification.
     strategy: T,
 
     /// A map of [`CodingCommitment`]s to [`ReconstructionState`]s.
@@ -385,7 +385,7 @@ where
         let mut sender = WrappedSender::<_, Shard<C, H>>::new(sender);
         let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
             WrappedBackgroundReceiver::new(
-                self.context.with_label("wrapped_background_receiver"),
+                self.context.with_label("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
@@ -467,7 +467,7 @@ where
                             response
                         ).await;
                     },
-                    Message::Durable { commitment } => {
+                    Message::Prune { commitment } => {
                         self.prune_reconstructed(commitment);
                     },
                 }
@@ -1758,7 +1758,7 @@ mod tests {
             );
 
             // Prune at height 2 (blocks with height <= 2 should be removed).
-            peer.mailbox.durable(commitment2).await;
+            peer.mailbox.prune(commitment2).await;
             context.sleep(Duration::from_millis(10)).await;
 
             // Blocks at heights 1 and 2 should be pruned.

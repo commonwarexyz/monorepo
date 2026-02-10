@@ -126,7 +126,8 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 /// This pipelines network I/O (receiving bytes) with CPU work (decoding messages) by spawning
 /// a separate task for each decode operation, rather than decoding sequentially on the receive
 /// loop. This is particularly useful when decoding large messages that would otherwise create
-/// backpressure on the event loop.
+/// backpressure on the event loop, such as signature verification, decryption, or intensive
+/// validity checks.
 ///
 /// Concurrency is bounded by the provided [`Strategy`]'s
 /// [`parallelism_hint`](Strategy::parallelism_hint): when the number of in-flight decode

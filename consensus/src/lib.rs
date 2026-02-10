@@ -9,12 +9,10 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(ALPHA {
-    pub mod aggregation;
-    pub mod ordered_broadcast;
-});
-commonware_macros::stability_scope!(BETA {
-    use commonware_codec::{Codec, EncodeSize, Write};
+use commonware_macros::stability_scope;
+
+stability_scope!(BETA {
+    use commonware_codec::{Codec, Encode};
     use commonware_cryptography::Digestible;
 
     pub mod simplex;
@@ -58,18 +56,16 @@ commonware_macros::stability_scope!(BETA {
     /// needs to participate in certification but never verified the block locally (necessary for liveness).
     pub trait CertifiableBlock: Block {
         /// The consensus context type stored in this block.
-        type Context: Clone + EncodeSize + Write;
+        type Context: Clone + Encode;
 
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
     }
 });
-commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::{types::Round, marshal::ancestry::{AncestorStream, BlockProvider}};
-    use commonware_cryptography::{Digest, certificate::Scheme};
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::{types::Round};
+    use commonware_cryptography::Digest;
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
-    use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand::Rng;
     use std::future::Future;
 
     pub mod marshal;
@@ -203,6 +199,16 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
         ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
+});
+stability_scope!(ALPHA {
+    pub mod aggregation;
+    pub mod ordered_broadcast;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    use crate::marshal::ancestry::{AncestorStream, BlockProvider};
+    use commonware_runtime::{Clock, Metrics, Spawner};
+    use commonware_cryptography::certificate::Scheme;
+    use rand::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.

@@ -80,11 +80,11 @@ enum BroadcastAction {
     },
     Subscribe {
         peer_index: usize,
-        digest: [u8; 32],
+        digest: Digest,
     },
     Get {
         peer_index: usize,
-        digest: [u8; 32],
+        digest: Digest,
     },
     Sleep {
         duration_ms: u64,
@@ -251,7 +251,7 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.subscribe(digest.into()).await);
+                        drop(mailbox.subscribe(digest).await);
                     }
                 }
                 BroadcastAction::Get { peer_index, digest } => {
@@ -259,7 +259,7 @@ fn fuzz(input: FuzzInput) {
                     let peer = peers[clamped_peer_idx].clone();
 
                     if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
-                        drop(mailbox.get(digest.into()).await);
+                        drop(mailbox.get(digest).await);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {

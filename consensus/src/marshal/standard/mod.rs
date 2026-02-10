@@ -22,8 +22,10 @@
 //! Prefer this variant when block sizes are small enough that shipping full blocks
 //! to every peer is acceptable.
 
-mod marshaled;
-pub use marshaled::Marshaled;
+commonware_macros::stability_scope!(ALPHA {
+    mod marshaled;
+    pub use marshaled::Marshaled;
+});
 
 mod variant;
 pub use variant::Standard;

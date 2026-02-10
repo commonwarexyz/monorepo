@@ -76,9 +76,9 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     },
-    /// A notification from marshal that a reconstructed block has been made durable.
-    Durable {
-        /// The block's [`CodingCommitment`].
+    /// A request to prune all caches at and below the given commitment.
+    Prune {
+        /// The prune target's [`CodingCommitment`].
         commitment: CodingCommitment,
     },
 }
@@ -190,9 +190,9 @@ where
         receiver
     }
 
-    /// Notify the engine that a reconstructed block has been made durable.
-    pub async fn durable(&mut self, commitment: CodingCommitment) {
-        let msg = Message::Durable { commitment };
+    /// Request to prune all caches at and below the given commitment.
+    pub async fn prune(&mut self, commitment: CodingCommitment) {
+        let msg = Message::Prune { commitment };
         self.sender.send_lossy(msg).await;
     }
 }

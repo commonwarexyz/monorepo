@@ -79,7 +79,7 @@ where
     }
 
     async fn finalized(&mut self, commitment: CodingCommitment) {
-        self.durable(commitment).await;
+        self.prune(commitment).await;
     }
 
     async fn proposed(&mut self, block: CodedBlock<B, C>) {
