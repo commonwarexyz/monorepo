@@ -158,21 +158,21 @@ use crate::{
     types::{CodingCommitment, View},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{Codec, Decode, Error as CodecError, Read};
+use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{utils::codec::WrappedSender, Blocker, Receiver, Recipients, Sender};
+use commonware_p2p::{
+    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
+    Blocker, Receiver, Recipients, Sender,
+};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
-    channel::{
-        fallible::{AsyncFallibleExt, OneshotExt},
-        mpsc, oneshot,
-    },
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::{Quorum, Set},
     Participant,
 };
@@ -390,6 +390,7 @@ where
                 self.shard_codec_cfg.clone(),
                 self.blocker.clone(),
                 self.background_channel_capacity,
+                &self.strategy,
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
         let _receiver_handle = receiver_service.start();
@@ -1363,103 +1364,6 @@ where
                 true
             }
             Self::Ready(_) => false,
-        }
-    }
-}
-
-/// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
-/// decode tasks using a [`Codec`].
-///
-/// This pipelines network I/O (receiving bytes) with CPU work (decoding messages) by spawning
-/// a separate task for each decode operation, rather than decoding sequentially on the receive
-/// loop. This is particularly useful when decoding large messages (such as erasure-coded shards)
-/// would otherwise create backpressure on the event loop.
-struct WrappedBackgroundReceiver<E, P, B, R, V>
-where
-    E: Spawner,
-    P: PublicKey,
-    B: Blocker<PublicKey = P>,
-    R: Receiver<PublicKey = P>,
-    V: Codec + Send,
-{
-    context: ContextCell<E>,
-    receiver: R,
-    codec_config: V::Cfg,
-    blocker: B,
-    sender: mpsc::Sender<(P, V)>,
-}
-
-impl<E, P, B, R, V> WrappedBackgroundReceiver<E, P, B, R, V>
-where
-    E: Spawner,
-    P: PublicKey,
-    B: Blocker<PublicKey = P>,
-    R: Receiver<PublicKey = P>,
-    V: Codec + Send + 'static,
-{
-    /// Create a new [`WrappedBackgroundReceiver`] with the given receiver, codec config, and
-    /// blocker.
-    pub fn new(
-        context: E,
-        receiver: R,
-        codec_config: V::Cfg,
-        blocker: B,
-        channel_capacity: usize,
-    ) -> (Self, mpsc::Receiver<(P, V)>) {
-        let (tx, rx) = mpsc::channel(channel_capacity);
-        (
-            Self {
-                context: ContextCell::new(context),
-                receiver,
-                codec_config,
-                blocker,
-                sender: tx,
-            },
-            rx,
-        )
-    }
-
-    /// Start the background receiver.
-    ///
-    /// Returns a [`Handle`] that must be kept alive for the background receiver to continue
-    /// running. Dropping the handle will abort the background receiver.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run().await)
-    }
-
-    /// Run the background receiver's event loop.
-    ///
-    /// Each incoming message is decoded in a separate spawned task, allowing
-    /// the receive loop to continue draining the network buffer while decodes
-    /// proceed concurrently.
-    async fn run(mut self) {
-        select_loop! {
-            self.context,
-            on_stopped => {
-                debug!("wrapped background receiver received shutdown signal, stopping");
-            },
-            Ok((peer, bytes)) = self.receiver.recv() else {
-                debug!("wrapped background receiver closed, stopping");
-                return;
-            } => {
-                let config = self.codec_config.clone();
-                let mut sender = self.sender.clone();
-                let mut blocker = self.blocker.clone();
-
-                let ctx = self.context.take();
-                ctx.clone().spawn(|_| async move {
-                    match V::decode_cfg(bytes.as_ref(), &config) {
-                        Ok(value) => {
-                            sender.send_lossy((peer, value)).await;
-                        }
-                        Err(err) => {
-                            warn!(?peer, ?err, "received invalid message, blocking peer");
-                            blocker.block(peer).await;
-                        }
-                    }
-                });
-                self.context.restore(ctx);
-            }
         }
     }
 }

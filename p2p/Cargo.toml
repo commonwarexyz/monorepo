@@ -18,6 +18,7 @@ arbitrary = { workspace = true, optional = true, features = ["derive"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-macros = { workspace = true, features = ["std"] }
+commonware-parallel.workspace = true
 commonware-runtime.workspace = true
 commonware-stream.workspace = true
 commonware-utils.workspace = true

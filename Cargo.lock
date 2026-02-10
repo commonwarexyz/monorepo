@@ -1452,6 +1452,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-math",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
