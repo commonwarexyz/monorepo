@@ -7,8 +7,6 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
-mod connection;
-pub(crate) use connection::Connection;
 mod data;
 pub mod discovery;
 pub mod lookup;

@@ -25,7 +25,6 @@ impl crate::Sink for Sink {
 pub struct Closer;
 
 impl crate::Closer for Closer {
-    fn close(&self) {}
     fn force_close(&self) {}
 }
 

@@ -9,7 +9,7 @@ use crate::authenticated::{
     },
     mailbox::UnboundedMailbox,
     relay::Relay,
-    Connection, Mailbox,
+    Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -17,7 +17,7 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, Closer, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::encrypted::Sender;
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,
@@ -117,11 +117,10 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         mut self,
         peer: C,
         greeting: types::Info<C>,
-        connection: Connection<O, I, Cl>,
+        (mut conn_sender, mut conn_receiver, closer): (Sender<O>, Receiver<I>, Cl),
         mut tracker: UnboundedMailbox<tracker::Message<C>>,
         channels: Channels<C>,
     ) -> Result<(), Error> {
-        let (mut conn_sender, mut conn_receiver, closer) = connection.into_parts();
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -536,7 +535,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
@@ -639,7 +638,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
@@ -744,7 +743,7 @@ mod tests {
                 .run(
                     local_pk,
                     greeting,
-                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )
@@ -886,7 +885,7 @@ mod tests {
                 .run(
                     local_pk_clone.clone(),
                     greeting,
-                    Connection::new(remote_sender, remote_receiver, mocks::Closer),
+                    (remote_sender, remote_receiver, mocks::Closer),
                     tracker_mailbox,
                     channels,
                 )

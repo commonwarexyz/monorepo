@@ -10,7 +10,7 @@ use crate::{
             metrics,
         },
         mailbox::UnboundedMailbox,
-        Connection, Mailbox,
+        Mailbox,
     },
     Ingress,
 };
@@ -150,9 +150,7 @@ impl<
 
                 // Start peer to handle messages
                 let (send, recv) = connection;
-                supervisor
-                    .spawn(Connection::new(send, recv, closer), reservation)
-                    .await;
+                supervisor.spawn((send, recv, closer), reservation).await;
             }
         });
     }

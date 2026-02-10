@@ -150,6 +150,8 @@ impl<
                                 let Some(greeting) = tracker.connect(peer.clone(), is_dialer).await
                                 else {
                                     debug!(?peer, "peer not eligible");
+                                    // Force close (RST instead of FIN) for blocked peers
+                                    connection.2.force_close();
                                     connections.dec();
                                     drop(reservation);
                                     return;

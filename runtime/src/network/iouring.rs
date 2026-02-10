@@ -343,13 +343,6 @@ pub struct Closer {
 }
 
 impl crate::Closer for Closer {
-    fn close(&self) {
-        let socket = SockRef::from(&*self.fd);
-        if let Err(err) = socket.shutdown(std::net::Shutdown::Write) {
-            warn!(?err, "failed to shutdown write half");
-        }
-    }
-
     fn force_close(&self) {
         let socket = SockRef::from(&*self.fd);
         if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {

@@ -3,7 +3,7 @@ use crate::authenticated::{
     data::EncodedData,
     lookup::{channels::Channels, metrics, types},
     relay::Relay,
-    Connection, Mailbox,
+    Mailbox,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
@@ -11,7 +11,7 @@ use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     Clock, Closer, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::encrypted::Sender;
+use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
     channel::mpsc::{self, error::TrySendError},
     time::SYSTEM_TIME_PRECISION,
@@ -104,10 +104,9 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub async fn run<Si: Sink, St: Stream, Cl: Closer>(
         mut self,
         peer: C,
-        connection: Connection<Si, St, Cl>,
+        (mut conn_sender, mut conn_receiver, closer): (Sender<Si>, Receiver<St>, Cl),
         channels: Channels<C>,
     ) -> Result<(), Error> {
-        let (mut conn_sender, mut conn_receiver, closer) = connection.into_parts();
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();

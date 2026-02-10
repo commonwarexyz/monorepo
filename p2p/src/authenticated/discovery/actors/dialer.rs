@@ -9,7 +9,7 @@ use crate::authenticated::{
         metrics,
     },
     mailbox::UnboundedMailbox,
-    Connection, Mailbox,
+    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -146,9 +146,7 @@ impl<
 
                 // Start peer to handle messages
                 let (send, recv) = instance;
-                supervisor
-                    .spawn(Connection::new(send, recv, closer), reservation)
-                    .await;
+                supervisor.spawn((send, recv, closer), reservation).await;
             }
         });
     }

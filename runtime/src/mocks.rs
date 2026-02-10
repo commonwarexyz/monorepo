@@ -115,7 +115,6 @@ impl Drop for Sink {
 pub struct Closer;
 
 impl CloserTrait for Closer {
-    fn close(&self) {}
     fn force_close(&self) {}
 }
 

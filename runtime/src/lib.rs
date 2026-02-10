@@ -588,25 +588,16 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
-    /// Handle for controlling connection lifecycle.
+    /// Handle for forcing an immediate connection reset.
     ///
-    /// Provides explicit control over how a connection is closed: gracefully
-    /// (sending FIN) or forcefully (sending RST). Returned alongside [Sink]
-    /// and [Stream] when accepting or dialing a connection.
+    /// Returned alongside [Sink] and [Stream] when accepting or dialing
+    /// a connection. For TCP, calling [Closer::force_close] sets SO_LINGER=0
+    /// so that when the connection is dropped, an RST is sent instead of a
+    /// graceful FIN/ACK shutdown. This is useful when rejecting connections
+    /// (e.g., invalid IP, failed handshake, blocked peer) to avoid
+    /// accumulating sockets in TIME_WAIT state.
     pub trait Closer: Sync + Send + 'static {
-        /// Gracefully close the connection.
-        ///
-        /// For TCP, this sends a FIN to the peer, signaling that no more
-        /// data will be sent.
-        fn close(&self);
-
         /// Force an immediate connection reset.
-        ///
-        /// For TCP, this sets SO_LINGER=0 so that when the connection is
-        /// dropped, an RST is sent instead of a graceful FIN/ACK shutdown.
-        /// This is useful when rejecting connections (e.g., invalid IP, failed
-        /// handshake, blocked peer) to avoid accumulating sockets in TIME_WAIT
-        /// state.
         fn force_close(&self);
     }
 

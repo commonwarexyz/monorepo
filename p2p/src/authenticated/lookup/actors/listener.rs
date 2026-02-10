@@ -3,7 +3,7 @@
 use crate::authenticated::{
     lookup::actors::{spawner, tracker},
     mailbox::UnboundedMailbox,
-    Connection, Mailbox,
+    Mailbox,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -144,9 +144,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
-        supervisor
-            .spawn(Connection::new(send, recv, closer), reservation)
-            .await;
+        supervisor.spawn((send, recv, closer), reservation).await;
     }
 
     #[allow(clippy::type_complexity)]
