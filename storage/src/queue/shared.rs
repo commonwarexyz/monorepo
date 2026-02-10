@@ -43,7 +43,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
     pub async fn enqueue(&self, item: V) -> Result<u64, Error> {
         let pos = self.queue.lock().await.enqueue(item).await?;
 
-        // Fire-and-forget: the notification is a wake-up hint, not a counter.
+        // Fire-and-forget so the writer never blocks on reader wake-up.
         // The reader always checks the queue under lock, so a missed
         // notification never causes a missed item.
         let _ = self.notify.try_send(());
@@ -156,8 +156,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn try_recv(&mut self) -> Result<Option<(u64, V)>, Error> {
-        // Drain pending notification (capacity is 1, so at most one buffered)
-        let _ = self.notify.try_recv();
+        // Drain pending notifications before checking the queue.
+        while self.notify.try_recv().is_ok() {}
+
         self.queue.lock().await.dequeue().await
     }
 
