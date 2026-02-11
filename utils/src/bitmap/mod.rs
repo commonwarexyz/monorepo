@@ -576,11 +576,10 @@ impl<const N: usize> BitMap<N> {
 
     /// Check if all the bits in a given range are 0.
     ///
-    /// The semantics are that this function returns true if every index in the
-    /// range is either out of bounds, or such that [`Self::get`] returns false.
-    /// In particular, indices that are out of bounds of this bitmap do not
-    /// affect the result, and if no indices are in bounds (which includes the
-    /// case where the range is empty) then the result is `true`.
+    /// Returns `true` if every index in the range is either out of bounds
+    /// or unset (i.e. [`Self::get`] returns `false`). Indices beyond the
+    /// length of the bitmap do not affect the result. Returns `true` if
+    /// the range is empty or entirely out of bounds.
     pub fn is_unset(&self, range: Range<u64>) -> bool {
         let start = range.start.min(self.len);
         let end = range.end.min(self.len);
