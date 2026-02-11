@@ -339,7 +339,7 @@ where
 
     // Build the grafted MMR from the bitmap chunks and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
-    let (grafted_mmr, grafted_leaf_count) = db::build_grafted_mmr::<H, N>(
+    let grafted_mmr = db::build_grafted_mmr::<H, N>(
         &mut hasher,
         &status,
         &pinned_nodes,
@@ -356,7 +356,6 @@ where
         any,
         status,
         grafted_mmr,
-        grafted_leaf_count,
         bitmap_metadata,
         pool,
         state: db::Merkleized { root },
@@ -429,7 +428,7 @@ where
 
     // Build the grafted MMR from the bitmap and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
-    let (grafted_mmr, grafted_leaf_count) = db::build_grafted_mmr::<H, N>(
+    let grafted_mmr = db::build_grafted_mmr::<H, N>(
         &mut hasher,
         &status,
         &pinned_nodes,
@@ -446,7 +445,6 @@ where
         any,
         status,
         grafted_mmr,
-        grafted_leaf_count,
         bitmap_metadata,
         pool,
         state: db::Merkleized { root },

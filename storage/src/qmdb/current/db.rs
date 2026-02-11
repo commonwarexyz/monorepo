@@ -1,5 +1,6 @@
 //! A shared, generic implementation of the _Current_ QMDB.
-//! This module contains the core [Db] struct and its state transitions.
+//!
+//! The impl blocks in this file defines shared functionality across all Current QMDB variants.
 
 use crate::{
     bitmap::partial_chunk_root,
@@ -41,10 +42,10 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use tracing::{error, warn};
 
-/// Prefix used for the metadata key identifying grafted digest pinned node digests.
+/// Prefix used for the metadata key for grafted MMR pinned nodes.
 const NODE_PREFIX: u8 = 0;
 
-/// Prefix used for the metadata key identifying the pruned_chunks value.
+/// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 mod private {
@@ -95,17 +96,14 @@ pub struct Db<
     /// specific value.
     pub(super) any: any::db::Db<E, C, I, H, U, S::MmrState, D>,
 
-    /// The raw bitmap over the activity status of each operation.
+    /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
+    /// order to further prove whether a key _currently_ has a specific value.
     pub(super) status: BitMap<N>,
 
     /// In-memory MMR of grafted digests. At the grafting height, leaves are
     /// `hash(chunk || ops_subtree_root)`. Above the grafting height, internal nodes use ops-space
     /// (not grafted-space) positions in their hash pre-image (via [grafting::GraftedHasher]).
     pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
-
-    /// The number of complete bitmap chunks that have grafted leaf entries in `grafted_mmr`.
-    /// Set during merkleization and init; used to detect new complete chunks.
-    pub(super) grafted_leaf_count: usize,
 
     /// Metadata storage for persisting pruned_chunks count and grafted digest pinned nodes.
     pub(super) bitmap_metadata: Metadata<E, U64, Vec<u8>>,
@@ -331,7 +329,6 @@ where
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
-            grafted_leaf_count: self.grafted_leaf_count,
             bitmap_metadata: self.bitmap_metadata,
             pool: self.pool,
             state: Unmerkleized {
@@ -362,7 +359,6 @@ where
             any,
             mut status,
             grafted_mmr,
-            grafted_leaf_count,
             bitmap_metadata,
             pool,
             state,
@@ -372,7 +368,7 @@ where
         let mut any = any.into_merkleized();
 
         // Number of grafted leaves (i.e. complete chunks) at last merkleization.
-        let old_grafted_leaves = grafted_leaf_count;
+        let old_grafted_leaves = *grafted_mmr.leaves() as usize;
         // Number of grafted leaves (i.e. complete chunks) now.
         let new_grafted_leaves = status.complete_chunks();
 
@@ -424,7 +420,6 @@ where
             any,
             status,
             grafted_mmr,
-            grafted_leaf_count: new_grafted_leaves,
             bitmap_metadata,
             pool,
             state: Merkleized { root },
@@ -450,7 +445,6 @@ where
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
-            grafted_leaf_count: self.grafted_leaf_count,
             bitmap_metadata: self.bitmap_metadata,
             pool: self.pool,
             state: Unmerkleized {
@@ -532,7 +526,6 @@ where
                 any,
                 status: self.status,
                 grafted_mmr: self.grafted_mmr,
-                grafted_leaf_count: self.grafted_leaf_count,
                 bitmap_metadata: self.bitmap_metadata,
                 pool: self.pool,
                 state: Unmerkleized {
@@ -562,7 +555,6 @@ where
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
-            grafted_leaf_count: self.grafted_leaf_count,
             bitmap_metadata: self.bitmap_metadata,
             pool: self.pool,
             state: Unmerkleized {
@@ -789,16 +781,13 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 }
 
 /// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.
-///
-/// Returns the grafted MMR and the number of complete chunks that were processed (for
-/// initializing `grafted_leaf_count`).
 pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<(mmr::mem::CleanMmr<H::Digest>, usize), Error> {
+) -> Result<mmr::mem::CleanMmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -837,7 +826,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
     let grafted_mmr = dirty.merkleize(&mut grafted_hasher, pool.cloned());
 
-    Ok((grafted_mmr, complete_chunks))
+    Ok(grafted_mmr)
 }
 
 /// Load the bitmap metadata store and recover the pruning state persisted by previous runs.
