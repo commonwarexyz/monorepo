@@ -143,7 +143,7 @@ impl<B: Blob> Append<B> {
         let mut buffer = Buffer::new(
             blob_state.current_page * cache_ref.page_size(),
             capacity,
-            cache_ref.pool(),
+            cache_ref.pool().clone(),
         );
         if let Some(partial_page) = partial_data {
             let over_capacity = buffer.append(partial_page.as_ref());
@@ -200,7 +200,7 @@ impl<B: Blob> Append<B> {
         let mut buffer = Buffer::new(
             blob_state.current_page * cache_ref.page_size(),
             capacity,
-            cache_ref.pool(),
+            cache_ref.pool().clone(),
         );
         if let Some(partial_page) = partial_data {
             let over_capacity = buffer.append(partial_page.as_ref());
@@ -372,6 +372,7 @@ impl<B: Blob> Append<B> {
         );
 
         // If there's nothing to write, return early.
+        let physical_pages = physical_pages.freeze();
         if physical_pages.is_empty() {
             return Ok(());
         }
@@ -428,8 +429,7 @@ impl<B: Blob> Append<B> {
                     // Protected CRC is first: [page_size..page_size+6]
                     // Write 1: New data in first page [prefix_len..page_size]
                     if prefix_len < logical_page_size {
-                        let payload =
-                            IoBufMut::from(&physical_pages.as_ref()[prefix_len..logical_page_size]);
+                        let payload = physical_pages.slice(prefix_len..logical_page_size);
                         blob_state
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, payload)
@@ -437,7 +437,7 @@ impl<B: Blob> Append<B> {
                     }
                     // Write 2: Second CRC of first page + all remaining pages [page_size+6..end]
                     let second_crc_start = logical_page_size + 6;
-                    let payload = IoBufMut::from(&physical_pages.as_ref()[second_crc_start..]);
+                    let payload = physical_pages.slice(second_crc_start..);
                     blob_state
                         .blob
                         .write_at(write_at_offset + second_crc_start as u64, payload)
@@ -448,8 +448,7 @@ impl<B: Blob> Append<B> {
                     // Write 1: New data + first CRC of first page [prefix_len..page_size+6]
                     let first_crc_end = logical_page_size + 6;
                     if prefix_len < first_crc_end {
-                        let payload =
-                            IoBufMut::from(&physical_pages.as_ref()[prefix_len..first_crc_end]);
+                        let payload = physical_pages.slice(prefix_len..first_crc_end);
                         blob_state
                             .blob
                             .write_at(write_at_offset + prefix_len as u64, payload)
@@ -457,8 +456,7 @@ impl<B: Blob> Append<B> {
                     }
                     // Write 2: All remaining pages (if any) [physical_page_size..end]
                     if physical_pages.len() > physical_page_size {
-                        let payload =
-                            IoBufMut::from(&physical_pages.as_ref()[physical_page_size..]);
+                        let payload = physical_pages.slice(physical_page_size..);
                         blob_state
                             .blob
                             .write_at(write_at_offset + physical_page_size as u64, payload)

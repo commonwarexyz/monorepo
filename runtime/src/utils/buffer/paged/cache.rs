@@ -94,13 +94,16 @@ pub struct CacheRef {
 
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
+
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
 }
 
 impl CacheRef {
-    /// Returns a new [CacheRef] that will buffer up to `capacity` pages with the
-    /// given `page_size` and explicitly provided `pool`.
+    /// Create a shared page-cache handle backed by `pool`.
+    ///
+    /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
+    /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64 = page_size.get() as u64;
 
@@ -120,8 +123,8 @@ impl CacheRef {
 
     /// Returns the storage buffer pool associated with this cache.
     #[inline]
-    pub fn pool(&self) -> BufferPool {
-        self.pool.clone()
+    pub const fn pool(&self) -> &BufferPool {
+        &self.pool
     }
 
     /// Returns a unique id for the next blob that will use this page cache.
@@ -268,9 +271,9 @@ impl CacheRef {
             // Copy the requested portion of the page into the buffer and return immediately.
             let page_buf = fetch_result.map_err(|_| Error::ReadFailed)?;
             let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
-            let page_slice = page_buf.as_ref();
-            buf[..bytes_to_copy]
-                .copy_from_slice(&page_slice[offset_in_page..offset_in_page + bytes_to_copy]);
+            buf[..bytes_to_copy].copy_from_slice(
+                &page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy],
+            );
             return Ok(bytes_to_copy);
         }
 
@@ -295,9 +298,8 @@ impl CacheRef {
 
         // Copy the requested portion of the page into the buffer.
         let bytes_to_copy = std::cmp::min(buf.len(), page_buf.len() - offset_in_page);
-        let page_slice = page_buf.as_ref();
         buf[..bytes_to_copy]
-            .copy_from_slice(&page_slice[offset_in_page..offset_in_page + bytes_to_copy]);
+            .copy_from_slice(&page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy]);
 
         Ok(bytes_to_copy)
     }
@@ -457,7 +459,8 @@ impl Cache {
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPooler, Runner as _, Storage as _,
+        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, BufferPooler,
+        Runner as _, Storage as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -472,7 +475,7 @@ mod tests {
     #[test_traced]
     fn test_cache_basic() {
         let mut registry = Registry::default();
-        let pool = crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry);
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.

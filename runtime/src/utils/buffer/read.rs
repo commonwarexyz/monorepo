@@ -59,7 +59,7 @@ impl<B: Blob> Read<B> {
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: { pool.alloc(buffer_size.get()) },
+            buffer: pool.alloc(buffer_size.get()),
             blob_position: 0,
             blob_size,
             buffer_position: 0,

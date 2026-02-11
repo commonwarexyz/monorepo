@@ -200,9 +200,9 @@ mod tests {
             let mut reader = Read::new(
                 blob,
                 size,
-                NZUsize!(64 * 1024),
+                NZUsize!(64 * 1024), // 64KB buffer
                 context.storage_buffer_pool().clone(),
-            ); // 64KB buffer
+            );
 
             // Read all data in smaller chunks
             let mut total_read = 0;
@@ -1203,9 +1203,9 @@ mod tests {
             let writer = Write::new(
                 blob.clone(),
                 size,
-                NZUsize!(5),
+                NZUsize!(5), // Small buffer
                 context.storage_buffer_pool().clone(),
-            ); // Small buffer
+            );
 
             // First write
             writer.write_at(0, b"AAA").await.unwrap();

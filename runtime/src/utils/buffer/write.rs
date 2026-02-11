@@ -1,6 +1,4 @@
-use crate::{
-    buffer::tip::Buffer, Blob, Buf, BufferPool, Error, IoBufMut, IoBufs, IoBufsMut, RwLock,
-};
+use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, Error, IoBuf, IoBufs, IoBufsMut, RwLock};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -43,6 +41,7 @@ pub struct Write<B: Blob> {
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
     buffer: Arc<RwLock<Buffer>>,
+
     /// Buffer pool used for internal allocations.
     pool: BufferPool,
 }
@@ -181,7 +180,7 @@ impl<B: Blob> Blob for Write<B> {
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
             self.blob
-                .write_at(current_offset, IoBufMut::from(chunk))
+                .write_at(current_offset, IoBuf::copy_from_slice(chunk))
                 .await?;
             buf.advance(chunk_len);
             current_offset += chunk_len as u64;
