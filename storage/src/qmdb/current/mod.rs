@@ -331,7 +331,7 @@ pub mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics as _, Runner as _,
+        BufferPool, BufferPooler, Metrics as _, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
@@ -346,7 +346,7 @@ pub mod tests {
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-        pool: commonware_runtime::BufferPool,
+        pool: BufferPool,
     ) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
@@ -366,7 +366,7 @@ pub mod tests {
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pool: commonware_runtime::BufferPool,
+        pool: BufferPool,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),

@@ -133,7 +133,8 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, RwLock,
+        buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Metrics, Runner as _,
+        RwLock,
     };
     use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore as _;
@@ -167,7 +168,7 @@ mod tests {
     /// Create a simple config for sync tests
     fn create_sync_config(
         suffix: &str,
-        pool: commonware_runtime::BufferPool,
+        pool: BufferPool,
     ) -> immutable::Config<crate::translator::TwoCap, ()> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);

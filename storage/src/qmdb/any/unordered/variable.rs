@@ -182,7 +182,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _,
+        BufferPool, BufferPooler, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -191,7 +191,7 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64, pool: commonware_runtime::BufferPool) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pool: BufferPool) -> VarConfig {
         VariableConfig {
             mmr_journal_partition: format!("journal_{seed}"),
             mmr_metadata_partition: format!("metadata_{seed}"),
@@ -585,10 +585,7 @@ pub(crate) mod test {
 
     type PartitionedVarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
-    fn partitioned_config(
-        suffix: &str,
-        pool: commonware_runtime::BufferPool,
-    ) -> PartitionedVarConfig {
+    fn partitioned_config(suffix: &str, pool: BufferPool) -> PartitionedVarConfig {
         VariableConfig {
             mmr_journal_partition: format!("pv_journal_{suffix}"),
             mmr_metadata_partition: format!("pv_metadata_{suffix}"),

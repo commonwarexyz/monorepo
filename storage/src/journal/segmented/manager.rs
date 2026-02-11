@@ -79,7 +79,7 @@ impl<B: Blob> BufferFactory<B> for AppendFactory {
 pub struct WriteFactory {
     /// The capacity of the write buffer.
     pub capacity: NonZeroUsize,
-    /// The storage buffer pool used by write buffers.
+    /// The buffer pool used by write buffers.
     pub pool: BufferPool,
 }
 

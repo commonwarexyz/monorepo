@@ -793,7 +793,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, BufferPool, BufferPooler, Runner,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
@@ -805,7 +805,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pool: commonware_runtime::BufferPool) -> Config {
+    fn test_config(pool: BufferPool) -> Config {
         Config {
             journal_partition: "journal_partition".into(),
             metadata_partition: "metadata_partition".into(),

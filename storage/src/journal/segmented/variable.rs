@@ -61,8 +61,9 @@
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     let pool = context.storage_buffer_pool().clone();
+//!
 //!     // Create a journal
-//!     let mut journal = Journal::init(context, Config{
+//!     let mut journal = Journal::init(context, Config {
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),

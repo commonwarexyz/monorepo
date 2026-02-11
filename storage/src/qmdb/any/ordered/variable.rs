@@ -184,7 +184,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _,
+        BufferPool, BufferPooler, Runner as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -201,7 +201,7 @@ pub(crate) mod test {
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-    pub(crate) fn create_test_config(seed: u64, pool: commonware_runtime::BufferPool) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pool: BufferPool) -> VarConfig {
         VariableConfig {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),

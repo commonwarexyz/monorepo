@@ -569,7 +569,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner as _,
+        BufferPool, BufferPooler, Metrics, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -579,7 +579,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     /// Create MMR configuration for tests.
-    fn mmr_config(suffix: &str, pool: commonware_runtime::BufferPool) -> MmrConfig {
+    fn mmr_config(suffix: &str, pool: BufferPool) -> MmrConfig {
         MmrConfig {
             journal_partition: format!("mmr_journal_{suffix}"),
             metadata_partition: format!("mmr_metadata_{suffix}"),
@@ -591,7 +591,7 @@ mod tests {
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pool: commonware_runtime::BufferPool) -> JConfig {
+    fn journal_config(suffix: &str, pool: BufferPool) -> JConfig {
         JConfig {
             partition: format!("journal_{suffix}"),
             items_per_blob: NZU64!(7),

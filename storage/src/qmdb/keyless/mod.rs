@@ -395,7 +395,7 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, BufferPool, BufferPooler, Metrics, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::num::NonZeroU16;
@@ -406,7 +406,7 @@ mod test {
 
     fn db_config(
         suffix: &str,
-        pool: commonware_runtime::BufferPool,
+        pool: BufferPool,
     ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),

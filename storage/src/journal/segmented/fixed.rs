@@ -356,7 +356,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+        buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Metrics, Runner,
     };
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
@@ -369,7 +369,7 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(pool: commonware_runtime::BufferPool) -> Config {
+    fn test_cfg(pool: BufferPool) -> Config {
         Config {
             partition: "test_partition".into(),
             page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),

@@ -785,7 +785,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, BufferPooler, Error as RuntimeError, Metrics, Runner, Storage,
+        Blob, BufferPool, BufferPooler, Error as RuntimeError, Metrics, Runner, Storage,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -799,7 +799,7 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(items_per_blob: NonZeroU64, pool: commonware_runtime::BufferPool) -> Config {
+    fn test_cfg(items_per_blob: NonZeroU64, pool: BufferPool) -> Config {
         Config {
             partition: "test_partition".into(),
             items_per_blob,

@@ -62,7 +62,8 @@ fn fuzz(data: FuzzInput) {
             page_cache: CacheRef::new(
                 context.storage_buffer_pool().clone(),
                 PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE)),
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
         };
 
         let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())

@@ -257,7 +257,7 @@ pub(crate) mod test {
 
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
-        pool: commonware_runtime::BufferPool,
+        pool: BufferPool,
     ) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -275,7 +275,7 @@ pub(crate) mod test {
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
-        pool: commonware_runtime::BufferPool,
+        pool: BufferPool,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -304,7 +304,7 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_runtime::{deterministic::Context, BufferPool, BufferPooler};
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 

@@ -449,8 +449,8 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Metrics,
-        Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPool, BufferPooler,
+        Metrics, Runner,
     };
     use commonware_utils::{NZUsize, NZU16};
 
@@ -516,7 +516,7 @@ mod tests {
         }
     }
 
-    fn test_cfg(pool: commonware_runtime::BufferPool) -> Config<()> {
+    fn test_cfg(pool: BufferPool) -> Config<()> {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
