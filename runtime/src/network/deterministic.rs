@@ -36,7 +36,16 @@ impl crate::Stream for Stream {
     }
 }
 
-impl crate::Closer for Stream {
+/// Implementation of [crate::Connection] for a deterministic [Network].
+pub struct Connection {
+    address: SocketAddr,
+}
+
+impl crate::Connection for Connection {
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
+
     fn force_close(&self) {}
 }
 
@@ -49,10 +58,15 @@ pub struct Listener {
 impl crate::Listener for Listener {
     type Sink = Sink;
     type Stream = Stream;
+    type Connection = Connection;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(&mut self) -> Result<(Self::Connection, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, Sink { sender }, Stream { receiver }))
+        Ok((
+            Connection { address: socket },
+            Sink { sender },
+            Stream { receiver },
+        ))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
@@ -114,7 +128,17 @@ impl crate::Network for Network {
         })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+    async fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> Result<
+        (
+            crate::ConnectionOf<Self>,
+            crate::SinkOf<Self>,
+            crate::StreamOf<Self>,
+        ),
+        Error,
+    > {
         // Assign dialer a port from the ephemeral range
         let dialer = {
             let mut ephemeral = self.ephemeral.lock().unwrap();
@@ -139,6 +163,7 @@ impl crate::Network for Network {
             .send((dialer, dialer_sender, listener_receiver))
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
+            Connection { address: socket },
             Sink {
                 sender: listener_sender,
             },

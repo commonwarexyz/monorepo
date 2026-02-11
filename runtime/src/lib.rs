@@ -510,6 +510,9 @@ stability_scope!(BETA {
     /// Syntactic sugar for the type of [Stream] used by a given [Network] N.
     pub type StreamOf<N> = <<N as Network>::Listener as Listener>::Stream;
 
+    /// Syntactic sugar for the type of [Connection] used by a given [Network] N.
+    pub type ConnectionOf<N> = <<N as Network>::Listener as Listener>::Connection;
+
     /// Syntactic sugar for the type of [Listener] used by a given [Network] N.
     pub type ListenerOf<N> = <N as crate::Network>::Listener;
 
@@ -517,8 +520,6 @@ stability_scope!(BETA {
     /// network connections.
     pub trait Network: Clone + Send + Sync + 'static {
         /// The type of [Listener] that's returned when binding to a socket.
-        /// Accepting a connection returns a [Sink] and [Stream] which are defined
-        /// by the [Listener] and used to send and receive data over the connection.
         type Listener: Listener;
 
         /// Bind to the given socket address.
@@ -528,10 +529,13 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Self::Listener, Error>> + Send;
 
         /// Dial the given socket address.
+        #[allow(clippy::type_complexity)]
         fn dial(
             &self,
             socket: SocketAddr,
-        ) -> impl Future<Output = Result<(SinkOf<Self>, StreamOf<Self>), Error>> + Send;
+        ) -> impl Future<
+            Output = Result<(ConnectionOf<Self>, SinkOf<Self>, StreamOf<Self>), Error>,
+        > + Send;
     }
 
     /// Interface for DNS resolution.
@@ -549,20 +553,36 @@ stability_scope!(BETA {
     /// incoming network connections.
     pub trait Listener: Sync + Send + 'static {
         /// The type of [Sink] that's returned when accepting a connection.
-        /// This is used to send data to the remote connection.
         type Sink: Sink;
         /// The type of [Stream] that's returned when accepting a connection.
-        /// This is used to receive data from the remote connection.
-        /// Also implements [Closer] to allow for connection lifecycle control.
-        type Stream: Stream + Closer;
+        type Stream: Stream;
+        /// A handle representing the connection itself.
+        type Connection: Connection;
 
         /// Accept an incoming connection.
+        #[allow(clippy::type_complexity)]
         fn accept(
             &mut self,
-        ) -> impl Future<Output = Result<(SocketAddr, Self::Sink, Self::Stream), Error>> + Send;
+        ) -> impl Future<
+            Output = Result<(Self::Connection, Self::Sink, Self::Stream), Error>,
+        > + Send;
 
         /// Returns the local address of the listener.
         fn local_addr(&self) -> Result<SocketAddr, std::io::Error>;
+    }
+
+    /// Handle representing a network connection.
+    ///
+    /// Provides access to the remote address and the ability to force
+    /// an immediate connection teardown instead of a graceful shutdown.
+    /// This is useful when rejecting incoming connections (e.g., blocked
+    /// peer, invalid handshake) to free resources quickly.
+    pub trait Connection: Sync + Send + 'static {
+        /// Returns the remote address of the connection.
+        fn address(&self) -> SocketAddr;
+
+        /// Force an immediate connection reset.
+        fn force_close(&self);
     }
 
     /// Interface that any runtime must implement to send
@@ -577,17 +597,6 @@ stability_scope!(BETA {
             &mut self,
             buf: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
-    }
-
-    /// Handle for forcing an immediate connection reset.
-    ///
-    /// Implemented by [Stream] types to allow callers to force an
-    /// immediate connection teardown instead of a graceful shutdown.
-    /// This is useful when rejecting incoming connections (e.g., invalid
-    /// IP, rate-limited handshake) to free resources without delay.
-    pub trait Closer: Sync + Send + 'static {
-        /// Force an immediate connection reset.
-        fn force_close(&self);
     }
 
     /// Interface that any runtime must implement to receive
@@ -3401,9 +3410,9 @@ mod tests {
             let client_handle = context
                 .with_label("client")
                 .spawn(move |context| async move {
-                    let (mut sink, mut stream) = loop {
+                    let (_, mut sink, mut stream) = loop {
                         match context.dial(address).await {
-                            Ok((sink, stream)) => break (sink, stream),
+                            Ok(result) => break result,
                             Err(e) => {
                                 // The client may be polled before the server is ready, that's alright!
                                 error!(err =?e, "failed to connect");

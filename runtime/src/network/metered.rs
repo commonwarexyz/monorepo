@@ -1,4 +1,4 @@
-use crate::{IoBufs, SinkOf, StreamOf};
+use crate::IoBufs;
 use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -69,12 +69,6 @@ pub struct Stream<S: crate::Stream> {
     metrics: Arc<Metrics>,
 }
 
-impl<S: crate::Stream + crate::Closer> crate::Closer for Stream<S> {
-    fn force_close(&self) {
-        self.inner.force_close();
-    }
-}
-
 impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, crate::Error> {
         let bufs = self.inner.recv(len).await?;
@@ -84,6 +78,21 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
 
     fn peek(&self, max_len: usize) -> &[u8] {
         self.inner.peek(max_len)
+    }
+}
+
+/// Forwards to the inner connection.
+pub struct Connection<C: crate::Connection> {
+    inner: C,
+}
+
+impl<C: crate::Connection> crate::Connection for Connection<C> {
+    fn address(&self) -> SocketAddr {
+        self.inner.address()
+    }
+
+    fn force_close(&self) {
+        self.inner.force_close();
     }
 }
 
@@ -97,12 +106,15 @@ pub struct Listener<L: crate::Listener> {
 impl<L: crate::Listener> crate::Listener for Listener<L> {
     type Sink = Sink<L::Sink>;
     type Stream = Stream<L::Stream>;
+    type Connection = Connection<L::Connection>;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), crate::Error> {
-        let (addr, sink, stream) = self.inner.accept().await?;
+    async fn accept(
+        &mut self,
+    ) -> Result<(Self::Connection, Self::Sink, Self::Stream), crate::Error> {
+        let (conn, sink, stream) = self.inner.accept().await?;
         self.metrics.inbound_connections.inc();
         Ok((
-            addr,
+            Connection { inner: conn },
             Sink {
                 inner: sink,
                 metrics: self.metrics.clone(),
@@ -157,10 +169,18 @@ impl<N: crate::Network> crate::Network for Network<N> {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(SinkOf<Self>, StreamOf<Self>), crate::Error> {
-        let (sink, stream) = self.inner.dial(socket).await?;
+    ) -> Result<
+        (
+            crate::ConnectionOf<Self>,
+            crate::SinkOf<Self>,
+            crate::StreamOf<Self>,
+        ),
+        crate::Error,
+    > {
+        let (conn, sink, stream) = self.inner.dial(socket).await?;
         self.metrics.outbound_connections.inc();
         Ok((
+            Connection { inner: conn },
             Sink {
                 inner: sink,
                 metrics: self.metrics.clone(),
@@ -231,7 +251,7 @@ mod tests {
         });
 
         // Send and receive data as client
-        let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+        let (_, mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
 
         // Send fixed-size data and receive response
         let msg = vec![42u8; MSG_SIZE];

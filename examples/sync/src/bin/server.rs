@@ -443,7 +443,8 @@ where
         },
         client_result = listener.accept() => {
             match client_result {
-                Ok((client_addr, sink, stream)) => {
+                Ok((conn, sink, stream)) => {
+                    let client_addr = commonware_runtime::Connection::address(&conn);
                     let state = state.clone();
                     context.with_label("client").spawn(move|context|async move {
                         if let Err(err) =

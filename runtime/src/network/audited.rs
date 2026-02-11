@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
+use crate::{deterministic::Auditor, Connection as ConnectionTrait, Error, IoBufs};
 use sha2::Digest;
 use std::{net::SocketAddr, sync::Arc};
 
@@ -38,12 +38,6 @@ pub struct Stream<S: crate::Stream> {
     remote_addr: SocketAddr,
 }
 
-impl<S: crate::Stream + crate::Closer> crate::Closer for Stream<S> {
-    fn force_close(&self) {
-        self.inner.force_close();
-    }
-}
-
 impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
@@ -76,6 +70,21 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     }
 }
 
+/// A connection that forwards to the inner connection.
+pub struct Connection<C: ConnectionTrait> {
+    inner: C,
+}
+
+impl<C: ConnectionTrait> ConnectionTrait for Connection<C> {
+    fn address(&self) -> SocketAddr {
+        self.inner.address()
+    }
+
+    fn force_close(&self) {
+        self.inner.force_close();
+    }
+}
+
 /// A listener that audits network operations.
 pub struct Listener<L: crate::Listener> {
     auditor: Arc<Auditor>,
@@ -86,35 +95,37 @@ pub struct Listener<L: crate::Listener> {
 impl<L: crate::Listener> crate::Listener for Listener<L> {
     type Sink = Sink<L::Sink>;
     type Stream = Stream<L::Stream>;
+    type Connection = Connection<L::Connection>;
 
-    async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
+    async fn accept(&mut self) -> Result<(Self::Connection, Self::Sink, Self::Stream), Error> {
         self.auditor.event(b"accept_attempt", |hasher| {
             hasher.update(self.local_addr.to_string().as_bytes());
         });
 
-        let (addr, sink, stream) = self.inner.accept().await.inspect_err(|e| {
+        let (conn, sink, stream) = self.inner.accept().await.inspect_err(|e| {
             self.auditor.event(b"accept_failure", |hasher| {
                 hasher.update(self.local_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
             });
         })?;
 
+        let remote_addr = ConnectionTrait::address(&conn);
         self.auditor.event(b"accept_success", |hasher| {
             hasher.update(self.local_addr.to_string().as_bytes());
-            hasher.update(addr.to_string().as_bytes());
+            hasher.update(remote_addr.to_string().as_bytes());
         });
 
         Ok((
-            addr,
+            Connection { inner: conn },
             Sink {
                 auditor: self.auditor.clone(),
                 inner: sink,
-                remote_addr: addr,
+                remote_addr,
             },
             Stream {
                 auditor: self.auditor.clone(),
                 inner: stream,
-                remote_addr: addr,
+                remote_addr,
             },
         ))
     }
@@ -165,12 +176,22 @@ impl<N: crate::Network> crate::Network for Network<N> {
         })
     }
 
-    async fn dial(&self, remote_addr: SocketAddr) -> Result<(SinkOf<Self>, StreamOf<Self>), Error> {
+    async fn dial(
+        &self,
+        remote_addr: SocketAddr,
+    ) -> Result<
+        (
+            crate::ConnectionOf<Self>,
+            crate::SinkOf<Self>,
+            crate::StreamOf<Self>,
+        ),
+        Error,
+    > {
         self.auditor.event(b"dial_attempt", |hasher| {
             hasher.update(remote_addr.to_string().as_bytes());
         });
 
-        let (sink, stream) = self.inner.dial(remote_addr).await.inspect_err(|e| {
+        let (conn, sink, stream) = self.inner.dial(remote_addr).await.inspect_err(|e| {
             self.auditor.event(b"dial_failure", |hasher| {
                 hasher.update(remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -182,6 +203,7 @@ impl<N: crate::Network> crate::Network for Network<N> {
         });
 
         Ok((
+            Connection { inner: conn },
             Sink {
                 auditor: self.auditor.clone(),
                 inner: sink,
@@ -288,7 +310,7 @@ mod tests {
         for network in &networks {
             let network = network.clone();
             let handle = tokio::spawn(async move {
-                let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
+                let (_, mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
 
                 // Send data to server
                 sink.send(CLIENT_MSG.as_bytes()).await.unwrap();

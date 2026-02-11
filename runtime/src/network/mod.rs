@@ -65,7 +65,7 @@ mod tests {
         // Spawn client, connect to server, send and receive data over connection
         let client = runtime.spawn(async move {
             // Connect to the server
-            let (mut sink, mut stream) = network
+            let (_, mut sink, mut stream) = network
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
@@ -120,7 +120,7 @@ mod tests {
         let client = runtime.spawn(async move {
             for _ in 0..3 {
                 // Connect to the server
-                let (mut sink, mut stream) = network
+                let (_, mut sink, mut stream) = network
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
@@ -174,7 +174,7 @@ mod tests {
         // Client task
         let client = runtime.spawn(async move {
             // Connect to the server
-            let (mut sink, mut stream) = network
+            let (_, mut sink, mut stream) = network
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
@@ -239,7 +239,7 @@ mod tests {
 
         // Client receives and tests peek
         let client = runtime.spawn(async move {
-            let (_, mut stream) = network
+            let (_, _, mut stream) = network
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
@@ -318,7 +318,7 @@ mod tests {
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
             clients.push(tokio::spawn(async move {
-                let (mut sink, mut stream) = network.dial(addr).await.unwrap();
+                let (_, mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();

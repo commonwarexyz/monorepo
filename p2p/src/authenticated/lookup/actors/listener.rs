@@ -8,8 +8,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, Closer, ContextCell, Handle, KeyedRateLimiter, Listener,
-    Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, Connection as ConnectionTrait, ContextCell, Handle,
+    KeyedRateLimiter, Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{channel::mpsc, concurrency::Limiter, net::SubnetMask, IpAddrExt};
@@ -113,7 +113,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         stream: StreamOf<E>,
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
-    ) {
+    ) -> bool {
         // Perform handshake
         let source_ip = address.ip();
         let (peer, send, recv) = match listen(
@@ -128,7 +128,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             Ok(connection) => connection,
             Err(err) => {
                 debug!(?err, ?address, "failed to upgrade connection");
-                return;
+                return false;
             }
         };
         debug!(?peer, ?address, "completed handshake");
@@ -136,12 +136,13 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
         // Attempt to claim the connection
         let Some(reservation) = tracker.listen(peer.clone()).await else {
             debug!(?peer, ?address, "unable to reserve connection to peer");
-            return;
+            return false;
         };
         debug!(?peer, ?address, "reserved connection");
 
         // Start peer to handle messages
         supervisor.spawn((send, recv), reservation).await;
+        true
     }
 
     #[allow(clippy::type_complexity)]
@@ -191,13 +192,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
             },
             listener = listener.accept() => {
                 // Accept a new connection
-                let (address, sink, stream) = match listener {
-                    Ok((address, sink, stream)) => (address, sink, stream),
+                let (conn, sink, stream) = match listener {
+                    Ok(result) => result,
                     Err(e) => {
                         debug!(error = ?e, "failed to accept connection");
                         continue;
                     }
                 };
+                let address = conn.address();
                 debug!(?address, "accepted incoming connection");
 
                 // Check whether the IP is private
@@ -205,7 +207,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
-                    stream.force_close();
+                    conn.force_close();
                     continue;
                 }
 
@@ -213,7 +215,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 if !self.bypass_ip_check && !self.registered_ips.contains(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting unregistered address");
-                    stream.force_close();
+                    conn.force_close();
                     continue;
                 }
 
@@ -245,7 +247,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
-                    stream.force_close();
+                    conn.force_close();
                     continue;
                 }
 
@@ -253,7 +255,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
-                    stream.force_close();
+                    conn.force_close();
                     continue;
                 };
 
@@ -263,7 +265,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
-                        Self::handshake(
+                        let ok = Self::handshake(
                             context.into_present(),
                             address,
                             stream_cfg,
@@ -273,6 +275,10 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                             supervisor,
                         )
                         .await;
+
+                        if !ok {
+                            conn.force_close();
+                        }
 
                         // Once the handshake attempt is complete, release the reservation
                         drop(reservation);
@@ -359,9 +365,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener
-            let (sink, mut stream) = loop {
+            let (_, sink, mut stream) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -375,7 +381,7 @@ mod tests {
 
             // Additional attempts should be rate limited immediately
             for _ in 0..3 {
-                let (sink, mut stream) = context.dial(address).await.expect("dial");
+                let (_, sink, mut stream) = context.dial(address).await.expect("dial");
 
                 // Wait for some message or drop
                 let _ = stream.recv(1).await;
@@ -518,9 +524,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener
-            let (sink, mut stream) = loop {
+            let (_, sink, mut stream) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -598,9 +604,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener
-            let (sink, mut stream) = loop {
+            let (_, sink, mut stream) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }
@@ -686,9 +692,9 @@ mod tests {
             let listener_handle = actor.start(tracker_mailbox, supervisor_mailbox);
 
             // Connect to the listener from a private IP
-            let (sink, mut stream) = loop {
+            let (_, sink, mut stream) = loop {
                 match context.dial(address).await {
-                    Ok(pair) => break pair,
+                    Ok(result) => break result,
                     Err(RuntimeError::ConnectionFailed) => {
                         context.sleep(Duration::from_millis(1)).await;
                     }

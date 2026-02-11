@@ -1240,7 +1240,7 @@ impl Link {
         let (inbox, mut outbox) = mpsc::unbounded_channel::<(Channel, IoBuf, SystemTime)>();
         context.with_label("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
-            let (mut sink, _) = context.dial(socket).await.unwrap();
+            let (_, mut sink, _) = context.dial(socket).await.unwrap();
             if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;

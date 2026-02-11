@@ -23,7 +23,7 @@ use commonware_cryptography::{
     Digest, Hasher, Sha256, Signer as _,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{tokio, Listener, Metrics, Network, Runner, Spawner};
+use commonware_runtime::{tokio, Connection, Listener, Metrics, Network, Runner, Spawner};
 use commonware_stream::encrypted::{listen, Config as StreamConfig};
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -248,7 +248,7 @@ fn main() {
         };
         loop {
             // Listen for connection
-            let Ok((_, sink, stream)) = listener.accept().await else {
+            let Ok((conn, sink, stream)) = listener.accept().await else {
                 debug!("failed to accept connection");
                 continue;
             };
@@ -268,6 +268,7 @@ fn main() {
                 Ok(x) => x,
                 Err(e) => {
                     debug!(error = ?e, "failed to upgrade connection");
+                    conn.force_close();
                     continue;
                 }
             };

@@ -14,8 +14,8 @@ use crate::authenticated::{
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf,
-    Spawner, StreamOf,
+    spawn_cell, BufferPooler, Clock, Connection as ConnectionTrait, ContextCell, Handle, Metrics,
+    Network, Resolver, SinkOf, Spawner, StreamOf,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::SystemTimeExt;
@@ -123,8 +123,8 @@ impl<
                 };
 
                 // Attempt to dial peer
-                let (sink, stream) = match context.dial(address).await {
-                    Ok(stream) => stream,
+                let (conn, sink, stream) = match context.dial(address).await {
+                    Ok(result) => result,
                     Err(err) => {
                         debug!(?err, "failed to dial peer");
                         return;
@@ -136,6 +136,7 @@ impl<
                 let instance = match dial(context, config, peer.clone(), stream, sink).await {
                     Ok(instance) => instance,
                     Err(err) => {
+                        conn.force_close();
                         debug!(?err, "failed to upgrade connection");
                         return;
                     }
