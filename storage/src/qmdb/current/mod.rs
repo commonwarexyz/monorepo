@@ -19,7 +19,7 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted digest cache** (`BTreeMap<Position, Digest>`): A cache of digests at and above the
+//! - **Grafted digest cache** (`GraftedDigests<Digest>`): A cache of digests at and above the
 //!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
 //!   into a single authenticated structure (see below).
 //!
@@ -349,7 +349,7 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr, grafting::height::<N>());
+    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr);
     let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
 
     Ok(db::Db {
@@ -439,7 +439,7 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr, grafting::height::<N>());
+    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr);
     let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
 
     Ok(db::Db {
