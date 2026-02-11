@@ -40,6 +40,12 @@ use tracing::{debug, error, trace, warn};
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
 
+/// 127.0.0.0/8 prefix used for simulated peer listener addresses.
+const LOOPBACK_PREFIX: u32 = 0x7F00_0000;
+const LOOPBACK_HOST_MASK: u32 = 0x00FF_FFFF;
+const LOCALHOST_HOST_BITS: u32 = 0x00000001;
+const INITIAL_VIRTUAL_PORT: u16 = 1;
+
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
@@ -114,8 +120,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // to keep peers connected, allowing byzantine actors the ability to continue sending messages.
     disconnect_on_block: bool,
 
-    // Next socket address to assign to a new peer
-    // Incremented for each new peer
+    // Next virtual socket address to assign to a new peer.
+    // Stays within 127.0.0.0/8 to keep addresses loopback-routable.
     next_addr: SocketAddr,
 
     // Channel to receive messages from the oracle
@@ -180,8 +186,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             received_messages.clone(),
         );
 
-        // Start with a pseudo-random IP address to assign sockets to for new peers
-        let next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(context.next_u32())), 0);
+        // Start in 127.0.0.0/8 with a seeded host component and non-zero port.
+        // Avoid 127.0.0.1 so deterministic runtime localhost port restrictions never apply.
+        let mut host = context.next_u32() & LOOPBACK_HOST_MASK;
+        if host == LOCALHOST_HOST_BITS {
+            host = host.wrapping_add(1) & LOOPBACK_HOST_MASK;
+        }
+        let next_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::from_bits(LOOPBACK_PREFIX | host)),
+            INITIAL_VIRTUAL_PORT,
+        );
 
         (
             Self {
@@ -209,27 +223,29 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         )
     }
 
-    /// Returns (and increments) the next available socket address.
+    /// Returns (and increments) the next virtual socket address in 127.0.0.0/8.
     ///
-    /// The port number is incremented for each call, and the IP address is incremented if the port
-    /// number overflows.
+    /// Ports increment first. On port overflow, the host component increments and
+    /// port resets to 1. Host bits wrap within the loopback /8.
     fn get_next_socket(&mut self) -> SocketAddr {
         let result = self.next_addr;
 
-        // Increment the port number, or the IP address if the port number overflows.
-        // Allows the ip address to overflow (wrapping).
-        match self.next_addr.port().checked_add(1) {
-            Some(port) => {
-                self.next_addr.set_port(port);
+        if self.next_addr.port() == u16::MAX {
+            let ip = match self.next_addr.ip() {
+                IpAddr::V4(ipv4) => ipv4,
+                _ => unreachable!(),
+            };
+            let mut host = Ipv4Addr::to_bits(ip) & LOOPBACK_HOST_MASK;
+            host = host.wrapping_add(1) & LOOPBACK_HOST_MASK;
+            if host == LOCALHOST_HOST_BITS {
+                host = host.wrapping_add(1) & LOOPBACK_HOST_MASK;
             }
-            None => {
-                let ip = match self.next_addr.ip() {
-                    IpAddr::V4(ipv4) => ipv4,
-                    _ => unreachable!(),
-                };
-                let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
-                self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
-            }
+            self.next_addr = SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::from_bits(LOOPBACK_PREFIX | host)),
+                INITIAL_VIRTUAL_PORT,
+            );
+        } else {
+            self.next_addr.set_port(self.next_addr.port() + 1);
         }
 
         result
@@ -478,7 +494,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Returns the socket address of the peer and a boolean indicating if a new peer was created.
     async fn ensure_peer_exists(&mut self, public_key: &P) -> (SocketAddr, bool) {
         if !self.peers.contains_key(public_key) {
-            // Create peer
+            // Create peer on the next virtual loopback socket.
             let socket = self.get_next_socket();
             let peer = Peer::new(
                 self.context.with_label("peer"),
@@ -1139,14 +1155,17 @@ impl<P: PublicKey> Peer<P> {
             }
         });
 
-        // Spawn a task that accepts new connections and spawns a task for each connection
+        // Spawn a task that accepts new connections and spawns a task for each connection.
+        // Send back the listener's resolved local address so callers always receive
+        // the actual bound socket.
         let (ready_tx, ready_rx) = oneshot::channel();
         context
             .with_label("listener")
             .spawn(move |context| async move {
                 // Initialize listener
                 let mut listener = context.bind(socket).await.unwrap();
-                let _ = ready_tx.send(());
+                let resolved = listener.local_addr().unwrap();
+                let _ = ready_tx.send(resolved);
 
                 // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
@@ -1186,12 +1205,12 @@ impl<P: PublicKey> Peer<P> {
                 }
             });
 
-        // Wait for listener to start before returning
-        let _ = ready_rx.await;
+        // Wait for listener to start and get the resolved address.
+        let resolved_socket = ready_rx.await.unwrap();
 
         // Return peer
         Self {
-            socket,
+            socket: resolved_socket,
             control: control_sender,
         }
     }
@@ -1689,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_next_socket() {
+    fn test_get_next_socket_stays_in_loopback_space() {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
@@ -1699,27 +1718,28 @@ mod tests {
 
         runner.start(|context| async move {
             type PublicKey = ed25519::PublicKey;
-            let (mut network, _) =
-                Network::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+            let (mut network, _) = Network::<deterministic::Context, PublicKey>::new(context, cfg);
 
-            // Test that the next socket address is incremented correctly
-            let mut original = network.next_addr;
-            let next = network.get_next_socket();
-            assert_eq!(next, original);
-            let next = network.get_next_socket();
-            original.set_port(1);
-            assert_eq!(next, original);
+            // Initial allocation is always loopback with non-zero port.
+            let first = network.get_next_socket();
+            assert!(first.ip().is_loopback());
+            assert_ne!(first.port(), 0);
 
-            // Test that the port number overflows correctly
-            let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
-            network.next_addr = max_addr;
-            let next = network.get_next_socket();
-            assert_eq!(next, max_addr);
-            let next = network.get_next_socket();
+            // Port increments monotonically before host rotation.
+            let second = network.get_next_socket();
+            assert_eq!(second.ip(), first.ip());
+            assert_eq!(second.port(), first.port() + 1);
+
+            // On port overflow, rotate host within loopback /8 and reset to port 1.
+            network.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), u16::MAX);
             assert_eq!(
-                next,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
+                network.get_next_socket(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), u16::MAX)
             );
+            let wrapped = network.get_next_socket();
+            assert!(wrapped.ip().is_loopback());
+            assert_ne!(wrapped.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert_eq!(wrapped.port(), INITIAL_VIRTUAL_PORT);
         });
     }
 
