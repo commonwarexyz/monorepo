@@ -34,7 +34,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: BufferPooler + Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -49,7 +49,7 @@ pub struct Actor<E: BufferPooler + Spawner + Clock + Network + CryptoRngCore + M
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: BufferPooler + Spawner + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_blocked = Counter::default();

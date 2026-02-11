@@ -66,7 +66,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
 }
 
 impl<
-        E: BufferPooler + Spawner + Clock + Network + Resolver + CryptoRngCore + Metrics,
+        E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRngCore + Metrics,
         C: Signer,
     > Actor<E, C>
 {
