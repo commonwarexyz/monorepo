@@ -9,7 +9,7 @@ use crate::variable::{
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _, ThreadPooler as _,
+    BufferPooler, Runner as _, ThreadPooler as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -90,9 +90,10 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(pool.clone(), &ctx);
-                            let current_cfg = current_cfg(pool, &ctx);
+                            let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+                            let buffer_pool = ctx.storage_buffer_pool().clone();
+                            let any_cfg = any_cfg(thread_pool.clone(), buffer_pool.clone());
+                            let current_cfg = current_cfg(thread_pool, buffer_pool);
 
                             // Start the timer here to avoid including time to allocate page cache,
                             // thread pool, and other shared structures.

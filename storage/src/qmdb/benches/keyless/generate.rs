@@ -6,7 +6,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, ThreadPooler as _,
+    BufferPool, BufferPooler, ThreadPooler as _,
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
@@ -36,8 +36,8 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 
 fn keyless_cfg(
-    pool: ThreadPool,
-    context: &Context,
+    thread_pool: ThreadPool,
+    buffer_pool: BufferPool,
 ) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -49,12 +49,8 @@ fn keyless_cfg(
         log_items_per_section: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        thread_pool: Some(pool),
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        ),
+        thread_pool: Some(thread_pool),
+        page_cache: CacheRef::new(buffer_pool, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -67,8 +63,9 @@ type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
-    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let keyless_cfg = keyless_cfg(pool, &ctx);
+    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let buffer_pool = ctx.storage_buffer_pool().clone();
+    let keyless_cfg = keyless_cfg(thread_pool, buffer_pool);
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 
     // Convert to mutable state for operations.
