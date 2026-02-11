@@ -63,7 +63,7 @@ where
 /// # Behavioral Semantics
 ///
 /// - At most one event is dispatched per iteration.
-/// - Returning `Err` from [`Actor::on_readonly`] or [`Actor::on_read_write`]
+/// - Returning `Err` from [`Actor::on_read_only`] or [`Actor::on_read_write`]
 ///   is fatal: the error is logged, remaining in-flight reads are drained,
 ///   and then [`Actor::on_shutdown`] is called before the loop exits.
 /// - A lane closing (`None`) or [`Actor::on_external`] returning `None`

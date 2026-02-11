@@ -37,7 +37,7 @@ impl<E: Spawner + Clock> Actor<E> for ExternalActor {
         self.n
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: ExternalMailboxReadOnlyMessage,
@@ -136,7 +136,7 @@ impl<E: Spawner> Actor<E> for CounterActor {
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: CounterMailboxReadOnlyMessage,
@@ -220,7 +220,7 @@ impl<E: Spawner> Actor<E> for PreprocessActor {
         self.preprocess_count += 1;
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: PreprocessMailboxReadOnlyMessage,
@@ -300,7 +300,7 @@ impl<E: Spawner> Actor<E> for StopOnCommandActor {
         self.shutdown_called.store(true, Ordering::SeqCst);
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: StopMailboxReadOnlyMessage,
@@ -371,7 +371,7 @@ impl<E: Spawner> Actor<E> for UnboundedActor {
         self.sum
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: UnboundedActorMailboxReadOnlyMessage,
@@ -447,7 +447,7 @@ impl<E: Spawner> Actor<E> for MultiLaneActor {
         self.log.clone()
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: MultiLaneMailboxReadOnlyMessage,
@@ -565,7 +565,7 @@ impl<E: Spawner, P: Peer> Actor<E> for GenericActor<P> {
         self.peer.clone()
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: GenericMailboxReadOnlyMessage<P>,
@@ -646,7 +646,7 @@ impl<E: Spawner> Actor<E> for SubscribeActor {
 
     fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         _snapshot: Self::Snapshot,
         _message: SubscribeMailboxReadOnlyMessage,
@@ -760,7 +760,7 @@ impl<E: Spawner> Actor<E> for ShutdownDrainActor {
         (self.read_started.clone(), self.read_finished.clone())
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: ShutdownDrainMailboxReadOnlyMessage,
@@ -885,5 +885,195 @@ fn test_try_tell_and_ask_timeout() {
             .await
             .unwrap_err();
         assert_eq!(err, crate::mailbox::MailboxError::Timeout);
+    });
+}
+
+pub(crate) trait HasId: Send + 'static {
+    type Id: Send + Clone + PartialEq + core::fmt::Debug + 'static;
+    fn id(&self) -> Self::Id;
+}
+
+struct Node {
+    name: String,
+}
+
+impl HasId for Node {
+    type Id = String;
+    fn id(&self) -> String {
+        self.name.clone()
+    }
+}
+
+struct AssocTypeActor<N: HasId> {
+    node: Option<N>,
+}
+
+ingress! {
+    AssocTypeMailbox<N: HasId>,
+
+    pub tell Register { node: N };
+    pub ask GetId -> Option<N::Id>;
+}
+
+impl<E: Spawner, N: HasId> Actor<E> for AssocTypeActor<N> {
+    type Mailbox = AssocTypeMailbox<N>;
+    type Ingress = AssocTypeMailboxMessage<N>;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = Option<N::Id>;
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {
+        self.node.as_ref().map(|n| n.id())
+    }
+
+    async fn on_read_only(
+        _context: E,
+        snapshot: Self::Snapshot,
+        message: AssocTypeMailboxReadOnlyMessage<N>,
+    ) -> Result<(), Self::Error> {
+        match message {
+            AssocTypeMailboxReadOnlyMessage::GetId { response } => {
+                response.send_lossy(snapshot);
+                Ok(())
+            }
+        }
+    }
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: AssocTypeMailboxReadWriteMessage<N>,
+    ) -> Result<(), Self::Error> {
+        match message {
+            AssocTypeMailboxReadWriteMessage::Register { node } => {
+                self.node = Some(node);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[test]
+fn test_associated_type_in_response() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let actor: AssocTypeActor<Node> = AssocTypeActor { node: None };
+        let (mailbox, service) = ServiceBuilder::new(actor).build(context.with_label("assoc_type"));
+        service.start();
+
+        assert_eq!(mailbox.get_id().await.expect("ask failed"), None);
+
+        mailbox
+            .register(Node {
+                name: "alpha".into(),
+            })
+            .await
+            .expect("tell failed");
+        context.sleep(Duration::from_millis(1)).await;
+
+        assert_eq!(
+            mailbox.get_id().await.expect("ask failed"),
+            Some("alpha".to_string()),
+        );
+    });
+}
+
+struct TellOnlyActor<P: Peer> {
+    last: Option<P>,
+}
+
+ingress! {
+    TellOnlyMailbox<P: Peer>,
+
+    pub tell Store { value: P };
+}
+
+impl<E: Spawner, P: Peer> Actor<E> for TellOnlyActor<P> {
+    type Mailbox = TellOnlyMailbox<P>;
+    type Ingress = TellOnlyMailboxMessage<P>;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = ();
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: TellOnlyMailboxReadWriteMessage<P>,
+    ) -> Result<(), Self::Error> {
+        match message {
+            TellOnlyMailboxReadWriteMessage::Store { value } => {
+                self.last = Some(value);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[test]
+fn test_generic_tell_only_no_readonly_variants() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let actor: TellOnlyActor<String> = TellOnlyActor { last: None };
+        let (mailbox, service) = ServiceBuilder::new(actor).build(context.with_label("tell_only"));
+        service.start();
+
+        mailbox
+            .store("hello".to_string())
+            .await
+            .expect("tell failed");
+    });
+}
+
+struct AskOnlyActor<P: Peer> {
+    value: P,
+}
+
+ingress! {
+    AskOnlyMailbox<P: Peer>,
+
+    pub ask GetValue -> P;
+}
+
+impl<E: Spawner, P: Peer> Actor<E> for AskOnlyActor<P> {
+    type Mailbox = AskOnlyMailbox<P>;
+    type Ingress = AskOnlyMailboxMessage<P>;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = P;
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {
+        self.value.clone()
+    }
+
+    async fn on_read_only(
+        _context: E,
+        snapshot: Self::Snapshot,
+        message: AskOnlyMailboxReadOnlyMessage<P>,
+    ) -> Result<(), Self::Error> {
+        match message {
+            AskOnlyMailboxReadOnlyMessage::GetValue { response } => {
+                response.send_lossy(snapshot);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[test]
+fn test_generic_ask_only_no_readwrite_variants() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let actor: AskOnlyActor<String> = AskOnlyActor {
+            value: "world".into(),
+        };
+        let (mailbox, service) = ServiceBuilder::new(actor).build(context.with_label("ask_only"));
+        service.start();
+
+        let val = mailbox.get_value().await.expect("ask failed");
+        assert_eq!(val, "world");
     });
 }

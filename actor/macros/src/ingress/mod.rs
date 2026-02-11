@@ -678,12 +678,14 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let names = GenericParamNames::from_generics(&generics);
 
-    let readonly_variants = items
+    let readonly_variants: Vec<_> = items
         .iter()
-        .filter_map(|item| emit_readonly_variant(item, &actor));
-    let read_write_variants = items
+        .filter_map(|item| emit_readonly_variant(item, &actor))
+        .collect();
+    let read_write_variants: Vec<_> = items
         .iter()
-        .filter_map(|item| emit_read_write_variant(item, &actor));
+        .filter_map(|item| emit_read_write_variant(item, &actor))
+        .collect();
     let wrappers = items.iter().map(|item| {
         let ctx = WrapperEmitCtx {
             actor: &actor,
@@ -707,13 +709,51 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         MailboxKind::Unbounded => quote!(#actor::mailbox::UnboundedMailbox<#ingress #ty_generics>),
     };
 
+    let phantom_variant = if generics.params.is_empty() {
+        quote!()
+    } else {
+        let phantom_args: Vec<_> = generics
+            .params
+            .iter()
+            .map(|p| match p {
+                GenericParam::Type(tp) => {
+                    let ident = &tp.ident;
+                    quote!(#ident)
+                }
+                GenericParam::Lifetime(lp) => {
+                    let lt = &lp.lifetime;
+                    quote!(&#lt ())
+                }
+                GenericParam::Const(_) => quote!(()),
+            })
+            .collect();
+        quote! {
+            #[doc(hidden)]
+            _Phantom(::core::marker::PhantomData<(#(#phantom_args),*)>),
+        }
+    };
+
+    let empty = quote!();
+    let readonly_phantom = if readonly_variants.is_empty() {
+        &phantom_variant
+    } else {
+        &empty
+    };
+    let read_write_phantom = if read_write_variants.is_empty() {
+        &phantom_variant
+    } else {
+        &empty
+    };
+
     quote! {
         pub enum #readonly_ingress #generics #where_clause {
             #(#readonly_variants)*
+            #readonly_phantom
         }
 
         pub enum #read_write_ingress #generics #where_clause {
             #(#read_write_variants)*
+            #read_write_phantom
         }
 
         pub enum #ingress #generics #where_clause {
