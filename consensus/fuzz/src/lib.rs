@@ -370,16 +370,16 @@ fn spawn_honest_validator_with_network<P: simplex::Simplex>(
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     vote_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let elector = P::Elector::default();
@@ -447,7 +447,7 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     participants: &[Ed25519PublicKey],
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
-    byzantine_router: crate::network::Router<Ed25519PublicKey, deterministic::Context>,
+    byzantine_router: network::Router<Ed25519PublicKey, deterministic::Context>,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
@@ -458,22 +458,22 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
 
     let vote_router = byzantine_router.clone();
     let (vote_primary, vote_secondary) = vote_receiver
-        .split_with(context.with_label("byz_first_vote"), move |msg| {
+        .split_with(context.with_label("byzantine_first_vote"), move |msg| {
             vote_router.route(msg)
         });
     let vote_receiver = ByzantineFirstReceiver::new(vote_primary, vote_secondary);
 
     let certificate_router = byzantine_router.clone();
-    let (certificate_primary, certificate_secondary) = certificate_receiver
-        .split_with(context.with_label("byz_first_certificate"), move |msg| {
-            certificate_router.route(msg)
-        });
+    let (certificate_primary, certificate_secondary) = certificate_receiver.split_with(
+        context.with_label("byzantine_first_certificate"),
+        move |msg| certificate_router.route(msg),
+    );
     let certificate_receiver =
         ByzantineFirstReceiver::new(certificate_primary, certificate_secondary);
 
     let resolver_router = byzantine_router;
     let (resolver_primary, resolver_secondary) = resolver_receiver
-        .split_with(context.with_label("byz_first_resolver"), move |msg| {
+        .split_with(context.with_label("byzantine_first_resolver"), move |msg| {
             resolver_router.route(msg)
         });
     let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
