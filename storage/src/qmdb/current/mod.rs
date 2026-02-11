@@ -19,7 +19,7 @@
 //!   operation _i_ is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N`
 //!   bytes (i.e. `N * 8` bits each). `N` must be a power of two.
 //!
-//! - **Grafted digest cache** (`GraftedDigests<Digest>`): A cache of digests at and above the
+//! - **Grafted MMR** (`CleanMmr<Digest>`): An in-memory MMR of digests at and above the
 //!   _grafting height_ in the ops MMR. This is the core of how bitmap and ops MMR are combined
 //!   into a single authenticated structure (see below).
 //!
@@ -337,9 +337,9 @@ where
     )
     .await?;
 
-    // Build the grafted digests cache from the bitmap chunks and ops MMR.
+    // Build the grafted MMR from the bitmap chunks and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
-    let (grafted_digests, grafted_leaf_count) = db::build_grafted_digests::<H, N>(
+    let (grafted_mmr, grafted_leaf_count) = db::build_grafted_mmr::<H, N>(
         &mut hasher,
         &status,
         &pinned_nodes,
@@ -349,13 +349,13 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr);
+    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
 
     Ok(db::Db {
         any,
         status,
-        grafted_digests,
+        grafted_mmr,
         grafted_leaf_count,
         bitmap_metadata,
         pool,
@@ -427,9 +427,9 @@ where
     )
     .await?;
 
-    // Build the grafted digests cache from the bitmap and ops MMR.
+    // Build the grafted MMR from the bitmap and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
-    let (grafted_digests, grafted_leaf_count) = db::build_grafted_digests::<H, N>(
+    let (grafted_mmr, grafted_leaf_count) = db::build_grafted_mmr::<H, N>(
         &mut hasher,
         &status,
         &pinned_nodes,
@@ -439,13 +439,13 @@ where
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr);
+    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
 
     Ok(db::Db {
         any,
         status,
-        grafted_digests,
+        grafted_mmr,
         grafted_leaf_count,
         bitmap_metadata,
         pool,

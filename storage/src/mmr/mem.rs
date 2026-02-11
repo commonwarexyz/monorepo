@@ -2,7 +2,7 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
+    iterator::{nodes_needing_parents, nodes_to_pin, pos_to_height, PathIterator, PeakIterator},
     proof,
     Error::{self, *},
     Location, Position, Proof,
@@ -437,7 +437,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Add `digest` as a new leaf in the MMR, returning its position.
-    pub(super) fn add_leaf_digest(&mut self, digest: D) -> Position {
+    pub(crate) fn add_leaf_digest(&mut self, digest: D) -> Position {
         // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
@@ -454,6 +454,24 @@ impl<D: Digest> DirtyMmr<D> {
         }
 
         leaf_pos
+    }
+
+    /// Overwrite the digest of an existing leaf and mark its ancestors as dirty.
+    pub(crate) fn update_leaf_digest(&mut self, loc: Location, digest: D) -> Result<(), Error> {
+        let pos = Position::try_from(loc).map_err(|_| Error::LocationOverflow(loc))?;
+        if pos < self.pruned_to_pos {
+            return Err(Error::ElementPruned(pos));
+        }
+        if pos >= self.size() {
+            return Err(Error::InvalidPosition(pos));
+        }
+        if pos_to_height(pos) != 0 {
+            return Err(Error::PositionNotLeaf(pos));
+        }
+        let index = self.pos_to_index(pos);
+        self.nodes[index] = digest;
+        self.mark_dirty(pos);
+        Ok(())
     }
 
     /// Add `element` to the MMR and return its position.

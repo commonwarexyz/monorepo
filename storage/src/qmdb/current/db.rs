@@ -98,12 +98,12 @@ pub struct Db<
     /// The raw bitmap over the activity status of each operation.
     pub(super) status: BitMap<N>,
 
-    /// Cache of grafted digests keyed by ops MMR positions. At the grafting height, entries are
-    /// `hash(chunk || ops_subtree_root)`. Above the grafting height, entries are standard MMR
-    /// internal nodes using ops-space positions in their hash pre-image.
-    pub(super) grafted_digests: grafting::Digests<H::Digest>,
+    /// In-memory MMR of grafted digests. At the grafting height, leaves are
+    /// `hash(chunk || ops_subtree_root)`. Above the grafting height, internal nodes use ops-space
+    /// (not grafted-space) positions in their hash pre-image (via [grafting::GraftedHasher]).
+    pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
 
-    /// The number of complete bitmap chunks that have grafted leaf entries in `grafted_digests`.
+    /// The number of complete bitmap chunks that have grafted leaf entries in `grafted_mmr`.
     /// Set during merkleization and init; used to detect new complete chunks.
     pub(super) grafted_leaf_count: usize,
 
@@ -183,7 +183,11 @@ where
     /// This presents the grafted digests (at or above grafting height) and the raw ops
     /// MMR nodes (below grafting height) as a single combined MMR storage.
     fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
-        grafting::Storage::new(&self.grafted_digests, &self.any.log.mmr)
+        grafting::Storage::new(
+            &self.grafted_mmr,
+            grafting::height::<N>(),
+            &self.any.log.mmr,
+        )
     }
 
     /// Returns a proof for the operation at `loc`.
@@ -247,7 +251,7 @@ where
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Persist grafted digest pruning state before pruning the ops log. If the subsequent
         // `any.prune` fails, the metadata is ahead of the log, which is safe: on recovery,
-        // `build_grafted_digests` will recompute from the (un-pruned) log and the metadata
+        // `build_grafted_mmr` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
         self.write_pruned().await?;
@@ -268,10 +272,12 @@ where
         // pruned portion of the bitmap.
         let pruned_ops_leaves = self.status.pruned_chunks() as u64 * BitMap::<N>::CHUNK_SIZE_BITS;
         let ops_mmr_size = Position::try_from(Location::new_unchecked(pruned_ops_leaves))?;
+        let grafting_height = grafting::height::<N>();
         for (i, (ops_pos, _)) in PeakIterator::new(ops_mmr_size).enumerate() {
+            let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
             let digest = self
-                .grafted_digests
-                .get(ops_pos)
+                .grafted_mmr
+                .get_node(grafted_pos)
                 .ok_or(mmr::Error::MissingNode(ops_pos))?;
             let key = U64::new(NODE_PREFIX, i as u64);
             self.bitmap_metadata.put(key, digest.to_vec());
@@ -324,7 +330,7 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            grafted_digests: self.grafted_digests,
+            grafted_mmr: self.grafted_mmr,
             grafted_leaf_count: self.grafted_leaf_count,
             bitmap_metadata: self.bitmap_metadata,
             pool: self.pool,
@@ -355,7 +361,7 @@ where
         let Self {
             any,
             mut status,
-            mut grafted_digests,
+            grafted_mmr,
             grafted_leaf_count,
             bitmap_metadata,
             pool,
@@ -378,7 +384,7 @@ where
                 .copied()
                 .filter(|&c| c < old_grafted_leaves),
         );
-        let leaves = compute_grafted_leaves::<H, N>(
+        let grafted_leaves = compute_grafted_leaves::<H, N>(
             &mut any.log.hasher,
             &status,
             &any.log.mmr,
@@ -386,24 +392,38 @@ where
             pool.as_ref(),
         )
         .await?;
-        grafted_digests.update_leaves(
-            &leaves,
-            &mut any.log.hasher,
-            any.log.mmr.size(),
-            pool.as_ref(),
-        );
+
+        // Update the grafted MMR with new/dirty leaves and re-merkleize.
+        let grafting_height = grafting::height::<N>();
+        let mut dirty = grafted_mmr.into_dirty();
+        for &(ops_pos, digest) in &grafted_leaves {
+            let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
+            if grafted_pos < dirty.size() {
+                let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
+                dirty
+                    .update_leaf_digest(loc, digest)
+                    .expect("update_leaf_digest failed");
+            } else {
+                dirty.add_leaf_digest(digest);
+            }
+        }
+        let grafted_mmr = {
+            let mut grafted_hasher =
+                grafting::GraftedHasher::new(any.log.hasher.fork(), grafting_height);
+            dirty.merkleize(&mut grafted_hasher, pool.clone())
+        };
 
         // Prune the bitmap of no-longer-necessary bits.
         status.prune_to_bit(*any.inactivity_floor_loc);
 
         // Compute and cache the root.
-        let storage = grafting::Storage::new(&grafted_digests, &any.log.mmr);
+        let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
         let root = compute_root::<H, N>(&mut any.log.hasher, &status, &storage).await?;
 
         Ok(Db {
             any,
             status,
-            grafted_digests,
+            grafted_mmr,
             grafted_leaf_count: new_grafted_leaves,
             bitmap_metadata,
             pool,
@@ -429,7 +449,7 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            grafted_digests: self.grafted_digests,
+            grafted_mmr: self.grafted_mmr,
             grafted_leaf_count: self.grafted_leaf_count,
             bitmap_metadata: self.bitmap_metadata,
             pool: self.pool,
@@ -511,7 +531,7 @@ where
             Db {
                 any,
                 status: self.status,
-                grafted_digests: self.grafted_digests,
+                grafted_mmr: self.grafted_mmr,
                 grafted_leaf_count: self.grafted_leaf_count,
                 bitmap_metadata: self.bitmap_metadata,
                 pool: self.pool,
@@ -541,7 +561,7 @@ where
         Db {
             any: self.any.into_mutable(),
             status: self.status,
-            grafted_digests: self.grafted_digests,
+            grafted_mmr: self.grafted_mmr,
             grafted_leaf_count: self.grafted_leaf_count,
             bitmap_metadata: self.bitmap_metadata,
             pool: self.pool,
@@ -707,8 +727,7 @@ pub(super) async fn compute_root<H: Hasher, const N: usize>(
 
 /// Compute grafted leaf digests for the given bitmap chunks.
 ///
-/// Each leaf is `hash(chunk || ops_subtree_root)`. Returns `(ops_pos, digest)` pairs suitable
-/// for passing to [grafting::Digests::update_leaves].
+/// Each leaf is `hash(chunk || ops_subtree_root)`. Returns `(ops_pos, digest)` pairs.
 ///
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 async fn compute_grafted_leaves<H: Hasher, const N: usize>(
@@ -769,27 +788,22 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     )
 }
 
-/// Build a grafted digests cache from scratch using bitmap chunks and the ops MMR.
+/// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.
 ///
-/// Returns the [grafting::Digests] cache and the number of complete chunks that were
-/// processed (for initializing `grafted_leaf_count`).
-pub(super) async fn build_grafted_digests<H: Hasher, const N: usize>(
+/// Returns the grafted MMR and the number of complete chunks that were processed (for
+/// initializing `grafted_leaf_count`).
+pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<(grafting::Digests<H::Digest>, usize), Error> {
+) -> Result<(mmr::mem::CleanMmr<H::Digest>, usize), Error> {
+    let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
 
-    let mut grafted_digests = if pruned_chunks > 0 {
-        grafting::Digests::from_pinned(pinned_nodes, pruned_chunks, grafting::height::<N>())
-    } else {
-        grafting::Digests::new(grafting::height::<N>())
-    };
-    // Compute grafted leaves for each unpruned complete chunk, then insert and propagate
-    // ancestors. Pinned nodes (peaks of the pruned subtree) serve as siblings during propagation.
+    // Compute grafted leaves for each unpruned complete chunk.
     let leaves = compute_grafted_leaves::<H, N>(
         hasher,
         bitmap,
@@ -798,9 +812,30 @@ pub(super) async fn build_grafted_digests<H: Hasher, const N: usize>(
         pool,
     )
     .await?;
-    grafted_digests.update_leaves(&leaves, hasher, ops_mmr.size(), pool);
 
-    Ok((grafted_digests, complete_chunks))
+    // Build a DirtyMmr: either from pruned components or empty.
+    let mut dirty = if pruned_chunks > 0 {
+        let grafted_pruned_to_pos = Position::mmr_size(pruned_chunks as u64);
+        mmr::mem::DirtyMmr::from_components(
+            Vec::new(),
+            grafted_pruned_to_pos,
+            pinned_nodes.to_vec(),
+        )
+    } else {
+        mmr::mem::DirtyMmr::default()
+    };
+
+    // Add each grafted leaf digest. Leaves arrive in chunk-index order (ascending),
+    // which is the same as grafted leaf location order.
+    for &(_ops_pos, digest) in &leaves {
+        dirty.add_leaf_digest(digest);
+    }
+
+    // Merkleize with the GraftedHasher to produce ops-space positions in hash pre-images.
+    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
+    let grafted_mmr = dirty.merkleize(&mut grafted_hasher, pool.cloned());
+
+    Ok((grafted_mmr, complete_chunks))
 }
 
 /// Load the bitmap metadata store and recover the pruning state persisted by previous runs.

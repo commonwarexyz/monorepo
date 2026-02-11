@@ -6,7 +6,8 @@
 //! status of each operation. To authenticate both structures efficiently, we combine them: each
 //! complete chunk of the bitmap is hashed together with the corresponding subtree root from the ops
 //! MMR to produce a single "grafted leaf" digest. These digests, along with their ancestor nodes,
-//! are cached in a [Digests] keyed by **ops MMR positions**.
+//! are stored in an in-memory MMR (using grafted-space positions internally, with ops-space
+//! positions in hash pre-images via [GraftedHasher]).
 //!
 //! This is more efficient than maintaining two independent authenticated structures. An inclusion
 //! proof for an operation and its activity status only requires one branch (which embeds the bitmap
@@ -37,19 +38,16 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard MMR hashing with ops-space positions.
 //!
-//! The `propagate_dirty` function incrementally maintains the cache above the grafting height when
+//! The grafted MMR is incrementally maintained via [GraftedHasher] + `DirtyMmr::merkleize` when
 //! grafted leaves change.
 
 use crate::mmr::{
-    hasher::Hasher as HasherTrait, iterator::pos_to_height, storage::Storage as StorageTrait,
-    Error, Location, Position, StandardHasher,
+    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::CleanMmr,
+    storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
 };
-use alloc::collections::BTreeSet;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_parallel::ThreadPool;
 use commonware_utils::bitmap::BitMap;
 use core::cmp::Ordering;
-use rayon::prelude::*;
 use tracing::debug;
 
 /// Minimum number of items before switching from serial to parallel computation.
@@ -85,11 +83,6 @@ pub(super) fn ops_pos_to_chunk_idx(ops_pos: Position, grafting_height: u32) -> u
     *loc >> grafting_height
 }
 
-/// Returns the number of nodes in an MMR with the given number of leaves.
-pub(super) const fn mmr_size(leaves: u64) -> u64 {
-    2 * leaves - leaves.count_ones() as u64
-}
-
 /// Convert an ops-space position (at or above the grafting height) to its grafted-space position.
 ///
 /// Related: [ops_pos_to_chunk_idx] converts an ops position at the grafting height to a chunk
@@ -99,351 +92,108 @@ pub(super) const fn mmr_size(leaves: u64) -> u64 {
 /// # Panics
 ///
 /// Panics if `ops_pos` is below the grafting height.
-pub(super) fn ops_to_grafted_pos(ops_pos: Position, grafting_height: u32) -> u64 {
+pub(super) fn ops_to_grafted_pos(ops_pos: Position, grafting_height: u32) -> Position {
     let oh = pos_to_height(ops_pos);
     assert!(
         oh >= grafting_height,
-        "ops_to_grafted_pos: position height {oh} < grafting height {grafting_height}"
+        "position height {oh} < grafting height {grafting_height}"
     );
     let gh = oh - grafting_height;
 
     // Find the leftmost ops-space leaf under this subtree.
     let leftmost_ops_leaf_pos = *ops_pos + 2 - (1u64 << (oh + 1));
     let ops_leaf_loc = Location::try_from(Position::new(leftmost_ops_leaf_pos))
-        .expect("ops_to_grafted_pos: leftmost leaf is not a valid leaf position");
+        .expect("leftmost leaf is not a valid leaf position");
 
     // Convert ops leaf location to chunk index (grafted leaf location).
     let chunk_idx = *ops_leaf_loc >> grafting_height;
 
     // Convert chunk index to grafted-space leaf position, then climb to grafted height gh.
-    let grafted_leaf_pos = Position::try_from(Location::new_unchecked(chunk_idx))
-        .expect("ops_to_grafted_pos overflow");
-    *grafted_leaf_pos + (1u64 << (gh + 1)) - 2
+    let grafted_leaf_pos =
+        Position::try_from(Location::new_unchecked(chunk_idx)).expect("chunk index overflow");
+    Position::new(*grafted_leaf_pos + (1u64 << (gh + 1)) - 2)
 }
 
 /// Convert a grafted-space position to its ops-space position.
 ///
 /// Inverse of [ops_to_grafted_pos]. Maps a position in the grafted MMR (whose leaves are
 /// bitmap chunks) back to the corresponding ops MMR position.
-#[cfg(test)]
-pub(super) fn grafted_to_ops_pos(grafted_pos: u64, grafting_height: u32) -> Position {
-    let gh = pos_to_height(Position::new(grafted_pos));
+pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
+    let gh = pos_to_height(grafted_pos);
 
     // Find the leftmost grafted-space leaf under this subtree.
     let leftmost_grafted_leaf_pos = grafted_pos + 2 - (1u64 << (gh + 1));
-    let chunk_idx = *Location::try_from(Position::new(leftmost_grafted_leaf_pos))
-        .expect("grafted_to_ops_pos: leftmost leaf is not a valid leaf position");
+    let chunk_idx = *Location::try_from(leftmost_grafted_leaf_pos)
+        .expect("leftmost leaf is not a valid leaf position");
 
     // Convert chunk index to ops-space leaf location.
     let ops_leaf_loc = chunk_idx << grafting_height;
-    let ops_leaf_pos = Position::try_from(Location::new_unchecked(ops_leaf_loc))
-        .expect("grafted_to_ops_pos overflow");
+    let ops_leaf_pos =
+        Position::try_from(Location::new_unchecked(ops_leaf_loc)).expect("ops leaf loc overflow");
 
     // Climb from the ops leaf to the ops height (gh + grafting_height).
     let oh = gh + grafting_height;
     Position::new(*ops_leaf_pos + (1u64 << (oh + 1)) - 2)
 }
 
-/// Stores grafted MMR digests.
-/// Invariant: after construction (i.e. after [Self::update_leaves]), every slot in `nodes`
-/// holds a valid digest. Internally, [Self::update_leaves] fills slots in two phases: first
-/// grafted leaves (which occupy non-contiguous positions in the MMR), then internal nodes
-/// (filled by [propagate_dirty]). Between phases, unfilled slots contain [Digest::EMPTY],
-/// but no reads occur until construction is complete.
-pub(super) struct Digests<D: Digest> {
-    /// (Position, Digest) for each pruned peak.
-    /// Ordered by [crate::mmr::iterator::PeakIterator] order (decreasing height).
-    pinned: Vec<(u64, D)>,
-
-    /// Unpruned grafted MMR digests, indexed by grafted-space position minus `offset`.
-    /// Pre-sized via [Self::resize_for_chunks] to hold all positions in the unpruned region.
-    nodes: Vec<D>,
-
-    /// Grafted-space position of `nodes[0]`. Equals `mmr_size(pruned_chunks)`.
-    /// 0 when nothing has been pruned.
-    offset: u64,
-
-    /// Height of grafted MMR leaves.
+/// An MMR [HasherTrait] adapter that converts grafted-space positions to ops-space before hashing.
+///
+/// The grafted MMR uses a compressed coordinate system (grafted-space) where each leaf corresponds
+/// to one bitmap chunk. Hash pre-images must use ops-space positions for proof compatibility with
+/// the ops MMR. This adapter intercepts [HasherTrait::node_digest] to perform the conversion;
+/// all other methods delegate unchanged.
+pub(super) struct GraftedHasher<H: HasherTrait> {
+    inner: H,
     grafting_height: u32,
 }
 
-impl<D: Digest> Digests<D> {
-    /// Returns a new empty [Digests].
-    pub(super) const fn new(grafting_height: u32) -> Self {
+impl<H: HasherTrait> GraftedHasher<H> {
+    pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
         Self {
-            pinned: Vec::new(),
-            nodes: Vec::new(),
-            offset: 0,
+            inner,
             grafting_height,
         }
-    }
-
-    /// Creates a new [Digests] from pinned peaks.
-    ///
-    /// `pinned_peaks` are peak digests in [crate::mmr::iterator::PeakIterator]
-    /// order (decreasing height).
-    /// `pruned_chunks` is the number of chunks that have been pruned.
-    pub(super) fn from_pinned(
-        pinned_peaks: &[D],
-        pruned_chunks: usize,
-        grafting_height: u32,
-    ) -> Self {
-        let offset = mmr_size(pruned_chunks as u64);
-
-        // Pair each pinned peak with its grafted-space position.
-        let pruned_ops_leaves = pruned_chunks as u64 * (1u64 << grafting_height);
-        let ops_mmr_size = Position::try_from(Location::new_unchecked(pruned_ops_leaves))
-            .expect("pruned_ops_leaves overflow");
-        let pinned: Vec<(u64, D)> = pinned_peaks
-            .iter()
-            .zip(crate::mmr::iterator::PeakIterator::new(ops_mmr_size))
-            .map(|(digest, (ops_pos, _))| {
-                let gp = ops_to_grafted_pos(ops_pos, grafting_height);
-                (gp, *digest)
-            })
-            .collect();
-
-        Self {
-            pinned,
-            nodes: Vec::new(),
-            offset,
-            grafting_height,
-        }
-    }
-
-    /// Pre-size `self.nodes` to hold all grafted positions for `complete_chunks` total chunks.
-    ///
-    /// New slots are initialized to [Digest::EMPTY] and will be overwritten by leaf insertion
-    /// and [propagate_dirty] before any reads occur.
-    fn resize_for_chunks(&mut self, complete_chunks: u64) {
-        let target_len = (mmr_size(complete_chunks) - self.offset) as usize;
-        if target_len > self.nodes.len() {
-            self.nodes.resize(target_len, D::EMPTY);
-        }
-    }
-
-    /// The grafting height.
-    pub(super) const fn grafting_height(&self) -> u32 {
-        self.grafting_height
-    }
-
-    /// Look up a digest by ops-space (not grafted-space) position.
-    pub(super) fn get(&self, pos: Position) -> Option<D> {
-        let gp = ops_to_grafted_pos(pos, self.grafting_height);
-        self.get_grafted(gp)
-    }
-
-    /// Insert a digest at an ops-space (not grafted-space) position.
-    pub(super) fn insert(&mut self, pos: Position, digest: D) {
-        let gp = ops_to_grafted_pos(pos, self.grafting_height);
-        self.insert_grafted(gp, digest);
-    }
-
-    /// Look up a digest by grafted-space position.
-    fn get_grafted(&self, pos: u64) -> Option<D> {
-        if pos < self.offset {
-            // Look in pinned peaks (linear scan over O(log P) entries).
-            return self.pinned.iter().find(|(p, _)| *p == pos).map(|(_, d)| *d);
-        }
-        let idx = (pos - self.offset) as usize;
-        self.nodes.get(idx).copied()
-    }
-
-    /// Write a digest at a grafted-space position.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pos` is beyond the pre-sized region (see [Self::update_leaves]).
-    fn insert_grafted(&mut self, pos: u64, digest: D) {
-        if pos < self.offset {
-            // Update an existing pinned peak. During normal operation, inserts only target the
-            // unpruned region (>= offset); this branch handles the edge case where a peak digest
-            // is refreshed.
-            let entry = self
-                .pinned
-                .iter_mut()
-                .find(|(p, _)| *p == pos)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "insert_grafted: no pinned entry at grafted pos {pos} (offset {})",
-                        self.offset
-                    )
-                });
-            entry.1 = digest;
-            return;
-        }
-        let idx = (pos - self.offset) as usize;
-        self.nodes[idx] = digest;
     }
 }
 
-impl<D: Digest> Digests<D> {
-    /// Insert grafted leaf digests and propagate ancestor nodes upward.
-    ///
-    /// `leaves` are `(ops_pos, digest)` pairs at the grafting height. The dense Vec is
-    /// automatically resized to accommodate the current ops MMR size before insertion.
-    /// After inserting all leaves, ancestor nodes are recomputed bottom-up so the cache
-    /// stays consistent.
-    pub(super) fn update_leaves<H: CHasher<Digest = D>>(
+impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
+    type Digest = H::Digest;
+    type Inner = H::Inner;
+
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+        self.inner.leaf_digest(pos, element)
+    }
+
+    fn node_digest(
         &mut self,
-        leaves: &[(Position, D)],
-        hasher: &mut StandardHasher<H>,
-        ops_mmr_size: Position,
-        pool: Option<&ThreadPool>,
-    ) {
-        // Derive the number of complete grafted leaves from the ops MMR size.
-        let ops_leaves = Location::try_from(ops_mmr_size).expect("ops_mmr_size overflow");
-        let complete_chunks = *ops_leaves >> self.grafting_height;
-        self.resize_for_chunks(complete_chunks);
-
-        let dirty_positions: Vec<Position> = leaves
-            .iter()
-            .map(|&(pos, digest)| {
-                self.insert(pos, digest);
-                pos
-            })
-            .collect();
-        propagate_dirty(self, hasher, &dirty_positions, ops_mmr_size, pool);
-    }
-}
-
-/// Recompute a single internal node's digest from its children.
-///
-/// `pos` is the node's ops-space position and `height` is its height (above the grafting height).
-/// The children are at `pos - (1 << height)` (left) and `pos - 1` (right).
-fn recompute_node<H: HasherTrait>(
-    grafted_digests: &Digests<H::Digest>,
-    hasher: &mut H,
-    pos: Position,
-    height: u32,
-) -> H::Digest {
-    let left = Position::new(*pos - (1u64 << height));
-    let right = Position::new(*pos - 1);
-    let left_digest = grafted_digests.get(left).expect("missing left child");
-    let right_digest = grafted_digests.get(right).expect("missing right child");
-    hasher.node_digest(pos, &left_digest, &right_digest)
-}
-
-/// Propagate dirty grafted leaf positions upward through the cache, recomputing ancestor digests.
-///
-/// Given a set of ops positions at the grafting height whose digests have just been
-/// inserted/updated in `grafted_digests`, this function walks each one up to its containing peak,
-/// collects all ancestor positions that need recomputation, deduplicates them, and recomputes
-/// bottom-up.
-///
-/// Uses **ops-space positions** in `node_digest` hash pre-images.
-fn propagate_dirty<H: CHasher>(
-    grafted_digests: &mut Digests<H::Digest>,
-    hasher: &mut StandardHasher<H>,
-    dirty_positions: &[Position],
-    ops_mmr_size: Position,
-    pool: Option<&ThreadPool>,
-) {
-    // Collect all ancestor positions that need recomputation, keyed by (height, position) so
-    // BTreeSet sorts by height first (bottom-up processing order).
-    let mut to_recompute: BTreeSet<(u32, Position)> = BTreeSet::new();
-
-    for &pos in dirty_positions {
-        let mut current = pos;
-        let mut height = pos_to_height(current);
-
-        loop {
-            // Determine parent position.
-            let parent = if pos_to_height(Position::new(*current + 1)) == height + 1 {
-                // current is a right child
-                Position::new(*current + 1)
-            } else {
-                // current is a left child
-                Position::new(*current + (1u64 << (height + 1)))
-            };
-
-            // Stop if the parent is outside the MMR (current is a peak).
-            if parent >= ops_mmr_size {
-                break;
-            }
-
-            to_recompute.insert((height + 1, parent));
-            current = parent;
-            height += 1;
-        }
+        pos: Position,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        let ops_pos = grafted_to_ops_pos(pos, self.grafting_height);
+        self.inner.node_digest(ops_pos, left, right)
     }
 
-    match pool {
-        Some(pool) => propagate_dirty_parallel(grafted_digests, hasher, &to_recompute, pool),
-        None => {
-            // Serial path: process bottom-up directly (BTreeSet iterates in ascending order).
-            for &(height, pos) in &to_recompute {
-                let digest = recompute_node(grafted_digests, hasher, pos, height);
-                grafted_digests.insert(pos, digest);
-            }
-        }
+    fn root<'a>(
+        &mut self,
+        leaves: Location,
+        peak_digests: impl Iterator<Item = &'a Self::Digest>,
+    ) -> Self::Digest {
+        self.inner.root(leaves, peak_digests)
     }
-}
 
-/// Parallel path for [`propagate_dirty`]: groups nodes by height level and parallelizes
-/// within each level using rayon. Falls back to serial for levels with fewer than
-/// [`MIN_TO_PARALLELIZE`] nodes.
-fn propagate_dirty_parallel<H: CHasher>(
-    grafted_digests: &mut Digests<H::Digest>,
-    hasher: &mut StandardHasher<H>,
-    to_recompute: &BTreeSet<(u32, Position)>,
-    pool: &ThreadPool,
-) {
-    let mut level_positions: Vec<Position> = Vec::new();
-    let mut current_height: Option<u32> = None;
-
-    for &(height, pos) in to_recompute {
-        if current_height != Some(height) {
-            if !level_positions.is_empty() {
-                process_level(
-                    grafted_digests,
-                    hasher,
-                    pool,
-                    &level_positions,
-                    current_height.unwrap(),
-                );
-            }
-            level_positions.clear();
-            current_height = Some(height);
-        }
-        level_positions.push(pos);
+    fn digest(&mut self, data: &[u8]) -> Self::Digest {
+        self.inner.digest(data)
     }
-    if !level_positions.is_empty() {
-        process_level(
-            grafted_digests,
-            hasher,
-            pool,
-            &level_positions,
-            current_height.unwrap(),
-        );
-    }
-}
 
-/// Recompute node digests at a single height level, parallelizing if there are enough nodes.
-fn process_level<H: CHasher>(
-    grafted_digests: &mut Digests<H::Digest>,
-    hasher: &mut StandardHasher<H>,
-    pool: &ThreadPool,
-    positions: &[Position],
-    height: u32,
-) {
-    if positions.len() >= MIN_TO_PARALLELIZE {
-        let computed: Vec<(Position, H::Digest)> = pool.install(|| {
-            positions
-                .par_iter()
-                .map_init(
-                    || hasher.fork(),
-                    |h, &pos| (pos, recompute_node(grafted_digests, h, pos, height)),
-                )
-                .collect()
-        });
-        for (pos, digest) in computed {
-            grafted_digests.insert(pos, digest);
-        }
-    } else {
-        for &pos in positions {
-            let digest = recompute_node(grafted_digests, hasher, pos, height);
-            grafted_digests.insert(pos, digest);
+    fn inner(&mut self) -> &mut Self::Inner {
+        self.inner.inner()
+    }
+
+    fn fork(&self) -> impl HasherTrait<Digest = Self::Digest> {
+        GraftedHasher {
+            inner: self.inner.fork(),
+            grafting_height: self.grafting_height,
         }
     }
 }
@@ -554,22 +304,28 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
     }
 }
 
-/// A virtual [StorageTrait] that presents a grafted digest cache and ops MMR as a single combined
+/// A virtual [StorageTrait] that presents a grafted [CleanMmr] and ops MMR as a single combined
 /// MMR.
 ///
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
-/// height are served from the grafted digests cache. This allows standard MMR proof generation to
-/// work transparently over the combined structure.
+/// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
+/// standard MMR proof generation to work transparently over the combined structure.
 pub(super) struct Storage<'a, D: Digest, S: StorageTrait<D>> {
-    grafted_digests: &'a Digests<D>,
+    grafted_mmr: &'a CleanMmr<D>,
+    grafting_height: u32,
     ops_mmr: &'a S,
 }
 
 impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(grafted_digests: &'a Digests<D>, ops_mmr: &'a S) -> Self {
+    pub(super) const fn new(
+        grafted_mmr: &'a CleanMmr<D>,
+        grafting_height: u32,
+        ops_mmr: &'a S,
+    ) -> Self {
         Self {
-            grafted_digests,
+            grafted_mmr,
+            grafting_height,
             ops_mmr,
         }
     }
@@ -581,10 +337,11 @@ impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
     }
 
     async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
-        if pos_to_height(pos) < self.grafted_digests.grafting_height() {
+        if pos_to_height(pos) < self.grafting_height {
             return self.ops_mmr.get_node(pos).await;
         }
-        Ok(self.grafted_digests.get(pos))
+        let grafted_pos = ops_to_grafted_pos(pos, self.grafting_height);
+        Ok(self.grafted_mmr.get_node(grafted_pos))
     }
 }
 
@@ -600,32 +357,28 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
-    /// Precompute grafted leaf digests and return a [Digests] containing the digests.
+    /// Precompute grafted leaf digests and return a [CleanMmr] in grafted-space.
     ///
     /// Each grafted leaf is `hash(chunk || ops_subtree_root)` where `ops_subtree_root` is the ops
     /// MMR node at the mapped position.
-    fn precompute_grafted_digests(
+    fn precompute_grafted_mmr(
         standard: &mut StandardHasher<Sha256>,
         ops_mmr: &CleanMmr<sha256::Digest>,
         chunks: &[sha256::Digest],
         grafting_height: u32,
-    ) -> Digests<sha256::Digest> {
-        let leaves: Vec<(Position, sha256::Digest)> = chunks
-            .iter()
-            .enumerate()
-            .map(|(i, chunk)| {
-                let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
-                let ops_subtree_root = ops_mmr
-                    .get_node(ops_pos)
-                    .expect("ops MMR missing node at mapped position");
-                standard.inner().update(chunk);
-                standard.inner().update(&ops_subtree_root);
-                (ops_pos, standard.inner().finalize())
-            })
-            .collect();
-        let mut cache = Digests::new(grafting_height);
-        cache.update_leaves(&leaves, standard, ops_mmr.size(), None);
-        cache
+    ) -> CleanMmr<sha256::Digest> {
+        let mut dirty = DirtyMmr::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
+            let ops_subtree_root = ops_mmr
+                .get_node(ops_pos)
+                .expect("ops MMR missing node at mapped position");
+            standard.inner().update(chunk);
+            standard.inner().update(&ops_subtree_root);
+            dirty.add_leaf_digest(standard.inner().finalize());
+        }
+        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
+        dirty.merkleize(&mut grafted_hasher, None)
     }
 
     #[test_traced]
@@ -641,25 +394,6 @@ mod tests {
                 let back = ops_pos_to_chunk_idx(ops_pos, grafting_height);
                 assert_eq!(chunk_idx, back);
             }
-        }
-    }
-
-    #[test_traced]
-    fn test_grafted_mmr_size() {
-        // mmr_size(n) = 2n - popcount(n)
-        assert_eq!(mmr_size(0), 0);
-        assert_eq!(mmr_size(1), 1); // 2 - 1
-        assert_eq!(mmr_size(2), 3); // 4 - 1
-        assert_eq!(mmr_size(3), 4); // 6 - 2
-        assert_eq!(mmr_size(4), 7); // 8 - 1
-        assert_eq!(mmr_size(5), 8); // 10 - 2
-        assert_eq!(mmr_size(8), 15); // 16 - 1
-
-        // Cross-check: Position::try_from(Location(n)) gives the MMR position of the (n+1)-th
-        // leaf, which equals mmr_size(n) for leaf count n.
-        for n in 1..1000u64 {
-            let expected = *Position::try_from(Location::new_unchecked(n)).unwrap();
-            assert_eq!(mmr_size(n), expected, "mismatch at n={n}");
         }
     }
 
@@ -755,8 +489,9 @@ mod tests {
                 assert_eq!(chunk_idx_to_ops_pos(0, 0), Position::new(0));
                 assert_eq!(chunk_idx_to_ops_pos(1, 0), Position::new(1));
 
-                let grafted = precompute_grafted_digests(&mut standard, &ops_mmr, &elements, 0);
-                assert!(grafted.get(chunk_idx_to_ops_pos(0, 0)).is_some());
+                let grafted = precompute_grafted_mmr(&mut standard, &ops_mmr, &elements, 0);
+                let gp = ops_to_grafted_pos(chunk_idx_to_ops_pos(0, 0), 0);
+                assert!(grafted.get_node(gp).is_some());
             }
 
             // Height 1 grafting (each grafted leaf covers 2 ops leaves).
@@ -769,8 +504,9 @@ mod tests {
                 assert_eq!(chunk_idx_to_ops_pos(3, 1), Position::new(12));
                 assert_eq!(chunk_idx_to_ops_pos(4, 1), Position::new(17));
 
-                let grafted = precompute_grafted_digests(&mut standard, &ops_mmr, &elements, 1);
-                assert!(grafted.get(chunk_idx_to_ops_pos(0, 1)).is_some());
+                let grafted = precompute_grafted_mmr(&mut standard, &ops_mmr, &elements, 1);
+                let gp = ops_to_grafted_pos(chunk_idx_to_ops_pos(0, 1), 1);
+                assert!(grafted.get_node(gp).is_some());
             }
 
             // Height 2 and 3 checks.
@@ -781,7 +517,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_propagate_dirty() {
+    fn test_merkleize_grafted() {
         let mut standard: StandardHasher<Sha256> = StandardHasher::new();
         let grafting_height = 1u32;
 
@@ -795,37 +531,32 @@ mod tests {
         let c1 = Sha256::fill(0xF1);
         let c2 = Sha256::fill(0xF2);
 
-        // Insert two grafted leaves manually.
-        let mut cache = Digests::new(grafting_height);
-        cache.resize_for_chunks(2);
+        // Build grafted MMR with 2 leaves via DirtyMmr + GraftedHasher.
+        let mut dirty = DirtyMmr::new();
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let sub0 = ops_mmr.get_node(pos0).unwrap();
         standard.inner().update(&c1);
         standard.inner().update(&sub0);
-        cache.insert(pos0, standard.inner().finalize());
+        dirty.add_leaf_digest(standard.inner().finalize());
 
         let sub1 = ops_mmr.get_node(pos1).unwrap();
         standard.inner().update(&c2);
         standard.inner().update(&sub1);
-        cache.insert(pos1, standard.inner().finalize());
+        dirty.add_leaf_digest(standard.inner().finalize());
 
-        // Propagate should add the parent node (at height grafting_height + 1).
-        propagate_dirty(
-            &mut cache,
-            &mut standard,
-            &[pos0, pos1],
-            ops_mmr.size(),
-            None,
-        );
+        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
+        let grafted = dirty.merkleize(&mut grafted_hasher, None);
 
         // With 4 ops leaves and grafting height 1, the grafted tree has 2 leaves and 1 root.
-        // All 3 nodes (2 leaves + 1 internal) should be retrievable.
-        assert!(cache.get(pos0).is_some());
-        assert!(cache.get(pos1).is_some());
-        // Parent at ops_pos = 6 (height 2 in ops space).
-        assert!(cache.get(Position::new(6)).is_some());
+        // All 3 nodes should be retrievable (via grafted-space positions).
+        let gp0 = ops_to_grafted_pos(pos0, grafting_height);
+        let gp1 = ops_to_grafted_pos(pos1, grafting_height);
+        let gp_root = ops_to_grafted_pos(Position::new(6), grafting_height);
+        assert!(grafted.get_node(gp0).is_some());
+        assert!(grafted.get_node(gp1).is_some());
+        assert!(grafted.get_node(gp_root).is_some());
     }
 
     /// Builds a small grafted structure, then generates and verifies proofs over it.
@@ -855,12 +586,12 @@ mod tests {
             // With grafting height 1, each grafted leaf covers 2 ops leaves, so 4 ops leaves
             // yield 2 grafted leaves.
             let grafted =
-                precompute_grafted_digests(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
+                precompute_grafted_mmr(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
 
             let ops_root = *ops_mmr.root();
 
             {
-                let combined = Storage::new(&grafted, &ops_mmr);
+                let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
                 assert_eq!(combined.size(), ops_mmr.size());
 
                 // Compute the combined root by iterating ops peaks.
@@ -871,7 +602,8 @@ mod tests {
                     let mut peaks = Vec::new();
                     for (peak_pos, peak_height) in PeakIterator::new(ops_size) {
                         if peak_height >= GRAFTING_HEIGHT {
-                            peaks.push(grafted.get(peak_pos).unwrap());
+                            let gp = ops_to_grafted_pos(peak_pos, GRAFTING_HEIGHT);
+                            peaks.push(grafted.get_node(gp).unwrap());
                         } else {
                             peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
                         }
@@ -1017,7 +749,7 @@ mod tests {
             ops_mmr.add(&mut standard, &b5);
             let ops_mmr = ops_mmr.merkleize(&mut standard, None);
 
-            let combined = Storage::new(&grafted, &ops_mmr);
+            let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size(), ops_mmr.size());
 
             // Compute the combined root.
@@ -1028,7 +760,8 @@ mod tests {
                 let mut peaks = Vec::new();
                 for (peak_pos, peak_height) in PeakIterator::new(ops_size) {
                     if peak_height >= GRAFTING_HEIGHT {
-                        peaks.push(grafted.get(peak_pos).unwrap());
+                        let gp = ops_to_grafted_pos(peak_pos, GRAFTING_HEIGHT);
+                        peaks.push(grafted.get_node(gp).unwrap());
                     } else {
                         peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
                     }
@@ -1055,66 +788,61 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_grafted_digests_basic() {
+    fn test_grafted_mmr_basic() {
         let grafting_height = 1u32;
-        let mut cache = Digests::<sha256::Digest>::new(grafting_height);
-        // Pre-size for 2 chunks (grafted MMR has 3 nodes: 2 leaves + 1 internal).
-        cache.resize_for_chunks(2);
+        let standard: StandardHasher<Sha256> = StandardHasher::new();
 
-        // Insert a grafted leaf at chunk 0 (ops pos = 2).
+        // Build a grafted MMR with 2 leaves via DirtyMmr + GraftedHasher.
+        let mut dirty = DirtyMmr::new();
         let d0 = Sha256::fill(0x01);
-        let ops_pos_0 = chunk_idx_to_ops_pos(0, grafting_height);
-        assert_eq!(*ops_pos_0, 2);
-        cache.insert(ops_pos_0, d0);
-        assert_eq!(cache.get(ops_pos_0), Some(d0));
-
-        // Insert a grafted leaf at chunk 1 (ops pos = 5).
         let d1 = Sha256::fill(0x02);
-        let ops_pos_1 = chunk_idx_to_ops_pos(1, grafting_height);
-        cache.insert(ops_pos_1, d1);
-        assert_eq!(cache.get(ops_pos_1), Some(d1));
+        dirty.add_leaf_digest(d0);
+        dirty.add_leaf_digest(d1);
+        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
+        let grafted = dirty.merkleize(&mut grafted_hasher, None);
 
-        // Insert an internal node (ops pos = 6, height 2 in ops space = height 1 in grafted).
-        let d_internal = Sha256::fill(0x03);
-        cache.insert(Position::new(6), d_internal);
-        assert_eq!(cache.get(Position::new(6)), Some(d_internal));
+        // Check that grafted leaves are retrievable via grafted-space positions.
+        let ops_pos_0 = chunk_idx_to_ops_pos(0, grafting_height);
+        let ops_pos_1 = chunk_idx_to_ops_pos(1, grafting_height);
+        let gp0 = ops_to_grafted_pos(ops_pos_0, grafting_height);
+        let gp1 = ops_to_grafted_pos(ops_pos_1, grafting_height);
+        assert_eq!(grafted.get_node(gp0), Some(d0));
+        assert_eq!(grafted.get_node(gp1), Some(d1));
+
+        // Internal node (grafted root) should also exist.
+        let gp_root = ops_to_grafted_pos(Position::new(6), grafting_height);
+        assert!(grafted.get_node(gp_root).is_some());
 
         // Non-existent position returns None.
-        assert_eq!(cache.get(chunk_idx_to_ops_pos(5, grafting_height)), None);
+        let gp_far = ops_to_grafted_pos(chunk_idx_to_ops_pos(5, grafting_height), grafting_height);
+        assert_eq!(grafted.get_node(gp_far), None);
     }
 
     #[test_traced]
-    fn test_grafted_digests_with_pruning() {
+    fn test_grafted_mmr_with_pruning() {
         let grafting_height = 1u32;
+        let standard: StandardHasher<Sha256> = StandardHasher::new();
 
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
         let pinned_digest = Sha256::fill(0xAA);
-        let mut cache =
-            Digests::<sha256::Digest>::from_pinned(&[pinned_digest], 4, grafting_height);
+        let grafted_pruned_to_pos = Position::mmr_size(4);
+        assert_eq!(*grafted_pruned_to_pos, 7);
 
-        assert_eq!(cache.offset, mmr_size(4));
-        assert_eq!(cache.offset, 7);
-
-        // The pinned peak should be at grafted position 6 (ops-space peak of 4-leaf sub-MMR).
-        // For 4 grafted leaves, the peak is the root of the 4-leaf grafted sub-MMR.
-        // ops_pos for this is at height 3 in ops space. For 4 chunks with gh=1:
-        // chunk 0 -> ops 2, chunk 1 -> ops 5, internal -> ops 6,
-        // chunk 2 -> ops 9, chunk 3 -> ops 12, internal -> ops 13, root -> ops 14.
-        // With 8 ops leaves (4 chunks * 2), the MMR has size = Position::try_from(Location(8)) = 15.
-        // Peak at position 14 (height 3, grafted height 2, grafted pos 6).
-        assert_eq!(cache.get(Position::new(14)), Some(pinned_digest));
-
-        // Pre-size for 5 total chunks (4 pruned + 1 unpruned).
-        cache.resize_for_chunks(5);
-
-        // Insert an unpruned node at chunk 4 (ops pos = 17, grafted pos = 7 = offset).
+        // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
-        let ops_pos_4 = chunk_idx_to_ops_pos(4, grafting_height);
-        cache.insert(ops_pos_4, d4);
-        assert_eq!(cache.get(ops_pos_4), Some(d4));
+        let mut dirty =
+            DirtyMmr::from_components(Vec::new(), grafted_pruned_to_pos, vec![pinned_digest]);
+        dirty.add_leaf_digest(d4);
+        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
+        let grafted = dirty.merkleize(&mut grafted_hasher, None);
 
-        // The unpruned node is at index 0 in the dense region.
-        assert_eq!(cache.nodes[0], d4);
+        // The pinned peak should be at grafted position 6.
+        assert_eq!(grafted.get_node(Position::new(6)), Some(pinned_digest));
+
+        // The new leaf at chunk 4 (grafted pos 7) should be retrievable.
+        let ops_pos_4 = chunk_idx_to_ops_pos(4, grafting_height);
+        let gp4 = ops_to_grafted_pos(ops_pos_4, grafting_height);
+        assert_eq!(grafted.get_node(gp4), Some(d4));
     }
 }
