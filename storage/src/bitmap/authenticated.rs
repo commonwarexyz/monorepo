@@ -181,13 +181,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// The returned index is absolute and includes pruned chunks.
     #[inline]
     fn complete_chunks(&self) -> usize {
+        let chunks_len = self.bitmap.chunks_len();
         if self.bitmap.is_chunk_aligned() {
-            self.bitmap.chunks_len()
+            chunks_len
         } else {
-            self.bitmap
-                .chunks_len()
-                .checked_sub(1)
-                .expect("partial chunk with chunks_len == 0")
+            // Last chunk is partial
+            chunks_len.checked_sub(1).unwrap()
         }
     }
 
