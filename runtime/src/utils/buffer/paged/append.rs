@@ -372,7 +372,6 @@ impl<B: Blob> Append<B> {
         );
 
         // If there's nothing to write, return early.
-        let physical_pages = physical_pages.freeze();
         if physical_pages.is_empty() {
             return Ok(());
         }
@@ -609,7 +608,7 @@ impl<B: Blob> Append<B> {
         buffer: &Buffer,
         include_partial_page: bool,
         old_crc_record: Option<&Checksum>,
-    ) -> (IoBufMut, Option<Checksum>) {
+    ) -> (IoBuf, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.data.len() / logical_page_size;
@@ -641,13 +640,13 @@ impl<B: Blob> Append<B> {
         }
 
         if !include_partial_page {
-            return (write_buffer, None);
+            return (write_buffer.freeze(), None);
         }
 
         let partial_page = &buffer_data[pages_to_write * logical_page_size..];
         if partial_page.is_empty() {
             // No partial page data to write.
-            return (write_buffer, None);
+            return (write_buffer.freeze(), None);
         }
 
         // If there are no full pages and the partial page length matches what was already
@@ -656,7 +655,7 @@ impl<B: Blob> Append<B> {
             if let Some(old_crc) = old_crc_record {
                 let (old_len, _) = old_crc.get_crc();
                 if partial_page.len() == old_len as usize {
-                    return (write_buffer, None);
+                    return (write_buffer.freeze(), None);
                 }
             }
         }
@@ -685,7 +684,7 @@ impl<B: Blob> Append<B> {
 
         // Return the CRC record that matches what we wrote to disk, so that future flushes
         // correctly identify which slot is protected.
-        (write_buffer, Some(crc_record))
+        (write_buffer.freeze(), Some(crc_record))
     }
 
     /// Build a CRC record that preserves the old CRC in its original slot and places
