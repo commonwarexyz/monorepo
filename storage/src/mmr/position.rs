@@ -545,18 +545,16 @@ mod tests {
     fn test_mmr_size() {
         // mmr_size(n) = 2n - popcount(n)
         assert_eq!(Position::mmr_size(0), Position::new(0));
-        assert_eq!(Position::mmr_size(1), Position::new(1)); // 2 - 1
-        assert_eq!(Position::mmr_size(2), Position::new(3)); // 4 - 1
-        assert_eq!(Position::mmr_size(3), Position::new(4)); // 6 - 2
-        assert_eq!(Position::mmr_size(4), Position::new(7)); // 8 - 1
-        assert_eq!(Position::mmr_size(5), Position::new(8)); // 10 - 2
-        assert_eq!(Position::mmr_size(8), Position::new(15)); // 16 - 1
+        assert_eq!(Position::mmr_size(1), Position::new(1));
+        assert_eq!(Position::mmr_size(2), Position::new(3));
+        assert_eq!(Position::mmr_size(3), Position::new(4));
+        assert_eq!(Position::mmr_size(4), Position::new(7));
+        assert_eq!(Position::mmr_size(5), Position::new(8));
+        assert_eq!(Position::mmr_size(8), Position::new(15));
 
-        // Cross-check: Position::try_from(Location(n)) gives the MMR position of the (n+1)-th
-        // leaf, which equals mmr_size(n) for leaf count n.
         for n in 1..1000u64 {
             let expected = Position::try_from(Location::new_unchecked(n)).unwrap();
-            assert_eq!(Position::mmr_size(n), expected, "mismatch at n={n}");
+            assert_eq!(Position::mmr_size(n), expected);
         }
     }
 
