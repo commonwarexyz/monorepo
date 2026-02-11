@@ -9,6 +9,7 @@ pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
+    network::ByzantineFirstReceiver,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{link_peers, register, Action, Partition},
 };
@@ -165,7 +166,7 @@ impl Arbitrary<'_> for FuzzInput {
         let fault_rounds_bound = u.int_in_range(1..=required_containers)?;
         let max_fault_rounds = fault_rounds_bound / FAULT_INJECTION_RATIO;
         let min_fault_rounds = MIN_NUMBER_OF_FAULTS.min(fault_rounds_bound);
-        let fault_rounds = u.int_in_range(0..=max_fault_rounds)?.max(min_fault_rounds);
+        let fault_rounds = u.int_in_range(min_fault_rounds..=max_fault_rounds)?;
         let strategy = match u.int_in_range(0..=9)? {
             0 => StrategyChoice::AnyScope,
             1 => StrategyChoice::FutureScope {
@@ -450,8 +451,6 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
-    use crate::network::ByzantineFirstReceiver;
-
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
     let (certificate_sender, certificate_receiver) = certificate_network;
