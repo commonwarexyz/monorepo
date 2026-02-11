@@ -203,39 +203,52 @@ where
                 let external = self
                     .actor
                     .on_external(self.context.as_present_mut(), &mut args);
-                Self::recv_event(&mut self.shutdown, &mut self.lanes, pin!(external)).await
-            };
-            match event {
-                LoopEvent::Shutdown => {
-                    self.shutdown_gracefully(&mut args, &mut reads, "shutdown signal received")
-                        .await;
-                    return;
-                }
-                LoopEvent::Mailbox(Some(message)) => match message.into_ingress_envelope() {
-                    IngressEnvelope::ReadOnly(message) => {
-                        self.handle_read_only(&args, &mut reads, message);
+                let external = pin!(external);
+                let recv = Self::recv_event(&mut self.shutdown, &mut self.lanes, external);
+                if reads.is_empty() {
+                    Some(recv.await)
+                } else {
+                    select! {
+                        event = recv => Some(event),
+                        result = reads.next() => {
+                            result.and_then(|is_fatal| is_fatal.then_some(LoopEvent::Shutdown))
+                        },
                     }
-                    IngressEnvelope::ReadWrite(message) => {
+                }
+            };
+            if let Some(event) = event {
+                match event {
+                    LoopEvent::Shutdown => {
+                        self.shutdown_gracefully(&mut args, &mut reads, "shutdown signal received")
+                            .await;
+                        return;
+                    }
+                    LoopEvent::Mailbox(Some(message)) => match message.into_ingress_envelope() {
+                        IngressEnvelope::ReadOnly(message) => {
+                            self.handle_read_only(&args, &mut reads, message);
+                        }
+                        IngressEnvelope::ReadWrite(message) => {
+                            if self.handle_read_write(&mut args, &mut reads, message).await {
+                                return;
+                            }
+                        }
+                    },
+                    LoopEvent::External(Some(message)) => {
                         if self.handle_read_write(&mut args, &mut reads, message).await {
                             return;
                         }
                     }
-                },
-                LoopEvent::External(Some(message)) => {
-                    if self.handle_read_write(&mut args, &mut reads, message).await {
+                    LoopEvent::Mailbox(None) | LoopEvent::External(None) => {
+                        self.shutdown_gracefully(
+                            &mut args,
+                            &mut reads,
+                            "ingress source closed, shutting down actor",
+                        )
+                        .await;
                         return;
                     }
                 }
-                LoopEvent::Mailbox(None) | LoopEvent::External(None) => {
-                    self.shutdown_gracefully(
-                        &mut args,
-                        &mut reads,
-                        "ingress source closed, shutting down actor",
-                    )
-                    .await;
-                    return;
-                }
-            };
+            }
 
             self.actor
                 .postprocess(self.context.as_present_mut(), &mut args)

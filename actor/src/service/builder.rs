@@ -98,7 +98,7 @@ impl<A> ServiceBuilder<A> {
     /// `capacity` is per-lane queue depth and must be non-zero.
     pub fn with_lane<L>(self, lane: L, capacity: NonZeroUsize) -> MultiLaneServiceBuilder<A, L>
     where
-        L: Copy + Ord + Send + 'static,
+        L: Ord + Send + 'static,
     {
         MultiLaneServiceBuilder {
             actor: self.actor,
@@ -110,7 +110,7 @@ impl<A> ServiceBuilder<A> {
     /// Add an unbounded lane, transitioning to a [`MultiLaneUnboundedServiceBuilder`].
     pub fn with_unbounded_lane<L>(self, lane: L) -> MultiLaneUnboundedServiceBuilder<A, L>
     where
-        L: Copy + Ord + Send + 'static,
+        L: Ord + Send + 'static,
     {
         MultiLaneUnboundedServiceBuilder {
             actor: self.actor,
@@ -186,7 +186,7 @@ impl<A> ServiceBuilder<A> {
 /// Configures a multi-lane actor service loop with bounded lanes.
 pub struct MultiLaneServiceBuilder<A, L>
 where
-    L: Copy + Ord + Send + 'static,
+    L: Ord + Send + 'static,
 {
     actor: A,
     lanes: Vec<(L, NonZeroUsize)>,
@@ -195,7 +195,7 @@ where
 
 impl<A, L> MultiLaneServiceBuilder<A, L>
 where
-    L: Copy + Ord + Send + 'static,
+    L: Ord + Send + 'static,
 {
     /// Add another bounded lane.
     ///
@@ -245,7 +245,7 @@ where
 /// Configures a multi-lane actor service loop with unbounded lanes.
 pub struct MultiLaneUnboundedServiceBuilder<A, L>
 where
-    L: Copy + Ord + Send + 'static,
+    L: Ord + Send + 'static,
 {
     actor: A,
     lanes: Vec<L>,
@@ -254,7 +254,7 @@ where
 
 impl<A, L> MultiLaneUnboundedServiceBuilder<A, L>
 where
-    L: Copy + Ord + Send + 'static,
+    L: Ord + Send + 'static,
 {
     /// Add another unbounded lane.
     pub fn with_unbounded_lane(mut self, lane: L) -> Self {
