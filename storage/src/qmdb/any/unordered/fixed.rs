@@ -22,8 +22,13 @@ pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T, Merkleized<H>, Durable>
+impl<
+        E: commonware_runtime::BufferPooler + Storage + Clock + Metrics,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+    > Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -92,7 +97,7 @@ pub mod partitioned {
         >;
 
     impl<
-            E: Storage + Clock + Metrics,
+            E: commonware_runtime::BufferPooler + Storage + Clock + Metrics,
             K: Array,
             V: FixedValue,
             H: Hasher,
@@ -173,7 +178,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         deterministic::{self, Context},
-        BufferPooler, Runner as _,
+        Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
@@ -191,8 +196,7 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let pool = context.storage_buffer_pool().clone();
-        AnyTest::init(context, fixed_db_config::<TwoCap>("partition", pool))
+        AnyTest::init(context, fixed_db_config::<TwoCap>("partition"))
             .await
             .unwrap()
     }
@@ -200,8 +204,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let pool = context.storage_buffer_pool().clone();
-        AnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string(), pool))
+        AnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string()))
             .await
             .unwrap()
     }
@@ -598,15 +601,13 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
 
     async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        let pool = context.storage_buffer_pool().clone();
-        PartitionedAnyTestP1::init(context, fixed_db_config("unordered_partitioned_p1", pool))
+        PartitionedAnyTestP1::init(context, fixed_db_config("unordered_partitioned_p1"))
             .await
             .unwrap()
     }
 
     async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        let pool = context.storage_buffer_pool().clone();
-        PartitionedAnyTestP2::init(context, fixed_db_config("unordered_partitioned_p2", pool))
+        PartitionedAnyTestP2::init(context, fixed_db_config("unordered_partitioned_p2"))
             .await
             .unwrap()
     }

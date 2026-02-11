@@ -642,7 +642,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
-            index_page_cache: config.key_page_cache.clone(),
+            index_page_cache_page_size: config.key_page_cache_page_size,
+            index_page_cache_capacity: config.key_page_cache_capacity,
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
             compression: config.value_compression,
@@ -1219,9 +1220,7 @@ mod tests {
     use super::*;
     use crate::kv::tests::{assert_gettable, assert_send, assert_updatable, test_key};
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
-    };
+    use commonware_runtime::{deterministic, deterministic::Context, Runner, Storage};
     use commonware_utils::{
         sequence::{FixedBytes, U64},
         NZUsize, NZU16,
@@ -1247,11 +1246,8 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    NZU16!(1024),
-                    NZUsize!(10),
-                ),
+                key_page_cache_page_size: NZU16!(1024),
+                key_page_cache_capacity: NZUsize!(10),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1306,11 +1302,8 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    NZU16!(1024),
-                    NZUsize!(10),
-                ),
+                key_page_cache_page_size: NZU16!(1024),
+                key_page_cache_capacity: NZUsize!(10),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

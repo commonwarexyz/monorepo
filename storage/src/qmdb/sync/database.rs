@@ -15,7 +15,8 @@ impl<T: Translator> Config for crate::qmdb::any::FixedConfig<T> {
             partition: self.log_journal_partition.clone(),
             items_per_blob: self.log_items_per_blob,
             write_buffer: self.log_write_buffer,
-            page_cache: self.page_cache.clone(),
+            page_cache_page_size: self.page_cache_page_size,
+            page_cache_capacity: self.page_cache_capacity,
         }
     }
 }
@@ -29,7 +30,8 @@ impl<T: Translator, C: Clone> Config for crate::qmdb::any::VariableConfig<T, C> 
             partition: self.log_partition.clone(),
             compression: self.log_compression,
             codec_config: self.log_codec_config.clone(),
-            page_cache: self.page_cache.clone(),
+            page_cache_page_size: self.page_cache_page_size,
+            page_cache_capacity: self.page_cache_capacity,
             write_buffer: self.log_write_buffer,
         }
     }
@@ -44,7 +46,8 @@ impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
             partition: self.log_partition.clone(),
             compression: self.log_compression,
             codec_config: self.log_codec_config.clone(),
-            page_cache: self.page_cache.clone(),
+            page_cache_page_size: self.page_cache_page_size,
+            page_cache_capacity: self.page_cache_capacity,
             write_buffer: self.log_write_buffer,
         }
     }

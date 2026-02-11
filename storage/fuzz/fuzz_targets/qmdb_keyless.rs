@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{deterministic, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
@@ -126,7 +126,7 @@ type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
 fn test_config(
     test_name: &str,
-    context: &deterministic::Context,
+    _context: &deterministic::Context,
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
@@ -139,11 +139,8 @@ fn test_config(
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         thread_pool: None,
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        ),
+        page_cache_page_size: PAGE_SIZE,
+        page_cache_capacity: NZUsize!(PAGE_CACHE_SIZE),
     }
 }
 

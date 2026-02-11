@@ -54,19 +54,19 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::journal::segmented::variable::{Journal, Config};
 //! use commonware_utils::{NZUsize, NZU16};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
-//!     let pool = context.storage_buffer_pool().clone();
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
 //!         partition: "partition".to_string(),
 //!         compression: None,
 //!         codec_config: (),
-//!         page_cache: CacheRef::new(pool, NZU16!(1024), NZUsize!(10)),
+//!         page_cache_page_size: NZU16!(1024),
+//!         page_cache_capacity: NZUsize!(10),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
@@ -86,10 +86,13 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
-    Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
+    Blob, Buf, BufMut, BufferPooler, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::{
+    io::Cursor,
+    num::{NonZeroU16, NonZeroUsize},
+};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -106,8 +109,11 @@ pub struct Config<C> {
     /// The codec configuration to use for encoding and decoding items.
     pub codec_config: C,
 
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    /// Page-cache page size for caching data.
+    pub page_cache_page_size: NonZeroU16,
+
+    /// Page-cache capacity for this configuration.
+    pub page_cache_capacity: NonZeroUsize,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -225,12 +231,19 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `Journal`.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error>
+    where
+        E: BufferPooler,
+    {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: AppendFactory {
                 write_buffer: cfg.write_buffer,
-                page_cache_ref: cfg.page_cache,
+                page_cache_ref: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
+                    cfg.page_cache_page_size,
+                    cfg.page_cache_capacity,
+                ),
             },
         };
         let manager = Manager::init(context, manager_cfg).await?;
@@ -663,7 +676,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 mod tests {
     use super::*;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Blob, BufMut, BufferPooler, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, BufMut, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
@@ -683,11 +696,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
@@ -750,11 +760,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -826,11 +833,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -924,11 +928,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1032,11 +1033,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1095,11 +1093,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1131,11 +1126,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1190,11 +1182,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1251,11 +1240,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1317,11 +1303,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1393,11 +1376,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1546,11 +1526,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1617,11 +1594,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1676,11 +1650,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1733,11 +1704,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1798,11 +1766,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1865,11 +1830,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1917,11 +1879,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1961,11 +1920,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2027,11 +1983,8 @@ mod tests {
                 partition: "test_partition".to_string(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -2076,7 +2029,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(context.storage_buffer_pool().clone(), PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2152,11 +2106,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2230,11 +2181,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2353,11 +2301,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2450,11 +2395,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2531,11 +2473,8 @@ mod tests {
                 partition: "test_partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    SMALL_PAGE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: SMALL_PAGE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
             let mut journal: Journal<_, [u8; 128]> =
@@ -2603,11 +2542,8 @@ mod tests {
                 partition: "clear_test".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_SIZE,
                 write_buffer: NZUsize!(1024),
             };
 

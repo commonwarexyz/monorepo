@@ -4,8 +4,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Provider;
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::CacheRef;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
 pub struct Config<B, P, ES, T>
@@ -35,8 +34,10 @@ where
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
 
-    /// The page cache to use for the freezer journal.
-    pub page_cache: CacheRef,
+    /// Page-cache page size for the freezer journal.
+    pub page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub page_cache_capacity: NonZeroUsize,
 
     /// The size of the replay buffer for storage archives.
     pub replay_buffer: NonZeroUsize,

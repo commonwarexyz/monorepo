@@ -162,7 +162,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic};
 //! use commonware_storage::freezer::{Freezer, Config, Identifier};
 //! use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 //!
@@ -172,7 +172,8 @@
 //!     let cfg = Config {
 //!         key_partition: "freezer_key_index".into(),
 //!         key_write_buffer: NZUsize!(1024 * 1024), // 1MB
-//!         key_page_cache: CacheRef::new(context.storage_buffer_pool().clone(), NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache_page_size: NZU16!(1024),
+//!         key_page_cache_capacity: NZUsize!(10),
 //!         value_partition: "freezer_value_journal".into(),
 //!         value_compression: Some(3),
 //!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
@@ -205,9 +206,8 @@
 #[cfg(test)]
 mod conformance;
 mod storage;
-use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::Array;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 pub use storage::{Checkpoint, Cursor, Freezer};
 use thiserror::Error;
 
@@ -237,8 +237,10 @@ pub struct Config<C> {
     /// The size of the write buffer for the key index journal.
     pub key_write_buffer: NonZeroUsize,
 
-    /// The page cache for the key index journal.
-    pub key_page_cache: CacheRef,
+    /// Page-cache page size for the key index journal.
+    pub key_page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub key_page_cache_capacity: NonZeroUsize,
 
     /// The [commonware_runtime::Storage] partition for the value journal.
     pub value_partition: String,
@@ -277,7 +279,7 @@ mod tests {
     use super::*;
     use crate::kv::tests::test_key;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, Blob, BufferPooler, Metrics, Runner, Storage};
+    use commonware_runtime::{deterministic, Blob, Metrics, Runner, Storage};
     use commonware_utils::{hex, sequence::FixedBytes, NZUsize, NZU16};
     use rand::{Rng, RngCore};
     use std::num::NonZeroU16;
@@ -299,11 +301,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: compression,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -373,11 +372,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -430,11 +426,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -497,11 +490,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -575,11 +565,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -682,11 +669,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -752,11 +736,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -818,11 +799,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -890,11 +868,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -973,11 +948,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1049,11 +1021,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1130,11 +1099,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1199,11 +1165,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -1361,11 +1324,8 @@ mod tests {
             let cfg = Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
-                key_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                key_page_cache_page_size: PAGE_SIZE,
+                key_page_cache_capacity: PAGE_CACHE_SIZE,
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),

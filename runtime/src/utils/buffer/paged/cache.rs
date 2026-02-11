@@ -88,9 +88,13 @@ pub struct CacheRef {
     /// You cannot change the page size once data has been written without invalidating it. (Reads
     /// on blobs that were written with a different page size will fail their integrity check.)
     page_size: u64,
+    page_size_u16: NonZeroU16,
 
     /// The next id to assign to a blob that will be managed by this cache.
     next_id: Arc<AtomicU64>,
+
+    /// Maximum number of pages this cache can hold.
+    capacity: NonZeroUsize,
 
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
@@ -106,7 +110,9 @@ impl CacheRef {
 
         Self {
             page_size: page_size_u64,
+            page_size_u16: page_size,
             next_id: Arc::new(AtomicU64::new(0)),
+            capacity,
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             pool,
         }
@@ -118,10 +124,22 @@ impl CacheRef {
         self.page_size
     }
 
+    /// The page size used by this page cache as [`NonZeroU16`].
+    #[inline]
+    pub const fn page_size_u16(&self) -> NonZeroU16 {
+        self.page_size_u16
+    }
+
     /// Returns the storage buffer pool associated with this cache.
     #[inline]
     pub fn pool(&self) -> BufferPool {
         self.pool.clone()
+    }
+
+    /// The maximum number of pages this page cache can hold.
+    #[inline]
+    pub const fn capacity(&self) -> NonZeroUsize {
+        self.capacity
     }
 
     /// Returns a unique id for the next blob that will use this page cache.

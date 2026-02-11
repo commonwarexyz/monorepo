@@ -5,9 +5,8 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Provider, Digest, Signer};
 use commonware_parallel::Strategy;
-use commonware_runtime::buffer::paged::CacheRef;
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
@@ -94,8 +93,10 @@ pub struct Config<
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
 
-    /// Page cache for the journal.
-    pub journal_page_cache: CacheRef,
+    /// Page-cache page size for the journal.
+    pub journal_page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub journal_page_cache_capacity: NonZeroUsize,
 
     /// Strategy for parallel operations.
     pub strategy: T,

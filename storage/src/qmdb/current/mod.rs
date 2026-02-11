@@ -23,9 +23,9 @@ use crate::{
 use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_utils::Array;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 pub mod db;
 pub mod ordered;
@@ -65,8 +65,10 @@ pub struct FixedConfig<T: Translator> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    /// Page-cache page size for caching data.
+    pub page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub page_cache_capacity: NonZeroUsize,
 }
 
 impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
@@ -81,7 +83,8 @@ impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
             log_write_buffer: cfg.log_write_buffer,
             translator: cfg.translator,
             thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache,
+            page_cache_page_size: cfg.page_cache_page_size,
+            page_cache_capacity: cfg.page_cache_capacity,
         }
     }
 }
@@ -124,8 +127,10 @@ pub struct VariableConfig<T: Translator, C> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    /// Page-cache page size for caching data.
+    pub page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub page_cache_capacity: NonZeroUsize,
 }
 
 impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
@@ -142,7 +147,8 @@ impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
             log_codec_config: cfg.log_codec_config,
             translator: cfg.translator,
             thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache,
+            page_cache_page_size: cfg.page_cache_page_size,
+            page_cache_capacity: cfg.page_cache_capacity,
         }
     }
 }
@@ -157,7 +163,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, const N: usize, NewIndex>(
     Error,
 >
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
@@ -232,7 +238,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, const N: usize, NewIndex>
     Error,
 >
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
@@ -329,9 +335,8 @@ pub mod tests {
         translator::Translator,
     };
     use commonware_runtime::{
-        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics as _, Runner as _,
+        Metrics as _, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
@@ -344,10 +349,7 @@ pub mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
 
     /// Shared config factory for fixed-value Current QMDB tests.
-    pub(crate) fn fixed_config<T: Translator + Default>(
-        partition_prefix: &str,
-        pool: commonware_runtime::BufferPool,
-    ) -> FixedConfig<T> {
+    pub(crate) fn fixed_config<T: Translator + Default>(partition_prefix: &str) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
             mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
@@ -359,14 +361,14 @@ pub mod tests {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: PAGE_CACHE_SIZE,
         }
     }
 
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pool: commonware_runtime::BufferPool,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
@@ -381,7 +383,8 @@ pub mod tests {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: PAGE_CACHE_SIZE,
         }
     }
 
@@ -865,10 +868,7 @@ pub mod tests {
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {
             |ctx: Context, partition: String| async move {
-                let pool = ctx.storage_buffer_pool().clone();
-                <$db>::init(ctx, $cfg::<OneCap>(&partition, pool))
-                    .await
-                    .unwrap()
+                <$db>::init(ctx, $cfg::<OneCap>(&partition)).await.unwrap()
             }
         };
     }

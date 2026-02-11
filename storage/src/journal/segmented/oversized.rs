@@ -48,7 +48,10 @@ use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{
+    collections::HashSet,
+    num::{NonZeroU16, NonZeroUsize},
+};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -74,8 +77,10 @@ pub struct Config<C> {
     /// Partition for the glob value storage.
     pub value_partition: String,
 
-    /// Page cache for index journal caching.
-    pub index_page_cache: commonware_runtime::buffer::paged::CacheRef,
+    /// Page cache page size for index journal caching.
+    pub index_page_cache_page_size: NonZeroU16,
+    /// Page cache capacity for index journal caching.
+    pub index_page_cache_capacity: NonZeroUsize,
 
     /// Write buffer size for the index journal.
     pub index_write_buffer: NonZeroUsize,
@@ -111,7 +116,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Initialize both journals
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
-            page_cache: cfg.index_page_cache,
+            page_cache_page_size: cfg.index_page_cache_page_size,
+            page_cache_capacity: cfg.index_page_cache_capacity,
             write_buffer: cfg.index_write_buffer,
         };
         let index = FixedJournal::init(context.with_label("index"), index_cfg).await?;
@@ -448,10 +454,7 @@ mod tests {
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Metrics,
-        Runner,
-    };
+    use commonware_runtime::{deterministic, Blob as _, Buf, BufMut, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16};
 
     /// Convert offset + size to byte end position (for truncation tests).
@@ -516,11 +519,12 @@ mod tests {
         }
     }
 
-    fn test_cfg(pool: commonware_runtime::BufferPool) -> Config<()> {
+    fn test_cfg() -> Config<()> {
         Config {
             index_partition: "test_index".to_string(),
             value_partition: "test_values".to_string(),
-            index_page_cache: CacheRef::new(pool, NZU16!(64), NZUsize!(8)),
+            index_page_cache_page_size: NZU16!(64),
+            index_page_cache_capacity: NZUsize!(8),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             compression: None,
@@ -535,12 +539,10 @@ mod tests {
     fn test_oversized_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                context.clone(),
-                test_cfg(context.storage_buffer_pool().clone()),
-            )
-            .await
-            .expect("Failed to init");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
 
             // Append entry with value
             let value: TestValue = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -571,7 +573,7 @@ mod tests {
     fn test_oversized_crash_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -636,7 +638,7 @@ mod tests {
     fn test_oversized_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -676,12 +678,10 @@ mod tests {
     fn test_oversized_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                context.clone(),
-                test_cfg(context.storage_buffer_pool().clone()),
-            )
-            .await
-            .expect("Failed to init");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
 
             // Append to multiple sections
             for section in 1u64..=5 {
@@ -714,7 +714,7 @@ mod tests {
     fn test_recovery_empty_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -750,7 +750,7 @@ mod tests {
     fn test_recovery_all_entries_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -814,7 +814,7 @@ mod tests {
     fn test_recovery_multiple_sections_mixed_validity() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -918,11 +918,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache_page_size: NZU16!(TestEntry::SIZE as u16),
+                index_page_cache_capacity: NZUsize!(8),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1004,7 +1001,7 @@ mod tests {
     fn test_recovery_all_entries_valid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1051,7 +1048,7 @@ mod tests {
     fn test_recovery_single_entry_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1094,7 +1091,7 @@ mod tests {
     fn test_recovery_last_entry_off_by_one() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1167,7 +1164,7 @@ mod tests {
     fn test_recovery_glob_missing_entirely() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1211,7 +1208,7 @@ mod tests {
     fn test_recovery_can_append_after_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1281,7 +1278,7 @@ mod tests {
     fn test_recovery_glob_pruned_but_index_not() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1338,7 +1335,7 @@ mod tests {
     fn test_recovery_index_partition_deleted() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1385,7 +1382,7 @@ mod tests {
     fn test_recovery_index_synced_but_glob_not() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1458,11 +1455,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache_page_size: NZU16!(TestEntry::SIZE as u16),
+                index_page_cache_capacity: NZUsize!(8),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1603,7 +1597,7 @@ mod tests {
     fn test_recovery_partial_index_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1676,7 +1670,7 @@ mod tests {
     fn test_recovery_only_partial_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1743,11 +1737,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache_page_size: NZU16!(TestEntry::SIZE as u16),
+                index_page_cache_capacity: NZUsize!(8),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -1818,7 +1809,7 @@ mod tests {
         // Simulates crash where glob was rewound but index wasn't
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1890,12 +1881,10 @@ mod tests {
     fn test_oversized_get_value_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                context.clone(),
-                test_cfg(context.storage_buffer_pool().clone()),
-            )
-            .await
-            .expect("Failed to init");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -1932,12 +1921,10 @@ mod tests {
     fn test_oversized_get_value_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                context.clone(),
-                test_cfg(context.storage_buffer_pool().clone()),
-            )
-            .await
-            .expect("Failed to init");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -1967,7 +1954,7 @@ mod tests {
     fn test_recovery_values_has_orphan_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate with sections 1 and 2
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2024,7 +2011,7 @@ mod tests {
     fn test_recovery_values_has_multiple_orphan_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate with only section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2081,7 +2068,7 @@ mod tests {
     fn test_recovery_index_empty_but_values_exist() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Manually create value sections without any index entries
             let glob_cfg = GlobConfig {
@@ -2121,7 +2108,7 @@ mod tests {
     fn test_recovery_orphan_section_append_after() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate with section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2213,7 +2200,7 @@ mod tests {
     fn test_recovery_no_orphan_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate with sections 1, 2, 3 (no orphans)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2253,7 +2240,7 @@ mod tests {
     fn test_recovery_orphan_with_empty_index_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2318,7 +2305,7 @@ mod tests {
         // Orphan sections 2, 4, 6 should be removed
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create index with sections 1, 3, 5 (gaps)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2384,7 +2371,7 @@ mod tests {
         // the glob trailing garbage so subsequent appends start at correct offset.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2476,11 +2463,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    NZU16!(TestEntry::SIZE as u16),
-                    NZUsize!(8),
-                ),
+                index_page_cache_page_size: NZU16!(TestEntry::SIZE as u16),
+                index_page_cache_capacity: NZUsize!(8),
                 index_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
                 compression: None,
@@ -2570,7 +2554,7 @@ mod tests {
         // are handled correctly across restart cycles.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2674,12 +2658,10 @@ mod tests {
         // This should fail because there's no actual data to decode.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                context.clone(),
-                test_cfg(context.storage_buffer_pool().clone()),
-            )
-            .await
-            .expect("Failed to init");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2704,12 +2686,10 @@ mod tests {
         // This should fail because the data is too short to decode.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oversized: Oversized<_, TestEntry, TestValue> = Oversized::init(
-                context.clone(),
-                test_cfg(context.storage_buffer_pool().clone()),
-            )
-            .await
-            .expect("Failed to init");
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.clone(), test_cfg())
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2734,7 +2714,7 @@ mod tests {
         // for overflow edge cases in section arithmetic.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Use section numbers near u64::MAX
             let large_sections = [u64::MAX - 3, u64::MAX - 2, u64::MAX - 1];
@@ -2810,7 +2790,7 @@ mod tests {
         // This simulates the worst-case where recovery itself is interrupted.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Phase 1: Create valid data with 5 entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2904,7 +2884,7 @@ mod tests {
         // orphan value sections, but crashes mid-cleanup.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(context.storage_buffer_pool().clone());
+            let cfg = test_cfg();
 
             // Phase 1: Create valid data in section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =

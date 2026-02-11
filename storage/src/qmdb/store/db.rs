@@ -21,7 +21,7 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
-//! use commonware_runtime::{BufferPooler, buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{deterministic::Runner, Metrics, Runner as _};
 //!
 //! use std::num::NonZeroU16;
 //! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);
@@ -36,7 +36,8 @@
 //!         log_codec_config: (),
 //!         log_items_per_section: NZU64!(4),
 //!         translator: TwoCap,
-//!         page_cache: CacheRef::new(ctx.storage_buffer_pool().clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!         page_cache_page_size: PAGE_SIZE,
+//!         page_cache_capacity: NZUsize!(PAGE_CACHE_SIZE),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -95,10 +96,10 @@ use crate::{
     Persistable,
 };
 use commonware_codec::Read;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Configuration for initializing a [Db].
@@ -122,8 +123,10 @@ pub struct Config<T: Translator, C> {
     /// The [Translator] used by the [Index].
     pub translator: T,
 
-    /// The [CacheRef] to use for caching data.
-    pub page_cache: CacheRef,
+    /// Page-cache settings to use for caching data.
+    pub page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub page_cache_capacity: NonZeroUsize,
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
@@ -264,7 +267,7 @@ where
 
 impl<E, K, V, T> Db<E, K, V, T, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -281,7 +284,8 @@ where
                 items_per_section: cfg.log_items_per_section,
                 compression: cfg.log_compression,
                 codec_config: cfg.log_codec_config,
-                page_cache: cfg.page_cache,
+                page_cache_page_size: cfg.page_cache_page_size,
+                page_cache_capacity: cfg.page_cache_capacity,
                 write_buffer: cfg.log_write_buffer,
             },
         )
@@ -453,7 +457,7 @@ where
 
 impl<E, K, V, T> Persistable for Db<E, K, V, T, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -466,11 +470,11 @@ where
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 
@@ -564,7 +568,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, BufferPooler, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -582,11 +586,8 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             translator: TwoCap,
-            page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: PAGE_CACHE_SIZE,
         };
         TestStore::init(context, cfg).await.unwrap()
     }

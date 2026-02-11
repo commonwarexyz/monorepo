@@ -25,9 +25,7 @@ use commonware_cryptography::{
     PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
-};
+use commonware_runtime::{Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage};
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
@@ -186,12 +184,6 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
     /// Initialize storage, creating partitions if needed.
     /// Replays metadata and journals to populate in-memory caches.
     pub async fn init(context: E, partition_prefix: &str, max_read_size: NonZeroU32) -> Self {
-        let page_cache = CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            PAGE_CACHE_CAPACITY,
-        );
-
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.with_label("states"),
             MetadataConfig {
@@ -208,7 +200,8 @@ impl<E: BufferPooler + Clock + RuntimeStorage + Metrics, V: Variant, P: PublicKe
                 partition: format!("{partition_prefix}_msgs"),
                 compression: None,
                 codec_config: max_read_size,
-                page_cache,
+                page_cache_page_size: PAGE_SIZE,
+                page_cache_capacity: PAGE_CACHE_CAPACITY,
                 write_buffer: WRITE_BUFFER,
             },
         )

@@ -16,9 +16,9 @@ use crate::{
 };
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use core::{marker::PhantomData, ops::Range};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use tracing::{debug, warn};
 
 mod operation;
@@ -57,8 +57,10 @@ pub struct Config<C> {
     /// An optional thread pool to use for parallelizing batch MMR operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    /// Page-cache page size for caching data.
+    pub page_cache_page_size: NonZeroU16,
+    /// Page-cache capacity for this configuration.
+    pub page_cache_capacity: NonZeroUsize,
 }
 
 /// A keyless QMDB for variable length data.
@@ -66,7 +68,7 @@ type Journal<E, V, H, S> = authenticated::Journal<E, ContiguousJournal<E, Operat
 
 /// A keyless authenticated database for variable-length data.
 pub struct Keyless<
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>> = Merkleized<H>,
@@ -84,7 +86,7 @@ pub struct Keyless<
 
 // Impl block for functionality available in all states.
 impl<
-        E: Storage + Clock + Metrics,
+        E: BufferPooler + Storage + Clock + Metrics,
         V: VariableValue,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
@@ -128,7 +130,7 @@ impl<
 }
 
 // Implementation for the Clean state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+impl<E: BufferPooler + Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Merkleized<H>, Durable>
 {
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
@@ -140,7 +142,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
             thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache.clone(),
+            page_cache_page_size: cfg.page_cache_page_size,
+            page_cache_capacity: cfg.page_cache_capacity,
         };
 
         let journal_cfg = JournalConfig {
@@ -148,7 +151,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
             items_per_section: cfg.log_items_per_section,
             compression: cfg.log_compression,
             codec_config: cfg.log_codec_config,
-            page_cache: cfg.page_cache,
+            page_cache_page_size: cfg.page_cache_page_size,
+            page_cache_capacity: cfg.page_cache_capacity,
             write_buffer: cfg.log_write_buffer,
         };
 
@@ -251,7 +255,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation for the Mutable state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+impl<E: BufferPooler + Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Unmerkleized, NonDurable>
 {
     /// Append a value to the db, returning its location which can be used to retrieve it.
@@ -296,7 +300,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation for the (Unmerkleized, Durable) state.
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
+impl<E: BufferPooler + Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     Keyless<E, V, H, Unmerkleized, Durable>
 {
     /// Convert this database into the Mutable state for accepting more operations without
@@ -320,8 +324,12 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
 }
 
 // Implementation of MerkleizedStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> MerkleizedStore
-    for Keyless<E, V, H, Merkleized<H>, D>
+impl<
+        E: BufferPooler + Storage + Clock + Metrics,
+        V: VariableValue,
+        H: Hasher,
+        D: DurabilityState,
+    > MerkleizedStore for Keyless<E, V, H, Merkleized<H>, D>
 {
     type Digest = H::Digest;
     type Operation = Operation<V>;
@@ -345,7 +353,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
 
 // Implementation of LogStore for all states.
 impl<
-        E: Storage + Clock + Metrics,
+        E: BufferPooler + Storage + Clock + Metrics,
         V: VariableValue,
         H: Hasher,
         M: MerkleizationState<DigestOf<H>>,
@@ -374,8 +382,12 @@ impl<
 }
 
 // Implementation of PrunableStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
-    for Keyless<E, V, H, Merkleized<H>, D>
+impl<
+        E: BufferPooler + Storage + Clock + Metrics,
+        V: VariableValue,
+        H: Hasher,
+        D: DurabilityState,
+    > PrunableStore for Keyless<E, V, H, Merkleized<H>, D>
 {
     async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
@@ -395,7 +407,7 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, Metrics, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::num::NonZeroU16;
@@ -404,10 +416,7 @@ mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config(
-        suffix: &str,
-        pool: commonware_runtime::BufferPool,
-    ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -419,7 +428,8 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: PAGE_CACHE_SIZE,
         }
     }
 
@@ -431,8 +441,7 @@ mod test {
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
-        let pool = context.storage_buffer_pool().clone();
-        CleanDb::init(context, db_config("partition", pool))
+        CleanDb::init(context, db_config("partition"))
             .await
             .unwrap()
     }

@@ -31,15 +31,14 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
+use commonware_storage::journal::segmented::variable::{Config as StorageJournalConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
 use futures::{
     future::{self, Either},
@@ -48,7 +47,7 @@ use futures::{
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, info, warn};
@@ -155,8 +154,9 @@ pub struct Engine<
     // Compression level for the journal.
     journal_compression: Option<u8>,
 
-    // Page cache for the journal.
-    journal_page_cache: CacheRef,
+    // Page-cache settings for the journal.
+    journal_page_cache_page_size: NonZeroU16,
+    journal_page_cache_capacity: NonZeroUsize,
 
     // A map of sequencer public keys to their journals.
     #[allow(clippy::type_complexity)]
@@ -201,7 +201,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
+        E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -239,7 +239,8 @@ impl<
             journal_write_buffer: cfg.journal_write_buffer,
             journal_name_prefix: cfg.journal_name_prefix,
             journal_compression: cfg.journal_compression,
-            journal_page_cache: cfg.journal_page_cache,
+            journal_page_cache_page_size: cfg.journal_page_cache_page_size,
+            journal_page_cache_capacity: cfg.journal_page_cache_capacity,
             journals: BTreeMap::new(),
             tip_manager: TipManager::<C::PublicKey, P::Scheme, D>::new(),
             ack_manager: AckManager::<C::PublicKey, P::Scheme, D>::new(),
@@ -1022,11 +1023,12 @@ impl<
         }
 
         // Initialize journal
-        let cfg = JournalConfig {
+        let cfg = StorageJournalConfig {
             partition: format!("{}{}", &self.journal_name_prefix, sequencer),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
-            page_cache: self.journal_page_cache.clone(),
+            page_cache_page_size: self.journal_page_cache_page_size,
+            page_cache_capacity: self.journal_page_cache_capacity,
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::<_, Node<C::PublicKey, P::Scheme, D>>::init(

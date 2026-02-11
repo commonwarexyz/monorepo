@@ -132,9 +132,7 @@ mod tests {
         Manager,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Quota, Runner,
-    };
+    use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
     use commonware_storage::{
         archive::{immutable, prunable},
         translator::EightCap,
@@ -225,11 +223,8 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: PAGE_CACHE_SIZE,
             strategy: Sequential,
         };
 
@@ -281,7 +276,8 @@ mod tests {
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_page_cache: config.page_cache.clone(),
+                freezer_key_page_cache_page_size: config.page_cache_page_size,
+                freezer_key_page_cache_capacity: config.page_cache_capacity,
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
@@ -324,7 +320,8 @@ mod tests {
                     "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_page_cache: config.page_cache.clone(),
+                freezer_key_page_cache_page_size: config.page_cache_page_size,
+                freezer_key_page_cache_capacity: config.page_cache_capacity,
                 freezer_value_partition: format!(
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
@@ -801,11 +798,6 @@ mod tests {
 
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
-            let page_cache = CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
             let control = oracle.control(validator.clone());
 
             // Closure to initialize marshal with prunable archives
@@ -814,7 +806,6 @@ mod tests {
                 let validator = validator.clone();
                 let schemes = schemes.clone();
                 let partition_prefix = partition_prefix.clone();
-                let page_cache = page_cache.clone();
                 let control = control.clone();
                 let oracle_manager = oracle.manager();
                 async move {
@@ -831,7 +822,8 @@ mod tests {
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
-                        page_cache: page_cache.clone(),
+                        page_cache_page_size: PAGE_SIZE,
+                        page_cache_capacity: PAGE_CACHE_SIZE,
                         strategy: Sequential,
                     };
 
@@ -872,7 +864,8 @@ mod tests {
                                 "{}-finalizations-by-height-key",
                                 partition_prefix
                             ),
-                            key_page_cache: page_cache.clone(),
+                            key_page_cache_page_size: PAGE_SIZE,
+                            key_page_cache_capacity: PAGE_CACHE_SIZE,
                             value_partition: format!(
                                 "{}-finalizations-by-height-value",
                                 partition_prefix
@@ -893,7 +886,8 @@ mod tests {
                         prunable::Config {
                             translator: EightCap,
                             key_partition: format!("{}-finalized-blocks-key", partition_prefix),
-                            key_page_cache: page_cache.clone(),
+                            key_page_cache_page_size: PAGE_SIZE,
+                            key_page_cache_capacity: PAGE_CACHE_SIZE,
                             value_partition: format!("{}-finalized-blocks-value", partition_prefix),
                             compression: None,
                             codec_config: config.block_codec_config,

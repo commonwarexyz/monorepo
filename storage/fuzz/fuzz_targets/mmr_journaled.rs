@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{deterministic, Metrics, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
@@ -82,18 +82,15 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, context: &deterministic::Context) -> Config {
+fn test_config(partition_suffix: &str, _context: &deterministic::Context) -> Config {
     Config {
         journal_partition: format!("journal_{partition_suffix}"),
         metadata_partition: format!("metadata_{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        ),
+        page_cache_page_size: PAGE_SIZE,
+        page_cache_capacity: NZUsize!(PAGE_CACHE_SIZE),
     }
 }
 

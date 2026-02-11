@@ -22,13 +22,12 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{futures::Pool as FuturesPool, ordered::Quorum, N3f1, PrioritySet};
@@ -40,7 +39,7 @@ use rand_core::CryptoRngCore;
 use std::{
     cmp::max,
     collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -142,7 +141,8 @@ pub struct Engine<
     journal_replay_buffer: NonZeroUsize,
     journal_heights_per_section: NonZeroU64,
     journal_compression: Option<u8>,
-    journal_page_cache: CacheRef,
+    journal_page_cache_page_size: NonZeroU16,
+    journal_page_cache_capacity: NonZeroUsize,
 
     // ---------- Network ----------
     /// Whether to send acks as priority messages.
@@ -154,7 +154,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Storage + Metrics + CryptoRngCore,
+        E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRngCore,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
         D: Digest,
         A: Automaton<Context = Height, Digest = D> + Clone,
@@ -194,7 +194,8 @@ impl<
             journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_compression: cfg.journal_compression,
-            journal_page_cache: cfg.journal_page_cache,
+            journal_page_cache_page_size: cfg.journal_page_cache_page_size,
+            journal_page_cache_capacity: cfg.journal_page_cache_capacity,
             priority_acks: cfg.priority_acks,
             metrics,
         }
@@ -245,7 +246,8 @@ impl<
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
-            page_cache: self.journal_page_cache.clone(),
+            page_cache_page_size: self.journal_page_cache_page_size,
+            page_cache_capacity: self.journal_page_cache_capacity,
             write_buffer: self.journal_write_buffer,
         };
         let journal = Journal::init(

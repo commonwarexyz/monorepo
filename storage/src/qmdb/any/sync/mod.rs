@@ -41,7 +41,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
@@ -59,7 +59,7 @@ async fn build_db<E, O, I, H, U, C>(
     apply_batch_size: usize,
 ) -> Result<Db<E, C, I, H, U, Merkleized<H>, Durable>, qmdb::Error>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     O: Operation + Committable + CodecShared + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
@@ -99,7 +99,8 @@ fn mmr_config_from_fixed<T: Translator>(config: &FixedConfig<T>) -> MmrConfig {
         items_per_blob: config.mmr_items_per_blob,
         write_buffer: config.mmr_write_buffer,
         thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
+        page_cache_page_size: config.page_cache_page_size,
+        page_cache_capacity: config.page_cache_capacity,
     }
 }
 
@@ -111,13 +112,14 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
         items_per_blob: config.mmr_items_per_blob,
         write_buffer: config.mmr_write_buffer,
         thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
+        page_cache_page_size: config.page_cache_page_size,
+        page_cache_capacity: config.page_cache_capacity,
     }
 }
 
 impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher,
@@ -160,7 +162,7 @@ where
 impl<E, K, V, H, T> qmdb::sync::Database
     for UnorderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: VariableValue + 'static,
     H: Hasher,
@@ -202,7 +204,7 @@ where
 
 impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher,
@@ -245,7 +247,7 @@ where
 impl<E, K, V, H, T> qmdb::sync::Database
     for OrderedVariableDb<E, K, V, H, T, Merkleized<H>, Durable>
 where
-    E: Storage + Clock + Metrics,
+    E: BufferPooler + Storage + Clock + Metrics,
     K: Array,
     V: VariableValue + 'static,
     H: Hasher,

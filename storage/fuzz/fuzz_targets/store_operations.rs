@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{deterministic, Metrics, Runner};
 use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,
@@ -92,7 +92,7 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(
     test_name: &str,
-    context: &deterministic::Context,
+    _context: &deterministic::Context,
 ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         log_partition: format!("{test_name}_log"),
@@ -101,11 +101,8 @@ fn test_config(
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         translator: TwoCap,
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        ),
+        page_cache_page_size: PAGE_SIZE,
+        page_cache_capacity: NZUsize!(PAGE_CACHE_SIZE),
     }
 }
 

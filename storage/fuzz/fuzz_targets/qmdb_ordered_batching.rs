@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
     kv::{Batchable as _, Deletable as _, Gettable as _, Updatable as _},
     qmdb::any::{ordered::fixed::Db, FixedConfig as Config},
@@ -54,11 +54,8 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            ),
+            page_cache_page_size: PAGE_SIZE,
+            page_cache_capacity: NZUsize!(PAGE_CACHE_SIZE),
         };
 
         let mut db = OrderedDb::init(context.clone(), cfg.clone())

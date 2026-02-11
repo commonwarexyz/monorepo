@@ -147,7 +147,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let oversized_cfg = OversizedConfig {
             index_partition: cfg.key_partition,
             value_partition: cfg.value_partition,
-            index_page_cache: cfg.key_page_cache,
+            index_page_cache_page_size: cfg.key_page_cache_page_size,
+            index_page_cache_capacity: cfg.key_page_cache_capacity,
             index_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,
             compression: cfg.compression,
