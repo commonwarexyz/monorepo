@@ -469,7 +469,7 @@ impl<const N: usize> DirtyBitMap<N> {
             self.state.projected_len
         );
 
-        let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+        let chunk_idx = Prunable::<N>::to_chunk_index(bit);
         assert!(
             chunk_idx >= self.state.projected_pruned_chunks,
             "cannot get bit {bit}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
@@ -508,7 +508,7 @@ impl<const N: usize> DirtyBitMap<N> {
             self.state.projected_len
         );
 
-        let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+        let chunk_idx = Prunable::<N>::to_chunk_index(bit);
 
         // Check if chunk is in pruned range
         assert!(
@@ -603,7 +603,7 @@ impl<const N: usize> DirtyBitMap<N> {
             self.state.projected_len
         );
 
-        let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+        let chunk_idx = Prunable::<N>::to_chunk_index(bit);
         assert!(
             chunk_idx >= self.state.projected_pruned_chunks,
             "cannot set bit {bit}: chunk {chunk_idx} is pruned (pruned up to chunk {})",
@@ -697,7 +697,7 @@ impl<const N: usize> DirtyBitMap<N> {
             self.state.projected_len
         );
 
-        let chunk_num = Prunable::<N>::unpruned_chunk(bit);
+        let chunk_num = Prunable::<N>::to_chunk_index(bit);
 
         if chunk_num <= self.state.projected_pruned_chunks {
             return self; // Already pruned
@@ -717,12 +717,9 @@ impl<const N: usize> DirtyBitMap<N> {
                 "attempting to prune chunk {chunk_idx} which is already pruned (current pruned_chunks={current_pruned})",
             );
 
-            let bitmap_idx = chunk_idx - current_pruned;
-
             // Get chunk data, which may come from dirty state if it's appended
-            let chunk_data = if bitmap_idx < self.current.chunks_len() {
-                // Chunk exists in current bitmap
-                *self.current.get_chunk(bitmap_idx)
+            let chunk_data = if chunk_idx < self.current.chunks_len() {
+                *self.current.get_chunk(chunk_idx)
             } else {
                 // Chunk only exists in appended bits
                 // Manually reconstruct it from appended_bits
@@ -848,7 +845,7 @@ impl<const N: usize> DirtyBitMap<N> {
     /// restore it when reconstructing historical states.
     fn capture_modified_chunks(&self, changes: &mut BTreeMap<usize, ChunkDiff<N>>) {
         for &bit in self.state.modified_bits.keys() {
-            let chunk_idx = Prunable::<N>::unpruned_chunk(bit);
+            let chunk_idx = Prunable::<N>::to_chunk_index(bit);
             changes.entry(chunk_idx).or_insert_with(|| {
                 // `modified_bits` only contains bits from the base region, so the chunk must exist.
                 let old_chunk = self
@@ -872,8 +869,8 @@ impl<const N: usize> DirtyBitMap<N> {
         // Calculate which chunks will be affected by appends.
         // Note: append_start_bit accounts for any net pops before the pushes.
         let append_start_bit = self.state.projected_len - self.state.appended_bits.len() as u64;
-        let start_chunk = Prunable::<N>::unpruned_chunk(append_start_bit);
-        let end_chunk = Prunable::<N>::unpruned_chunk(self.state.projected_len.saturating_sub(1));
+        let start_chunk = Prunable::<N>::to_chunk_index(append_start_bit);
+        let end_chunk = Prunable::<N>::to_chunk_index(self.state.projected_len.saturating_sub(1));
 
         for chunk_idx in start_chunk..=end_chunk {
             // Use or_insert_with so we don't overwrite chunks already captured
@@ -900,9 +897,9 @@ impl<const N: usize> DirtyBitMap<N> {
         }
 
         // Identify the range of chunks affected by length reduction.
-        let old_last_chunk = Prunable::<N>::unpruned_chunk(self.state.base_len - 1);
+        let old_last_chunk = Prunable::<N>::to_chunk_index(self.state.base_len - 1);
         let new_last_chunk = if self.state.projected_len > 0 {
-            Prunable::<N>::unpruned_chunk(self.state.projected_len - 1)
+            Prunable::<N>::to_chunk_index(self.state.projected_len - 1)
         } else {
             0
         };
@@ -951,11 +948,8 @@ impl<const N: usize> DirtyBitMap<N> {
     /// or `None` if it's out of bounds or pruned.
     fn get_chunk_from_current(&self, chunk_idx: usize) -> Option<[u8; N]> {
         let current_pruned = self.current.pruned_chunks();
-        if chunk_idx >= current_pruned {
-            let bitmap_idx = chunk_idx - current_pruned;
-            if bitmap_idx < self.current.chunks_len() {
-                return Some(*self.current.get_chunk(bitmap_idx));
-            }
+        if chunk_idx >= current_pruned && chunk_idx < self.current.chunks_len() {
+            return Some(*self.current.get_chunk(chunk_idx));
         }
         None
     }

@@ -902,7 +902,7 @@ fn test_randomized_helper<R: rand::Rng>(rng: &mut R) {
                 let new_value = rng.gen_bool(0.5);
 
                 // Safety: Only modify bits that aren't pruned
-                let chunk_idx = Prunable::<4>::unpruned_chunk(bit);
+                let chunk_idx = Prunable::<4>::to_chunk_index(bit);
                 if chunk_idx >= current_pruned {
                     dirty.set_bit(bit, new_value);
                     ground_truth.set_bit(bit, new_value);

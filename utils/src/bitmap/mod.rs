@@ -158,11 +158,15 @@ impl<const N: usize> BitMap<N> {
             bit,
             self.len()
         );
-        &self.chunks[Self::chunk(bit)]
+        &self.chunks[Self::to_chunk_index(bit)]
     }
 
     /// Get a reference to a chunk by its index in the current bitmap.
     /// Note this is an index into the chunks, not a bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the `chunk` is out of bounds.
     #[inline]
     pub(super) fn get_chunk(&self, chunk: usize) -> &[u8; N] {
         assert!(
@@ -275,7 +279,7 @@ impl<const N: usize> BitMap<N> {
     #[inline]
     pub fn flip(&mut self, bit: u64) {
         self.assert_bit(bit);
-        let chunk = Self::chunk(bit);
+        let chunk = Self::to_chunk_index(bit);
         let byte = Self::chunk_byte_offset(bit);
         let mask = Self::chunk_byte_bitmask(bit);
         self.chunks[chunk][byte] ^= mask;
@@ -305,7 +309,7 @@ impl<const N: usize> BitMap<N> {
             self.len()
         );
 
-        let chunk = &mut self.chunks[Self::chunk(bit)];
+        let chunk = &mut self.chunks[Self::to_chunk_index(bit)];
         let byte = Self::chunk_byte_offset(bit);
         let mask = Self::chunk_byte_bitmask(bit);
         if value {
@@ -488,7 +492,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the chunk index overflows `usize`.
     #[inline]
-    pub(super) fn chunk(bit: u64) -> usize {
+    pub(super) fn to_chunk_index(bit: u64) -> usize {
         let chunk = bit / Self::CHUNK_SIZE_BITS;
         assert!(
             chunk <= usize::MAX as u64,
