@@ -580,16 +580,38 @@ impl<const N: usize> BitMap<N> {
 
     /// Check if all the bits in a given range are 0.
     ///
-    /// Returns `true` if every index in the range is either out of bounds
-    /// or unset (i.e. [`Self::get`] returns `false`). Indices beyond the
-    /// length of the bitmap do not affect the result. Returns `true` if
-    /// the range is empty or entirely out of bounds.
+    /// Returns `true` if every index in the range is unset (i.e.
+    /// [`Self::get`] returns `false`). Returns `true` if the range
+    /// is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range.end` exceeds the length of the bitmap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::bitmap::BitMap;
+    ///
+    /// let mut bitmap = BitMap::<8>::zeroes(128);
+    /// assert!(bitmap.is_unset(0..128));
+    ///
+    /// bitmap.set(64, true);
+    /// assert!(bitmap.is_unset(0..64));
+    /// assert!(!bitmap.is_unset(0..65));
+    /// ```
     pub fn is_unset(&self, range: Range<u64>) -> bool {
-        let start = range.start.min(self.len);
-        let end = range.end.min(self.len);
-        if start >= end {
+        assert!(
+            range.end <= self.len(),
+            "range end {} out of bounds (len: {})",
+            range.end,
+            self.len()
+        );
+        if range.start >= range.end {
             return true;
         }
+        let start = range.start;
+        let end = range.end;
 
         // We know this can't underflow, because start < end.
         //
@@ -2217,19 +2239,78 @@ mod tests {
         proptest! {
             #[test]
             fn is_unset_matches_naive(
-                bits in prop::collection::vec(any::<bool>(), 0..=512usize),
-                start in 0u64..=600,
-                end in 0u64..=600,
+                bits in prop::collection::vec(any::<bool>(), 1..=512usize),
+                start in 0u64..=512,
+                end in 0u64..=512,
             ) {
                 let bitmap: BitMap = BitMap::from(bits.as_slice());
+                let len = bitmap.len();
+                let start = start.min(len);
+                let end = end.max(start).min(len);
                 let range = start..end;
 
-                let expected = range.clone()
-                    .all(|i| i >= bitmap.len() || !bitmap.get(i));
+                let expected = range.clone().all(|i| !bitmap.get(i));
 
                 prop_assert_eq!(bitmap.is_unset(range), expected);
             }
         }
+    }
+
+    #[test]
+    fn is_unset_all_zeros() {
+        let bitmap = BitMap::<8>::zeroes(256);
+        assert!(bitmap.is_unset(0..256));
+    }
+
+    #[test]
+    fn is_unset_all_ones() {
+        let bitmap = BitMap::<8>::ones(256);
+        assert!(!bitmap.is_unset(0..256));
+    }
+
+    #[test]
+    fn is_unset_single_bit() {
+        let mut bitmap = BitMap::<8>::zeroes(64);
+        bitmap.set(31, true);
+        assert!(bitmap.is_unset(0..31));
+        assert!(!bitmap.is_unset(0..32));
+        assert!(!bitmap.is_unset(31..32));
+        assert!(bitmap.is_unset(32..64));
+    }
+
+    #[test]
+    fn is_unset_empty_range() {
+        let bitmap = BitMap::<8>::ones(64);
+        assert!(bitmap.is_unset(0..0));
+        assert!(bitmap.is_unset(32..32));
+        assert!(bitmap.is_unset(64..64));
+    }
+
+    #[test]
+    fn is_unset_chunk_boundaries() {
+        // N=1 means 8 bits per chunk, so boundaries are more frequent
+        let mut bitmap = BitMap::<1>::zeroes(32);
+        bitmap.set(7, true);
+        assert!(bitmap.is_unset(0..7));
+        assert!(!bitmap.is_unset(0..8));
+        assert!(bitmap.is_unset(8..32));
+    }
+
+    #[test]
+    fn is_unset_small_chunk_multi_span() {
+        // N=4 means 32 bits per chunk, test spanning 3 chunks
+        let mut bitmap = BitMap::<4>::zeroes(128);
+        bitmap.set(96, true);
+        assert!(bitmap.is_unset(0..96));
+        assert!(!bitmap.is_unset(0..97));
+        assert!(bitmap.is_unset(97..128));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn is_unset_out_of_bounds() {
+        let bitmap = BitMap::<8>::zeroes(64);
+        bitmap.is_unset(0..65);
     }
 
     #[cfg(feature = "arbitrary")]
