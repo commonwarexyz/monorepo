@@ -438,7 +438,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> kv::Getta
     type Error = Error;
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        Self::get(self, *key).await
+        self.get(*key).await
     }
 }
 
@@ -446,7 +446,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> kv::Updat
     for Ordinal<E, V>
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        Self::put(self, key, value).await
+        self.put(key, value).await
     }
 }
 
@@ -456,15 +456,15 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> Persistab
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
+        self.sync().await
     }
 
     async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
+        self.sync().await
     }
 
     async fn destroy(self) -> Result<(), Self::Error> {
-        Self::destroy(self).await
+        self.destroy().await
     }
 }
 
