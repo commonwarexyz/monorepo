@@ -80,7 +80,7 @@ impl Position {
 
     /// Returns the MMR size (total node count) for an MMR with `leaves` leaves.
     #[inline]
-    pub(crate) const fn mmr_size(leaves: u64) -> Self {
+    pub const fn mmr_size(leaves: u64) -> Self {
         Self(2 * leaves - leaves.count_ones() as u64)
     }
 

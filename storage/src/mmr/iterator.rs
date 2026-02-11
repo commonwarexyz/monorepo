@@ -154,6 +154,7 @@ pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<Position
 }
 
 /// Returns the height of the node at position `pos` in an MMR.
+#[cfg(any(feature = "std", test))]
 pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     let mut pos = pos.as_u64();
 

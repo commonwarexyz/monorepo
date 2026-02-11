@@ -2,11 +2,13 @@
 
 use crate::mmr::{
     hasher::Hasher,
-    iterator::{nodes_needing_parents, nodes_to_pin, pos_to_height, PathIterator, PeakIterator},
+    iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
     proof,
     Error::{self, *},
     Location, Position, Proof,
 };
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::pos_to_height;
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
@@ -457,6 +459,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Overwrite the digest of an existing leaf and mark its ancestors as dirty.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn update_leaf_digest(&mut self, loc: Location, digest: D) -> Result<(), Error> {
         let pos = Position::try_from(loc).map_err(|_| Error::LocationOverflow(loc))?;
         if pos < self.pruned_to_pos {
