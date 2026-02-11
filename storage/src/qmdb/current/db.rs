@@ -101,13 +101,15 @@ pub struct Db<
     /// order to further prove whether a key _currently_ has a specific value.
     pub(super) status: BitMap<N>,
 
-    /// In-memory MMR of grafted digests. At the grafting height, leaves are
-    /// `hash(chunk || ops_subtree_root)`. Above the grafting height, internal nodes use ops-space
-    /// (not grafted-space) positions in their hash pre-image (via [grafting::GraftedHasher]).
+    /// Each leaf is hash(chunk || ops_subtree_root) for a complete bitmap chunk and
+    /// the ops MMR node at the grafting height.
+    /// Nodes are hashed using their position in the ops MMR rather than their grafted position.
     pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
 
-    /// Metadata storage for persisting pruned_chunks count and grafted digest pinned nodes.
-    pub(super) bitmap_metadata: Metadata<E, U64, Vec<u8>>,
+    /// Persists:
+    /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
+    /// - The grafted MMR pinned nodes at key [NODE_PREFIX]
+    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Optional thread pool for parallelizing grafted digest computation.
     pub(super) pool: Option<ThreadPool>,
@@ -177,10 +179,9 @@ where
         self.state.root
     }
 
-    /// Returns a virtual [grafting::Storage] over the grafted digest cache and ops MMR.
-    ///
-    /// This presents the grafted digests (at or above grafting height) and the raw ops
-    /// MMR nodes (below grafting height) as a single combined MMR storage.
+    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
+    /// For positions at or above the grafting height, returns grafted MMR node.
+    /// For positions below the grafting height, the ops MMR is used.
     fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
@@ -253,18 +254,18 @@ where
         // `build_grafted_mmr` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
-        self.write_pruned().await?;
+        self.sync_metadata().await?;
 
         self.any.prune(prune_loc).await
     }
 
-    /// Write the information necessary to restore grafted digests after pruning.
-    async fn write_pruned(&mut self) -> Result<(), Error> {
-        self.bitmap_metadata.clear();
+    /// Sync the metadata to disk.
+    async fn sync_metadata(&mut self) -> Result<(), Error> {
+        self.metadata.clear();
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        self.bitmap_metadata
+        self.metadata
             .put(key, self.status.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the grafted digest pinned nodes. These are the ops-space peaks covering the
@@ -279,10 +280,10 @@ where
                 .get_node(grafted_pos)
                 .ok_or(mmr::Error::MissingNode(ops_pos))?;
             let key = U64::new(NODE_PREFIX, i as u64);
-            self.bitmap_metadata.put(key, digest.to_vec());
+            self.metadata.put(key, digest.to_vec());
         }
 
-        self.bitmap_metadata
+        self.metadata
             .sync()
             .await
             .map_err(mmr::Error::MetadataError)?;
@@ -309,16 +310,13 @@ where
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
         // re-Merkleize the inactive portion up to the inactivity floor.
-        self.write_pruned().await
+        self.sync_metadata().await
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        self.bitmap_metadata
-            .destroy()
-            .await
-            .map_err(|e| Error::Mmr(mmr::Error::MetadataError(e)))?;
+        self.metadata.destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -330,7 +328,7 @@ where
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
-            bitmap_metadata: self.bitmap_metadata,
+            metadata: self.metadata,
             pool: self.pool,
             state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
@@ -360,20 +358,20 @@ where
             any,
             mut status,
             grafted_mmr,
-            bitmap_metadata,
+            metadata,
             pool,
             state,
         } = self;
 
-        // Merkleize the any db (ops MMR: Dirty -> Clean)
+        // Merkleize the any db
         let mut any = any.into_merkleized();
 
-        // Number of grafted leaves (i.e. complete chunks) at last merkleization.
+        // Number of grafted leaves (i.e. complete bitmap chunks) at last merkleization.
         let old_grafted_leaves = *grafted_mmr.leaves() as usize;
-        // Number of grafted leaves (i.e. complete chunks) now.
+        // Number of grafted leaves (i.e. complete bitmap chunks) now.
         let new_grafted_leaves = status.complete_chunks();
 
-        // Compute grafted leaves for new complete chunks and modified existing chunks.
+        // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
         let chunks_to_update = (old_grafted_leaves..new_grafted_leaves).chain(
             state
                 .dirty_chunks
@@ -422,7 +420,7 @@ where
             any,
             status,
             grafted_mmr,
-            bitmap_metadata,
+            metadata,
             pool,
             state: Merkleized { root },
         })
@@ -447,7 +445,7 @@ where
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
-            bitmap_metadata: self.bitmap_metadata,
+            metadata: self.metadata,
             pool: self.pool,
             state: Unmerkleized {
                 dirty_chunks: self.state.dirty_chunks,
@@ -528,7 +526,7 @@ where
                 any,
                 status: self.status,
                 grafted_mmr: self.grafted_mmr,
-                bitmap_metadata: self.bitmap_metadata,
+                metadata: self.metadata,
                 pool: self.pool,
                 state: Unmerkleized {
                     dirty_chunks: self.state.dirty_chunks,
@@ -557,7 +555,7 @@ where
             any: self.any.into_mutable(),
             status: self.status,
             grafted_mmr: self.grafted_mmr,
-            bitmap_metadata: self.bitmap_metadata,
+            metadata: self.metadata,
             pool: self.pool,
             state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
@@ -843,7 +841,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     Ok(grafted_mmr)
 }
 
-/// Load the bitmap metadata store and recover the pruning state persisted by previous runs.
+/// Load the metadata and recover the pruning state persisted by previous runs.
 ///
 /// The metadata store holds two kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
@@ -853,7 +851,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
 ///   the pruned chunks.
 ///
 /// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
-pub(super) async fn init_bitmap_metadata<E: Storage + Clock + Metrics, D: Digest>(
+pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     context: E,
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {

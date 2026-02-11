@@ -311,7 +311,7 @@ where
     let pool = config.thread_pool.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
-    let (bitmap_metadata, pruned_chunks, pinned_nodes) = db::init_bitmap_metadata::<E, H::Digest>(
+    let (metadata, pruned_chunks, pinned_nodes) = db::init_metadata::<E, H::Digest>(
         context.with_label("bitmap_metadata"),
         &bitmap_metadata_partition,
     )
@@ -357,7 +357,7 @@ where
         any,
         status,
         grafted_mmr,
-        bitmap_metadata,
+        metadata,
         pool,
         state: db::Merkleized { root },
     })
@@ -401,7 +401,7 @@ where
     let pool = config.thread_pool.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
-    let (bitmap_metadata, pruned_chunks, pinned_nodes) = db::init_bitmap_metadata::<E, H::Digest>(
+    let (metadata, pruned_chunks, pinned_nodes) = db::init_metadata::<E, H::Digest>(
         context.with_label("bitmap_metadata"),
         &bitmap_metadata_partition,
     )
@@ -447,7 +447,7 @@ where
         any,
         status,
         grafted_mmr,
-        bitmap_metadata,
+        metadata,
         pool,
         state: db::Merkleized { root },
     })

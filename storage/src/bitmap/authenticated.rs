@@ -638,16 +638,6 @@ mod tests {
     type TestContext = deterministic::Context;
     type TestMerkleizedBitMap<const N: usize> = MerkleizedBitMap<TestContext, sha256::Digest, N>;
 
-    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
-        /// Convert a bit into the position of the Merkle tree leaf it belongs to.
-        #[allow(dead_code)]
-        pub(crate) fn leaf_pos(bit: u64) -> Position {
-            let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
-            let chunk = Location::new_unchecked(chunk as u64);
-            Position::try_from(chunk).expect("chunk should never overflow MAX_LOCATION")
-        }
-    }
-
     impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
         // Add a byte's worth of bits to the bitmap.
         //
