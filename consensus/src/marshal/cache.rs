@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
     metadata::{self, Metadata},
@@ -15,7 +15,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::BTreeMap,
-    num::{NonZero, NonZeroU16, NonZeroUsize},
+    num::{NonZero, NonZeroUsize},
     time::Instant,
 };
 use tracing::{debug, info};
@@ -30,10 +30,7 @@ pub(crate) struct Config {
     pub replay_buffer: NonZeroUsize,
     pub key_write_buffer: NonZeroUsize,
     pub value_write_buffer: NonZeroUsize,
-    /// Page-cache page size for prunable key journals.
-    pub key_page_cache_page_size: NonZeroU16,
-    /// Page-cache capacity for this configuration.
-    pub key_page_cache_capacity: NonZeroUsize,
+    pub key_page_cache: CacheRef,
 }
 
 /// Prunable archives for a single epoch.
@@ -203,8 +200,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: format!("{}-cache-{epoch}-{name}-key", self.cfg.partition_prefix),
-            key_page_cache_page_size: self.cfg.key_page_cache_page_size,
-            key_page_cache_capacity: self.cfg.key_page_cache_capacity,
+            key_page_cache: self.cfg.key_page_cache.clone(),
             value_partition: format!("{}-cache-{epoch}-{name}-value", self.cfg.partition_prefix),
             items_per_section: self.cfg.prunable_items_per_section,
             compression: None,

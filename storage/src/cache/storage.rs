@@ -5,9 +5,7 @@ use crate::{
     rmap::RMap,
 };
 use commonware_codec::{varint::UInt, CodecShared, EncodeSize, Read, ReadExt, Write};
-use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Metrics, Storage,
-};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Buf, BufMut, Metrics, Storage};
 use futures::{future::try_join_all, pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,10 +84,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     ///
     /// The in-memory index for `Cache` is populated during this call
     /// by replaying the journal.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error>
-    where
-        E: BufferPooler,
-    {
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
         let journal = Journal::<E, Record<V>>::init(
             context.with_label("journal"),
@@ -97,8 +92,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
                 partition: cfg.partition,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
-                page_cache_page_size: cfg.page_cache_page_size,
-                page_cache_capacity: cfg.page_cache_capacity,
+                page_cache: cfg.page_cache,
                 write_buffer: cfg.write_buffer,
             },
         )

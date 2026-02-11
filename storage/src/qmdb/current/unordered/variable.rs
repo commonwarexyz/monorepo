@@ -38,7 +38,7 @@ pub type Db<E, K, V, H, T, const N: usize, S = Merkleized<DigestOf<H>>, D = Dura
 
 // Functionality for the Merkleized state - init only.
 impl<
-        E: commonware_runtime::BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: Hasher,
@@ -109,7 +109,7 @@ pub mod partitioned {
     >;
 
     impl<
-            E: commonware_runtime::BufferPooler + RStorage + Clock + Metrics,
+            E: RStorage + Clock + Metrics,
             K: Array,
             V: VariableValue,
             H: Hasher,
@@ -156,7 +156,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics as _, Runner as _};
+    use commonware_runtime::{deterministic, BufferPooler, Metrics as _, Runner as _};
     use commonware_utils::NZU64;
     use rand::RngCore;
 
@@ -173,7 +173,8 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, variable_config::<TwoCap>(&partition_prefix))
+        let pool = context.storage_buffer_pool().clone();
+        CleanCurrentTest::init(context, variable_config::<TwoCap>(&partition_prefix, pool))
             .await
             .unwrap()
     }

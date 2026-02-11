@@ -2,7 +2,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
@@ -29,7 +29,7 @@ pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
-pub fn create_config<E>(_context: &E) -> Config<Translator> {
+pub fn create_config<E: BufferPooler>(context: &E) -> Config<Translator> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
@@ -40,14 +40,17 @@ pub fn create_config<E>(_context: &E) -> Config<Translator> {
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
-        page_cache_page_size: NZU16!(1024),
-        page_cache_capacity: NZUsize!(10),
+        page_cache: buffer::paged::CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            NZU16!(1024),
+            NZUsize!(10),
+        ),
     }
 }
 
 impl<E> crate::databases::Syncable for Database<E>
 where
-    E: BufferPooler + Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
 {
     type Operation = Operation;
 

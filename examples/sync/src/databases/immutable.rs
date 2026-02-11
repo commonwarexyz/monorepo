@@ -24,7 +24,7 @@ pub type Database<E> =
 pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config<E>(_context: &E) -> Config<Translator, ()> {
+pub fn create_config<E: BufferPooler>(context: &E) -> Config<Translator, ()> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
@@ -37,8 +37,11 @@ pub fn create_config<E>(_context: &E) -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        page_cache_page_size: NZU16!(1024),
-        page_cache_capacity: NZUsize!(10),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            NZU16!(1024),
+            NZUsize!(10),
+        ),
     }
 }
 
@@ -75,7 +78,7 @@ pub fn create_test_operations(count: usize, seed: u64) -> Vec<Operation> {
 
 impl<E> super::Syncable for Database<E>
 where
-    E: BufferPooler + Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
 {
     type Operation = Operation;
 

@@ -2,7 +2,9 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{deterministic, Metrics, Runner, RwLock};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, RwLock,
+};
 use commonware_storage::{
     qmdb::{
         any::{
@@ -89,7 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, _context: &deterministic::Context) -> Config<TwoCap> {
+fn test_config(test_name: &str, context: &deterministic::Context) -> Config<TwoCap> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
@@ -100,8 +102,11 @@ fn test_config(test_name: &str, _context: &deterministic::Context) -> Config<Two
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache_page_size: PAGE_SIZE,
-        page_cache_capacity: NZUsize!(1),
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            PAGE_SIZE,
+            NZUsize!(1),
+        ),
     }
 }
 

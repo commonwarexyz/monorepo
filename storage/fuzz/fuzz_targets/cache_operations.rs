@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::cache::{Cache, Config};
 use commonware_utils::{NZUsize, NZU64};
 use libfuzzer_sys::{
@@ -137,8 +137,11 @@ fn fuzz(input: FuzzInput) {
             write_buffer: NZUsize!(input.config.write_buffer),
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
-            page_cache_page_size: input.config.page_cache_page_size,
-            page_cache_capacity: NZUsize!(input.config.page_cache_capacity),
+            page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
+                input.config.page_cache_page_size,
+                NZUsize!(input.config.page_cache_capacity),
+            ),
         };
 
         let mut cache_opt = Some(

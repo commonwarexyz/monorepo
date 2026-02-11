@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     mmr::{Location, Proof, StandardHasher as Standard},
     qmdb::{
@@ -79,8 +79,10 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            page_cache_page_size: PAGE_SIZE,
-            page_cache_capacity: NZUsize!(PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())

@@ -100,8 +100,9 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Metrics, Quota, Runner, Spawner,
+        BufferPooler, Clock, Metrics, Quota, Runner, Spawner,
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
@@ -249,8 +250,11 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
-                    journal_page_cache_page_size: PAGE_SIZE,
-                    journal_page_cache_capacity: PAGE_CACHE_SIZE,
+                    journal_page_cache: CacheRef::new(
+                        context.storage_buffer_pool().clone(),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     strategy: Sequential,
                 },
             );
@@ -494,8 +498,11 @@ mod tests {
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
-                                journal_page_cache_page_size: PAGE_SIZE,
-                                journal_page_cache_capacity: PAGE_CACHE_SIZE,
+                                journal_page_cache: CacheRef::new(
+                                    context.storage_buffer_pool().clone(),
+                                    PAGE_SIZE,
+                                    PAGE_CACHE_SIZE,
+                                ),
                                 strategy: Sequential,
                             },
                         );
@@ -644,8 +651,11 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache_page_size: PAGE_SIZE,
-                            journal_page_cache_capacity: PAGE_CACHE_SIZE,
+                            journal_page_cache: CacheRef::new(
+                                context.storage_buffer_pool().clone(),
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            ),
                             strategy: Sequential,
                         },
                     );
@@ -728,8 +738,11 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache_page_size: PAGE_SIZE,
-                            journal_page_cache_capacity: PAGE_CACHE_SIZE,
+                            journal_page_cache: CacheRef::new(
+                                context.storage_buffer_pool().clone(),
+                                PAGE_SIZE,
+                                PAGE_CACHE_SIZE,
+                            ),
                             strategy: Sequential,
                         },
                     );
@@ -1070,8 +1083,11 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache_page_size: PAGE_SIZE,
-                journal_page_cache_capacity: PAGE_CACHE_SIZE,
+                        journal_page_cache: CacheRef::new(
+                            context.storage_buffer_pool().clone(),
+                            PAGE_SIZE,
+                            PAGE_CACHE_SIZE,
+                        ),
                         strategy: Sequential,
                     },
                 );

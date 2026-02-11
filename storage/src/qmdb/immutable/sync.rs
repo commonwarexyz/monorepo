@@ -15,13 +15,13 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
-    E: BufferPooler + Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: Hasher,
@@ -69,8 +69,7 @@ where
                     items_per_blob: db_config.mmr_items_per_blob,
                     write_buffer: db_config.mmr_write_buffer,
                     thread_pool: db_config.thread_pool.clone(),
-                    page_cache_page_size: db_config.page_cache_page_size,
-                    page_cache_capacity: db_config.page_cache_capacity,
+                    page_cache: db_config.page_cache.clone(),
                 },
                 range: Position::try_from(range.start)?
                     ..Position::try_from(range.end.saturating_add(1))?,
@@ -133,7 +132,9 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Metrics, Runner as _, RwLock};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, RwLock,
+    };
     use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore as _;
     use rstest::rstest;
@@ -164,7 +165,10 @@ mod tests {
     >;
 
     /// Create a simple config for sync tests
-    fn create_sync_config(suffix: &str) -> immutable::Config<crate::translator::TwoCap, ()> {
+    fn create_sync_config(
+        suffix: &str,
+        pool: commonware_runtime::BufferPool,
+    ) -> immutable::Config<crate::translator::TwoCap, ()> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
@@ -181,15 +185,15 @@ mod tests {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            page_cache_page_size: PAGE_SIZE,
-            page_cache_capacity: PAGE_CACHE_SIZE,
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let config = create_sync_config(&format!("sync_test_{seed}"));
+        let pool = context.storage_buffer_pool().clone();
+        let config = create_sync_config(&format!("sync_test_{seed}"), pool);
         ImmutableSyncTest::init(context, config).await.unwrap()
     }
 
@@ -266,7 +270,10 @@ mod tests {
                 }
             }
 
-            let db_config = create_sync_config(&format!("sync_client_{}", context.next_u64()));
+            let db_config = create_sync_config(
+                &format!("sync_client_{}", context.next_u64()),
+                context.storage_buffer_pool().clone(),
+            );
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
@@ -348,7 +355,10 @@ mod tests {
             let target_oldest_retained_loc = bounds.start;
             let target_root = target_db.root();
 
-            let db_config = create_sync_config(&format!("empty_sync_{}", context.next_u64()));
+            let db_config = create_sync_config(
+                &format!("empty_sync_{}", context.next_u64()),
+                context.storage_buffer_pool().clone(),
+            );
             let target_db = Arc::new(RwLock::new(target_db));
             let config = Config {
                 db_config,
@@ -400,7 +410,8 @@ mod tests {
             let op_count = bounds.end;
 
             // Perform sync
-            let db_config = create_sync_config("persistence_test");
+            let db_config =
+                create_sync_config("persistence_test", context.storage_buffer_pool().clone());
             let client_context = context.with_label("client");
             let target_db = Arc::new(RwLock::new(target_db));
             let config = Config {
@@ -493,7 +504,10 @@ mod tests {
             let client = {
                 let config = Config {
                     context: context.with_label("client"),
-                    db_config: create_sync_config(&format!("update_test_{}", context.next_u64())),
+                    db_config: create_sync_config(
+                        &format!("update_test_{}", context.next_u64()),
+                        context.storage_buffer_pool().clone(),
+                    ),
                     target: Target {
                         root: initial_root,
                         range: initial_lower_bound..initial_upper_bound,
@@ -564,7 +578,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let target_db = create_test_db(context.with_label("target")).await;
-            let db_config = create_sync_config(&format!("invalid_bounds_{}", context.next_u64()));
+            let db_config = create_sync_config(
+                &format!("invalid_bounds_{}", context.next_u64()),
+                context.storage_buffer_pool().clone(),
+            );
             let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
@@ -619,7 +636,10 @@ mod tests {
 
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
-                db_config: create_sync_config(&format!("subset_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("subset_{}", context.next_u64()),
+                    context.storage_buffer_pool().clone(),
+                ),
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
@@ -656,7 +676,10 @@ mod tests {
             // Create two databases
             let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
-            let sync_db_config = create_sync_config(&format!("partial_{}", context.next_u64()));
+            let sync_db_config = create_sync_config(
+                &format!("partial_{}", context.next_u64()),
+                context.storage_buffer_pool().clone(),
+            );
             let client_context = context.with_label("client");
             let sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(client_context.clone(), sync_db_config.clone())
@@ -725,7 +748,10 @@ mod tests {
             // Create two databases
             let target_db = create_test_db(context.with_label("target")).await;
             let mut target_db = target_db.into_mutable();
-            let sync_config = create_sync_config(&format!("exact_{}", context.next_u64()));
+            let sync_config = create_sync_config(
+                &format!("exact_{}", context.next_u64()),
+                context.storage_buffer_pool().clone(),
+            );
             let client_context = context.with_label("client");
             let sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(client_context.clone(), sync_config.clone())
@@ -803,7 +829,10 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("lb_dec_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("lb_dec_{}", context.next_u64()),
+                    context.storage_buffer_pool().clone(),
+                ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -864,7 +893,10 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("ub_dec_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("ub_dec_{}", context.next_u64()),
+                    context.storage_buffer_pool().clone(),
+                ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -948,7 +980,10 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("bounds_inc_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("bounds_inc_{}", context.next_u64()),
+                    context.storage_buffer_pool().clone(),
+                ),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
@@ -1010,7 +1045,10 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("invalid_update_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("invalid_update_{}", context.next_u64()),
+                    context.storage_buffer_pool().clone(),
+                ),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -1069,7 +1107,10 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("done_{}", context.next_u64())),
+                db_config: create_sync_config(
+                    &format!("done_{}", context.next_u64()),
+                    context.storage_buffer_pool().clone(),
+                ),
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,

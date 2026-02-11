@@ -16,7 +16,9 @@ use commonware_cryptography::{
     ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{tokio, Metrics, Network, Quota, Runner, ThreadPooler};
+use commonware_runtime::{
+    buffer::paged::CacheRef, tokio, BufferPooler, Metrics, Network, Quota, Runner, ThreadPooler,
+};
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
@@ -256,8 +258,11 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                page_cache_page_size: NZU16!(16_384),
-                page_cache_capacity: NZUsize!(10_000),
+                page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
+                    NZU16!(16_384),
+                    NZUsize!(10_000),
+                ),
                 strategy,
             },
         );

@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic};
+//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     archive::{
@@ -44,8 +44,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "key".into(),
-//!         freezer_key_page_cache_page_size: NZU16!(1024),
-//!         freezer_key_page_cache_capacity: NZUsize!(10),
+//!         freezer_key_page_cache: CacheRef::new(context.storage_buffer_pool().clone(), NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -67,7 +66,8 @@
 //! });
 
 mod storage;
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use commonware_runtime::buffer::paged::CacheRef;
+use std::num::{NonZeroU64, NonZeroUsize};
 pub use storage::Archive;
 
 /// Configuration for [Archive] storage.
@@ -91,10 +91,8 @@ pub struct Config<C> {
     /// The partition to use for the archive's freezer keys.
     pub freezer_key_partition: String,
 
-    /// Page-cache page size for the archive's freezer keys.
-    pub freezer_key_page_cache_page_size: NonZeroU16,
-    /// Page-cache capacity for this configuration.
-    pub freezer_key_page_cache_capacity: NonZeroUsize,
+    /// The page cache to use for the archive's freezer keys.
+    pub freezer_key_page_cache: CacheRef,
 
     /// The partition to use for the archive's freezer values.
     pub freezer_value_partition: String,
@@ -135,7 +133,9 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -153,8 +153,11 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "test_key2".into(),
-                freezer_key_page_cache_page_size: PAGE_SIZE,
-                freezer_key_page_cache_capacity: PAGE_CACHE_SIZE,
+                freezer_key_page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 freezer_value_partition: "test_value2".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),

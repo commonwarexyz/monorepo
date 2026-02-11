@@ -25,16 +25,13 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, BufferPooler, Metrics, Storage,
+    Blob, Buf, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},
     StreamExt,
 };
-use std::{
-    marker::PhantomData,
-    num::{NonZeroU16, NonZeroUsize},
-};
+use std::{marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
 
 /// State for replaying a single section's blob.
@@ -51,10 +48,8 @@ pub struct Config {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// Page-cache page size for caching data.
-    pub page_cache_page_size: NonZeroU16,
-    /// Page-cache capacity for this configuration.
-    pub page_cache_capacity: NonZeroUsize,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
@@ -87,19 +82,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// All backing blobs are opened but not read during initialization. Use `replay`
     /// to iterate over all items.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error>
-    where
-        E: BufferPooler,
-    {
+    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: AppendFactory {
                 write_buffer: cfg.write_buffer,
-                page_cache_ref: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    cfg.page_cache_page_size,
-                    cfg.page_cache_capacity,
-                ),
+                page_cache_ref: cfg.page_cache,
             },
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
@@ -367,7 +355,9 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+    };
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
@@ -379,11 +369,10 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    fn test_cfg() -> Config {
+    fn test_cfg(pool: commonware_runtime::BufferPool) -> Config {
         Config {
             partition: "test_partition".into(),
-            page_cache_page_size: PAGE_SIZE,
-            page_cache_capacity: PAGE_CACHE_SIZE,
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -392,7 +381,7 @@ mod tests {
     fn test_segmented_fixed_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -438,7 +427,7 @@ mod tests {
     fn test_segmented_fixed_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -501,7 +490,7 @@ mod tests {
         // Test that replay with a non-zero start_position correctly skips items.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -621,7 +610,7 @@ mod tests {
     fn test_segmented_fixed_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -653,7 +642,7 @@ mod tests {
     fn test_segmented_fixed_rewind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -699,7 +688,7 @@ mod tests {
     fn test_segmented_fixed_rewind_many_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -756,7 +745,7 @@ mod tests {
     fn test_segmented_fixed_rewind_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
 
             // Create sections 1-5
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -807,7 +796,7 @@ mod tests {
     fn test_segmented_fixed_corruption_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -856,7 +845,7 @@ mod tests {
     fn test_segmented_fixed_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
 
             // Create and populate journal
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -890,7 +879,7 @@ mod tests {
     fn test_segmented_fixed_section_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -917,7 +906,7 @@ mod tests {
         // Sections 1, 5, 10 should all be independent and accessible.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1008,7 +997,7 @@ mod tests {
         // Section 1 has data, section 2 is empty, section 3 has data.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1109,7 +1098,7 @@ mod tests {
         // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(context.storage_buffer_pool().clone());
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1176,8 +1165,11 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear_test".into(),
-                page_cache_page_size: PAGE_SIZE,
-                page_cache_capacity: PAGE_CACHE_SIZE,
+                page_cache: CacheRef::new(
+                    context.storage_buffer_pool().clone(),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
                 write_buffer: NZUsize!(1024),
             };
 

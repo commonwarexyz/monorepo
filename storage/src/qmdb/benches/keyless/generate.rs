@@ -4,8 +4,9 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
+    buffer::paged::CacheRef,
     tokio::{Config, Context},
-    ThreadPooler as _,
+    BufferPooler, ThreadPooler as _,
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
@@ -36,7 +37,7 @@ const THREADS: NonZeroUsize = NZUsize!(8);
 
 fn keyless_cfg(
     pool: ThreadPool,
-    _context: &Context,
+    context: &Context,
     page_cache_page_size: NonZeroU16,
     page_cache_capacity: NonZeroUsize,
 ) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
@@ -51,8 +52,11 @@ fn keyless_cfg(
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         thread_pool: Some(pool),
-        page_cache_page_size,
-        page_cache_capacity,
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 

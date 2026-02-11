@@ -29,9 +29,9 @@ use crate::{
 use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::Array;
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
 pub(crate) mod db;
@@ -74,10 +74,8 @@ pub struct FixedConfig<T: Translator> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// Page-cache page size for caching data.
-    pub page_cache_page_size: NonZeroU16,
-    /// Page-cache capacity for this configuration.
-    pub page_cache_capacity: NonZeroUsize,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
@@ -116,10 +114,8 @@ pub struct VariableConfig<T: Translator, C> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// Page-cache page size for caching data.
-    pub page_cache_page_size: NonZeroU16,
-    /// Page-cache capacity for this configuration.
-    pub page_cache_capacity: NonZeroUsize,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// Shared initialization logic for fixed-sized value [db::Db].
@@ -131,7 +127,7 @@ pub(super) async fn init_fixed<E, K, V, U, H, T, I, F, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, FJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
-    E: BufferPooler + Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
@@ -148,16 +144,14 @@ where
         items_per_blob: cfg.mmr_items_per_blob,
         write_buffer: cfg.mmr_write_buffer,
         thread_pool: cfg.thread_pool,
-        page_cache_page_size: cfg.page_cache_page_size,
-        page_cache_capacity: cfg.page_cache_capacity,
+        page_cache: cfg.page_cache.clone(),
     };
 
     let journal_config = FConfig {
         partition: cfg.log_journal_partition,
         items_per_blob: cfg.log_items_per_blob,
         write_buffer: cfg.log_write_buffer,
-        page_cache_page_size: cfg.page_cache_page_size,
-        page_cache_capacity: cfg.page_cache_capacity,
+        page_cache: cfg.page_cache,
     };
 
     let log = authenticated::Journal::<_, FJournal<_, _>, _, _>::new(
@@ -193,7 +187,7 @@ pub(super) async fn init_variable<E, K, V, U, H, T, I, F, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, VJournal<E, Operation<K, V, U>>, I, H, U, Merkleized<H>, Durable>, Error>
 where
-    E: BufferPooler + Storage + Clock + Metrics,
+    E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
     U: Update<K, V> + Send + Sync,
@@ -210,8 +204,7 @@ where
         items_per_blob: cfg.mmr_items_per_blob,
         write_buffer: cfg.mmr_write_buffer,
         thread_pool: cfg.thread_pool,
-        page_cache_page_size: cfg.page_cache_page_size,
-        page_cache_capacity: cfg.page_cache_capacity,
+        page_cache: cfg.page_cache.clone(),
     };
 
     let journal_config = VConfig {
@@ -219,8 +212,7 @@ where
         items_per_section: cfg.log_items_per_blob,
         compression: cfg.log_compression,
         codec_config: cfg.log_codec_config,
-        page_cache_page_size: cfg.page_cache_page_size,
-        page_cache_capacity: cfg.page_cache_capacity,
+        page_cache: cfg.page_cache,
         write_buffer: cfg.log_write_buffer,
     };
 
@@ -263,7 +255,10 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(crate) fn fixed_db_config<T: Translator + Default>(suffix: &str) -> FixedConfig<T> {
+    pub(crate) fn fixed_db_config<T: Translator + Default>(
+        suffix: &str,
+        pool: commonware_runtime::BufferPool,
+    ) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -274,13 +269,13 @@ pub(crate) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: T::default(),
             thread_pool: None,
-            page_cache_page_size: PAGE_SIZE,
-            page_cache_capacity: PAGE_CACHE_SIZE,
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
+        pool: commonware_runtime::BufferPool,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -294,8 +289,7 @@ pub(crate) mod test {
             log_codec_config: (),
             translator: T::default(),
             thread_pool: None,
-            page_cache_page_size: PAGE_SIZE,
-            page_cache_capacity: PAGE_CACHE_SIZE,
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -310,7 +304,7 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::deterministic::Context;
+    use commonware_runtime::{deterministic::Context, BufferPooler};
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 
@@ -901,7 +895,8 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                $f(<$db>::init(ctx, $cfg::<OneCap>(p)).await.unwrap()).await;
+                let pool = ctx.storage_buffer_pool().clone();
+                $f(<$db>::init(ctx, $cfg::<OneCap>(p, pool)).await.unwrap()).await;
             })
             .await
         }};
@@ -912,12 +907,18 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p)).await.unwrap();
+                let pool = ctx.storage_buffer_pool().clone();
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pool))
+                    .await
+                    .unwrap();
                 $f(
                     ctx,
                     db,
                     |ctx| {
-                        Box::pin(async move { <$db>::init(ctx, $cfg::<OneCap>(p)).await.unwrap() })
+                        Box::pin(async move {
+                            let pool = ctx.storage_buffer_pool().clone();
+                            <$db>::init(ctx, $cfg::<OneCap>(p, pool)).await.unwrap()
+                        })
                     },
                     to_digest,
                 )
@@ -932,7 +933,10 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p)).await.unwrap();
+                let pool = ctx.storage_buffer_pool().clone();
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pool))
+                    .await
+                    .unwrap();
                 $f(ctx, db, to_digest).await;
             })
             .await

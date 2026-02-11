@@ -21,18 +21,13 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock,
+    ContextCell, Handle, Metrics, Network, Spawner, Storage,
 };
-use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize};
+use commonware_utils::{channel::mpsc, vec::NonEmptyVec, NZUsize, NZU16};
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
-use std::{
-    collections::BTreeMap,
-    marker::PhantomData,
-    num::{NonZeroU16, NonZeroUsize},
-    time::Duration,
-};
+use std::{collections::BTreeMap, marker::PhantomData, time::Duration};
 use tracing::{debug, info, warn};
 
 /// Configuration for the orchestrator.
@@ -59,10 +54,6 @@ where
 
     // Partition prefix used for orchestrator metadata persistence
     pub partition_prefix: String,
-    /// Page-cache page size for consensus journals.
-    pub page_cache_page_size: std::num::NonZeroU16,
-    /// Page-cache capacity for consensus journals.
-    pub page_cache_capacity: std::num::NonZeroUsize,
 
     pub _phantom: PhantomData<L>,
 }
@@ -92,8 +83,7 @@ where
 
     muxer_size: usize,
     partition_prefix: String,
-    page_cache_page_size: NonZeroU16,
-    page_cache_capacity: NonZeroUsize,
+    page_cache_ref: CacheRef,
 
     latest_epoch: Gauge,
 
@@ -119,6 +109,11 @@ where
         config: Config<B, V, C, H, A, S, L, T>,
     ) -> (Self, Mailbox<V, C::PublicKey>) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
+        let page_cache_ref = CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            NZU16!(16_384),
+            NZUsize!(10_000),
+        );
 
         // Register latest_epoch gauge for Grafana integration
         let latest_epoch = Gauge::default();
@@ -135,8 +130,7 @@ where
                 strategy: config.strategy,
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                page_cache_page_size: config.page_cache_page_size,
-                page_cache_capacity: config.page_cache_capacity,
+                page_cache_ref,
                 latest_epoch,
                 _phantom: PhantomData,
             },
@@ -334,8 +328,7 @@ where
                 activity_timeout: ViewDelta::new(256),
                 skip_timeout: ViewDelta::new(10),
                 fetch_concurrent: 32,
-                page_cache_page_size: self.page_cache_page_size,
-                page_cache_capacity: self.page_cache_capacity,
+                page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
             },
         );

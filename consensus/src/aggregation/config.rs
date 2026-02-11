@@ -9,8 +9,9 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::NonZeroDuration;
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Configuration for the [super::Engine].
 pub struct Config<
@@ -76,11 +77,8 @@ pub struct Config<
     /// Compression level for the journal.
     pub journal_compression: Option<u8>,
 
-    /// Page-cache page size for the journal.
-    pub journal_page_cache_page_size: NonZeroU16,
-
-    /// Page-cache capacity for the journal.
-    pub journal_page_cache_capacity: NonZeroUsize,
+    /// Page cache for the journal.
+    pub journal_page_cache: CacheRef,
 
     /// Strategy for parallel operations.
     pub strategy: T,

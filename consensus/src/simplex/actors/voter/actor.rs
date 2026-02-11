@@ -22,7 +22,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::WrappedSender, Blocker, Recipients, Sender};
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
@@ -34,7 +34,7 @@ use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
-    num::{NonZeroU16, NonZeroUsize},
+    num::NonZeroUsize,
     pin::Pin,
     task::{self, Poll},
 };
@@ -109,8 +109,7 @@ pub struct Actor<
     partition: String,
     replay_buffer: NonZeroUsize,
     write_buffer: NonZeroUsize,
-    page_cache_page_size: NonZeroU16,
-    page_cache_capacity: NonZeroUsize,
+    page_cache: CacheRef,
     journal: Option<Journal<E, Artifact<S, D>>>,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
@@ -121,7 +120,7 @@ pub struct Actor<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -186,8 +185,7 @@ impl<
                 partition: cfg.partition,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
-                page_cache_page_size: cfg.page_cache_page_size,
-                page_cache_capacity: cfg.page_cache_capacity,
+                page_cache: cfg.page_cache,
                 journal: None,
 
                 mailbox_receiver,
@@ -689,8 +687,7 @@ impl<
                 partition: self.partition.clone(),
                 compression: None, // most of the data is not compressible
                 codec_config: self.certificate_config.clone(),
-                page_cache_page_size: self.page_cache_page_size,
-                page_cache_capacity: self.page_cache_capacity,
+                page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
             },
         )

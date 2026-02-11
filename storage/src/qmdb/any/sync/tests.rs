@@ -42,7 +42,7 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 fn fresh_config<H: SyncTestHarness>(context: &mut deterministic::Context) -> ConfigOf<H> {
     let suffix = context.next_u64().to_string();
-    H::config(&suffix)
+    H::config(context, &suffix)
 }
 
 /// Trait for cleanup operations in tests.
@@ -86,7 +86,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
         + Gettable<Key = Digest>;
 
     /// Create a config with unique partition names
-    fn config(suffix: &str) -> ConfigOf<Self>;
+    fn config(ctx: &deterministic::Context, suffix: &str) -> ConfigOf<Self>;
 
     /// Clone a config
     fn clone_config(config: &ConfigOf<Self>) -> ConfigOf<Self>;
@@ -1256,7 +1256,7 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{qmdb::any::value::VariableEncoding, translator::TwoCap};
     use commonware_cryptography::sha256::Digest;
-    use commonware_runtime::deterministic::Context;
+    use commonware_runtime::{deterministic::Context, BufferPooler};
 
     // ----- Ordered/Fixed -----
 
@@ -1265,8 +1265,8 @@ mod harnesses {
     impl SyncTestHarness for OrderedFixedHarness {
         type Db = crate::qmdb::any::ordered::fixed::test::CleanAnyTest;
 
-        fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::test::fixed_db_config(suffix)
+        fn config(ctx: &Context, suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::test::fixed_db_config(suffix, ctx.storage_buffer_pool().clone())
         }
 
         fn clone_config(
@@ -1316,9 +1316,13 @@ mod harnesses {
     impl SyncTestHarness for OrderedVariableHarness {
         type Db = crate::qmdb::any::ordered::variable::test::AnyTest;
 
-        fn config(suffix: &str) -> crate::qmdb::any::ordered::variable::test::VarConfig {
+        fn config(
+            ctx: &Context,
+            suffix: &str,
+        ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
+                ctx.storage_buffer_pool().clone(),
             )
         }
 
@@ -1373,8 +1377,8 @@ mod harnesses {
     impl SyncTestHarness for UnorderedFixedHarness {
         type Db = crate::qmdb::any::unordered::fixed::test::AnyTest;
 
-        fn config(suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
-            crate::qmdb::any::test::fixed_db_config(suffix)
+        fn config(ctx: &Context, suffix: &str) -> crate::qmdb::any::FixedConfig<TwoCap> {
+            crate::qmdb::any::test::fixed_db_config(suffix, ctx.storage_buffer_pool().clone())
         }
 
         fn clone_config(
@@ -1424,9 +1428,13 @@ mod harnesses {
     impl SyncTestHarness for UnorderedVariableHarness {
         type Db = crate::qmdb::any::unordered::variable::test::AnyTest;
 
-        fn config(suffix: &str) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+        fn config(
+            ctx: &Context,
+            suffix: &str,
+        ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
+                ctx.storage_buffer_pool().clone(),
             )
         }
 

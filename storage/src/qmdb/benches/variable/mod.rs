@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{tokio::Context, ThreadPooler};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
     qmdb::{
@@ -88,7 +88,7 @@ type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_S
 
 fn any_cfg(
     pool: ThreadPool,
-    _context: &Context,
+    context: &Context,
     page_cache_page_size: NonZeroU16,
     page_cache_capacity: NonZeroUsize,
 ) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -104,8 +104,11 @@ fn any_cfg(
         log_compression: None,
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache_page_size,
-        page_cache_capacity,
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 
@@ -123,7 +126,7 @@ async fn get_any_ordered(ctx: Context) -> OVariableDb {
 
 fn current_cfg(
     pool: ThreadPool,
-    _context: &Context,
+    context: &Context,
     page_cache_page_size: NonZeroU16,
     page_cache_capacity: NonZeroUsize,
 ) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -140,8 +143,11 @@ fn current_cfg(
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
-        page_cache_page_size,
-        page_cache_capacity,
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
     }
 }
 

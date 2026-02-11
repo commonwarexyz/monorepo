@@ -18,10 +18,10 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::{DigestOf, Hasher as CHasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
 use tracing::warn;
@@ -70,16 +70,14 @@ pub struct Config<T: Translator, C> {
     /// An optional thread pool to use for parallelizing batch operations.
     pub thread_pool: Option<ThreadPool>,
 
-    /// Page-cache page size for caching data.
-    pub page_cache_page_size: NonZeroU16,
-    /// Page-cache capacity for this configuration.
-    pub page_cache_capacity: NonZeroUsize,
+    /// The page cache to use for caching data.
+    pub page_cache: CacheRef,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
 pub struct Immutable<
-    E: BufferPooler + RStorage + Clock + Metrics,
+    E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
@@ -106,7 +104,7 @@ pub struct Immutable<
 
 // Functionality shared across all DB states.
 impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -175,7 +173,7 @@ impl<
 
 // Functionality shared across Merkleized states.
 impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -243,13 +241,8 @@ impl<
 }
 
 // Functionality specific to (Merkleized, Durable) state.
-impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-    > Immutable<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -263,8 +256,7 @@ impl<
             items_per_blob: cfg.mmr_items_per_blob,
             write_buffer: cfg.mmr_write_buffer,
             thread_pool: cfg.thread_pool,
-            page_cache_page_size: cfg.page_cache_page_size,
-            page_cache_capacity: cfg.page_cache_capacity,
+            page_cache: cfg.page_cache.clone(),
         };
 
         let journal_cfg = JournalConfig {
@@ -272,8 +264,7 @@ impl<
             items_per_section: cfg.log_items_per_section,
             compression: cfg.log_compression,
             codec_config: cfg.log_codec_config,
-            page_cache_page_size: cfg.page_cache_page_size,
-            page_cache_capacity: cfg.page_cache_capacity,
+            page_cache: cfg.page_cache.clone(),
             write_buffer: cfg.log_write_buffer,
         };
 
@@ -335,13 +326,8 @@ impl<
 }
 
 // Functionality specific to (Unmerkleized, Durable) state.
-impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-    > Immutable<E, K, V, H, T, Unmerkleized, Durable>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Unmerkleized, Durable>
 {
     /// Convert this database into a mutable state for batched updates.
     pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
@@ -365,13 +351,8 @@ impl<
 }
 
 // Functionality specific to (Merkleized, NonDurable) state.
-impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-    > Immutable<E, K, V, H, T, Merkleized<H>, NonDurable>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Merkleized<H>, NonDurable>
 {
     /// Convert this database into a mutable state for batched updates.
     pub fn into_mutable(self) -> Immutable<E, K, V, H, T, Unmerkleized, NonDurable> {
@@ -385,13 +366,8 @@ impl<
 }
 
 // Functionality specific to (Unmerkleized, NonDurable) state - the mutable state.
-impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-    > Immutable<E, K, V, H, T, Unmerkleized, NonDurable>
+impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<E, K, V, H, T, Unmerkleized, NonDurable>
 {
     /// Update the operations MMR with the given operation, and append the operation to the log. The
     /// `commit` method must be called to make any applied operation persistent & recoverable.
@@ -457,7 +433,7 @@ impl<
 }
 
 impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -476,7 +452,7 @@ impl<
 }
 
 impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -506,7 +482,7 @@ impl<
 }
 
 impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -533,7 +509,7 @@ impl<
 }
 
 impl<
-        E: BufferPooler + RStorage + Clock + Metrics,
+        E: RStorage + Clock + Metrics,
         K: Array,
         V: VariableValue,
         H: CHasher,
@@ -552,7 +528,7 @@ pub(super) mod test {
     use crate::{mmr::StandardHasher, qmdb::verify_proof, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -563,7 +539,7 @@ pub(super) mod test {
 
     pub(crate) fn db_config(
         suffix: &str,
-        _context: &deterministic::Context,
+        context: &deterministic::Context,
         page_cache_page_size: NonZeroU16,
         page_cache_capacity: NonZeroUsize,
     ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
@@ -579,8 +555,11 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            page_cache_page_size,
-            page_cache_capacity,
+            page_cache: CacheRef::new(
+                context.storage_buffer_pool().clone(),
+                page_cache_page_size,
+                page_cache_capacity,
+            ),
         }
     }
 

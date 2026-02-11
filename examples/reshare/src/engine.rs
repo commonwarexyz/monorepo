@@ -24,7 +24,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
@@ -131,6 +132,11 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
+        let page_cache = CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            PAGE_CACHE_PAGE_SIZE,
+            PAGE_CACHE_CAPACITY,
+        );
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
@@ -177,8 +183,7 @@ where
                     "{}-finalizations-by-height-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_page_cache_page_size: PAGE_CACHE_PAGE_SIZE,
-                freezer_key_page_cache_capacity: PAGE_CACHE_CAPACITY,
+                freezer_key_page_cache: page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalizations-by-height-freezer-value",
                     config.partition_prefix
@@ -221,8 +226,7 @@ where
                     "{}-finalized_blocks-freezer-key",
                     config.partition_prefix
                 ),
-                freezer_key_page_cache_page_size: PAGE_CACHE_PAGE_SIZE,
-                freezer_key_page_cache_capacity: PAGE_CACHE_CAPACITY,
+                freezer_key_page_cache: page_cache.clone(),
                 freezer_value_partition: format!(
                     "{}-finalized_blocks-freezer-value",
                     config.partition_prefix
@@ -268,8 +272,7 @@ where
                         .saturating_mul(SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER),
                 ),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
-                page_cache_page_size: PAGE_CACHE_PAGE_SIZE,
-                page_cache_capacity: PAGE_CACHE_CAPACITY,
+                page_cache: page_cache.clone(),
                 replay_buffer: REPLAY_BUFFER,
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
@@ -298,8 +301,6 @@ where
                 muxer_size: MAILBOX_SIZE,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}_consensus", config.partition_prefix),
-                page_cache_page_size: PAGE_CACHE_PAGE_SIZE,
-                page_cache_capacity: PAGE_CACHE_CAPACITY,
                 _phantom: PhantomData,
             },
         );

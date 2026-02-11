@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -18,15 +18,18 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 fn config<E: BufferPooler>(
     seed: u64,
-    _context: &E,
+    context: &E,
     page_cache_page_size: NonZeroU16,
     page_cache_capacity: NonZeroUsize,
 ) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
         items_per_section: ITEMS_PER_SECTION,
-        page_cache_page_size,
-        page_cache_capacity,
+        page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            page_cache_page_size,
+            page_cache_capacity,
+        ),
         write_buffer: WRITE_BUFFER,
         compression: None,
         codec_config: (RangeCfg::new(0..256), ()),

@@ -27,13 +27,8 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 pub type Db<E, K, V, H, T, S = Merkleized<H>, D = Durable> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>, S, D>;
 
-impl<
-        E: commonware_runtime::BufferPooler + Storage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-    > Db<E, K, V, H, T, Merkleized<H>, Durable>
+impl<E: Storage + Clock + Metrics, K: Array, V: VariableValue, H: Hasher, T: Translator>
+    Db<E, K, V, H, T, Merkleized<H>, Durable>
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -106,7 +101,7 @@ pub mod partitioned {
         >;
 
     impl<
-            E: commonware_runtime::BufferPooler + Storage + Clock + Metrics,
+            E: Storage + Clock + Metrics,
             K: Array,
             V: VariableValue,
             H: Hasher,
@@ -185,8 +180,9 @@ pub(crate) mod test {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
+        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Runner as _,
+        BufferPooler, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -195,7 +191,7 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pool: commonware_runtime::BufferPool) -> VarConfig {
         VariableConfig {
             mmr_journal_partition: format!("journal_{seed}"),
             mmr_metadata_partition: format!("metadata_{seed}"),
@@ -208,8 +204,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache_page_size: PAGE_SIZE,
-            page_cache_capacity: PAGE_CACHE_SIZE,
+            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -228,13 +223,14 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed);
+        let config = create_test_config(seed, context.storage_buffer_pool().clone());
         AnyTest::init(context, config).await.unwrap()
     }
 
     /// Return a Digest-valued variable database for generic tests.
     async fn open_digest_db(context: Context) -> DigestAnyTest {
-        DigestAnyTest::init(context, variable_db_config("digest_partition"))
+        let pool = context.storage_buffer_pool().clone();
+        DigestAnyTest::init(context, variable_db_config("digest_partition", pool))
             .await
             .unwrap()
     }
@@ -298,7 +294,10 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, create_test_config(0)).await.unwrap()
+        let pool = context.storage_buffer_pool().clone();
+        AnyTest::init(context, create_test_config(0, pool))
+            .await
+            .unwrap()
     }
 
     #[test_traced("WARN")]
@@ -500,7 +499,7 @@ pub(crate) mod test {
     fn test_any_unordered_variable_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let cfg = create_test_config(seed);
+            let cfg = create_test_config(seed, ctx.storage_buffer_pool().clone());
             AnyTest::init(ctx, cfg).await.unwrap().into_mutable()
         });
     }
@@ -586,7 +585,10 @@ pub(crate) mod test {
 
     type PartitionedVarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
-    fn partitioned_config(suffix: &str) -> PartitionedVarConfig {
+    fn partitioned_config(
+        suffix: &str,
+        pool: commonware_runtime::BufferPool,
+    ) -> PartitionedVarConfig {
         VariableConfig {
             mmr_journal_partition: format!("pv_journal_{suffix}"),
             mmr_metadata_partition: format!("pv_metadata_{suffix}"),
@@ -599,8 +601,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache_page_size: NZU16!(77),
-            page_cache_capacity: NZUsize!(9),
+            page_cache: CacheRef::new(pool, NZU16!(77), NZUsize!(9)),
         }
     }
 
@@ -617,15 +618,17 @@ pub(crate) mod test {
 
     #[inline]
     async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(context, partitioned_config("partition_p1"))
+        let pool = context.storage_buffer_pool().clone();
+        PartitionedAnyTestP1::init(context, partitioned_config("partition_p1", pool))
             .await
             .unwrap()
     }
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
+        let pool = context.storage_buffer_pool().clone();
         PartitionedAnyTestDigestP1::init(
             context,
-            variable_db_config("unordered_partitioned_var_p1"),
+            variable_db_config("unordered_partitioned_var_p1", pool),
         )
         .await
         .unwrap()

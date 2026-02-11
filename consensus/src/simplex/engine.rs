@@ -9,15 +9,13 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -40,7 +38,7 @@ pub struct Engine<
 }
 
 impl<
-        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
         S: Scheme<D>,
         L: Elector<S>,
         B: Blocker<PublicKey = S::PublicKey>,
@@ -90,8 +88,7 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
-                page_cache_page_size: cfg.page_cache_page_size,
-                page_cache_capacity: cfg.page_cache_capacity,
+                page_cache: cfg.page_cache,
             },
         );
 

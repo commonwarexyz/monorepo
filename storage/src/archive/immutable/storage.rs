@@ -127,8 +127,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Arch
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
                 key_write_buffer: cfg.freezer_key_write_buffer,
-                key_page_cache_page_size: cfg.freezer_key_page_cache_page_size,
-                key_page_cache_capacity: cfg.freezer_key_page_cache_capacity,
+                key_page_cache: cfg.freezer_key_page_cache,
                 value_partition: cfg.freezer_value_partition,
                 value_compression: cfg.freezer_value_compression,
                 value_write_buffer: cfg.freezer_value_write_buffer,

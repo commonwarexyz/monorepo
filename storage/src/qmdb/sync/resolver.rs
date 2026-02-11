@@ -19,7 +19,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{BufferPooler, Clock, Metrics, RwLock, Storage};
+use commonware_runtime::{Clock, Metrics, RwLock, Storage};
 use commonware_utils::{channel::oneshot, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
@@ -70,7 +70,7 @@ macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
         impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T, Merkleized<H>, Durable>>
         where
-            E: BufferPooler + Storage + Clock + Metrics,
+            E: Storage + Clock + Metrics,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -99,7 +99,7 @@ macro_rules! impl_resolver {
 
         impl<E, K, V, H, T> Resolver for Arc<RwLock<$db<E, K, V, H, T, Merkleized<H>, Durable>>>
         where
-            E: BufferPooler + Storage + Clock + Metrics,
+            E: Storage + Clock + Metrics,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -130,7 +130,7 @@ macro_rules! impl_resolver {
         impl<E, K, V, H, T> Resolver
             for Arc<RwLock<Option<$db<E, K, V, H, T, Merkleized<H>, Durable>>>>
         where
-            E: BufferPooler + Storage + Clock + Metrics,
+            E: Storage + Clock + Metrics,
             K: Array,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,

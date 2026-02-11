@@ -7,7 +7,10 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{deterministic, Blob as _, Buf, BufMut, Metrics, Runner, Storage as _};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Metrics, Runner,
+    Storage as _,
+};
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -158,12 +161,15 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz_index";
 const VALUE_PARTITION: &str = "fuzz_values";
 
-fn test_cfg(_context: &deterministic::Context) -> Config<()> {
+fn test_cfg(context: &deterministic::Context) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.to_string(),
         value_partition: VALUE_PARTITION.to_string(),
-        index_page_cache_page_size: PAGE_SIZE,
-        index_page_cache_capacity: PAGE_CACHE_SIZE,
+        index_page_cache: CacheRef::new(
+            context.storage_buffer_pool().clone(),
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
+        ),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         compression: None,
