@@ -4,7 +4,6 @@ use commonware_macros::select;
 use commonware_runtime::{signal::Signal, ContextCell, Error as RuntimeError, Handle, Spawner};
 use futures::{future::FutureExt, stream::FuturesUnordered, StreamExt};
 use std::{
-    collections::BTreeMap,
     future::Future,
     num::NonZeroUsize,
     pin::{pin, Pin},
@@ -38,118 +37,41 @@ impl<I> Future for Lanes<'_, I> {
     }
 }
 
-/// A read-only task handle tagged with the scheduler epoch at which it
-/// was dispatched. Resolves to `(epoch, result)` so the scheduler can
-/// track per-epoch completion counts.
-struct EpochedRead<E: Spawner, A: Actor<E>> {
-    epoch: u64,
-    handle: Handle<Result<(), A::Error>>,
-}
-
-impl<E: Spawner, A: Actor<E>> Future for EpochedRead<E, A> {
-    type Output = (u64, Result<Result<(), A::Error>, RuntimeError>);
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let epoch = self.epoch;
-        Pin::new(&mut self.handle).poll(cx).map(|r| (epoch, r))
-    }
-}
-
-/// Epoch-based read/write scheduler.
+/// In-flight read-only tasks with a bounded concurrency limit.
 ///
-/// Manages concurrent read-only tasks tagged with monotonic epochs,
-/// enforcing the invariant that a read-write (mutation) at epoch `e`
-/// waits for all reads dispatched at epochs `<= e` to complete before
-/// proceeding. Reads dispatched after the fence epoch are allowed to
-/// remain in flight.
-///
-/// ```text
-///  epoch 0          epoch 1          epoch 2
-///  -------          -------          -------
-///  R0a  R0b         R1a              R2a  R2b
-///   |    |           |                |    |
-///   |    |   W(fence=0)               |    |
-///   |    |     |     |                |    |
-///   v    v     |     |                |    |
-///  (drain R0*) |     |  (R1a, R2* may continue)
-///              v     |                |    |
-///          execute   |                |    |
-///              |     |   W(fence=1)   |    |
-///              |     |     |          |    |
-///              |     v     |          |    |
-///              | (drain R1*)          |    |
-///              |           v          |    |
-///              |       execute        |    |
-///              |                      v    v
-/// ```
-///
-/// Each `push` tags a read with the current epoch. `begin_write`
-/// snapshots the epoch as a fence and increments it. The caller then
-/// drains reads at or before the fence before executing the write.
-struct Scheduler<E: Spawner, A: Actor<E>> {
-    inflight: FuturesUnordered<EpochedRead<E, A>>,
-    epoch_counts: BTreeMap<u64, usize>,
-    fence_epoch: Option<u64>,
-    fence_count: usize,
-    epoch: u64,
+/// Before executing a read-write (mutation), all in-flight reads must
+/// be drained. New reads are only accepted when the number of in-flight
+/// reads is below `max_inflight`.
+struct Reads<E: Spawner, A: Actor<E>> {
+    inflight: FuturesUnordered<Handle<Result<(), A::Error>>>,
     max_inflight: usize,
 }
 
-impl<E: Spawner, A: Actor<E>> Scheduler<E, A> {
-    /// Create a scheduler that allows up to `max_inflight` concurrent reads.
+impl<E: Spawner, A: Actor<E>> Reads<E, A> {
     fn new(max_inflight: NonZeroUsize) -> Self {
         Self {
             inflight: FuturesUnordered::new(),
-            epoch_counts: BTreeMap::new(),
-            fence_epoch: None,
-            fence_count: 0,
-            epoch: 0,
             max_inflight: max_inflight.get(),
         }
     }
 
-    /// Returns `true` when the number of in-flight reads has reached capacity.
     fn is_full(&self) -> bool {
         self.inflight.len() >= self.max_inflight
     }
 
-    /// Returns `true` when no reads are in flight.
     fn is_empty(&self) -> bool {
         self.inflight.is_empty()
     }
 
-    /// Register a read-only task at the current epoch.
     fn push(&mut self, handle: Handle<Result<(), A::Error>>) {
-        let epoch = self.epoch;
-        *self.epoch_counts.entry(epoch).or_default() += 1;
-        self.inflight.push(EpochedRead { epoch, handle });
-    }
-
-    /// Advance the epoch and snapshot how many reads must be drained
-    /// before executing a write.
-    fn begin_write(&mut self) {
-        let fence = self.epoch;
-        self.epoch += 1;
-
-        self.fence_count = self
-            .epoch_counts
-            .range(..=fence)
-            .map(|(_, count)| count)
-            .sum();
-        self.fence_epoch = (self.fence_count > 0).then_some(fence);
-    }
-
-    /// Returns `true` while reads at or before `fence` are still in flight.
-    const fn has_fence_reads(&self) -> bool {
-        self.fence_count > 0
+        self.inflight.push(handle);
     }
 
     /// Retire all immediately-ready reads without blocking.
     ///
     /// Returns `true` if any completed read was fatal, `false` otherwise.
     fn retire_ready(&mut self) -> bool {
-        while let Some((completed_epoch, result)) = self.inflight.next().now_or_never().flatten() {
-            self.complete_read(completed_epoch);
+        while let Some(result) = self.inflight.next().now_or_never().flatten() {
             if Self::is_fatal(result) {
                 return true;
             }
@@ -162,50 +84,21 @@ impl<E: Spawner, A: Actor<E>> Scheduler<E, A> {
     /// Returns `None` when there are no in-flight reads, or `Some(fatal)`
     /// where `fatal` is `true` if the completed read failed.
     async fn next(&mut self) -> Option<bool> {
-        let (completed_epoch, result) = self.inflight.next().await?;
-        self.complete_read(completed_epoch);
+        let result = self.inflight.next().await?;
         Some(Self::is_fatal(result))
     }
 
     /// Drain all remaining in-flight reads, logging results until the
     /// first fatal, then draining the rest silently.
     async fn drain(&mut self) {
-        while let Some((_, result)) = self.inflight.next().await {
+        while let Some(result) = self.inflight.next().await {
             if Self::is_fatal(result) {
-                while let Some((_, _)) = self.inflight.next().await {}
+                while self.inflight.next().await.is_some() {}
                 break;
             }
         }
-        self.epoch_counts.clear();
-        self.fence_epoch = None;
-        self.fence_count = 0;
     }
 
-    /// Decrement the read count for `epoch`, removing the entry when it
-    /// reaches zero.
-    fn complete_read(&mut self, epoch: u64) {
-        if let Some(n) = self.epoch_counts.get_mut(&epoch) {
-            *n -= 1;
-
-            if let Some(fence) = self.fence_epoch {
-                if epoch <= fence {
-                    self.fence_count = self
-                        .fence_count
-                        .checked_sub(1)
-                        .expect("fence_count underflow");
-                    if self.fence_count == 0 {
-                        self.fence_epoch = None;
-                    }
-                }
-            }
-
-            if *n == 0 {
-                self.epoch_counts.remove(&epoch);
-            }
-        }
-    }
-
-    /// Returns `true` if the completed read result is fatal.
     fn is_fatal(result: Result<Result<(), A::Error>, RuntimeError>) -> bool {
         match result {
             Ok(Ok(())) => false,
@@ -222,6 +115,30 @@ impl<E: Spawner, A: Actor<E>> Scheduler<E, A> {
 }
 
 /// Framework-managed actor loop used by [`crate::service::ServiceBuilder`].
+///
+/// The loop dispatches incoming messages as either read-only (spawned
+/// concurrently on a snapshot) or read-write (executed inline with
+/// exclusive `&mut self` access). A fence ensures the two never overlap:
+///
+/// ```text
+///   Timeline for a write arriving while reads are in flight:
+///
+///   --time-->
+///
+///   R0 ####..done
+///   R1 ######..done
+///   R2 ########.done     drain_reads_or_shutdown()
+///                   |---- FENCE ----|
+///   W0                              ######done  on_read_write()
+///   R3                                    ######  (new reads ok)
+///
+///   # = executing   . = completing / being awaited
+/// ```
+///
+/// Before any read-write handler runs, the service drains every in-flight
+/// read task to completion. This fence guarantees that
+/// `on_read_write(&mut self, ...)` never races with a concurrent
+/// `on_read_only` snapshot task.
 pub struct ActorService<E, A>
 where
     E: Spawner,
@@ -250,7 +167,6 @@ where
         })
     }
 
-    /// Main control loop. Calls lifecycle hooks, dispatches ingress to
     /// read-only or read-write handlers, and exits on shutdown, lane
     /// closure, or fatal handler error.
     async fn enter(mut self, mut args: A::Args) {
@@ -259,14 +175,11 @@ where
             .on_startup(self.context.as_present_mut(), &mut args)
             .await;
 
-        let mut scheduler = Scheduler::<E, A>::new(self.max_inflight_reads);
+        let mut reads = Reads::<E, A>::new(self.max_inflight_reads);
 
         loop {
-            // Drain any concurrent reads that finished since the last
-            // iteration before doing anything else. Only check when there
-            // are in-flight reads to avoid unnecessary overhead.
-            if !scheduler.is_empty() && scheduler.retire_ready() {
-                self.shutdown_gracefully(&mut args, &mut scheduler, "fatal read detected")
+            if !reads.is_empty() && reads.retire_ready() {
+                self.shutdown_gracefully(&mut args, &mut reads, "fatal read detected")
                     .await;
                 return;
             }
@@ -275,17 +188,8 @@ where
                 .preprocess(self.context.as_present_mut(), &mut args)
                 .await;
 
-            // Backpressure: limit in-flight concurrent reads to prevent
-            // unbounded memory growth and ensure timely write processing.
-            //
-            // Before receiving the next event, check if we've hit the
-            // concurrency limit. If so, wait for a read slot to free up.
-            // This ensures:
-            // - If the next event is a write, we need to drain
-            // reads before the new epoch anyway. If it is a read, we need a
-            // free slot before spawning. Either way, wait for capacity.
-            if scheduler.is_full() {
-                if self.wait_for_read_capacity(&mut args, &mut scheduler).await {
+            if reads.is_full() {
+                if self.wait_for_read_capacity(&mut args, &mut reads).await {
                     return;
                 }
 
@@ -303,35 +207,29 @@ where
             };
             match event {
                 LoopEvent::Shutdown => {
-                    self.shutdown_gracefully(&mut args, &mut scheduler, "shutdown signal received")
+                    self.shutdown_gracefully(&mut args, &mut reads, "shutdown signal received")
                         .await;
                     return;
                 }
                 LoopEvent::Mailbox(Some(message)) => match message.into_ingress_envelope() {
                     IngressEnvelope::ReadOnly(message) => {
-                        self.handle_read_only(&args, &mut scheduler, message);
+                        self.handle_read_only(&args, &mut reads, message);
                     }
                     IngressEnvelope::ReadWrite(message) => {
-                        if self
-                            .handle_read_write(&mut args, &mut scheduler, message)
-                            .await
-                        {
+                        if self.handle_read_write(&mut args, &mut reads, message).await {
                             return;
                         }
                     }
                 },
                 LoopEvent::External(Some(message)) => {
-                    if self
-                        .handle_read_write(&mut args, &mut scheduler, message)
-                        .await
-                    {
+                    if self.handle_read_write(&mut args, &mut reads, message).await {
                         return;
                     }
                 }
                 LoopEvent::Mailbox(None) | LoopEvent::External(None) => {
                     self.shutdown_gracefully(
                         &mut args,
-                        &mut scheduler,
+                        &mut reads,
                         "ingress source closed, shutting down actor",
                     )
                     .await;
@@ -350,35 +248,35 @@ where
     async fn shutdown_gracefully(
         &mut self,
         args: &mut A::Args,
-        scheduler: &mut Scheduler<E, A>,
+        reads: &mut Reads<E, A>,
         reason: &'static str,
     ) {
         debug!(reason, "actor shutting down");
-        scheduler.drain().await;
+        reads.drain().await;
         self.actor
             .on_shutdown(self.context.as_present_mut(), args)
             .await;
         debug!("actor service stopped");
     }
 
-    /// Block until the scheduler has room for another read or a shutdown
-    /// signal arrives. Returns `true` if the actor loop should exit.
+    /// Block until there is room for another read or a shutdown signal
+    /// arrives. Returns `true` if the actor loop should exit.
     async fn wait_for_read_capacity(
         &mut self,
         args: &mut A::Args,
-        scheduler: &mut Scheduler<E, A>,
+        reads: &mut Reads<E, A>,
     ) -> bool {
-        debug_assert!(!scheduler.is_empty(), "wait requires in-flight reads");
+        debug_assert!(!reads.is_empty(), "wait requires in-flight reads");
 
         select! {
             _ = &mut self.shutdown => {
-                self.shutdown_gracefully(args, scheduler, "shutdown signal received").await;
+                self.shutdown_gracefully(args, reads, "shutdown signal received").await;
                 true
             },
-            result = scheduler.next() => {
+            result = reads.next() => {
                 match result {
                     Some(true) => {
-                        self.shutdown_gracefully(args, scheduler, "fatal read detected").await;
+                        self.shutdown_gracefully(args, reads, "fatal read detected").await;
                         true
                     },
                     _ => false,
@@ -387,31 +285,28 @@ where
         }
     }
 
-    /// Wait for all reads at or before `fence` to complete, or exit
-    /// early on shutdown or fatal read. Returns `true` if the actor
-    /// loop should exit.
-    async fn drain_fence_or_shutdown(
+    /// Wait for all in-flight reads to complete, or exit early on
+    /// shutdown or fatal read. Returns `true` if the actor loop should
+    /// exit.
+    async fn drain_reads_or_shutdown(
         &mut self,
         args: &mut A::Args,
-        scheduler: &mut Scheduler<E, A>,
+        reads: &mut Reads<E, A>,
     ) -> bool {
-        while scheduler.has_fence_reads() {
+        while !reads.is_empty() {
             select! {
                 _ = &mut self.shutdown => {
-                    self.shutdown_gracefully(args, scheduler, "shutdown signal received").await;
+                    self.shutdown_gracefully(args, reads, "shutdown signal received").await;
                     return true;
                 },
-                result = scheduler.next() => {
+                result = reads.next() => {
                     match result {
                         Some(true) => {
-                            self.shutdown_gracefully(args, scheduler, "fatal read detected").await;
+                            self.shutdown_gracefully(args, reads, "fatal read detected").await;
                             return true;
                         },
                         Some(false) => {},
-                        None => {
-                            debug_assert!(!scheduler.has_fence_reads(), "fence_count > 0 with no in-flight reads");
-                            return false;
-                        },
+                        None => return false,
                     }
                 },
             }
@@ -419,31 +314,29 @@ where
         false
     }
 
-    /// Snapshot actor state and spawn a read-only handler on the scheduler.
+    /// Snapshot actor state and spawn a read-only handler.
     fn handle_read_only(
         &self,
         args: &A::Args,
-        scheduler: &mut Scheduler<E, A>,
+        reads: &mut Reads<E, A>,
         message: <A::Ingress as IntoIngressEnvelope>::ReadOnlyIngress,
     ) {
         let snapshot = self.actor.snapshot(args);
         let context = self.context.as_present().clone();
         let handle = context
-            .spawn(move |context| async move { A::on_readonly(context, snapshot, message).await });
-        scheduler.push(handle);
+            .spawn(move |context| async move { A::on_read_only(context, snapshot, message).await });
+        reads.push(handle);
     }
 
-    /// Fence in-flight reads, execute a read-write message, and handle
-    /// errors. Returns `true` if the actor loop should exit.
+    /// Drain all in-flight reads, execute a read-write message, and
+    /// handle errors. Returns `true` if the actor loop should exit.
     async fn handle_read_write(
         &mut self,
         args: &mut A::Args,
-        scheduler: &mut Scheduler<E, A>,
+        reads: &mut Reads<E, A>,
         message: <A::Ingress as IntoIngressEnvelope>::ReadWriteIngress,
     ) -> bool {
-        scheduler.begin_write();
-
-        if self.drain_fence_or_shutdown(args, scheduler).await {
+        if self.drain_reads_or_shutdown(args, reads).await {
             return true;
         }
 
@@ -453,7 +346,7 @@ where
             .await
         {
             error!(%err, "actor failed");
-            self.shutdown_gracefully(args, scheduler, "fatal write detected")
+            self.shutdown_gracefully(args, reads, "fatal write detected")
                 .await;
             return true;
         }
