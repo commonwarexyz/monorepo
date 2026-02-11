@@ -179,7 +179,11 @@ stability_scope!(ALPHA {
             futures::future::pending()
         }
 
-        /// Runs at the end of each iteration.
+        /// Runs at the end of each iteration that dispatched a message.
+        ///
+        /// Not guaranteed to be called after every single message. When
+        /// multiple read-only messages are batched concurrently,
+        /// `postprocess` may only run after the full batch completes.
         fn postprocess(
             &mut self,
             _context: &mut E,
