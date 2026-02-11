@@ -78,12 +78,6 @@ impl Position {
         Self(self.0.saturating_sub(rhs))
     }
 
-    /// Returns the MMR size (total node count) for an MMR with `leaves` leaves.
-    #[inline]
-    pub const fn mmr_size(leaves: u64) -> Self {
-        Self(2 * leaves - leaves.count_ones() as u64)
-    }
-
     /// Returns whether this is a valid MMR size.
     ///
     /// The implementation verifies that (1) the size won't result in overflow and (2) peaks in the
@@ -539,23 +533,6 @@ mod tests {
         assert!(Position::new(u64::MAX >> 1).is_mmr_size());
         assert!(!Position::new((u64::MAX >> 1) + 1).is_mmr_size());
         assert!(!MAX_POSITION.is_mmr_size());
-    }
-
-    #[test]
-    fn test_mmr_size() {
-        // mmr_size(n) = 2n - popcount(n)
-        assert_eq!(Position::mmr_size(0), Position::new(0));
-        assert_eq!(Position::mmr_size(1), Position::new(1));
-        assert_eq!(Position::mmr_size(2), Position::new(3));
-        assert_eq!(Position::mmr_size(3), Position::new(4));
-        assert_eq!(Position::mmr_size(4), Position::new(7));
-        assert_eq!(Position::mmr_size(5), Position::new(8));
-        assert_eq!(Position::mmr_size(8), Position::new(15));
-
-        for n in 1..1000u64 {
-            let expected = Position::try_from(Location::new_unchecked(n)).unwrap();
-            assert_eq!(Position::mmr_size(n), expected);
-        }
     }
 
     #[test]

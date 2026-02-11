@@ -815,7 +815,9 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
 
     // Build a DirtyMmr: either from pruned components or empty.
     let mut dirty = if pruned_chunks > 0 {
-        let grafted_pruned_to_pos = Position::mmr_size(pruned_chunks as u64);
+        let grafted_pruned_to_pos =
+            Position::try_from(Location::new_unchecked(pruned_chunks as u64))
+                .expect("pruned_chunks overflow");
         mmr::mem::DirtyMmr::from_components(
             Vec::new(),
             grafted_pruned_to_pos,
