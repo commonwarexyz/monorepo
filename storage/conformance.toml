@@ -125,3 +125,7 @@ hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
 ["commonware_storage::qmdb::sync::target::tests::conformance::CodecConformance<Target<sha256::Digest>>"]
 n_cases = 65536
 hash = "252e8350e4c38a2e0e5aa8679e474cb9a788fe88bfa5811a59c3220bff4afca0"
+
+["commonware_storage::queue::conformance::QueueConformance"]
+n_cases = 512
+hash = "718a6b9f3905c146aa0d95b2b32ea1557680940c3fe2a293b73a19a56a3ac000"
