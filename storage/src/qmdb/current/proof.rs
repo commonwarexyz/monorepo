@@ -100,11 +100,9 @@ impl<D: Digest> RangeProof<D> {
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let start = *start_loc / chunk_bits; // chunk that contains the first bit
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
-        let pruned_chunks = status.pruned_chunks() as u64;
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
-            let relative = (i - pruned_chunks) as usize;
-            chunks.push(*status.get_chunk(relative));
+            chunks.push(*status.get_chunk(i as usize));
         }
 
         Ok((proof, ops, chunks))
@@ -233,9 +231,8 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     ) -> Result<Self, Error> {
         // Since `loc` is assumed to be in-bounds, `loc + 1` won't overflow.
         let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1).await?;
-        let relative_chunk =
-            (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize - status.pruned_chunks();
-        let chunk = *status.get_chunk(relative_chunk);
+        let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
+        let chunk = *status.get_chunk(chunk_idx);
 
         Ok(Self {
             loc,

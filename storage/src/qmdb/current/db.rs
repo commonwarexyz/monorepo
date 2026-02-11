@@ -379,7 +379,7 @@ where
                 .dirty_chunks
                 .iter()
                 .copied()
-                .filter(|&c| c < old_grafted_leaves),
+                .filter(|&c| c >= status.pruned_chunks() && c < old_grafted_leaves),
         );
         let grafted_leaves = compute_grafted_leaves::<H, N>(
             &mut any.log.hasher,
@@ -416,8 +416,7 @@ where
         // Compute and cache the root.
         let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
         let partial_chunk = partial_chunk(&status);
-        let root =
-            compute_root::<H, _, N>(&mut any.log.hasher, &storage, partial_chunk).await?;
+        let root = compute_root(&mut any.log.hasher, &storage, partial_chunk).await?;
 
         Ok(Db {
             any,
@@ -482,7 +481,7 @@ where
         self.status.set_bit(*self.any.last_commit_loc, false);
         self.state
             .dirty_chunks
-            .insert(BitMap::<N>::unpruned_chunk(*self.any.last_commit_loc));
+            .insert(BitMap::<N>::to_chunk_index(*self.any.last_commit_loc));
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
@@ -490,8 +489,8 @@ where
         let inactivity_floor_loc = self
             .any
             .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, new_loc| {
-                dirty_chunks.insert(BitMap::<N>::unpruned_chunk(*old_loc));
-                dirty_chunks.insert(BitMap::<N>::unpruned_chunk(*new_loc));
+                dirty_chunks.insert(BitMap::<N>::to_chunk_index(*old_loc));
+                dirty_chunks.insert(BitMap::<N>::to_chunk_index(*new_loc));
             })
             .await?;
 
@@ -752,8 +751,7 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     let inputs = try_join_all(
         chunks
             .map(|chunk_idx| {
-                let relative_idx = chunk_idx - bitmap.pruned_chunks();
-                let chunk = *bitmap.get_chunk(relative_idx);
+                let chunk = *bitmap.get_chunk(chunk_idx);
                 let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
                 async move {
                     let ops_digest = ops_mmr.get_node(ops_pos).await?.ok_or(

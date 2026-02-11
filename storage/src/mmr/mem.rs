@@ -1,5 +1,7 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::pos_to_height;
 use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
@@ -7,8 +9,6 @@ use crate::mmr::{
     Error::{self, *},
     Location, Position, Proof,
 };
-#[cfg(any(feature = "std", test))]
-use crate::mmr::iterator::pos_to_height;
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,

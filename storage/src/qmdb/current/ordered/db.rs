@@ -246,7 +246,7 @@ where
                 status.push(append);
                 if let Some(loc) = loc {
                     status.set_bit(*loc, false);
-                    dirty_chunks.insert(BitMap::<N>::unpruned_chunk(*loc));
+                    dirty_chunks.insert(BitMap::<N>::to_chunk_index(*loc));
                 }
             })
             .await

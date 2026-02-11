@@ -295,8 +295,8 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.loc);
             assert_eq!(
-                BitMap::<32>::unpruned_chunk(*active_loc),
-                BitMap::<32>::unpruned_chunk(*proof_inactive.loc)
+                BitMap::<32>::to_chunk_index(*active_loc),
+                BitMap::<32>::to_chunk_index(*proof_inactive.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.loc = active_loc;
