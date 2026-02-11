@@ -95,8 +95,7 @@ where
         mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        let mut mmr =
-            Self::align(mmr.into_dirty(), &journal, &mut hasher, apply_batch_size).await?;
+        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
@@ -121,7 +120,7 @@ where
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size().await;
-        let mut mmr_size = mmr.leaves();
+        let mut mmr_size = mmr.leaves().await;
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR items");
@@ -153,7 +152,7 @@ where
         }
 
         // At this point the MMR and journal should be consistent.
-        assert_eq!(journal.size().await, *mmr.leaves());
+        assert_eq!(journal.size().await, *mmr.leaves().await);
 
         Ok(mmr.merkleize(hasher))
     }
@@ -163,7 +162,7 @@ where
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
-        if self.mmr.size() == 0 {
+        if self.mmr.size().await == 0 {
             // DB is empty, nothing to prune.
             return Ok(Location::new_unchecked(self.reader().await.bounds().start));
         }
@@ -266,8 +265,8 @@ where
     }
 
     /// Return the root of the MMR.
-    pub const fn root(&self) -> H::Digest {
-        self.mmr.root()
+    pub async fn root(&self) -> H::Digest {
+        self.mmr.root().await
     }
 
     /// Convert this journal into its dirty counterpart for batched updates.
@@ -392,8 +391,7 @@ where
         // Align the MMR and journal.
         let mut hasher = StandardHasher::<H>::new();
         let mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let mut mmr =
-            Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -433,8 +431,7 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let mut mmr =
-            Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+        let mmr = Self::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -489,7 +486,7 @@ where
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
         self.journal.rewind(size).await?;
 
-        let leaves = *self.mmr.leaves();
+        let leaves = *self.mmr.leaves().await;
         if leaves > size {
             self.mmr
                 .pop((leaves - size) as usize)
@@ -717,7 +714,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
+            assert_eq!(mmr.leaves().await, Location::new_unchecked(0));
             assert_eq!(journal.size().await, 0);
         });
     }
@@ -750,7 +747,7 @@ mod tests {
                 .unwrap();
 
             // MMR should have been popped to match journal
-            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
+            assert_eq!(mmr.leaves().await, Location::new_unchecked(21));
             assert_eq!(journal.size().await, 21);
         });
     }
@@ -779,7 +776,7 @@ mod tests {
                 .unwrap();
 
             // MMR should have been replayed to match journal
-            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
+            assert_eq!(mmr.leaves().await, Location::new_unchecked(21));
             assert_eq!(journal.size().await, 21);
         });
     }
@@ -1027,8 +1024,8 @@ mod tests {
                 let mut journal = journal.into_dirty();
                 journal.rewind(2).await.unwrap();
                 assert_eq!(journal.size().await, 2);
-                assert_eq!(journal.mmr.leaves(), 2);
-                assert_eq!(journal.mmr.size(), 3);
+                assert_eq!(journal.mmr.leaves().await, 2);
+                assert_eq!(journal.mmr.size().await, 3);
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.start, 0);
                 assert!(!bounds.is_empty());
@@ -1041,8 +1038,8 @@ mod tests {
                 journal.rewind(0).await.unwrap();
                 let journal = journal.merkleize();
                 assert_eq!(journal.size().await, 0);
-                assert_eq!(journal.mmr.leaves(), 0);
-                assert_eq!(journal.mmr.size(), 0);
+                assert_eq!(journal.mmr.leaves().await, 0);
+                assert_eq!(journal.mmr.size().await, 0);
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.start, 0);
                 assert!(bounds.is_empty());
@@ -1061,7 +1058,7 @@ mod tests {
                 journal.rewind(98).await.unwrap();
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.end, 98);
-                assert_eq!(journal.mmr.leaves(), 98);
+                assert_eq!(journal.mmr.leaves().await, 98);
                 assert_eq!(bounds.start, 98);
                 assert!(bounds.is_empty());
             }
@@ -1449,7 +1446,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root();
+            let root = journal.root().await;
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1481,7 +1478,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root();
+            let root = journal.root().await;
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1514,7 +1511,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root();
+            let root = journal.root().await;
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1576,7 +1573,7 @@ mod tests {
 
             // Capture root at historical state
             let mut hasher = StandardHasher::new();
-            let historical_root = journal.root();
+            let historical_root = journal.root().await;
             let historical_size = journal.size().await;
 
             // Add more operations after the historical state

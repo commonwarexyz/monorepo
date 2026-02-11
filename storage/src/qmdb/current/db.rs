@@ -458,7 +458,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    fn root(&self) -> H::Digest {
+    async fn root(&self) -> H::Digest {
         self.root()
     }
 

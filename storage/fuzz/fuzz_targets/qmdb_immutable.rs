@@ -195,7 +195,7 @@ fn fuzz(input: FuzzInput) {
                         if let Ok((proof, ops)) =
                             merkleized_db.proof(safe_start, safe_max_ops).await
                         {
-                            let root = merkleized_db.root();
+                            let root = merkleized_db.root().await;
                             let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
                         }
                         db = merkleized_db.into_mutable();
@@ -240,7 +240,7 @@ fn fuzz(input: FuzzInput) {
 
                 ImmutableOperation::Root => {
                     let clean_db = db.into_merkleized();
-                    let _ = clean_db.root();
+                    let _ = clean_db.root().await;
                     db = clean_db.into_mutable();
                 }
             }
