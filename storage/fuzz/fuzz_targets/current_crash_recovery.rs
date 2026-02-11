@@ -101,7 +101,7 @@ fn make_config(
         log_journal_partition: format!("crash_log_journal_{suffix}"),
         log_items_per_blob: NZU64!(log_items_per_blob),
         log_write_buffer: write_buffer,
-        bitmap_metadata_partition: format!("crash_bitmap_metadata_{suffix}"),
+        grafted_mmr_metadata_partition: format!("crash_grafted_mmr_metadata_{suffix}"),
         translator: TwoCap,
         page_cache: CacheRef::new(page_size, page_cache_size),
         thread_pool: None,

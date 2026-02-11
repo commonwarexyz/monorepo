@@ -96,7 +96,7 @@ fn fuzz(data: FuzzInput) {
             log_journal_partition: "fuzz_current_log_journal".into(),
             log_items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
+            grafted_mmr_metadata_partition: "fuzz_current_metadata".into(),
             translator: TwoCap,
             page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             thread_pool: None,

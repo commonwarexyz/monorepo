@@ -126,7 +126,7 @@ fn current_cfg(pool: ThreadPool) -> CConfig<EightCap, (commonware_codec::RangeCf
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
-        bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
+        grafted_mmr_metadata_partition: format!("grafted_mmr_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(pool),
         page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),

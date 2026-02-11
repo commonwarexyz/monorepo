@@ -103,7 +103,8 @@ pub struct Db<
 
     /// Each leaf is hash(chunk || ops_subtree_root) for a complete bitmap chunk and
     /// the ops MMR node at the grafting height.
-    /// Nodes are hashed using their position in the ops MMR rather than their grafted position.
+    /// Internal nodes are hashed using their position in the ops MMR rather than their
+    /// grafted position.
     pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
 
     /// Persists:
@@ -111,8 +112,8 @@ pub struct Db<
     /// - The grafted MMR pinned nodes at key [NODE_PREFIX]
     pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// Optional thread pool for parallelizing grafted digest computation.
-    pub(super) pool: Option<ThreadPool>,
+    /// Optional thread pool for parallelizing grafted leaf computation.
+    pub(super) thread_pool: Option<ThreadPool>,
 
     /// Type state based on whether the database is [Merkleized] or [Unmerkleized].
     pub(super) state: S,
@@ -249,7 +250,7 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [mmr::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        // Persist grafted digest pruning state before pruning the ops log. If the subsequent
+        // Persist grafted MMR pruning state before pruning the ops log. If the subsequent
         // `any.prune` fails, the metadata is ahead of the log, which is safe: on recovery,
         // `build_grafted_mmr` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
@@ -265,13 +266,17 @@ where
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        self.metadata
-            .put(key, self.status.pruned_chunks().to_be_bytes().to_vec());
+        self.metadata.put(
+            key,
+            (self.status.pruned_chunks() as u64).to_be_bytes().to_vec(),
+        );
 
-        // Write the grafted digest pinned nodes. These are the ops-space peaks covering the
+        // Write the grafted MMR pinned nodes. These are the ops-space peaks covering the
         // pruned portion of the bitmap.
-        let pruned_ops_leaves = self.status.pruned_chunks() as u64 * BitMap::<N>::CHUNK_SIZE_BITS;
-        let ops_mmr_size = Position::try_from(Location::new_unchecked(pruned_ops_leaves))?;
+        let pruned_ops = (self.status.pruned_chunks() as u64)
+            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
+            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
+        let ops_mmr_size = Position::try_from(Location::new_unchecked(pruned_ops))?;
         let grafting_height = grafting::height::<N>();
         for (i, (ops_pos, _)) in PeakIterator::new(ops_mmr_size).enumerate() {
             let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
@@ -329,7 +334,7 @@ where
             status: self.status,
             grafted_mmr: self.grafted_mmr,
             metadata: self.metadata,
-            pool: self.pool,
+            thread_pool: self.thread_pool,
             state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
             },
@@ -359,7 +364,7 @@ where
             mut status,
             grafted_mmr,
             metadata,
-            pool,
+            thread_pool: pool,
             state,
         } = self;
 
@@ -421,7 +426,7 @@ where
             status,
             grafted_mmr,
             metadata,
-            pool,
+            thread_pool: pool,
             state: Merkleized { root },
         })
     }
@@ -446,7 +451,7 @@ where
             status: self.status,
             grafted_mmr: self.grafted_mmr,
             metadata: self.metadata,
-            pool: self.pool,
+            thread_pool: self.thread_pool,
             state: Unmerkleized {
                 dirty_chunks: self.state.dirty_chunks,
             },
@@ -527,7 +532,7 @@ where
                 status: self.status,
                 grafted_mmr: self.grafted_mmr,
                 metadata: self.metadata,
-                pool: self.pool,
+                thread_pool: self.thread_pool,
                 state: Unmerkleized {
                     dirty_chunks: self.state.dirty_chunks,
                 },
@@ -556,7 +561,7 @@ where
             status: self.status,
             grafted_mmr: self.grafted_mmr,
             metadata: self.metadata,
-            pool: self.pool,
+            thread_pool: self.thread_pool,
             state: Unmerkleized {
                 dirty_chunks: HashSet::new(),
             },
@@ -702,7 +707,7 @@ pub(super) async fn compute_root<H: Hasher, S: mmr::storage::Storage<H::Digest>,
     let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
 
     // Collect peak digests from the grafted storage, which transparently dispatches
-    // to the grafted digest cache or the ops MMR based on height.
+    // to the grafted MMR or the ops MMR based on height.
     let mut peaks = Vec::new();
     for (peak_pos, _) in PeakIterator::new(size) {
         let digest = storage
@@ -746,23 +751,24 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 
     // (ops_pos, ops_digest, chunk) for each chunk, where ops_pos is the position of the ops MMR
     // node on which to graft the chunk, and ops_digest is the digest of that node.
-    let inputs = try_join_all(
-        chunks
-            .map(|chunk_idx| {
-                let chunk = *bitmap.get_chunk(chunk_idx);
-                let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
-                async move {
-                    let ops_digest = ops_mmr.get_node(ops_pos).await?.ok_or(
-                        mmr::Error::MissingGraftedDigest(
-                            Location::try_from(ops_pos).unwrap_or_default(),
-                        ),
-                    )?;
-                    Ok::<_, Error>((ops_pos, ops_digest, chunk))
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
-    .await?;
+    let inputs =
+        try_join_all(
+            chunks
+                .map(|chunk_idx| {
+                    let chunk = *bitmap.get_chunk(chunk_idx);
+                    let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
+                    async move {
+                        let ops_digest = ops_mmr.get_node(ops_pos).await?.ok_or(
+                            mmr::Error::MissingGraftedLeaf(
+                                Location::try_from(ops_pos).unwrap_or_default(),
+                            ),
+                        )?;
+                        Ok::<_, Error>((ops_pos, ops_digest, chunk))
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await?;
 
     // Hash each: grafted_leaf = hash(chunk || ops_subtree_root).
     Ok(

@@ -24,7 +24,7 @@
 //!   into a single authenticated structure (see below).
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed
-//!   to restore the grafted digest cache after pruning old bitmap chunks.
+//!   to restore the grafted MMR after pruning old bitmap chunks.
 //!
 //! # Grafting: combining the activity status bitmap and the ops MMR
 //!
@@ -60,13 +60,13 @@
 //! Ops MMR positions (8 leaves):
 //!
 //!   Height
-//!     3              14                    <-- peak (standard MMR hash of grafted children)
+//!     3              14                    <-- peak: digest commits to ops MMR and bitmap chunks
 //!                  /    \
 //!                 /      \
 //!                /        \
 //!     2  [G]    6          13    [G]       <-- grafting height: grafted leaves
 //!             /   \      /    \
-//!     1      2     5    9     12           <-- below grafting height: pure ops MMR
+//!     1      2     5    9     12           <-- below grafting height: pure ops MMR nodes
 //!           / \   / \  / \   /  \
 //!     0    0   1 3   4 7  8 10  11
 //!          ^           ^
@@ -82,7 +82,7 @@
 //! Position 14 (above grafting height) is a standard MMR internal node:
 //! - `pos 14: hash(14 || digest(pos 6) || digest(pos 13))`
 //!
-//! The grafted digest cache stores positions 6, 13, and 14. The ops MMR stores everything below
+//! The grafted MMR stores positions 6, 13, and 14. The ops MMR stores everything below
 //! (positions 0-5 and 7-12). Together they form a single virtual MMR whose root authenticates
 //! both the operations and their activity status.
 //!
@@ -182,8 +182,8 @@ pub struct FixedConfig<T: Translator> {
     /// The size of the write buffer to use for each blob in the log journal.
     pub log_write_buffer: NonZeroUsize,
 
-    /// The name of the storage partition used for the bitmap metadata.
-    pub bitmap_metadata_partition: String,
+    /// The name of the storage partition used for the grafted MMR metadata.
+    pub grafted_mmr_metadata_partition: String,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -241,8 +241,8 @@ pub struct VariableConfig<T: Translator, C> {
     /// The items per blob configuration value used by the log journal.
     pub log_items_per_blob: NonZeroU64,
 
-    /// The name of the storage partition used for the bitmap metadata.
-    pub bitmap_metadata_partition: String,
+    /// The name of the storage partition used for the grafted MMR metadata.
+    pub grafted_mmr_metadata_partition: String,
 
     /// The translator used by the compressed index.
     pub translator: T,
@@ -307,15 +307,12 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
-    let pool = config.thread_pool.clone();
+    let thread_pool = config.thread_pool.clone();
+    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
-    let (metadata, pruned_chunks, pinned_nodes) = db::init_metadata::<E, H::Digest>(
-        context.with_label("bitmap_metadata"),
-        &bitmap_metadata_partition,
-    )
-    .await?;
+    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
+    let (metadata, pruned_chunks, pinned_nodes) =
+        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
     // Initialize the activity status bitmap.
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
@@ -337,14 +334,14 @@ where
     )
     .await?;
 
-    // Build the grafted MMR from the bitmap chunks and ops MMR.
+    // Build the grafted MMR from the bitmap and ops MMR.
     let mut hasher = StandardHasher::<H>::new();
     let grafted_mmr = db::build_grafted_mmr::<H, N>(
         &mut hasher,
         &status,
         &pinned_nodes,
         &any.log.mmr,
-        pool.as_ref(),
+        thread_pool.as_ref(),
     )
     .await?;
 
@@ -358,7 +355,7 @@ where
         status,
         grafted_mmr,
         metadata,
-        pool,
+        thread_pool,
         state: db::Merkleized { root },
     })
 }
@@ -397,15 +394,12 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let bitmap_metadata_partition = config.bitmap_metadata_partition.clone();
+    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
     let pool = config.thread_pool.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted digests).
-    let (metadata, pruned_chunks, pinned_nodes) = db::init_metadata::<E, H::Digest>(
-        context.with_label("bitmap_metadata"),
-        &bitmap_metadata_partition,
-    )
-    .await?;
+    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
+    let (metadata, pruned_chunks, pinned_nodes) =
+        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
     // Initialize the activity status bitmap.
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
@@ -448,7 +442,7 @@ where
         status,
         grafted_mmr,
         metadata,
-        pool,
+        thread_pool: pool,
         state: db::Merkleized { root },
     })
 }
@@ -509,7 +503,9 @@ pub mod tests {
             log_journal_partition: format!("{partition_prefix}_partition_prefix"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
-            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            grafted_mmr_metadata_partition: format!(
+                "{partition_prefix}_grafted_mmr_metadata_partition"
+            ),
             translator: T::default(),
             thread_pool: None,
             page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -530,7 +526,9 @@ pub mod tests {
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: (),
-            bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
+            grafted_mmr_metadata_partition: format!(
+                "{partition_prefix}_grafted_mmr_metadata_partition"
+            ),
             translator: T::default(),
             thread_pool: None,
             page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),

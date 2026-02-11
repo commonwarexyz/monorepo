@@ -58,89 +58,99 @@ pub(crate) const fn height<const N: usize>() -> u32 {
     BitMap::<N>::CHUNK_SIZE_BITS.trailing_zeros()
 }
 
-/// Given a chunk index and grafting height, returns the ops MMR position of the subtree root
-/// covering that chunk's leaves.
+// --- Coordinate conversion ---
+//
+// These functions convert between three coordinate spaces:
+//
+// 1. **Chunk index**: Sequential index (0, 1, 2, ...) of (complete) bitmap chunks.
+// 2. **Ops position**: Position in the full operations MMR.
+// 3. **Grafted position**: Position in the grafted MMR, whose leaves correspond 1:1 with chunks.
+//
+// All conversions rely on a single MMR identity: given the leftmost leaf at position P of a
+// perfect subtree, the subtree root at height h is at `P + 2^(h+1) - 2`, and conversely the
+// leftmost leaf under a subtree root at position P and height h is at `P + 2 - 2^(h+1)`.
+
+/// Convert a chunk index to the ops MMR position of the subtree root covering that chunk.
 ///
-/// Maps a chunk index (equivalent to a grafted leaf location) to its ops-space position.
+/// Chunk `i` covers ops leaves `[i * 2^h, (i+1) * 2^h)`. This returns the ops position
+/// at the grafting height that roots that range.
+///
+/// Inverse of [ops_pos_to_chunk_idx].
 pub(super) fn chunk_idx_to_ops_pos(chunk_idx: u64, grafting_height: u32) -> Position {
     let first_leaf_loc = Location::new_unchecked(chunk_idx << grafting_height);
     let first_leaf_pos = Position::try_from(first_leaf_loc).expect("chunk_idx_to_ops_pos overflow");
-    // The subtree root covering 2^h leaves starting at first_leaf_pos is at:
-    //   first_leaf_pos + 2^(h+1) - 2
     Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2)
 }
 
-/// Given an ops MMR position at the grafting height, returns the corresponding chunk index.
+/// Convert an ops MMR position at the grafting height back to its chunk index.
 ///
-/// This is the inverse of [chunk_idx_to_ops_pos].
+/// Inverse of [chunk_idx_to_ops_pos].
 pub(super) fn ops_pos_to_chunk_idx(ops_pos: Position, grafting_height: u32) -> u64 {
-    // The leftmost leaf position under the subtree rooted at ops_pos:
-    //   ops_pos + 2 - 2^(h+1)
-    // (reordered to avoid intermediate underflow)
     let leftmost_leaf_pos = *ops_pos + 2 - (1u64 << (grafting_height + 1));
     let loc = Location::try_from(Position::new(leftmost_leaf_pos))
         .expect("ops_pos_to_chunk_idx: position is not a leaf");
     *loc >> grafting_height
 }
 
-/// Convert an ops-space position (at or above the grafting height) to its grafted-space position.
+/// Convert an ops MMR position (at or above the grafting height) to a grafted MMR position.
 ///
-/// Related: [ops_pos_to_chunk_idx] converts an ops position at the grafting height to a chunk
-/// index (a sequential integer for array indexing). This function returns a grafted MMR position
-/// (for navigating the MMR structure) and works at any height at or above the grafting height.
+/// An ops node at height `ops_h` maps to a grafted node at height `ops_h - grafting_height`.
+/// The conversion descends to the leftmost ops leaf, divides by 2^h to get the chunk index
+/// (= grafted leaf location), then climbs back up to the grafted height.
+///
+/// See also [ops_pos_to_chunk_idx], which converts specifically to a chunk index (useful for
+/// array indexing) rather than a grafted MMR position.
+///
+/// Inverse of [grafted_to_ops_pos].
 ///
 /// # Panics
 ///
 /// Panics if `ops_pos` is below the grafting height.
 pub(super) fn ops_to_grafted_pos(ops_pos: Position, grafting_height: u32) -> Position {
-    let oh = pos_to_height(ops_pos);
+    let ops_height = pos_to_height(ops_pos);
     assert!(
-        oh >= grafting_height,
-        "position height {oh} < grafting height {grafting_height}"
+        ops_height >= grafting_height,
+        "position height {ops_height} < grafting height {grafting_height}"
     );
-    let gh = oh - grafting_height;
+    let grafted_height = ops_height - grafting_height;
 
-    // Find the leftmost ops-space leaf under this subtree.
-    let leftmost_ops_leaf_pos = *ops_pos + 2 - (1u64 << (oh + 1));
+    // Descend to the leftmost ops leaf, then convert to chunk index.
+    let leftmost_ops_leaf_pos = *ops_pos + 2 - (1u64 << (ops_height + 1));
     let ops_leaf_loc = Location::try_from(Position::new(leftmost_ops_leaf_pos))
         .expect("leftmost leaf is not a valid leaf position");
-
-    // Convert ops leaf location to chunk index (grafted leaf location).
     let chunk_idx = *ops_leaf_loc >> grafting_height;
 
-    // Convert chunk index to grafted-space leaf position, then climb to grafted height gh.
+    // Convert chunk index to grafted leaf position, then climb to grafted_height.
     let grafted_leaf_pos =
         Position::try_from(Location::new_unchecked(chunk_idx)).expect("chunk index overflow");
-    Position::new(*grafted_leaf_pos + (1u64 << (gh + 1)) - 2)
+    Position::new(*grafted_leaf_pos + (1u64 << (grafted_height + 1)) - 2)
 }
 
-/// Convert a grafted-space position to its ops-space position.
+/// Convert a grafted MMR position to the corresponding ops MMR position.
 ///
-/// Inverse of [ops_to_grafted_pos]. Maps a position in the grafted MMR (whose leaves are
-/// bitmap chunks) back to the corresponding ops MMR position.
+/// Inverse of [ops_to_grafted_pos]. A grafted node at height `gh` maps to an ops node at
+/// height `gh + grafting_height`.
 pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) -> Position {
-    let gh = pos_to_height(grafted_pos);
+    let grafted_height = pos_to_height(grafted_pos);
 
-    // Find the leftmost grafted-space leaf under this subtree.
-    let leftmost_grafted_leaf_pos = grafted_pos + 2 - (1u64 << (gh + 1));
+    // Descend to the leftmost grafted leaf to get the chunk index.
+    let leftmost_grafted_leaf_pos = grafted_pos + 2 - (1u64 << (grafted_height + 1));
     let chunk_idx = *Location::try_from(leftmost_grafted_leaf_pos)
         .expect("leftmost leaf is not a valid leaf position");
 
-    // Convert chunk index to ops-space leaf location.
+    // Convert chunk index to ops leaf location, then climb to ops height.
     let ops_leaf_loc = chunk_idx << grafting_height;
     let ops_leaf_pos =
         Position::try_from(Location::new_unchecked(ops_leaf_loc)).expect("ops leaf loc overflow");
-
-    // Climb from the ops leaf to the ops height (gh + grafting_height).
-    let oh = gh + grafting_height;
-    Position::new(*ops_leaf_pos + (1u64 << (oh + 1)) - 2)
+    let ops_height = grafted_height + grafting_height;
+    Position::new(*ops_leaf_pos + (1u64 << (ops_height + 1)) - 2)
 }
 
-/// An MMR [HasherTrait] adapter that converts grafted-space positions to ops-space before hashing.
+/// An MMR hasher adapter that converts grafted-space positions to ops-space before hashing.
 ///
-/// The grafted MMR uses a compressed coordinate system (grafted-space) where each leaf corresponds
-/// to one bitmap chunk. Hash pre-images must use ops-space positions for proof compatibility with
-/// the ops MMR. This adapter intercepts [HasherTrait::node_digest] to perform the conversion;
+/// Internal nodes in the grafted MMR must hash with ops-space positions so that proofs
+/// generated against the grafted MMR are compatible with the ops MMR. This adapter
+/// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods delegate unchanged.
 pub(super) struct GraftedHasher<H: HasherTrait> {
     inner: H,
@@ -231,15 +241,6 @@ impl<'a, H: CHasher> Verifier<'a, H> {
             start_chunk_index,
         }
     }
-
-    /// Resolve the local index into `self.chunks` for the ops position at the grafting height.
-    ///
-    /// Returns `None` if the chunk index is outside the range covered by `self.chunks`.
-    fn resolve_chunk_idx(&self, pos: Position) -> Option<usize> {
-        let chunk_idx = ops_pos_to_chunk_idx(pos, self.grafting_height);
-        let local = chunk_idx.checked_sub(self.start_chunk_index)?;
-        (local < self.chunks.len() as u64).then_some(local as usize)
-    }
 }
 
 impl<H: CHasher> HasherTrait for Verifier<'_, H> {
@@ -274,7 +275,12 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
                 // At grafting height: compute ops subtree root, then combine with bitmap chunk.
                 let ops_subtree_root = self.hasher.node_digest(pos, left_digest, right_digest);
 
-                let Some(local) = self.resolve_chunk_idx(pos) else {
+                let chunk_idx = ops_pos_to_chunk_idx(pos, self.grafting_height);
+                let Some(local) = chunk_idx
+                    .checked_sub(self.start_chunk_index)
+                    .filter(|&l| l < self.chunks.len() as u64)
+                    .map(|l| l as usize)
+                else {
                     debug!(?pos, "chunk not available for grafted leaf");
                     return ops_subtree_root;
                 };
@@ -350,6 +356,7 @@ mod tests {
     use super::*;
     use crate::mmr::{
         conformance::build_test_mmr,
+        iterator::PeakIterator,
         mem::{CleanMmr, DirtyMmr},
         verification, Position, StandardHasher,
     };
@@ -361,7 +368,7 @@ mod tests {
     ///
     /// Each grafted leaf is `hash(chunk || ops_subtree_root)` where `ops_subtree_root` is the ops
     /// MMR node at the mapped position.
-    fn precompute_grafted_mmr(
+    fn build_test_grafted_mmr(
         standard: &mut StandardHasher<Sha256>,
         ops_mmr: &CleanMmr<sha256::Digest>,
         chunks: &[sha256::Digest],
@@ -489,7 +496,7 @@ mod tests {
                 assert_eq!(chunk_idx_to_ops_pos(0, 0), Position::new(0));
                 assert_eq!(chunk_idx_to_ops_pos(1, 0), Position::new(1));
 
-                let grafted = precompute_grafted_mmr(&mut standard, &ops_mmr, &elements, 0);
+                let grafted = build_test_grafted_mmr(&mut standard, &ops_mmr, &elements, 0);
                 let gp = ops_to_grafted_pos(chunk_idx_to_ops_pos(0, 0), 0);
                 assert!(grafted.get_node(gp).is_some());
             }
@@ -504,7 +511,7 @@ mod tests {
                 assert_eq!(chunk_idx_to_ops_pos(3, 1), Position::new(12));
                 assert_eq!(chunk_idx_to_ops_pos(4, 1), Position::new(17));
 
-                let grafted = precompute_grafted_mmr(&mut standard, &ops_mmr, &elements, 1);
+                let grafted = build_test_grafted_mmr(&mut standard, &ops_mmr, &elements, 1);
                 let gp = ops_to_grafted_pos(chunk_idx_to_ops_pos(0, 1), 1);
                 assert!(grafted.get_node(gp).is_some());
             }
@@ -586,7 +593,7 @@ mod tests {
             // With grafting height 1, each grafted leaf covers 2 ops leaves, so 4 ops leaves
             // yield 2 grafted leaves.
             let grafted =
-                precompute_grafted_mmr(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
+                build_test_grafted_mmr(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
 
             let ops_root = *ops_mmr.root();
 
@@ -596,7 +603,6 @@ mod tests {
 
                 // Compute the combined root by iterating ops peaks.
                 let combined_root = {
-                    use crate::mmr::iterator::PeakIterator;
                     let ops_size = ops_mmr.size();
                     let ops_leaves = Location::try_from(ops_size).unwrap();
                     let mut peaks = Vec::new();
@@ -754,7 +760,6 @@ mod tests {
 
             // Compute the combined root.
             let combined_root = {
-                use crate::mmr::iterator::PeakIterator;
                 let ops_size = ops_mmr.size();
                 let ops_leaves = Location::try_from(ops_size).unwrap();
                 let mut peaks = Vec::new();

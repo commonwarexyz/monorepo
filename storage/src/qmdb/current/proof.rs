@@ -231,9 +231,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     ) -> Result<Self, Error> {
         // Since `loc` is assumed to be in-bounds, `loc + 1` won't overflow.
         let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1).await?;
-        let chunk_idx = (*loc / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-        let chunk = *status.get_chunk(chunk_idx);
-
+        let chunk = *status.get_chunk_containing(*loc);
         Ok(Self {
             loc,
             chunk,
