@@ -597,8 +597,8 @@ impl<const N: usize> BitMap<N> {
         let end = end - 1;
 
         // Get the chunks containing the start and end bits.
-        let first_chunk = Self::chunk(start);
-        let last_chunk = Self::chunk(end);
+        let first_chunk = Self::to_chunk_index(start);
+        let last_chunk = Self::to_chunk_index(end);
 
         // All of these chunks require all of their bits to be checked.
         // If first_chunk == last_chunk, we skip the loop.
