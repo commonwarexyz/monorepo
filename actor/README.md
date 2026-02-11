@@ -75,7 +75,7 @@ At minimum, you provide:
 - `type Args`: startup payload (`()` when unused)
 - `type Snapshot`: cheap clone used for concurrent read-only handlers
 - `snapshot(...)`
-- `on_readonly(...)`
+- `on_read_only(...)`
 - `on_read_write(...)`
 
 ### Minimal actor example
@@ -108,7 +108,7 @@ impl<E: Spawner> Actor<E> for Counter {
         self.total
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: CounterMailboxReadOnlyMessage,
@@ -153,7 +153,7 @@ runner.start(|context| async move {
 - read-only ingress runs concurrently on snapshots
 - read-write ingress runs serially on actor state
 - read-write handling is fenced behind read-only work dispatched before the write arrived
-- returning `Err` from `on_readonly` or `on_read_write` is fatal but `on_shutdown` is still called after draining in-flight reads
+- returning `Err` from `on_read_only` or `on_read_write` is fatal but `on_shutdown` is still called after draining in-flight reads
 
 `subscribe` detail:
 
@@ -200,7 +200,7 @@ impl<E: Spawner + Clock> Actor<E> for ExternalActor {
         self.value
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: ExternalMailboxReadOnlyMessage,
