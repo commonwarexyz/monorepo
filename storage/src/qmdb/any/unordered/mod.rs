@@ -1,3 +1,9 @@
+#[cfg(any(test, feature = "test-traits"))]
+use crate::journal::contiguous::Persistable as JournalPersistable;
+#[cfg(any(test, feature = "test-traits"))]
+use crate::qmdb::any::states::{
+    CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+};
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
@@ -13,11 +19,6 @@ use crate::{
         update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
         NonDurable, Unmerkleized,
     },
-};
-#[cfg(any(test, feature = "test-traits"))]
-use crate::{
-    qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -38,7 +39,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -222,7 +223,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -263,7 +264,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: CodecShared,
@@ -282,7 +283,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -309,7 +310,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -328,7 +329,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
