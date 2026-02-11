@@ -350,7 +350,8 @@ where
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
-    let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
+    let partial_chunk = db::partial_chunk(&status);
+    let root = db::compute_root(&mut hasher, &storage, partial_chunk).await?;
 
     Ok(db::Db {
         any,
@@ -439,7 +440,8 @@ where
 
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
-    let root = db::compute_root::<H, N>(&mut hasher, &status, &storage).await?;
+    let partial_chunk = db::partial_chunk(&status);
+    let root = db::compute_root(&mut hasher, &storage, partial_chunk).await?;
 
     Ok(db::Db {
         any,

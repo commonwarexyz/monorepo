@@ -14,6 +14,7 @@ use crate::{
         self,
         hasher::Hasher as _,
         iterator::{nodes_to_pin, PeakIterator},
+        storage::Storage as _,
         Location, Position, Proof, StandardHasher,
     },
     qmdb::{
@@ -414,7 +415,9 @@ where
 
         // Compute and cache the root.
         let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
-        let root = compute_root::<H, N>(&mut any.log.hasher, &status, &storage).await?;
+        let partial_chunk = partial_chunk(&status);
+        let root =
+            compute_root::<H, _, N>(&mut any.log.hasher, &storage, partial_chunk).await?;
 
         Ok(Db {
             any,
@@ -678,11 +681,25 @@ where
     }
 }
 
-/// Compute the root of the current QMDB from the grafted storage and bitmap.
-pub(super) async fn compute_root<H: Hasher, const N: usize>(
+/// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
+/// `None` if all bits fall on complete chunk boundaries.
+pub(super) fn partial_chunk<const N: usize>(bitmap: &BitMap<N>) -> Option<(&[u8; N], u64)> {
+    let (last_chunk, next_bit) = bitmap.last_chunk();
+    if next_bit == BitMap::<N>::CHUNK_SIZE_BITS {
+        None
+    } else {
+        Some((last_chunk, next_bit))
+    }
+}
+
+/// Compute the root digest of a [Db].
+/// `storage` is the grafted storage over the grafted MMR and the ops MMR.
+/// `partial_chunk` is `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk,
+/// or `None` if all bits fall on complete chunk boundaries.
+pub(super) async fn compute_root<H: Hasher, S: mmr::storage::Storage<H::Digest>, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    bitmap: &BitMap<N>,
-    storage: &impl mmr::storage::Storage<H::Digest>,
+    storage: &grafting::Storage<'_, H::Digest, S>,
+    partial_chunk: Option<(&[u8; N], u64)>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size();
     let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
@@ -700,10 +717,9 @@ pub(super) async fn compute_root<H: Hasher, const N: usize>(
 
     let mmr_root = hasher.root(leaves, peaks.iter());
 
-    let (last_chunk, next_bit) = bitmap.last_chunk();
-    if next_bit == BitMap::<N>::CHUNK_SIZE_BITS {
+    let Some((last_chunk, next_bit)) = partial_chunk else {
         return Ok(mmr_root);
-    }
+    };
 
     // There are bits in an uncommitted (partial) chunk, so we need to incorporate that information
     // into the root digest to fully capture the database state.
