@@ -162,6 +162,10 @@ impl<const N: usize> BitMap<N> {
 
     /// Get a reference to a chunk by its index in the current bitmap.
     /// Note this is an index into the chunks, not a bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the `chunk` is out of bounds.
     #[inline]
     pub(super) fn get_chunk(&self, chunk: usize) -> &[u8; N] {
         assert!(
