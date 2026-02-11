@@ -581,35 +581,36 @@ impl<const N: usize> BitMap<N> {
     /// In particular, indices that are out of bounds of this bitmap do not
     /// affect the result, and if no indices are in bounds (which includes the
     /// case where the range is empty) then the result is `true`.
-    pub fn is_unset_in_range(&self, range: Range<u64>) -> bool {
+    pub fn is_unset(&self, range: Range<u64>) -> bool {
         let start = range.start.min(self.len);
         let end = range.end.min(self.len);
         if start >= end {
             return true;
         }
+
         // We know this can't underflow, because start < end.
         //
         // We now want "end" to represent the last bit we want to consider.
         let end = end - 1;
 
+        // Get the chunks containing the start and end bits.
         let first_chunk = Self::chunk(start);
         let last_chunk = Self::chunk(end);
-        let zero = [0u8; N];
 
         // All of these chunks require all of their bits to be checked.
         // If first_chunk == last_chunk, we skip the loop.
+        let zero = [0u8; N];
         for full_chunk in (first_chunk + 1)..last_chunk {
             if self.chunks[full_chunk] != zero {
                 return false;
             }
         }
 
+        // Check first chunk tail (or whole range if first_chunk == last_chunk).
         let start_byte = Self::chunk_byte_offset(start);
         let end_byte = Self::chunk_byte_offset(end);
         let start_mask = (0xFFu16 << ((start & 0b111) as u32)) as u8;
         let end_mask = (0xFFu16 >> (7 - ((end & 0b111) as u32))) as u8;
-
-        // Check first chunk tail (or whole range if first_chunk == last_chunk).
         let first = &self.chunks[first_chunk];
         let first_end_byte = if first_chunk == last_chunk {
             end_byte
@@ -633,7 +634,6 @@ impl<const N: usize> BitMap<N> {
                 return false;
             }
         }
-
         if first_chunk == last_chunk {
             return true;
         }
@@ -2213,7 +2213,7 @@ mod tests {
 
         proptest! {
             #[test]
-            fn is_unset_in_range_matches_naive(
+            fn is_unset_matches_naive(
                 bits in prop::collection::vec(any::<bool>(), 0..=512usize),
                 start in 0u64..=600,
                 end in 0u64..=600,
@@ -2224,7 +2224,7 @@ mod tests {
                 let expected = range.clone()
                     .all(|i| i >= bitmap.len() || !bitmap.get(i));
 
-                prop_assert_eq!(bitmap.is_unset_in_range(range), expected);
+                prop_assert_eq!(bitmap.is_unset(range), expected);
             }
         }
     }
