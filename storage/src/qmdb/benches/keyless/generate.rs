@@ -63,7 +63,7 @@ type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let keyless_cfg = keyless_cfg(thread_pool, buffer_pool);
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();

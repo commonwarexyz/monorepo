@@ -90,7 +90,7 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+                            let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
                             let buffer_pool = ctx.storage_buffer_pool().clone();
                             let any_cfg = any_cfg(thread_pool.clone(), buffer_pool.clone());
                             let current_cfg = current_cfg(thread_pool, buffer_pool);

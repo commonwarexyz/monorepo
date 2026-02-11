@@ -185,7 +185,7 @@ fn variable_current_cfg(
 
 /// Get an unordered fixed Any QMDB instance in clean state.
 async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let any_cfg = any_cfg(thread_pool, buffer_pool);
     UFixedDb::init(ctx, any_cfg).await.unwrap()
@@ -193,7 +193,7 @@ async fn get_any_unordered_fixed(ctx: Context) -> UFixedDb {
 
 /// Get an ordered fixed Any QMDB instance in clean state.
 async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let any_cfg = any_cfg(thread_pool, buffer_pool);
     OFixedDb::init(ctx, any_cfg).await.unwrap()
@@ -201,7 +201,7 @@ async fn get_any_ordered_fixed(ctx: Context) -> OFixedDb {
 
 /// Get an unordered variable Any QMDB instance in clean state.
 async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let variable_any_cfg = variable_any_cfg(thread_pool, buffer_pool);
     UVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
@@ -209,7 +209,7 @@ async fn get_any_unordered_variable(ctx: Context) -> UVAnyDb {
 
 /// Get an ordered variable Any QMDB instance in clean state.
 async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let variable_any_cfg = variable_any_cfg(thread_pool, buffer_pool);
     OVAnyDb::init(ctx, variable_any_cfg).await.unwrap()
@@ -217,7 +217,7 @@ async fn get_any_ordered_variable(ctx: Context) -> OVAnyDb {
 
 /// Get an unordered current QMDB instance.
 async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let current_cfg = current_cfg(thread_pool, buffer_pool);
     UCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -227,7 +227,7 @@ async fn get_current_unordered_fixed(ctx: Context) -> UCurrentDb {
 
 /// Get an ordered current QMDB instance.
 async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let current_cfg = current_cfg(thread_pool, buffer_pool);
     OCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -237,7 +237,7 @@ async fn get_current_ordered_fixed(ctx: Context) -> OCurrentDb {
 
 /// Get an unordered variable current QMDB instance.
 async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let variable_current_cfg = variable_current_cfg(thread_pool, buffer_pool);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, variable_current_cfg)
@@ -247,7 +247,7 @@ async fn get_current_unordered_variable(ctx: Context) -> UVCurrentDb {
 
 /// Get an ordered variable current QMDB instance.
 async fn get_current_ordered_variable(ctx: Context) -> OVCurrentDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let variable_current_cfg = variable_current_cfg(thread_pool, buffer_pool);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, variable_current_cfg)

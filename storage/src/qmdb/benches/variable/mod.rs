@@ -109,14 +109,14 @@ fn any_cfg(
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let any_cfg = any_cfg(thread_pool, buffer_pool);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let any_cfg = any_cfg(thread_pool, buffer_pool);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
@@ -144,7 +144,7 @@ fn current_cfg(
 }
 
 async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let current_cfg = current_cfg(thread_pool, buffer_pool);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
@@ -153,7 +153,7 @@ async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
 }
 
 async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
-    let thread_pool = ctx.clone().create_thread_pool(THREADS).unwrap();
+    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
     let buffer_pool = ctx.storage_buffer_pool().clone();
     let current_cfg = current_cfg(thread_pool, buffer_pool);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
