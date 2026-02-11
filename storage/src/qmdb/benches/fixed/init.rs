@@ -109,30 +109,10 @@ fn bench_fixed_init(c: &mut Criterion) {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
                             let pool = ctx.create_thread_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(
-                                pool.clone(),
-                                &ctx,
-                                crate::fixed::PAGE_SIZE,
-                                crate::fixed::PAGE_CACHE_SIZE,
-                            );
-                            let current_cfg = current_cfg(
-                                pool.clone(),
-                                &ctx,
-                                crate::fixed::PAGE_SIZE,
-                                crate::fixed::PAGE_CACHE_SIZE,
-                            );
-                            let variable_any_cfg = variable_any_cfg(
-                                pool.clone(),
-                                &ctx,
-                                crate::fixed::PAGE_SIZE,
-                                crate::fixed::PAGE_CACHE_SIZE,
-                            );
-                            let variable_current_cfg = variable_current_cfg(
-                                pool,
-                                &ctx,
-                                crate::fixed::PAGE_SIZE,
-                                crate::fixed::PAGE_CACHE_SIZE,
-                            );
+                            let any_cfg = any_cfg(pool.clone(), &ctx);
+                            let current_cfg = current_cfg(pool.clone(), &ctx);
+                            let variable_any_cfg = variable_any_cfg(pool.clone(), &ctx);
+                            let variable_current_cfg = variable_current_cfg(pool, &ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {

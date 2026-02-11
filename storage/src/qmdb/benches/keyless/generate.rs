@@ -38,8 +38,6 @@ const THREADS: NonZeroUsize = NZUsize!(8);
 fn keyless_cfg(
     pool: ThreadPool,
     context: &Context,
-    page_cache_page_size: NonZeroU16,
-    page_cache_capacity: NonZeroUsize,
 ) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -54,8 +52,8 @@ fn keyless_cfg(
         thread_pool: Some(pool),
         page_cache: CacheRef::new(
             context.storage_buffer_pool().clone(),
-            page_cache_page_size,
-            page_cache_capacity,
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
         ),
     }
 }
@@ -70,7 +68,7 @@ type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let keyless_cfg = keyless_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let keyless_cfg = keyless_cfg(pool, &ctx);
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 
     // Convert to mutable state for operations.

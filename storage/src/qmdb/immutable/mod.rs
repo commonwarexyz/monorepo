@@ -540,8 +540,6 @@ pub(super) mod test {
     pub(crate) fn db_config(
         suffix: &str,
         context: &deterministic::Context,
-        page_cache_page_size: NonZeroU16,
-        page_cache_capacity: NonZeroUsize,
     ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -557,8 +555,8 @@ pub(super) mod test {
             thread_pool: None,
             page_cache: CacheRef::new(
                 context.storage_buffer_pool().clone(),
-                page_cache_page_size,
-                page_cache_capacity,
+                PAGE_SIZE,
+                PAGE_CACHE_SIZE,
             ),
         }
     }
@@ -567,7 +565,7 @@ pub(super) mod test {
     async fn open_db(
         context: deterministic::Context,
     ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
-        let cfg = db_config("partition", &context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let cfg = db_config("partition", &context);
         Immutable::init(context, cfg).await.unwrap()
     }
 

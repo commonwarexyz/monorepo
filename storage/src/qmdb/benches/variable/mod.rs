@@ -89,8 +89,6 @@ type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_S
 fn any_cfg(
     pool: ThreadPool,
     context: &Context,
-    page_cache_page_size: NonZeroU16,
-    page_cache_capacity: NonZeroUsize,
 ) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -106,29 +104,27 @@ fn any_cfg(
         thread_pool: Some(pool),
         page_cache: CacheRef::new(
             context.storage_buffer_pool().clone(),
-            page_cache_page_size,
-            page_cache_capacity,
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
         ),
     }
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let any_cfg = any_cfg(pool, &ctx);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let any_cfg = any_cfg(pool, &ctx);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 fn current_cfg(
     pool: ThreadPool,
     context: &Context,
-    page_cache_page_size: NonZeroU16,
-    page_cache_capacity: NonZeroUsize,
 ) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -145,15 +141,15 @@ fn current_cfg(
         thread_pool: Some(pool),
         page_cache: CacheRef::new(
             context.storage_buffer_pool().clone(),
-            page_cache_page_size,
-            page_cache_capacity,
+            PAGE_SIZE,
+            PAGE_CACHE_SIZE,
         ),
     }
 }
 
 async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let current_cfg = current_cfg(pool, &ctx);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
@@ -161,7 +157,7 @@ async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
 
 async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
     let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(pool, &ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let current_cfg = current_cfg(pool, &ctx);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
