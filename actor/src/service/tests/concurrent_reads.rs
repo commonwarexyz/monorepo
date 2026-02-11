@@ -50,7 +50,7 @@ impl<E: Spawner> Actor<E> for ConcurrentReadActor {
         )
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: ConcurrentReadMailboxReadOnlyMessage,
@@ -462,7 +462,7 @@ impl<E: Spawner> Actor<E> for FailingReadActor {
 
     fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         _snapshot: Self::Snapshot,
         message: FailingReadMailboxReadOnlyMessage,

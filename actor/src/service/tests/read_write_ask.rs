@@ -26,7 +26,7 @@ impl<E: Spawner> Actor<E> for AskReadWriteActor {
         self.value
     }
 
-    async fn on_readonly(
+    async fn on_read_only(
         _context: E,
         snapshot: Self::Snapshot,
         message: AskReadWriteMailboxReadOnlyMessage,
