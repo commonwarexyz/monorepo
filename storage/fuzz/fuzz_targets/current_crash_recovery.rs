@@ -8,7 +8,11 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef,
+    deterministic::{self, Context},
+    Metrics as _, Runner,
+};
 use commonware_storage::{
     mmr::Location,
     qmdb::{
@@ -86,6 +90,7 @@ struct FuzzInput {
 }
 
 fn make_config(
+    ctx: &Context,
     suffix: &str,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
@@ -103,7 +108,7 @@ fn make_config(
         log_write_buffer: write_buffer,
         grafted_mmr_metadata_partition: format!("crash_grafted_mmr_metadata_{suffix}"),
         translator: TwoCap,
-        page_cache: CacheRef::new(page_size, page_cache_size),
+        page_cache: CacheRef::from_pooler(ctx, page_size, page_cache_size),
         thread_pool: None,
     }
 }
@@ -135,6 +140,7 @@ fn fuzz(input: FuzzInput) {
             let db = CleanDb::init(
                 ctx.with_label("db"),
                 make_config(
+                    &ctx,
                     &suffix,
                     page_size,
                     page_cache_size,
@@ -230,6 +236,7 @@ fn fuzz(input: FuzzInput) {
             let db = CleanDb::init(
                 ctx.with_label("recovered"),
                 make_config(
+                    &ctx,
                     &suffix,
                     page_size,
                     page_cache_size,
