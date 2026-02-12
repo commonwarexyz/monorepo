@@ -185,9 +185,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Inner<E, V> {
 pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     /// Inner state for data journal metadata.
     ///
-    /// Write guards serialize mutating operations (`append`, `prune`, `rewind`).
-    /// Upgradable-read guards are used by `commit`/`sync` so readers can continue
-    /// while mutators are blocked.
+    /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
+    /// race conditions while allowing concurrent reads during sync.
     inner: RwLock<Inner<E, V>>,
 
     /// Index mapping positions to byte offsets within the data journal.

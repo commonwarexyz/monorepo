@@ -175,9 +175,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     /// Inner state with segmented journal and size.
     ///
-    /// Write guards serialize mutating operations (`append`, `prune`, `rewind`).
-    /// Upgradable-read guards are used by `sync` so readers can continue while
-    /// mutators are blocked.
+    /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
+    /// race conditions while allowing concurrent reads during sync.
     inner: RwLock<Inner<E, A>>,
 
     /// The maximum number of items per blob (section).
@@ -589,7 +588,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Only the tail section can have pending updates since historical sections are synced
     /// when they become full.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Serialize with append/prune/rewind so section selection is stable, while still allowing
+        // Serialize with append/prune/rewind to ensure section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
@@ -600,9 +599,9 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // non-existent section is safe (returns Ok).
         inner.journal.sync(tail_section).await?;
 
+        // Persist metadata only when pruning_boundary is mid-section.
         let pruning_boundary = inner.pruning_boundary;
         let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
-
         let put = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
             let needs_update = pruning_boundary_from_metadata
                 .is_none_or(|bytes| bytes.as_slice() != pruning_boundary.to_be_bytes());
@@ -653,9 +652,10 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn append(&self, item: A) -> Result<u64, Error> {
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
+
+        // Append the item to the journal.
         let position = inner.size;
         let (section, _pos_in_section) = self.position_to_section(position);
-
         inner.journal.append(section, item).await?;
         inner.size += 1;
 
