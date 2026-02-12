@@ -242,9 +242,7 @@ impl<B: Blob> Append<B> {
             let len = buf_guard.data.len();
             if len > 0 {
                 let mut shrunk = IoBufMut::with_capacity(len);
-                // SAFETY: We initialize all bytes immediately below.
-                unsafe { shrunk.set_len(len) };
-                shrunk.as_mut().copy_from_slice(buf_guard.data.as_ref());
+                shrunk.put_slice(buf_guard.data.as_ref());
                 buf_guard.data = shrunk;
             } else {
                 buf_guard.data = IoBufMut::default();
