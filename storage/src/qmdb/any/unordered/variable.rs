@@ -182,7 +182,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Runner as _,
+        BufferPooler, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -191,7 +191,7 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
             mmr_journal_partition: format!("journal_{seed}"),
             mmr_metadata_partition: format!("metadata_{seed}"),
@@ -204,7 +204,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -223,15 +223,14 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed);
+        let config = create_test_config(seed, &context);
         AnyTest::init(context, config).await.unwrap()
     }
 
     /// Return a Digest-valued variable database for generic tests.
     async fn open_digest_db(context: Context) -> DigestAnyTest {
-        DigestAnyTest::init(context, variable_db_config("digest_partition"))
-            .await
-            .unwrap()
+        let cfg = variable_db_config("digest_partition", &context);
+        DigestAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -293,7 +292,8 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, create_test_config(0)).await.unwrap()
+        let cfg = create_test_config(0, &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -495,7 +495,7 @@ pub(crate) mod test {
     fn test_any_unordered_variable_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let cfg = create_test_config(seed);
+            let cfg = create_test_config(seed, &ctx);
             AnyTest::init(ctx, cfg).await.unwrap().into_mutable()
         });
     }
@@ -581,7 +581,7 @@ pub(crate) mod test {
 
     type PartitionedVarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
-    fn partitioned_config(suffix: &str) -> PartitionedVarConfig {
+    fn partitioned_config(suffix: &str, pooler: &impl BufferPooler) -> PartitionedVarConfig {
         VariableConfig {
             mmr_journal_partition: format!("pv_journal_{suffix}"),
             mmr_metadata_partition: format!("pv_metadata_{suffix}"),
@@ -594,7 +594,7 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(NZU16!(77), NZUsize!(9)),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(77), NZUsize!(9)),
         }
     }
 
@@ -611,18 +611,15 @@ pub(crate) mod test {
 
     #[inline]
     async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(context, partitioned_config("partition_p1"))
-            .await
-            .unwrap()
+        let cfg = partitioned_config("partition_p1", &context);
+        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
-        PartitionedAnyTestDigestP1::init(
-            context,
-            variable_db_config("unordered_partitioned_var_p1"),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("unordered_partitioned_var_p1", &context);
+        PartitionedAnyTestDigestP1::init(context, cfg)
+            .await
+            .unwrap()
     }
 
     #[test_traced("WARN")]

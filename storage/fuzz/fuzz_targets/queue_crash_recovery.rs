@@ -396,7 +396,7 @@ fn fuzz(input: FuzzInput) {
                 items_per_section,
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
-                page_cache: CacheRef::new(page_size, page_cache_size),
+                page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
                 write_buffer,
             };
 
@@ -428,7 +428,7 @@ fn fuzz(input: FuzzInput) {
             items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::new(page_size, page_cache_size),
+            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
             write_buffer,
         };
 

@@ -3,7 +3,7 @@
 //! Fuzz test for journal crash recovery (both fixed and variable journals).
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{deterministic, Metrics as _, Runner};
+use commonware_runtime::{deterministic, BufferPooler, Metrics as _, Runner};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
@@ -115,6 +115,7 @@ struct FuzzInput {
 
 fn fixed_config(
     partition: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
@@ -123,13 +124,18 @@ fn fixed_config(
     FixedConfig {
         partition: partition.to_string(),
         items_per_blob: NZU64!(items_per_section),
-        page_cache: commonware_runtime::buffer::paged::CacheRef::new(page_size, page_cache_size),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            pooler,
+            page_size,
+            page_cache_size,
+        ),
         write_buffer,
     }
 }
 
 fn variable_config(
     partition: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
@@ -140,7 +146,11 @@ fn variable_config(
         items_per_section: NZU64!(items_per_section),
         compression: None,
         codec_config: (),
-        page_cache: commonware_runtime::buffer::paged::CacheRef::new(page_size, page_cache_size),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            pooler,
+            page_size,
+            page_cache_size,
+        ),
         write_buffer,
     }
 }
@@ -151,6 +161,7 @@ trait FuzzJournal: Sized {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
@@ -209,6 +220,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
@@ -216,6 +228,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     ) -> Self::Config {
         fixed_config(
             partition,
+            pooler,
             page_size,
             page_cache_size,
             items_per_section,
@@ -289,6 +302,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
@@ -296,6 +310,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     ) -> Self::Config {
         variable_config(
             partition,
+            pooler,
             page_size,
             page_cache_size,
             items_per_section,
@@ -531,6 +546,7 @@ where
                 ctx.with_label("journal"),
                 J::config(
                     &partition_name,
+                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_section,
@@ -559,6 +575,7 @@ where
             ctx.with_label("recovered"),
             J::config(
                 &partition_name,
+                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_section,

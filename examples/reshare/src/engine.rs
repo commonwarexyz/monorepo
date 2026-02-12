@@ -24,8 +24,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    buffer::paged::CacheRef, spawn_cell, Clock, ContextCell, Handle, Metrics, Network, Spawner,
-    Storage,
+    buffer::paged::CacheRef, spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics,
+    Network, Spawner, Storage,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{channel::mpsc, union, NZUsize, NZU16, NZU32, NZU64};
@@ -76,7 +76,7 @@ where
 
 pub struct Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -120,7 +120,7 @@ where
 
 impl<E, C, P, B, H, V, S, L, T> Engine<E, C, P, B, H, V, S, L, T>
 where
-    E: Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
+    E: BufferPooler + Spawner + Metrics + CryptoRngCore + Clock + Storage + Network,
     C: Signer,
     P: Manager<PublicKey = C::PublicKey>,
     B: Blocker<PublicKey = C::PublicKey>,
@@ -132,7 +132,7 @@ where
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
     pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
-        let page_cache = CacheRef::new(PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
+        let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 

@@ -8,7 +8,8 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, Metrics, Runner, Storage as _,
+    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler, Metrics, Runner,
+    Storage as _,
 };
 use commonware_storage::journal::segmented::oversized::{Config, Oversized, Record};
 use commonware_utils::{NZUsize, NZU16};
@@ -160,11 +161,11 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
 const INDEX_PARTITION: &str = "fuzz_index";
 const VALUE_PARTITION: &str = "fuzz_values";
 
-fn test_cfg() -> Config<()> {
+fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.to_string(),
         value_partition: VALUE_PARTITION.to_string(),
-        index_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         compression: None,
@@ -176,7 +177,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_cfg();
+        let cfg = test_cfg(&context);
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =

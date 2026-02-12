@@ -27,7 +27,7 @@ mod tests {
             let size = data.len() as u64;
 
             // Create a buffered reader with small buffer to test refilling
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read some data
             let mut buf = [0u8; 5];
@@ -66,7 +66,7 @@ mod tests {
             let size = data.len() as u64;
 
             // Use a buffer smaller than the total data size
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read data that crosses buffer boundaries
             let mut buf = [0u8; 15];
@@ -98,7 +98,7 @@ mod tests {
             blob.write_at(0, data).await.unwrap();
             let size = data.len() as u64;
 
-            let mut reader = Read::new(blob, size, NZUsize!(20));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
 
             // Read data that crosses buffer boundaries
             let mut buf = [0u8; 21];
@@ -133,7 +133,7 @@ mod tests {
             let size = data.len() as u64;
 
             // Create a buffered reader with buffer smaller than total data
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Check initial remaining bytes
             assert_eq!(reader.blob_remaining(), size);
@@ -177,7 +177,7 @@ mod tests {
             let size = data.len() as u64;
 
             // Use a buffer much smaller than the total data
-            let mut reader = Read::new(blob, size, NZUsize!(64 * 1024)); // 64KB buffer
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(64 * 1024));
 
             // Read all data in smaller chunks
             let mut total_read = 0;
@@ -224,7 +224,7 @@ mod tests {
             blob.write_at(0, data.clone()).await.unwrap();
             let size = data.len() as u64;
 
-            let mut reader = Read::new(blob, size, NZUsize!(buffer_size));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer_size));
 
             // Read exactly one buffer size
             let mut buf1 = vec![0u8; buffer_size];
@@ -260,7 +260,7 @@ mod tests {
             let size = data.len() as u64;
 
             // Create a buffer reader
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read some data to advance the position
             let mut buf = [0u8; 5];
@@ -312,7 +312,7 @@ mod tests {
             let size = data.len() as u64;
 
             // Create a buffer reader with small buffer
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read some data
             let mut buf = [0u8; 5];
@@ -349,7 +349,7 @@ mod tests {
             let data_len = data.len() as u64;
 
             // Create a buffer reader
-            let reader = Read::new(blob.clone(), data_len, NZUsize!(10));
+            let reader = Read::from_pooler(&context, blob.clone(), data_len, NZUsize!(10));
 
             // Resize the blob to half its size
             let resize_len = data_len / 2;
@@ -360,7 +360,7 @@ mod tests {
             assert_eq!(size, resize_len, "Blob should be resized to half size");
 
             // Create a new buffer and read to verify truncation
-            let mut new_reader = Read::new(blob, size, NZUsize!(10));
+            let mut new_reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Read the content
             let mut buf = vec![0u8; size as usize];
@@ -383,7 +383,7 @@ mod tests {
             assert_eq!(new_size, data_len * 2);
 
             // Create a new buffer and read to verify resize
-            let mut new_reader = Read::new(blob, new_size, NZUsize!(10));
+            let mut new_reader = Read::from_pooler(&context, blob, new_size, NZUsize!(10));
             let mut buf = vec![0u8; new_size as usize];
             new_reader
                 .read_exact(&mut buf, new_size as usize)
@@ -409,7 +409,7 @@ mod tests {
             blob.write_at(0, data).await.unwrap();
 
             // Create a buffer reader
-            let reader = Read::new(blob.clone(), data_len, NZUsize!(10));
+            let reader = Read::from_pooler(&context, blob.clone(), data_len, NZUsize!(10));
 
             // Resize the blob to zero
             reader.resize(0).await.unwrap();
@@ -419,7 +419,7 @@ mod tests {
             assert_eq!(size, 0, "Blob should be resized to zero");
 
             // Create a new buffer and try to read (should fail)
-            let mut new_reader = Read::new(blob, size, NZUsize!(10));
+            let mut new_reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Reading from resized blob should fail
             let mut buf = [0u8; 1];
@@ -436,7 +436,7 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::new(blob.clone(), size, NZUsize!(8));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(8));
             writer.write_at(0, b"hello").await.unwrap();
             assert_eq!(writer.size().await, 5);
             writer.sync().await.unwrap();
@@ -445,7 +445,7 @@ mod tests {
             // Verify data was written correctly
             let (blob, size) = context.open("partition", b"write_basic").await.unwrap();
             assert_eq!(size, 5);
-            let mut reader = Read::new(blob, size, NZUsize!(8));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
             let mut buf = [0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
             assert_eq!(&buf, b"hello");
@@ -460,7 +460,7 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::new(blob.clone(), size, NZUsize!(4));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
             writer.write_at(0, b"abc").await.unwrap();
             assert_eq!(writer.size().await, 3);
             writer.write_at(3, b"defg").await.unwrap();
@@ -470,7 +470,7 @@ mod tests {
             // Verify the final result
             let (blob, size) = context.open("partition", b"write_multi").await.unwrap();
             assert_eq!(size, 7);
-            let mut reader = Read::new(blob, size, NZUsize!(4));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(4));
             let mut buf = [0u8; 7];
             reader.read_exact(&mut buf, 7).await.unwrap();
             assert_eq!(&buf, b"abcdefg");
@@ -485,7 +485,7 @@ mod tests {
             let (blob, size) = context.open("partition", b"write_large").await.unwrap();
             assert_eq!(size, 0);
 
-            let writer = Write::new(blob.clone(), size, NZUsize!(4));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(4));
             writer.write_at(0, b"abc").await.unwrap();
             assert_eq!(writer.size().await, 3);
             writer
@@ -499,7 +499,7 @@ mod tests {
             // Verify the complete data
             let (blob, size) = context.open("partition", b"write_large").await.unwrap();
             assert_eq!(size, 26);
-            let mut reader = Read::new(blob, size, NZUsize!(4));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(4));
             let mut buf = [0u8; 26];
             reader.read_exact(&mut buf, 26).await.unwrap();
             assert_eq!(&buf, b"abcdefghijklmnopqrstuvwxyz");
@@ -512,7 +512,7 @@ mod tests {
         executor.start(|context| async move {
             // Test sequential appends that exceed buffer capacity
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write data that fits in buffer
             writer.write_at(0, b"hello").await.unwrap();
@@ -526,7 +526,7 @@ mod tests {
             // Verify the complete result
             let (blob, size) = context.open("partition", b"append_buf").await.unwrap();
             assert_eq!(size, 11);
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
             let mut buf = vec![0u8; 11];
             reader.read_exact(&mut buf, 11).await.unwrap();
             assert_eq!(&buf, b"hello world");
@@ -539,7 +539,7 @@ mod tests {
         executor.start(|context| async move {
             // Test overwriting data within the buffer and extending it
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(20));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(20));
 
             // Initial write
             writer.write_at(0, b"abcdefghij").await.unwrap();
@@ -553,7 +553,7 @@ mod tests {
             // Verify overwrite result
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 10);
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
             assert_eq!(&buf, b"ab01234hij");
@@ -568,7 +568,7 @@ mod tests {
             // Verify final result
             let (blob, size) = context.open("partition", b"middle_buf").await.unwrap();
             assert_eq!(size, 20);
-            let mut reader = Read::new(blob, size, NZUsize!(20));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
             assert_eq!(&buf, b"ab01234hiwxyznopqrst");
@@ -581,7 +581,7 @@ mod tests {
         executor.start(|context| async move {
             // Test writing at offsets before the current buffer position
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write data at a later offset first
             writer.write_at(10, b"0123456789").await.unwrap();
@@ -595,7 +595,7 @@ mod tests {
             // Verify data placement with gap
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20);
-            let mut reader = Read::new(blob, size, NZUsize!(20));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
             let mut expected = vec![0u8; 20];
@@ -612,7 +612,7 @@ mod tests {
             // Verify gap is filled
             let (blob, size) = context.open("partition", b"before_buf").await.unwrap();
             assert_eq!(size, 20);
-            let mut reader = Read::new(blob, size, NZUsize!(20));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(20));
             let mut buf = vec![0u8; 20];
             reader.read_exact(&mut buf, 20).await.unwrap();
             expected[0..10].copy_from_slice("abcdefghij".as_bytes());
@@ -626,7 +626,7 @@ mod tests {
         executor.start(|context| async move {
             // Test blob resize functionality and subsequent writes
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
-            let writer = Write::new(blob, size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob, size, NZUsize!(10));
 
             // Write initial data
             writer.write_at(0, b"hello world").await.unwrap();
@@ -647,7 +647,7 @@ mod tests {
             // Verify resize
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
-            let mut reader = Read::new(blob, size, NZUsize!(5));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(5));
             let mut buf = vec![0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
             assert_eq!(&buf, b"hello");
@@ -660,7 +660,7 @@ mod tests {
             // Verify overwrite
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 5);
-            let mut reader = Read::new(blob, size, NZUsize!(5));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(5));
             let mut buf = vec![0u8; 5];
             reader.read_exact(&mut buf, 5).await.unwrap();
             assert_eq!(&buf, b"Xello");
@@ -673,7 +673,7 @@ mod tests {
             // Verify resize
             let (blob, size) = context.open("partition", b"resize_write").await.unwrap();
             assert_eq!(size, 10);
-            let mut reader = Read::new(blob, size, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(10));
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
             assert_eq!(&buf[0..5], b"Xello");
@@ -681,7 +681,7 @@ mod tests {
 
             // Test resize to zero
             let (blob_zero, size) = context.open("partition", b"resize_zero").await.unwrap();
-            let writer_zero = Write::new(blob_zero.clone(), size, NZUsize!(10));
+            let writer_zero = Write::from_pooler(&context, blob_zero.clone(), size, NZUsize!(10));
             writer_zero.write_at(0, b"some data").await.unwrap();
             assert_eq!(writer_zero.size().await, 9);
             writer_zero.sync().await.unwrap();
@@ -703,7 +703,7 @@ mod tests {
         executor.start(|context| async move {
             // Test reading through writer's read_at method (buffer + blob reads)
             let (blob, size) = context.open("partition", b"read_at_writer").await.unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write data that stays in buffer
             writer.write_at(0, b"buffered").await.unwrap();
@@ -750,7 +750,8 @@ mod tests {
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
             assert_eq!(final_size, 30);
-            let mut final_reader = Read::new(final_blob, final_size, NZUsize!(30));
+            let mut final_reader =
+                Read::from_pooler(&context, final_blob, final_size, NZUsize!(30));
             let mut full_content = vec![0u8; 30];
             final_reader
                 .read_exact(&mut full_content, 30)
@@ -766,7 +767,7 @@ mod tests {
         executor.start(|context| async move {
             // Test writes that cannot be merged into buffer (non-contiguous/too large)
             let (blob, size) = context.open("partition", b"write_straddle").await.unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Fill buffer completely
             writer.write_at(0, b"0123456789").await.unwrap();
@@ -782,7 +783,7 @@ mod tests {
             let (blob_check, size_check) =
                 context.open("partition", b"write_straddle").await.unwrap();
             assert_eq!(size_check, 18);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(20));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(20));
             let mut buf = vec![0u8; 18];
             reader.read_exact(&mut buf, 18).await.unwrap();
 
@@ -793,7 +794,7 @@ mod tests {
 
             // Test write that exceeds buffer capacity
             let (blob2, size) = context.open("partition", b"write_straddle2").await.unwrap();
-            let writer2 = Write::new(blob2.clone(), size, NZUsize!(10));
+            let writer2 = Write::from_pooler(&context, blob2.clone(), size, NZUsize!(10));
             writer2.write_at(0, b"0123456789").await.unwrap();
             assert_eq!(writer2.size().await, 10);
 
@@ -807,7 +808,7 @@ mod tests {
             let (blob_check2, size_check2) =
                 context.open("partition", b"write_straddle2").await.unwrap();
             assert_eq!(size_check2, 17);
-            let mut reader2 = Read::new(blob_check2, size_check2, NZUsize!(20));
+            let mut reader2 = Read::from_pooler(&context, blob_check2, size_check2, NZUsize!(20));
             let mut buf2 = vec![0u8; 17];
             reader2.read_exact(&mut buf2, 17).await.unwrap();
             assert_eq!(&buf2, b"01234ABCDEFGHIJKL");
@@ -820,7 +821,7 @@ mod tests {
         executor.start(|context| async move {
             // Test that closing writer flushes and persists buffered data
             let (blob_orig, size) = context.open("partition", b"write_close").await.unwrap();
-            let writer = Write::new(blob_orig.clone(), size, NZUsize!(8));
+            let writer = Write::from_pooler(&context, blob_orig.clone(), size, NZUsize!(8));
             writer.write_at(0, b"pending").await.unwrap();
             assert_eq!(writer.size().await, 7);
 
@@ -830,7 +831,7 @@ mod tests {
             // Verify data persistence
             let (blob_check, size_check) = context.open("partition", b"write_close").await.unwrap();
             assert_eq!(size_check, 7);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(8));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(8));
             let mut buf = [0u8; 7];
             reader.read_exact(&mut buf, 7).await.unwrap();
             assert_eq!(&buf, b"pending");
@@ -846,7 +847,7 @@ mod tests {
                 .open("partition", b"write_direct_size")
                 .await
                 .unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(5));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(5));
 
             // Write data larger than buffer capacity (should write directly)
             let data_large = b"0123456789";
@@ -862,7 +863,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_check, 10);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
             assert_eq!(&buf, data_large.as_slice());
@@ -883,7 +884,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_check2, 13);
-            let mut reader2 = Read::new(blob_check2, size_check2, NZUsize!(13));
+            let mut reader2 = Read::from_pooler(&context, blob_check2, size_check2, NZUsize!(13));
             let mut buf2 = vec![0u8; 13];
             reader2.read_exact(&mut buf2, 13).await.unwrap();
             assert_eq!(&buf2[10..], b"abc".as_slice());
@@ -899,7 +900,7 @@ mod tests {
                 .open("partition", b"overwrite_extend_buf")
                 .await
                 .unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(15));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(15));
 
             // Write initial data
             writer.write_at(0, b"0123456789").await.unwrap();
@@ -921,7 +922,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_check, 15);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(15));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(15));
             let mut final_buf = vec![0u8; 15];
             reader.read_exact(&mut final_buf, 15).await.unwrap();
             assert_eq!(&final_buf, b"01234ABCDEFGHIJ".as_slice());
@@ -934,7 +935,7 @@ mod tests {
         executor.start(|context| async move {
             // Test writing at the current logical end of the blob
             let (blob, size) = context.open("partition", b"write_end").await.unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(20));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(20));
 
             // Write initial data
             writer.write_at(0, b"0123456789").await.unwrap();
@@ -949,7 +950,7 @@ mod tests {
             // Verify complete result
             let (blob_check, size_check) = context.open("partition", b"write_end").await.unwrap();
             assert_eq!(size_check, 13);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(13));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(13));
             let mut buf = vec![0u8; 13];
             reader.read_exact(&mut buf, 13).await.unwrap();
             assert_eq!(&buf, b"0123456789abc");
@@ -965,7 +966,7 @@ mod tests {
                 .open("partition", b"write_multiple_appends_at_size")
                 .await
                 .unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(5)); // Small buffer
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(5));
 
             // First write
             writer.write_at(0, b"AAA").await.unwrap();
@@ -991,7 +992,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_check, 9);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(9));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(9));
             let mut buf = vec![0u8; 9];
             reader.read_exact(&mut buf, 9).await.unwrap();
             assert_eq!(&buf, b"AAABBBCCC");
@@ -1007,7 +1008,7 @@ mod tests {
                 .open("partition", b"write_non_contiguous_then_append")
                 .await
                 .unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Initial buffered write
             writer.write_at(0, b"INITIAL").await.unwrap(); // 7 bytes
@@ -1035,7 +1036,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_check, 35);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(35));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(35));
             let mut buf = vec![0u8; 35];
             reader.read_exact(&mut buf, 35).await.unwrap();
 
@@ -1056,7 +1057,7 @@ mod tests {
                 .open("partition", b"resize_then_append_at_size")
                 .await
                 .unwrap();
-            let writer = Write::new(blob.clone(), size, NZUsize!(10));
+            let writer = Write::from_pooler(&context, blob.clone(), size, NZUsize!(10));
 
             // Write initial data and sync
             writer.write_at(0, b"0123456789ABCDEF").await.unwrap(); // 16 bytes
@@ -1089,7 +1090,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(size_check, 10);
-            let mut reader = Read::new(blob_check, size_check, NZUsize!(10));
+            let mut reader = Read::from_pooler(&context, blob_check, size_check, NZUsize!(10));
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf, 10).await.unwrap();
             assert_eq!(&buf, b"01234XXXXX");

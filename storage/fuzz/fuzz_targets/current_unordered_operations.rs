@@ -92,7 +92,11 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
             translator: TwoCap,
-            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(
+                &context,
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
             thread_pool: None,
         };
 

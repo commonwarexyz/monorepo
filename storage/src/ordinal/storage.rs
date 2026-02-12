@@ -6,7 +6,7 @@ use commonware_codec::{
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
-    Blob, Buf, BufMut, Clock, Error as RError, Metrics, Storage,
+    Blob, Buf, BufMut, BufferPooler, Clock, Error as RError, Metrics, Storage,
 };
 use commonware_utils::{bitmap::BitMap, hex};
 use futures::future::try_join_all;
@@ -69,7 +69,7 @@ where
 }
 
 /// Implementation of [Ordinal].
-pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
+pub struct Ordinal<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     // Configuration and context
     context: E,
     config: Config,
@@ -93,7 +93,7 @@ pub struct Ordinal<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> {
     _phantom: PhantomData<V>,
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// Initialize a new [Ordinal] instance.
     pub async fn init(context: E, config: Config) -> Result<Self, Error> {
         Self::init_with_bits(context, config, None).await
@@ -143,7 +143,7 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             }
 
             debug!(blob = index, len, "found index blob");
-            let wrapped_blob = Write::new(blob, len, config.write_buffer);
+            let wrapped_blob = Write::from_pooler(&context, blob, len, config.write_buffer);
             blobs.insert(index, wrapped_blob);
         }
 
@@ -166,7 +166,8 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
             // Initialize read buffer
             let size = blob.size().await;
-            let mut replay_blob = ReadBuffer::new(blob.clone(), size, config.replay_buffer);
+            let mut replay_blob =
+                ReadBuffer::from_pooler(&context, blob.clone(), size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
@@ -261,7 +262,12 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 .context
                 .open(&self.config.partition, &section.to_be_bytes())
                 .await?;
-            entry.insert(Write::new(blob, len, self.config.write_buffer));
+            entry.insert(Write::from_pooler(
+                &self.context,
+                blob,
+                len,
+                self.config.write_buffer,
+            ));
             debug!(section, "created blob");
         }
 
@@ -415,7 +421,9 @@ impl<E: Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal<E, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable
+    for Ordinal<E, V>
+{
     type Key = u64;
     type Value = V;
     type Error = Error;
@@ -425,13 +433,17 @@ impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Gettable for Ordinal
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable for Ordinal<E, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> kv::Updatable
+    for Ordinal<E, V>
+{
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await
     }
 }
 
-impl<E: Storage + Metrics + Clock, V: CodecFixedShared> Persistable for Ordinal<E, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> Persistable
+    for Ordinal<E, V>
+{
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
@@ -135,7 +135,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn test_config(
+    test_name: &str,
+    pooler: &impl BufferPooler,
+) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
@@ -148,7 +151,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<us
         log_codec_config: ((0..=100000).into(), ()),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 
@@ -157,13 +160,11 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("qmdb_any_variable_fuzz_test"),
-        )
-        .await
-        .expect("Failed to init source db")
-        .into_mutable();
+        let cfg = test_config("qmdb_any_variable_fuzz_test", &context);
+        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
+            .await
+            .expect("Failed to init source db")
+            .into_mutable();
         let mut restarts = 0usize;
 
         let mut historical_roots: HashMap<
@@ -282,11 +283,12 @@ fn fuzz(input: FuzzInput) {
                     // Simulate unclean shutdown by dropping the db without committing
                     drop(db);
 
+                    let cfg = test_config("qmdb_any_variable_fuzz_test", &context);
                     db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config("qmdb_any_variable_fuzz_test"),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init source db")

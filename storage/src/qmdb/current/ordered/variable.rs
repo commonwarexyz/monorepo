@@ -173,9 +173,8 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, variable_config::<OneCap>(&partition_prefix))
-            .await
-            .unwrap()
+        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        CleanCurrentTest::init(context, cfg).await.unwrap()
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
