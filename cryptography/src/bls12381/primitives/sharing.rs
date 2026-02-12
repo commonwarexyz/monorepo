@@ -66,12 +66,11 @@ impl Mode {
                 let size = (total.get() as u64).next_power_of_two();
                 let lg_size = size.ilog2() as u8;
                 let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
-                let mut acc = Scalar::one();
                 (0..total.get())
-                    .map(|_| {
-                        let val = acc.clone();
-                        acc *= &w;
-                        val
+                    .scan(Scalar::one(), |state, _| {
+                        let val = state.clone();
+                        *state *= &w;
+                        Some(val)
                     })
                     .collect()
             }
@@ -116,7 +115,7 @@ impl Mode {
                 // For roots of unity mode, we use the fast O(n log n) interpolation.
                 // Participant i maps to exponent i, so the evaluation point is w^i.
                 let size = (total.get() as u64).next_power_of_two();
-                let ntt_total = NZU32!(size as u32);
+                let ntt_total = NonZeroU32::new(u32::try_from(size).ok()?)?;
 
                 let mut count = 0;
                 let points: Vec<(I, u32)> = indices
@@ -343,6 +342,23 @@ impl<V: Variant> Read for Sharing<V> {
         };
         let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*cfg), ()))?;
         Ok(Self::new(mode, total, poly))
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roots_of_unity_interpolator_large_total_returns_none() {
+        let total = NonZeroU32::new(u32::MAX).expect("u32::MAX is non-zero");
+        let indices = Set::from_iter_dedup([Participant::new(0)]);
+        let interpolator =
+            Mode::RootsOfUnity.interpolator(total, &indices, |participant| Some(*participant));
+        assert!(
+            interpolator.is_none(),
+            "domain > u32::MAX should be rejected instead of panicking"
+        );
     }
 }
 
