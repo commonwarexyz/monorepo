@@ -21,7 +21,7 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
-//! use commonware_runtime::{BufferPooler, buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _};
+//! use commonware_runtime::{buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _};
 //!
 //! use std::num::NonZeroU16;
 //! const PAGE_SIZE: NonZeroU16 = NZU16!(8192);
@@ -36,7 +36,7 @@
 //!         log_codec_config: (),
 //!         log_items_per_section: NZU64!(4),
 //!         translator: TwoCap,
-//!         page_cache: CacheRef::new(ctx.storage_buffer_pool().clone(), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!         page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -564,7 +564,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, BufferPooler, Runner};
+    use commonware_runtime::{deterministic, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -582,11 +582,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             translator: TwoCap,
-            page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         TestStore::init(context, cfg).await.unwrap()
     }

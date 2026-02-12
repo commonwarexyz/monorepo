@@ -7,7 +7,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, buffer::{Write, Read}, Blob, BufferPooler, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::{Write, Read, BufferPooler}, Blob, Error, Storage, deterministic};
 /// use commonware_utils::NZUsize;
 ///
 /// let executor = deterministic::Runner::default();

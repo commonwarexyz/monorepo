@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
     mmr::Location,
     qmdb::{
@@ -106,11 +106,7 @@ fn db_config(
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        ),
+        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

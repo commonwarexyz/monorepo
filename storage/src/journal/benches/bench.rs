@@ -1,4 +1,4 @@
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     journal::contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -53,11 +53,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         partition: partition_name.to_string(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        ),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
 }
@@ -95,11 +91,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         items_per_section,
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            PAGE_SIZE,
-            PAGE_CACHE_SIZE,
-        ),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
     };
     VariableJournal::init(context, journal_config)

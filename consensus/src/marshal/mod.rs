@@ -133,7 +133,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Quota, Runner,
+        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner,
     };
     use commonware_storage::{
         archive::{immutable, prunable},
@@ -225,11 +225,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -801,11 +797,7 @@ mod tests {
 
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
-            let page_cache = CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            );
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let control = oracle.control(validator.clone());
 
             // Closure to initialize marshal with prunable archives

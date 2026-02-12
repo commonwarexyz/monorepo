@@ -120,7 +120,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Metrics, Runner,
+        Metrics, Runner,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
@@ -139,11 +139,7 @@ mod tests {
         let cfg = prunable::Config {
             translator: TwoCap,
             key_partition: "test_key".into(),
-            key_page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test_value".into(),
             compression,
             codec_config: (),
@@ -166,11 +162,7 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: "test_key".into(),
-            freezer_key_page_cache: CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: "test_value".into(),
             freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,
