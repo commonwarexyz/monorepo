@@ -760,24 +760,22 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 
     // (ops_pos, ops_digest, chunk) for each chunk, where ops_pos is the position of the ops MMR
     // node on which to graft the chunk, and ops_digest is the digest of that node.
-    let inputs =
-        try_join_all(
-            chunks
-                .map(|chunk_idx| {
-                    let chunk = *bitmap.get_chunk(chunk_idx);
-                    let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
-                    async move {
-                        let ops_digest = ops_mmr.get_node(ops_pos).await?.ok_or(
-                            mmr::Error::MissingGraftedLeaf(
-                                Location::try_from(ops_pos).unwrap_or_default(),
-                            ),
-                        )?;
-                        Ok::<_, Error>((ops_pos, ops_digest, chunk))
-                    }
-                })
-                .collect::<Vec<_>>(),
-        )
-        .await?;
+    let inputs = try_join_all(
+        chunks
+            .map(|chunk_idx| {
+                let chunk = *bitmap.get_chunk(chunk_idx);
+                let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
+                async move {
+                    let ops_digest = ops_mmr
+                        .get_node(ops_pos)
+                        .await?
+                        .ok_or(mmr::Error::MissingGraftedLeaf(ops_pos))?;
+                    Ok::<_, Error>((ops_pos, ops_digest, chunk))
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await?;
 
     // Hash each: grafted_leaf = hash(chunk || ops_subtree_root).
     Ok(

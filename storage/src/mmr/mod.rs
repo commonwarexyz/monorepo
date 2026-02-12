@@ -118,7 +118,7 @@ pub enum Error {
     #[error("missing digest: {0}")]
     MissingDigest(Position),
     #[error("missing grafted leaf digest: {0}")]
-    MissingGraftedLeaf(Location),
+    MissingGraftedLeaf(Position),
     #[error("invalid proof length")]
     InvalidProofLength,
     #[error("invalid size: {0}")]
