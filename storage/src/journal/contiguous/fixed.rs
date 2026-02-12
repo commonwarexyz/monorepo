@@ -65,9 +65,10 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, Storage,
+    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard,
+    RwLockWriteGuard, Storage,
 };
-use futures::{lock::Mutex, stream::Stream, StreamExt};
+use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
@@ -173,11 +174,10 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// by the underlying [SegmentedJournal] during init.
 pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     /// Inner state with segmented journal and size.
-    inner: RwLock<Inner<E, A>>,
-
+    ///
     /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
     /// race conditions while allowing concurrent reads during sync.
-    write_lock: Mutex<()>,
+    inner: RwLock<Inner<E, A>>,
 
     /// The maximum number of items per blob (section).
     items_per_blob: u64,
@@ -361,7 +361,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 metadata,
                 pruning_boundary,
             }),
-            write_lock: Mutex::new(()),
             items_per_blob,
         })
     }
@@ -572,7 +571,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 metadata,
                 pruning_boundary: size, // No data exists yet
             }),
-            write_lock: Mutex::new(()),
             items_per_blob,
         })
     }
@@ -590,43 +588,47 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Only the tail section can have pending updates since historical sections are synced
     /// when they become full.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Serialize with append/prune/rewind so section selection is stable.
-        let _write_guard = self.write_lock.lock().await;
+        // Serialize with append/prune/rewind to ensure section selection is stable, while still allowing
+        // concurrent readers.
+        let inner = self.inner.upgradable_read().await;
 
-        let (pruning_boundary, pruning_boundary_from_metadata) = {
-            let inner = self.inner.read().await;
+        // Sync the tail section
+        let tail_section = inner.size / self.items_per_blob;
 
-            // Sync the tail section
-            let tail_section = inner.size / self.items_per_blob;
-
-            // The tail section may not exist yet if the previous section was just filled, but syncing a
-            // non-existent section is safe (returns Ok).
-            inner.journal.sync(tail_section).await?;
-
-            let pruning_boundary = inner.pruning_boundary;
-            let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
-
-            (pruning_boundary, pruning_boundary_from_metadata)
-        };
+        // The tail section may not exist yet if the previous section was just filled, but syncing a
+        // non-existent section is safe (returns Ok).
+        inner.journal.sync(tail_section).await?;
 
         // Persist metadata only when pruning_boundary is mid-section.
-        if !pruning_boundary.is_multiple_of(self.items_per_blob) {
+        let pruning_boundary = inner.pruning_boundary;
+        let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
+        let put = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
             let needs_update = pruning_boundary_from_metadata
                 .is_none_or(|bytes| bytes.as_slice() != pruning_boundary.to_be_bytes());
 
             if needs_update {
-                let mut inner = self.inner.write().await;
-                inner.metadata.put(
-                    PRUNING_BOUNDARY_KEY,
-                    pruning_boundary.to_be_bytes().to_vec(),
-                );
-                inner.metadata.sync().await?;
+                true
+            } else {
+                return Ok(());
             }
         } else if pruning_boundary_from_metadata.is_some() {
-            let mut inner = self.inner.write().await;
+            false
+        } else {
+            return Ok(());
+        };
+
+        // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
+        // the tail section above.
+        let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
+        if put {
+            inner.metadata.put(
+                PRUNING_BOUNDARY_KEY,
+                pruning_boundary.to_be_bytes().to_vec(),
+            );
+        } else {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
-            inner.metadata.sync().await?;
         }
+        inner.metadata.sync().await?;
 
         Ok(())
     }
@@ -648,41 +650,30 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: A) -> Result<u64, Error> {
-        // Serialize appends to prevent race conditions when sections fill up.
-        let _append_guard = self.write_lock.lock().await;
+        // Mutating operations are serialized by taking the write guard.
+        let mut inner = self.inner.write().await;
 
-        // Append the item (requires write lock)
-        let (position, section) = {
-            let mut inner = self.inner.write().await;
-            let position = inner.size;
-            let (section, _pos_in_section) = self.position_to_section(position);
+        // Append the item to the journal.
+        let position = inner.size;
+        let (section, _pos_in_section) = self.position_to_section(position);
+        inner.journal.append(section, item).await?;
+        inner.size += 1;
 
-            inner.journal.append(section, item).await?;
-            inner.size += 1;
-
-            // Return early if no sync is needed (section not full).
-            if !inner.size.is_multiple_of(self.items_per_blob) {
-                return Ok(position);
-            }
-
-            (position, section)
-        };
-
-        // If we get here the section was filled and we need to sync it. We sync while only holding
-        // a read lock on self.inner to avoid blocking concurrent reads. We must however continue to
-        // hold the outer write_lock since we don't want to start writing to the new section until
-        // this completes.
-        {
-            let inner = self.inner.read().await;
-            inner.journal.sync(section).await?;
+        // Return early if no sync is needed (section not full).
+        if !inner.size.is_multiple_of(self.items_per_blob) {
+            return Ok(position);
         }
+
+        // The section was filled and must be synced. Downgrade so readers can continue during the
+        // sync, but keep mutators blocked. After sync, upgrade again to create the next tail
+        // section before any append can proceed.
+        let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
+        inner.journal.sync(section).await?;
 
         // Ensure the new tail section exists, as required to maintain the invariant. This must
         // happen after the previous section is synced.
-        {
-            let mut inner = self.inner.write().await;
-            inner.journal.ensure_section_exists(section + 1).await?;
-        }
+        let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
+        inner.journal.ensure_section_exists(section + 1).await?;
 
         Ok(position)
     }
@@ -696,7 +687,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed from newest to oldest.
     pub async fn rewind(&self, size: u64) -> Result<(), Error> {
-        let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
 
         match size.cmp(&inner.size) {
@@ -736,8 +726,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
     /// event of failure as items are always pruned in order from oldest to newest.
     pub async fn prune(&self, min_item_pos: u64) -> Result<bool, Error> {
-        let _write_guard = self.write_lock.lock().await;
-
         let mut inner = self.inner.write().await;
 
         // Calculate the section that would contain min_item_pos
@@ -791,7 +779,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // - Crash after clear: no blobs, recovery returns (0, 0), metadata ignored
         // - Crash after create: old metadata triggers "metadata ahead" warning,
         //   recovery falls back to blob state
-        let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
         inner.journal.clear().await?;
         let tail_section = new_size / self.items_per_blob;

@@ -13,12 +13,12 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{
-    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, Storage,
+    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, RwLockWriteGuard, Storage,
 };
 use commonware_utils::NZUsize;
 #[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
-use futures::{lock::Mutex, stream, Stream, StreamExt as _};
+use futures::{stream, Stream, StreamExt as _};
 use std::num::{NonZeroU64, NonZeroUsize};
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
@@ -183,15 +183,15 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// data.bounds().start. This should never occur because we always prune the data journal
 /// before the offsets journal.
 pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
+    /// Inner state for data journal metadata.
+    ///
+    /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
+    /// race conditions while allowing concurrent reads during sync.
     inner: RwLock<Inner<E, V>>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
     offsets: fixed::Journal<E, u64>,
-
-    /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
-    /// race conditions while allowing concurrent reads during sync.
-    write_lock: Mutex<()>,
 
     /// The number of items per section.
     ///
@@ -310,7 +310,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 pruning_boundary,
             }),
             offsets,
-            write_lock: Mutex::new(()),
             items_per_section,
         })
     }
@@ -354,7 +353,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
                 pruning_boundary: size,
             }),
             offsets,
-            write_lock: Mutex::new(()),
             items_per_section: cfg.items_per_section.get(),
         })
     }
@@ -462,7 +460,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
     pub async fn rewind(&self, size: u64) -> Result<(), Error> {
-        let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
 
         // Validate rewind target
@@ -512,42 +509,32 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: V) -> Result<u64, Error> {
-        // Serialize write operations to prevent race conditions when sections fill up.
-        let _write_guard = self.write_lock.lock().await;
+        // Mutating operations are serialized by taking the write guard.
+        let mut inner = self.inner.write().await;
 
-        let (position, section) = {
-            let mut inner = self.inner.write().await;
+        // Calculate which section this position belongs to
+        let section = position_to_section(inner.size, self.items_per_section);
 
-            // Calculate which section this position belongs to
-            let section = position_to_section(inner.size, self.items_per_section);
+        // Append to data journal, get offset
+        let (offset, _size) = inner.data.append(section, item).await?;
 
-            // Append to data journal, get offset
-            let (offset, _size) = inner.data.append(section, item).await?;
+        // Append offset to offsets journal
+        let offsets_pos = self.offsets.append(offset).await?;
+        assert_eq!(offsets_pos, inner.size);
 
-            // Append offset to offsets journal
-            let offsets_pos = self.offsets.append(offset).await?;
-            assert_eq!(offsets_pos, inner.size);
+        // Return the current position
+        let position = inner.size;
+        inner.size += 1;
 
-            // Return the current position
-            let position = inner.size;
-            inner.size += 1;
-
-            // Return early if no sync is needed (section not full).
-            if !inner.size.is_multiple_of(self.items_per_section) {
-                return Ok(position);
-            }
-
-            (position, section)
-        };
-
-        // If we get here the section was filled and we need to sync it. We sync while only holding
-        // a read lock on self.inner to avoid blocking concurrent reads. We must however continue to
-        // hold the outer write_lock since we don't want to start writing to the new section until
-        // this completes.
-        {
-            let inner = self.inner.read().await;
-            futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
+        // Return early if no sync is needed (section not full).
+        if !inner.size.is_multiple_of(self.items_per_section) {
+            return Ok(position);
         }
+
+        // The section was filled and must be synced. Downgrade so readers can continue during the
+        // sync while mutators remain blocked.
+        let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
+        futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
 
         Ok(position)
     }
@@ -578,7 +565,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn prune(&self, min_position: u64) -> Result<bool, Error> {
-        let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
 
         if min_position <= inner.pruning_boundary {
@@ -605,9 +591,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// This is faster than `sync()` but recovery will be required on startup if a crash occurs
     /// before the next call to `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
-        // Serialize with append/prune/rewind so section selection is stable.
-        let _write_guard = self.write_lock.lock().await;
-        let inner = self.inner.read().await;
+        // Serialize with append/prune/rewind so section selection is stable, while still allowing
+        // concurrent readers.
+        let inner = self.inner.upgradable_read().await;
         let section = position_to_section(inner.size, self.items_per_section);
         inner.data.sync(section).await
     }
@@ -616,9 +602,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Serialize with append/prune/rewind so section selection is stable.
-        let _write_guard = self.write_lock.lock().await;
-        let inner = self.inner.read().await;
+        // Serialize with append/prune/rewind so section selection is stable, while still allowing
+        // concurrent readers.
+        let inner = self.inner.upgradable_read().await;
         // Persist only the current (final) section of the data journal.
         // All non-final sections are already persisted per Invariant #1.
         let section = position_to_section(inner.size, self.items_per_section);
@@ -645,7 +631,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
-        let _write_guard = self.write_lock.lock().await;
         let mut inner = self.inner.write().await;
         inner.data.clear().await?;
 
