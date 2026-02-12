@@ -113,11 +113,11 @@ struct FuzzInput {
 
 fn fixed_config(
     partition: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    pooler: &impl BufferPooler,
 ) -> FixedConfig {
     FixedConfig {
         partition: partition.to_string(),
@@ -133,11 +133,11 @@ fn fixed_config(
 
 fn variable_config(
     partition: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
-    pooler: &impl BufferPooler,
 ) -> VariableConfig<()> {
     VariableConfig {
         partition: partition.to_string(),
@@ -159,11 +159,11 @@ trait FuzzJournal: Sized {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
         write_buffer: NonZeroUsize,
-        pooler: &impl BufferPooler,
     ) -> Self::Config;
 
     fn init(
@@ -219,19 +219,19 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
         write_buffer: NonZeroUsize,
-        pooler: &impl BufferPooler,
     ) -> Self::Config {
         fixed_config(
             partition,
+            pooler,
             page_size,
             page_cache_size,
             items_per_section,
             write_buffer,
-            pooler,
         )
     }
 
@@ -294,19 +294,19 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
         write_buffer: NonZeroUsize,
-        pooler: &impl BufferPooler,
     ) -> Self::Config {
         variable_config(
             partition,
+            pooler,
             page_size,
             page_cache_size,
             items_per_section,
             write_buffer,
-            pooler,
         )
     }
 
@@ -530,11 +530,11 @@ where
                 ctx.with_label("journal"),
                 J::config(
                     &partition_name,
+                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_section,
                     write_buffer,
-                    &ctx,
                 ),
             )
             .await
@@ -559,11 +559,11 @@ where
             ctx.with_label("recovered"),
             J::config(
                 &partition_name,
+                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_section,
                 write_buffer,
-                &ctx,
             ),
         )
         .await
