@@ -6,7 +6,7 @@ use crate::{
     bitmap::partial_chunk_root,
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, MutableContiguous},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     metadata::{Config as MConfig, Metadata},
@@ -236,7 +236,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -304,7 +304,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -377,12 +377,14 @@ where
         let new_grafted_leaves = status.complete_chunks();
 
         // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
+        // Dirty chunks are always at or above the pruning boundary because their sources
+        // (last_commit_loc, floor-raising old/new locations) are all above the inactivity floor.
         let chunks_to_update = (old_grafted_leaves..new_grafted_leaves).chain(
             state
                 .dirty_chunks
                 .iter()
                 .copied()
-                .filter(|&c| c >= status.pruned_chunks() && c < old_grafted_leaves),
+                .filter(|&c| c < old_grafted_leaves),
         );
         let grafted_leaves = compute_grafted_leaves::<H, N>(
             &mut any.log.hasher,
@@ -407,14 +409,27 @@ where
                 dirty.add_leaf_digest(digest);
             }
         }
-        let grafted_mmr = {
+        let mut grafted_mmr = {
             let mut grafted_hasher =
                 grafting::GraftedHasher::new(any.log.hasher.fork(), grafting_height);
             dirty.merkleize(&mut grafted_hasher, pool.clone())
         };
 
-        // Prune the bitmap of no-longer-necessary bits.
+        // Prune bitmap chunks that are fully below the inactivity floor. All their bits are
+        // guaranteed to be 0, so we can discard them.
         status.prune_to_bit(*any.inactivity_floor_loc);
+
+        // Prune the grafted MMR to match: nodes for pruned bitmap chunks are no longer needed
+        // in memory. `prune_to_pos` pins the O(log n) peak digests covering the pruned region,
+        // which remain accessible via `get_node` for root computation and metadata persistence.
+        let pruned_chunks = status.pruned_chunks() as u64;
+        if pruned_chunks > 0 {
+            let new_grafted_mmr_prune_pos =
+                Position::try_from(Location::new_unchecked(pruned_chunks))?;
+            if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
+                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
+            }
+        }
 
         // Compute and cache the root.
         let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
@@ -466,7 +481,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -503,7 +518,7 @@ where
 
         self.any.apply_commit_op(commit_op).await?;
 
-        Ok(start_loc..self.any.log.bounds().end)
+        Ok(start_loc..self.any.log.size().await)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
@@ -549,7 +564,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -576,7 +591,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -608,7 +623,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -648,20 +663,16 @@ where
 {
     type Value = V::Value;
 
-    fn bounds(&self) -> std::ops::Range<Location> {
-        self.any.bounds()
+    async fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds().await
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    async fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 }
 
@@ -672,7 +683,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,

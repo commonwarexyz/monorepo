@@ -126,7 +126,7 @@ fn fuzz(data: FuzzInput) {
                         // Account for the previous key update
                         uncommitted_ops += 1;
                     }
-                    let actual_count = db.bounds().end;
+                    let actual_count = db.bounds().await.end;
                     let expected_count = last_committed_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
                         "Operation count mismatch: expected {expected_count} (last_known={last_committed_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
@@ -175,7 +175,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::OpCount => {
-                    let actual_count = db.bounds().end;
+                    let actual_count = db.bounds().await.end;
                     let expected_count = last_committed_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
                         "Operation count mismatch: expected {expected_count}, got {actual_count}");
@@ -184,7 +184,7 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
-                    last_committed_op_count = clean_db.bounds().end;
+                    last_committed_op_count = clean_db.bounds().await.end;
                     uncommitted_ops = 0;
                     db = clean_db.into_mutable();
                 }
@@ -202,7 +202,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::RangeProof { start_loc, max_ops } => {
-                    let current_op_count = db.bounds().end;
+                    let current_op_count = db.bounds().await.end;
 
                     if current_op_count > 0 {
                         let merkleized_db = db.into_merkleized().await.expect("into_merkleized should not fail");
@@ -235,7 +235,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 CurrentOperation::ArbitraryProof {start_loc, bad_digests, max_ops, bad_chunks} => {
-                    let current_op_count = db.bounds().end;
+                    let current_op_count = db.bounds().await.end;
                     if current_op_count == 0 {
                         continue;
                     }

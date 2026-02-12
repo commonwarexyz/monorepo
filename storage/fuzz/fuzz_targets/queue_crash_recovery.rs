@@ -251,7 +251,7 @@ async fn run_operations(
 
             QueueOperation::DequeueAndAck => {
                 if let Ok(Some((pos, _item))) = queue.dequeue().await {
-                    if queue.ack(pos).is_ok() {
+                    if queue.ack(pos).await.is_ok() {
                         state.update_ack_floor(queue.ack_floor());
                     }
                 }
@@ -263,21 +263,21 @@ async fn run_operations(
             }
 
             QueueOperation::AckOffset { offset } => {
-                let size = queue.size();
+                let size = queue.size().await;
                 let ack_floor = queue.ack_floor();
                 if size > ack_floor {
                     let range = size - ack_floor;
                     let pos = ack_floor + (*offset as u64 % range);
-                    if queue.ack(pos).is_ok() {
+                    if queue.ack(pos).await.is_ok() {
                         state.update_ack_floor(queue.ack_floor());
                     }
                 }
             }
 
             QueueOperation::AckUpToOffset { offset } => {
-                let size = queue.size();
+                let size = queue.size().await;
                 let up_to = (*offset as u64) % (size + 1);
-                if queue.ack_up_to(up_to).is_ok() {
+                if queue.ack_up_to(up_to).await.is_ok() {
                     state.update_ack_floor(queue.ack_floor());
                 }
             }
@@ -305,7 +305,7 @@ async fn verify_recovery(
     queue: &mut Queue<deterministic::Context, Vec<u8>>,
     state: &RecoveryState,
 ) {
-    let size = queue.size();
+    let size = queue.size().await;
     let ack_floor = queue.ack_floor();
 
     // Size should be within expected bounds

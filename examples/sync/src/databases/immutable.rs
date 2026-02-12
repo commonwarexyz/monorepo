@@ -117,14 +117,14 @@ where
         self.root()
     }
 
-    fn size(&self) -> Location {
-        LogStore::bounds(self).end
+    async fn size(&self) -> Location {
+        LogStore::bounds(self).await.end
     }
 
-    fn inactivity_floor(&self) -> Location {
+    async fn inactivity_floor(&self) -> Location {
         // For Immutable databases, all retained operations are active,
         // so the inactivity floor equals the pruning boundary.
-        LogStore::bounds(self).start
+        LogStore::bounds(self).await.start
     }
 
     fn historical_proof(

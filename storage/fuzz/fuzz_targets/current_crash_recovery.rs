@@ -268,7 +268,7 @@ fn fuzz(input: FuzzInput) {
 
             // Verify range proofs over the recovered DB.
             let floor = *db.inactivity_floor_loc();
-            let size = *db.size();
+            let size = *db.size().await;
             for i in floor..size {
                 let loc = Location::new(i).unwrap();
                 let (proof, ops, chunks) = db

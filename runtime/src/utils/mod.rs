@@ -103,6 +103,9 @@ pub struct RwLock<T>(async_lock::RwLock<T>);
 /// Shared guard returned by [RwLock::read].
 pub type RwLockReadGuard<'a, T> = async_lock::RwLockReadGuard<'a, T>;
 
+/// Upgradable shared guard returned by [RwLock::upgradable_read].
+pub type RwLockUpgradableReadGuard<'a, T> = async_lock::RwLockUpgradableReadGuard<'a, T>;
+
 /// Exclusive guard returned by [RwLock::write].
 pub type RwLockWriteGuard<'a, T> = async_lock::RwLockWriteGuard<'a, T>;
 
@@ -117,6 +120,15 @@ impl<T> RwLock<T> {
     #[inline]
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
         self.0.read().await
+    }
+
+    /// Acquire an upgradable shared guard.
+    ///
+    /// While this guard is held, readers may proceed but no other upgradable reader
+    /// or writer can be acquired. The guard can be upgraded into an exclusive writer.
+    #[inline]
+    pub async fn upgradable_read(&self) -> RwLockUpgradableReadGuard<'_, T> {
+        self.0.upgradable_read().await
     }
 
     /// Acquire an exclusive write guard.
@@ -135,6 +147,12 @@ impl<T> RwLock<T> {
     #[inline]
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
         self.0.try_write()
+    }
+
+    /// Try to get an upgradable shared guard without waiting.
+    #[inline]
+    pub fn try_upgradable_read(&self) -> Option<RwLockUpgradableReadGuard<'_, T>> {
+        self.0.try_upgradable_read()
     }
 
     /// Get mutable access without locking (requires `&mut self`).
