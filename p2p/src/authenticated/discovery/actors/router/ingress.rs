@@ -87,8 +87,7 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Vec<P> {
-        let encoded =
-            EncodedData::encode_with_prefix(&self.pool, channel, message, types::DATA_PREFIX);
+        let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
 
         self.sender
             .0
