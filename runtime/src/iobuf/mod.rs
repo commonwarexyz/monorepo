@@ -110,16 +110,15 @@ impl IoBuf {
 
     /// Try to convert this buffer into `IoBufMut` without copying.
     ///
-    /// If `self` uniquely owns the entire underlying allocation, this succeeds
-    /// and returns an `IoBufMut` with the same contents.
-    ///
-    /// If `self` is not unique for the entire original allocation, this fails
-    /// and returns `self` unchanged.
+    /// Succeeds when `self` holds exclusive ownership of the backing storage
+    /// and returns an `IoBufMut` with the same contents. Fails and returns
+    /// `self` unchanged when ownership is shared.
     ///
     /// For `Bytes`-backed buffers, this matches `Bytes::try_into_mut`
-    /// semantics, including that `from_owner` and `from_static` buffers
-    /// always fail. For pooled buffers, this succeeds for any uniquely-owned
-    /// view (including slices) and fails when shared.
+    /// semantics: succeeds only for uniquely-owned full buffers, and always
+    /// fails for `from_owner` and `from_static` buffers. For pooled buffers,
+    /// this succeeds for any uniquely-owned view (including slices) and fails
+    /// when shared.
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
         match self.inner {
             IoBufInner::Bytes(bytes) => bytes
