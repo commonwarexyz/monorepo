@@ -7,7 +7,7 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecShared;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::status::GaugeExt, Clock, Metrics, Storage};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
@@ -130,9 +130,9 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         debug!(floor = bounds.start, size = bounds.end, "queue initialized");
 
         // Set initial metric values
-        metrics.tip.set(bounds.end as i64);
-        metrics.floor.set(bounds.start as i64);
-        metrics.next.set(bounds.start as i64);
+        let _ = metrics.tip.try_set(bounds.end);
+        let _ = metrics.floor.try_set(bounds.start);
+        let _ = metrics.next.try_set(bounds.start);
 
         Ok(Self {
             journal,
@@ -158,7 +158,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     /// Returns an error if the underlying storage operation fails.
     pub async fn append(&mut self, item: V) -> Result<u64, Error> {
         let pos = self.journal.append(item).await?;
-        self.metrics.tip.set((pos + 1) as i64);
+        let _ = self.metrics.tip.try_set(pos + 1);
         debug!(pos, "appended item");
         Ok(pos)
     }
@@ -197,7 +197,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         }
 
         // If the read position is greater than the size of the journal, return None.
-        self.metrics.next.set(self.read_pos as i64);
+        let _ = self.metrics.next.try_set(self.read_pos);
         if self.read_pos >= size {
             return Ok(None);
         }
@@ -205,7 +205,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         let item = reader.read(self.read_pos).await?;
         let pos = self.read_pos;
         self.read_pos += 1;
-        self.metrics.next.set(self.read_pos as i64);
+        let _ = self.metrics.next.try_set(self.read_pos);
         debug!(position = pos, "dequeued item");
         Ok(Some((pos, item)))
     }
@@ -243,7 +243,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             };
             self.acked_above.remove(next, final_floor - 1);
             self.ack_floor = final_floor;
-            self.metrics.floor.set(self.ack_floor as i64);
+            let _ = self.metrics.floor.try_set(self.ack_floor);
             debug!(floor = self.ack_floor, "advanced ack floor");
         } else {
             // Floor is not advancing, so add to acked_above
@@ -279,7 +279,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         // Remove all entries covered by the new floor and advance
         self.acked_above.remove(self.ack_floor, final_floor - 1);
         self.ack_floor = final_floor;
-        self.metrics.floor.set(self.ack_floor as i64);
+        let _ = self.metrics.floor.try_set(self.ack_floor);
         debug!(floor = self.ack_floor, "batch acked up to");
         Ok(())
     }
@@ -318,7 +318,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
     pub fn reset(&mut self) {
         let old_pos = self.read_pos;
         self.read_pos = self.ack_floor;
-        self.metrics.next.set(self.read_pos as i64);
+        let _ = self.metrics.next.try_set(self.read_pos);
         debug!(
             old_read_pos = old_pos,
             new_read_pos = self.read_pos,
