@@ -65,8 +65,8 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard,
-    RwLockUpgradableReadGuard, RwLockWriteGuard, Storage,
+    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard,
+    RwLockWriteGuard, Storage,
 };
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -74,11 +74,6 @@ use tracing::warn;
 
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
-
-enum MetadataUpdate {
-    Put(Vec<u8>),
-    Remove,
-}
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -613,31 +608,24 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 .is_none_or(|bytes| bytes.as_slice() != pruning_boundary.to_be_bytes());
 
             if needs_update {
-                Some(MetadataUpdate::Put(pruning_boundary.to_be_bytes().to_vec()))
+                Some(pruning_boundary.to_be_bytes().to_vec())
             } else {
-                None
+                return Ok(());
             }
         } else if pruning_boundary_from_metadata.is_some() {
-            Some(MetadataUpdate::Remove)
-        } else {
             None
+        } else {
+            return Ok(());
         };
 
-        // Persist metadata only when pruning_boundary is mid-section.
-        if let Some(update) = metadata_update {
-            // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
-            // the tail section above.
-            let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
-            match update {
-                MetadataUpdate::Put(value) => {
-                    inner.metadata.put(PRUNING_BOUNDARY_KEY, value);
-                }
-                MetadataUpdate::Remove => {
-                    inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
-                }
-            }
-            inner.metadata.sync().await?;
+        // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
+        // the tail section above.
+        let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
+        match metadata_update {
+            Some(value) => inner.metadata.put(PRUNING_BOUNDARY_KEY, value),
+            None => inner.metadata.remove(&PRUNING_BOUNDARY_KEY),
         }
+        inner.metadata.sync().await?;
 
         Ok(())
     }
