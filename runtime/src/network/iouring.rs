@@ -516,7 +516,7 @@ impl crate::Connection for Connection {
         self.address
     }
 
-    fn force_close(&self) {
+    fn abort_on_close(&self) {
         let socket = SockRef::from(&*self.fd);
         if let Err(err) = socket.set_linger(Some(Duration::ZERO)) {
             warn!(?err, "failed to set SO_LINGER");

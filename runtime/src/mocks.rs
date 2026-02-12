@@ -197,7 +197,7 @@ impl ConnectionTrait for Connection {
         self.address
     }
 
-    fn force_close(&self) {}
+    fn abort_on_close(&self) {}
 }
 
 #[cfg(test)]

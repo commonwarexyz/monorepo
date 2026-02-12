@@ -268,7 +268,7 @@ fn main() {
                 Ok(x) => x,
                 Err(e) => {
                     debug!(error = ?e, "failed to upgrade connection");
-                    conn.force_close();
+                    conn.abort_on_close();
                     continue;
                 }
             };

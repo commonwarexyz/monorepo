@@ -80,8 +80,8 @@ impl<C: ConnectionTrait> ConnectionTrait for Connection<C> {
         self.inner.address()
     }
 
-    fn force_close(&self) {
-        self.inner.force_close();
+    fn abort_on_close(&self) {
+        self.inner.abort_on_close();
     }
 }
 

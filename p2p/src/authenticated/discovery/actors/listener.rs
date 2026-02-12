@@ -188,7 +188,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 if !self.allow_private_ips && !IpAddrExt::is_global(&ip) {
                     self.handshakes_blocked.inc();
                     debug!(?address, "rejecting private address");
-                    conn.force_close();
+                    conn.abort_on_close();
                     continue;
                 }
 
@@ -218,7 +218,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 // We wait to check whether the handshake is permitted until after updating both the ip
                 // and subnet rate limiters
                 if ip_limited || subnet_limited {
-                    conn.force_close();
+                    conn.abort_on_close();
                     continue;
                 }
 
@@ -226,7 +226,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                 let Some(reservation) = self.handshake_limiter.try_acquire() else {
                     self.handshakes_concurrent_rate_limited.inc();
                     debug!(?address, "maximum concurrent handshakes reached");
-                    conn.force_close();
+                    conn.abort_on_close();
                     continue;
                 };
 
@@ -248,7 +248,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
                         .await;
 
                         if !ok {
-                            conn.force_close();
+                            conn.abort_on_close();
                         }
 
                         // Once the handshake attempt is complete, release the reservation

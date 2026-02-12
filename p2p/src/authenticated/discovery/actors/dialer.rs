@@ -136,7 +136,7 @@ impl<
                 let instance = match dial(context, config, peer.clone(), stream, sink).await {
                     Ok(instance) => instance,
                     Err(err) => {
-                        conn.force_close();
+                        conn.abort_on_close();
                         debug!(?err, "failed to upgrade connection");
                         return;
                     }

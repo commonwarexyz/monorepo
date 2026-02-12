@@ -46,7 +46,7 @@ impl crate::Connection for Connection {
         self.address
     }
 
-    fn force_close(&self) {}
+    fn abort_on_close(&self) {}
 }
 
 /// Implementation of [crate::Listener] for a deterministic [Network].

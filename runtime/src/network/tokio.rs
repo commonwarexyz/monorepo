@@ -40,7 +40,7 @@ pub struct Stream {
 
 /// Implementation of [crate::Connection] for the [tokio] runtime.
 ///
-/// Holds a duplicated socket handle so that [crate::Connection::force_close] can
+/// Holds a duplicated socket handle so that [crate::Connection::abort_on_close] can
 /// set SO_LINGER=0 independently of the read/write halves.
 pub struct Connection {
     address: SocketAddr,
@@ -52,7 +52,7 @@ impl crate::Connection for Connection {
         self.address
     }
 
-    fn force_close(&self) {
+    fn abort_on_close(&self) {
         if let Err(err) = self.socket.set_linger(Some(Duration::ZERO)) {
             warn!(?err, "failed to set SO_LINGER");
         }

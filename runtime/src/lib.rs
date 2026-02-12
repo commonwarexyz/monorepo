@@ -573,16 +573,18 @@ stability_scope!(BETA {
 
     /// Handle representing a network connection.
     ///
-    /// Provides access to the remote address and the ability to force
-    /// an immediate connection teardown instead of a graceful shutdown.
-    /// This is useful when rejecting incoming connections (e.g., blocked
-    /// peer, invalid handshake) to free resources quickly.
+    /// Provides access to the remote address and the ability to
+    /// configure an abortive (immediate) teardown when the connection
+    /// is dropped, rather than a graceful shutdown. This is useful
+    /// when rejecting incoming connections (e.g., blocked peer, invalid
+    /// handshake) to free resources quickly.
     pub trait Connection: Sync + Send + 'static {
         /// Returns the remote address of the connection.
         fn address(&self) -> SocketAddr;
 
-        /// Force an immediate connection reset.
-        fn force_close(&self);
+        /// Configure the connection to perform an abortive (immediate)
+        /// teardown when it is closed, rather than a graceful shutdown.
+        fn abort_on_close(&self);
     }
 
     /// Interface that any runtime must implement to send
