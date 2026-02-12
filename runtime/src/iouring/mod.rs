@@ -105,6 +105,7 @@ impl From<IoBuf> for OpBuffer {
 /// The variant must match the descriptor type:
 /// - `Fd`: For network sockets and other OS file descriptors
 /// - `File`: For file-backed descriptors
+#[allow(dead_code)]
 pub enum OpFd {
     /// A socket or other OS file descriptor.
     Fd(Arc<OwnedFd>),
