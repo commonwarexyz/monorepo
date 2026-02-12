@@ -51,7 +51,7 @@ impl IoBuf {
         }
     }
 
-    /// Create a pooled immutable buffer (internal).
+    /// Create a buffer from a pooled allocation.
     const fn from_pooled(pooled: PooledBuf) -> Self {
         Self {
             inner: IoBufInner::Pooled(pooled),
