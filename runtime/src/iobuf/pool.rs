@@ -698,6 +698,17 @@ impl std::fmt::Debug for PooledBuf {
 }
 
 impl PooledBuf {
+    /// Returns `true` if this buffer is tracked by a pool.
+    ///
+    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// returned to their pool when dropped.
+    ///
+    /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
+    #[inline]
+    pub fn is_tracked(&self) -> bool {
+        self.inner.pool.strong_count() > 0
+    }
+
     /// Returns a pointer to the first readable byte.
     #[inline]
     pub fn as_ptr(&self) -> *const u8 {
@@ -876,8 +887,10 @@ impl PooledBufMut {
 
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers will be returned to their pool when dropped. Untracked
-    /// buffers (from fallback allocations) are deallocated directly.
+    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// returned to their pool when dropped.
+    ///
+    /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
     #[inline]
     pub fn is_tracked(&self) -> bool {
         self.inner.pool.strong_count() > 0
@@ -1465,6 +1478,30 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_to_bytes_zero_len_on_pooled_buffer() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0x42u8; 100]);
+        let mut iobuf = buf.freeze();
+
+        // copy_to_bytes(0) should return an empty Bytes without retaining the pooled owner.
+        let extracted = iobuf.copy_to_bytes(0);
+        assert!(extracted.is_empty());
+        assert_eq!(iobuf.len(), 100);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        // Dropping the original should return the buffer immediately.
+        drop(iobuf);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+
+        drop(extracted);
+    }
+
+    #[test]
     fn test_concurrent_clones_and_drops() {
         let page = page_size();
         let mut registry = test_registry();
@@ -1982,6 +2019,23 @@ mod tests {
 
         let owned = IoBufMut::with_capacity(100);
         assert!(!owned.is_pooled());
+    }
+
+    #[test]
+    fn test_iobuf_is_pooled() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let pooled = pool.try_alloc(100).unwrap().freeze();
+        assert!(pooled.is_pooled());
+
+        // Oversized alloc uses untracked fallback allocation.
+        let fallback = pool.alloc(page * 10).freeze();
+        assert!(!fallback.is_pooled());
+
+        let bytes = IoBuf::copy_from_slice(b"hello");
+        assert!(!bytes.is_pooled());
     }
 
     #[test]

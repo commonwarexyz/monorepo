@@ -48,6 +48,21 @@ impl IoBuf {
         }
     }
 
+    /// Returns `true` if this buffer is tracked by a pool.
+    ///
+    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// returned to the pool when the final reference is dropped.
+    ///
+    /// Buffers backed by `Bytes`, and untracked fallback allocations from
+    /// [`BufferPool::alloc`], return `false`.
+    #[inline]
+    pub fn is_pooled(&self) -> bool {
+        match &self.inner {
+            IoBufInner::Bytes(_) => false,
+            IoBufInner::Pooled(p) => p.is_tracked(),
+        }
+    }
+
     /// Number of bytes remaining in the buffer.
     #[inline]
     pub fn len(&self) -> usize {
@@ -353,9 +368,11 @@ impl IoBufMut {
 
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers will be returned to their pool when dropped. Fallback
-    /// allocations from [`BufferPool::alloc`] when the pool is exhausted or
-    /// oversized are aligned but untracked, so this returns `false`.
+    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// returned to the pool when dropped.
+    ///
+    /// Buffers backed by `BytesMut`, and untracked fallback allocations from
+    /// [`BufferPool::alloc`], return `false`.
     #[inline]
     pub fn is_pooled(&self) -> bool {
         match &self.inner {
