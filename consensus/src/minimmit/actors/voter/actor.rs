@@ -12,7 +12,7 @@
 
 use super::{egress::Egress, ingress::Message, Config, Mailbox};
 use crate::{
-    elector::Config as Elector,
+    elector::{Config as ElectorConfig, Elector as LeaderElector},
     minimmit::{
         actors::{batcher, resolver},
         metrics::Outbound,
@@ -39,6 +39,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::channel::{mpsc, oneshot};
+use core::future::Future;
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
@@ -47,23 +48,57 @@ use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
+    pin::Pin,
     sync::{atomic::AtomicI64, Arc},
+    task::{self, Poll},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace};
 
 /// An outstanding request to the automaton.
-struct Request<V: Viewable, R>(
-    /// Attached context for the pending item.
-    V,
-    /// Oneshot receiver that the automaton responds over.
-    oneshot::Receiver<R>,
-);
+struct Request<V: Viewable, R>(V, oneshot::Receiver<R>);
 
 impl<V: Viewable, R> Viewable for Request<V, R> {
     fn view(&self) -> View {
         self.0.view()
     }
+}
+
+/// Adapter that polls an optional request in place.
+struct Waiter<'a, V: Viewable, R>(&'a mut Option<Request<V, R>>);
+
+impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
+    type Output = (V, Result<R, oneshot::error::RecvError>);
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        let Waiter(slot) = self.get_mut();
+        let res = match slot.as_mut() {
+            Some(Request(_, receiver)) => match Pin::new(receiver).poll(cx) {
+                Poll::Ready(res) => res,
+                Poll::Pending => return Poll::Pending,
+            },
+            None => return Poll::Pending,
+        };
+        let Request(item, _) = slot.take().expect("request must exist while polling");
+        Poll::Ready((item, res))
+    }
+}
+
+struct ActionContext<'a, S, D, E, V, C>
+where
+    S: Scheme<D>,
+    D: Digest,
+    E: LeaderElector<S>,
+    V: Sender,
+    C: Sender,
+{
+    state: &'a mut State<S, D, E>,
+    egress: &'a mut Egress<S, D, V, C>,
+    batcher: &'a mut batcher::Mailbox<S, D>,
+    resolver: &'a mut resolver::Mailbox<S, D>,
+    timeout_deadline: &'a mut SystemTime,
+    pending_propose: &'a mut Option<Request<Context<D, S::PublicKey>, D>>,
+    pending_verify: &'a mut Option<Request<Proposal<D>, bool>>,
 }
 
 /// Voter actor for Minimmit consensus.
@@ -77,7 +112,7 @@ pub struct Actor<E, S, L, B, D, A, R, F, T>
 where
     E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
@@ -131,7 +166,7 @@ impl<E, S, L, B, D, A, R, F, T> Actor<E, S, L, B, D, A, R, F, T>
 where
     E: Clock + CryptoRngCore + Spawner + Storage + Metrics,
     S: Scheme<D>,
-    L: Elector<S>,
+    L: ElectorConfig<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: Automaton<Digest = D, Context = Context<D, S::PublicKey>>,
@@ -292,6 +327,34 @@ where
         }
     }
 
+    /// Starts proposal verification and returns the completion receiver.
+    ///
+    /// Returns `None` when ancestry is currently missing. This is a deferred
+    /// condition and should be retried after new certificates arrive.
+    async fn request_proposal_verification(
+        &mut self,
+        state: &mut State<S, D, L::Elector>,
+        proposal: Proposal<D>,
+    ) -> Option<oneshot::Receiver<bool>> {
+        debug!(view = %proposal.view(), "requesting proposal verification");
+
+        let leader = state.leader(proposal.view(), None);
+        let leader_key = state
+            .scheme()
+            .participants()
+            .get(leader.into())
+            .expect("leader must exist")
+            .clone();
+
+        let parent = state.parent_payload(&proposal)?;
+        let context = Context {
+            round: proposal.round,
+            leader: leader_key,
+            parent,
+        };
+        Some(self.automaton.verify(context, proposal.payload).await)
+    }
+
     async fn run(
         mut self,
         mut batcher: batcher::Mailbox<S, D>,
@@ -431,11 +494,21 @@ where
         // This ensures nodes can make progress via nullifications even when all
         // nodes restart simultaneously at different views.
         let mut timeout_deadline = self.context.current();
+        let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
+        let mut pending_verify: Option<Request<Proposal<D>, bool>> = None;
 
         // Try to propose if we're leader
         if let Some(action) = state.try_propose() {
-            self.execute_action(action, &mut state, &mut egress, &mut batcher, &mut resolver)
-                .await;
+            let mut action_ctx = ActionContext {
+                state: &mut state,
+                egress: &mut egress,
+                batcher: &mut batcher,
+                resolver: &mut resolver,
+                timeout_deadline: &mut timeout_deadline,
+                pending_propose: &mut pending_propose,
+                pending_verify: &mut pending_verify,
+            };
+            self.execute_action(action, &mut action_ctx).await;
         }
 
         // Re-broadcast our vote for current view after crash recovery.
@@ -467,6 +540,11 @@ where
             },
             // Handle timeout
             _ = self.context.sleep_until(timeout_deadline) => {
+                if pending_verify.is_some() {
+                    debug!(view = %state.view(), "proposal verification timed out");
+                    pending_verify = None;
+                }
+
                 trace!(view = %state.view(), "timeout expired");
                 let result = state.handle_timeout();
 
@@ -502,6 +580,47 @@ where
                 timeout_deadline = self.context.current() + self.nullify_retry;
             },
             // Handle messages from batcher and resolver
+            (context, propose_result) = Waiter(&mut pending_propose) => {
+                if let Ok(payload) = propose_result {
+                    let proposal =
+                        Proposal::new(context.round, context.parent.0, context.parent.1, payload);
+                    let actions = state.proposed(proposal.clone());
+
+                    if !actions.is_empty() {
+                        self.relay.broadcast(proposal.payload).await;
+                    }
+
+                    for action in actions {
+                        let mut action_ctx = ActionContext {
+                            state: &mut state,
+                            egress: &mut egress,
+                            batcher: &mut batcher,
+                            resolver: &mut resolver,
+                            timeout_deadline: &mut timeout_deadline,
+                            pending_propose: &mut pending_propose,
+                            pending_verify: &mut pending_verify,
+                        };
+                        self.execute_action(action, &mut action_ctx).await;
+                    }
+                }
+            },
+            (proposal, verify_result) = Waiter(&mut pending_verify) => {
+                if let Ok(valid) = verify_result {
+                    let actions = state.proposal_verified(proposal, valid);
+                    for action in actions {
+                        let mut action_ctx = ActionContext {
+                            state: &mut state,
+                            egress: &mut egress,
+                            batcher: &mut batcher,
+                            resolver: &mut resolver,
+                            timeout_deadline: &mut timeout_deadline,
+                            pending_propose: &mut pending_propose,
+                            pending_verify: &mut pending_verify,
+                        };
+                        self.execute_action(action, &mut action_ctx).await;
+                    }
+                }
+            },
             message = self.receiver.recv() => {
                 let Some(message) = message else {
                     break;
@@ -550,8 +669,16 @@ where
                 };
 
                 for action in actions {
-                    self.execute_action(action, &mut state, &mut egress, &mut batcher, &mut resolver)
-                        .await;
+                    let mut action_ctx = ActionContext {
+                        state: &mut state,
+                        egress: &mut egress,
+                        batcher: &mut batcher,
+                        resolver: &mut resolver,
+                        timeout_deadline: &mut timeout_deadline,
+                        pending_propose: &mut pending_propose,
+                        pending_verify: &mut pending_verify,
+                    };
+                    self.execute_action(action, &mut action_ctx).await;
                 }
             },
             on_end => {
@@ -560,6 +687,9 @@ where
                 if new_view > current_view {
                     info!(old = %current_view, new = %new_view, "view advanced");
                     current_view = new_view;
+
+                    pending_verify = None;
+                    pending_propose = None;
 
                     // Update current_view metric
                     let _ = self.current_view.try_set(new_view.get());
@@ -581,14 +711,16 @@ where
 
                     // Try to propose if we're leader of the new view
                     if let Some(action) = state.try_propose() {
-                        self.execute_action(
-                            action,
-                            &mut state,
-                            &mut egress,
-                            &mut batcher,
-                            &mut resolver,
-                        )
-                        .await;
+                        let mut action_ctx = ActionContext {
+                            state: &mut state,
+                            egress: &mut egress,
+                            batcher: &mut batcher,
+                            resolver: &mut resolver,
+                            timeout_deadline: &mut timeout_deadline,
+                            pending_propose: &mut pending_propose,
+                            pending_verify: &mut pending_verify,
+                        };
+                        self.execute_action(action, &mut action_ctx).await;
                     }
                 }
             },
@@ -599,71 +731,34 @@ where
     async fn execute_action<V: Sender, C: Sender>(
         &mut self,
         action: Action<S, D>,
-        state: &mut State<S, D, L::Elector>,
-        egress: &mut Egress<S, D, V, C>,
-        batcher: &mut batcher::Mailbox<S, D>,
-        resolver: &mut resolver::Mailbox<S, D>,
+        context: &mut ActionContext<'_, S, D, L::Elector, V, C>,
     ) {
         match action {
-            Action::Propose { context, view } => {
+            Action::Propose {
+                context: request_context,
+                view,
+            } => {
                 debug!(%view, "requesting proposal from automaton");
+                if context.pending_propose.is_some() {
+                    return;
+                }
                 // Record proposal start time for latency measurement (we are the leader)
                 self.proposal_starts.insert(view, self.context.current());
-                let receiver = self.automaton.propose(context.clone()).await;
-                // Wait for proposal (with timeout handled by automaton)
-                if let Ok(payload) = receiver.await {
-                    let proposal =
-                        Proposal::new(context.round, context.parent.0, context.parent.1, payload);
-                    let actions = state.proposed(proposal.clone());
-
-                    // Only broadcast if we actually voted (view hasn't advanced)
-                    // This avoids leaking stale proposals if the view changed while
-                    // waiting for the automaton
-                    if !actions.is_empty() {
-                        self.relay.broadcast(proposal.payload).await;
-                    }
-
-                    for action in actions {
-                        Box::pin(self.execute_action(action, state, egress, batcher, resolver))
-                            .await;
-                    }
-                }
+                let receiver = self.automaton.propose(request_context.clone()).await;
+                *context.pending_propose = Some(Request(request_context, receiver));
             }
             Action::VerifyProposal(proposal) => {
-                debug!(view = %proposal.view(), "requesting proposal verification");
-                // Build context for verification using the proposal's claimed parent
-                let leader = state.leader(proposal.view(), None);
-                let leader_key = state
-                    .scheme()
-                    .participants()
-                    .get(leader.into())
-                    .expect("leader must exist")
-                    .clone();
-                // Look up the parent payload based on the proposal's claimed parent view
-                let parent = match state.parent_payload(&proposal) {
-                    Some(p) => p,
-                    None => {
-                        // Invalid ancestry - reject the proposal
-                        let actions = state.proposal_verified(proposal, false);
-                        for action in actions {
-                            Box::pin(self.execute_action(action, state, egress, batcher, resolver))
-                                .await;
-                        }
-                        return;
-                    }
-                };
-                let context = Context {
-                    round: proposal.round,
-                    leader: leader_key,
-                    parent,
-                };
-                let receiver = self.automaton.verify(context, proposal.payload).await;
-                // Wait for verification result
-                if let Ok(valid) = receiver.await {
-                    let actions = state.proposal_verified(proposal, valid);
-                    for action in actions {
-                        Box::pin(self.execute_action(action, state, egress, batcher, resolver))
-                            .await;
+                if context.pending_verify.is_some() {
+                    return;
+                }
+                if let Some(receiver) = self
+                    .request_proposal_verification(context.state, proposal.clone())
+                    .await
+                {
+                    *context.pending_verify = Some(Request(proposal, receiver));
+                    let deadline = self.context.current() + self.notarization_timeout;
+                    if deadline < *context.timeout_deadline {
+                        *context.timeout_deadline = deadline;
                     }
                 }
             }
@@ -677,8 +772,11 @@ where
                     .report(Activity::Notarize(notarize.clone()))
                     .await;
                 // Add to batcher for tracking
-                batcher.constructed(Vote::Notarize(notarize.clone())).await;
-                egress.broadcast_notarize(notarize).await;
+                context
+                    .batcher
+                    .constructed(Vote::Notarize(notarize.clone()))
+                    .await;
+                context.egress.broadcast_notarize(notarize).await;
             }
             Action::BroadcastNullify(nullify) => {
                 debug!(view = %nullify.view(), "broadcasting nullify");
@@ -690,8 +788,11 @@ where
                     .report(Activity::Nullify(nullify.clone()))
                     .await;
                 // Add to batcher for tracking
-                batcher.constructed(Vote::Nullify(nullify.clone())).await;
-                egress.broadcast_nullify(nullify).await;
+                context
+                    .batcher
+                    .constructed(Vote::Nullify(nullify.clone()))
+                    .await;
+                context.egress.broadcast_nullify(nullify).await;
             }
             Action::BroadcastCertificate(certificate) => {
                 debug!(view = %certificate.view(), "broadcasting certificate");
@@ -708,7 +809,7 @@ where
                             .await;
                         // Notify batcher that M-quorum was reached for this view.
                         // This allows batching toward L-quorum.
-                        batcher.m_notarization_exists(view).await;
+                        context.batcher.m_notarization_exists(view).await;
                         Artifact::MNotarization(m.clone())
                     }
                     Certificate::Nullification(n) => {
@@ -731,8 +832,8 @@ where
                 self.append_journal(view, artifact).await;
                 self.sync_journal(view).await;
                 // Notify resolver of new certificate
-                resolver.updated(certificate.clone()).await;
-                egress.broadcast_certificate(certificate).await;
+                context.resolver.updated(certificate.clone()).await;
+                context.egress.broadcast_certificate(certificate).await;
             }
             Action::Finalized(finalization) => {
                 let view = finalization.view();
@@ -747,7 +848,8 @@ where
                 // Notify resolver so it can serve finalizations for catch-up.
                 // Note: we don't broadcast finalizations (per the paper), but the resolver
                 // needs to know about them to help lagging nodes.
-                resolver
+                context
+                    .resolver
                     .updated(Certificate::Finalization(finalization))
                     .await;
             }
@@ -770,7 +872,8 @@ mod tests {
             types::{Artifact, Certificate, MNotarization, Notarize, Proposal},
         },
         mocks::relay,
-        types::{Epoch, Round, View, ViewDelta},
+        types::{Context, Epoch, Round, View, ViewDelta},
+        Automaton, Relay,
     };
     use bytes::Bytes;
     use commonware_codec::Read;
@@ -786,12 +889,18 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Clock, IoBufMut, Metrics, Runner, Spawner,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{channel::mpsc, test_rng, NZUsize, Participant, NZU16};
+    use commonware_utils::{
+        channel::{mpsc, oneshot},
+        test_rng, NZUsize, Participant, NZU16,
+    };
     use std::{
         convert::Infallible,
         marker::PhantomData,
         num::{NonZeroU16, NonZeroUsize},
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
         time::{Duration, SystemTime},
     };
 
@@ -869,6 +978,79 @@ mod tests {
                 messages: self.messages.clone(),
                 _marker: PhantomData,
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct NeverResolvesVerifyAutomaton {
+        genesis: Sha256Digest,
+        verify_calls: Arc<AtomicUsize>,
+    }
+
+    impl Automaton for NeverResolvesVerifyAutomaton {
+        type Context = Context<Sha256Digest, Ed25519PublicKey>;
+        type Digest = Sha256Digest;
+
+        async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
+            self.genesis
+        }
+
+        async fn propose(&mut self, _context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(self.genesis);
+            receiver
+        }
+
+        async fn verify(
+            &mut self,
+            _context: Self::Context,
+            _payload: Self::Digest,
+        ) -> oneshot::Receiver<bool> {
+            self.verify_calls.fetch_add(1, Ordering::Relaxed);
+            let (sender, receiver) = oneshot::channel();
+            std::mem::forget(sender);
+            receiver
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct NoopRelay;
+
+    impl Relay for NoopRelay {
+        type Digest = Sha256Digest;
+
+        async fn broadcast(&mut self, _payload: Self::Digest) {}
+    }
+
+    #[derive(Clone)]
+    struct NeverResolvesProposeAutomaton {
+        genesis: Sha256Digest,
+        propose_calls: Arc<AtomicUsize>,
+    }
+
+    impl Automaton for NeverResolvesProposeAutomaton {
+        type Context = Context<Sha256Digest, Ed25519PublicKey>;
+        type Digest = Sha256Digest;
+
+        async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
+            self.genesis
+        }
+
+        async fn propose(&mut self, _context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+            self.propose_calls.fetch_add(1, Ordering::Relaxed);
+            let (sender, receiver) = oneshot::channel();
+            std::mem::forget(sender);
+            receiver
+        }
+
+        async fn verify(
+            &mut self,
+            _context: Self::Context,
+            _payload: Self::Digest,
+        ) -> oneshot::Receiver<bool> {
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(true);
+            receiver
         }
     }
 
@@ -1076,6 +1258,341 @@ mod tests {
             }
 
             context.stop(0, None).await.expect("stop");
+        });
+    }
+
+    #[test]
+    fn verify_hang_does_not_stall_voter_loop() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"minimmit-verify-hang", 6);
+            let scheme = schemes[0].clone();
+            let participants = scheme.participants().clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants,
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let cfg = Config {
+                scheme,
+                elector,
+                blocker: NoopBlocker,
+                automaton: NeverResolvesVerifyAutomaton {
+                    genesis: Sha256Digest::from([0u8; 32]),
+                    verify_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                relay: NoopRelay,
+                reporter,
+                strategy: Sequential,
+                partition: "voter_verify_hang".to_string(),
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(1),
+                nullify_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let verify_calls = actor.automaton.verify_calls.clone();
+            let (batcher_sender, batcher_receiver) = mpsc::channel(8);
+            drop(batcher_receiver);
+            let (resolver_sender, resolver_receiver) = mpsc::channel(8);
+            drop(resolver_receiver);
+            let vote_sender = TestSender::<Ed25519PublicKey>::default();
+            let certificate_sender = TestSender::<Ed25519PublicKey>::default();
+
+            actor.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender.clone(),
+                certificate_sender.clone(),
+            );
+
+            // This proposal enters VerifyProposal and hangs forever in automaton.verify().
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(1), View::new(1)),
+                View::zero(),
+                Sha256Digest::from([0u8; 32]),
+                Sha256Digest::from([9u8; 32]),
+            );
+            assert!(mailbox.proposal(proposal));
+
+            for _ in 0..20 {
+                if verify_calls.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                verify_calls.load(Ordering::Relaxed) > 0,
+                "expected proposal verification to start"
+            );
+
+            // Queue a valid certificate message that should be handled promptly if the loop is responsive.
+            let nullify_votes: Vec<_> = [1usize, 2, 3]
+                .into_iter()
+                .map(|i| {
+                    crate::minimmit::types::Nullify::sign::<Sha256Digest>(
+                        &schemes[i],
+                        Round::new(Epoch::new(1), View::new(1)),
+                    )
+                    .expect("nullify")
+                })
+                .collect();
+            let nullification = crate::minimmit::types::Nullification::from_nullifies(
+                &schemes[0],
+                nullify_votes.iter(),
+                &Sequential,
+            )
+            .expect("nullification");
+            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+
+            for _ in 0..20 {
+                if certificate_sender.len() > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            assert!(
+                certificate_sender.len() > 0,
+                "voter loop should keep processing messages even while a proposal verification is pending"
+            );
+        });
+    }
+
+    #[test]
+    fn verify_timeout_triggers_nullify_when_payload_never_arrives() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"minimmit-verify-timeout", 6);
+            let scheme = schemes[0].clone();
+            let participants = scheme.participants().clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants,
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let cfg = Config {
+                scheme,
+                elector,
+                blocker: NoopBlocker,
+                automaton: NeverResolvesVerifyAutomaton {
+                    genesis: Sha256Digest::from([0u8; 32]),
+                    verify_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                relay: NoopRelay,
+                reporter,
+                strategy: Sequential,
+                partition: "voter_verify_timeout".to_string(),
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_millis(20),
+                notarization_timeout: Duration::from_millis(20),
+                nullify_retry: Duration::from_millis(20),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let verify_calls = actor.automaton.verify_calls.clone();
+            let (batcher_sender, batcher_receiver) = mpsc::channel(8);
+            drop(batcher_receiver);
+            let (resolver_sender, resolver_receiver) = mpsc::channel(8);
+            drop(resolver_receiver);
+            let vote_sender = TestSender::<Ed25519PublicKey>::default();
+            let certificate_sender = TestSender::<Ed25519PublicKey>::default();
+
+            actor.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender.clone(),
+                certificate_sender,
+            );
+
+            // Let initial immediate timeout/nullify settle, then clear captured votes.
+            context.sleep(Duration::from_millis(30)).await;
+            let _ = vote_sender.take();
+
+            // Advance to view 2 with a nullification for view 1 so we can verify in a fresh view.
+            let nullify_votes: Vec<_> = [1usize, 2, 3]
+                .into_iter()
+                .map(|i| {
+                    crate::minimmit::types::Nullify::sign::<Sha256Digest>(
+                        &schemes[i],
+                        Round::new(Epoch::new(1), View::new(1)),
+                    )
+                    .expect("nullify")
+                })
+                .collect();
+            let nullification = crate::minimmit::types::Nullification::from_nullifies(
+                &schemes[0],
+                nullify_votes.iter(),
+                &Sequential,
+            )
+            .expect("nullification");
+            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+
+            context.sleep(Duration::from_millis(10)).await;
+            let _ = vote_sender.take();
+
+            // Submit a view-2 proposal that will enter verify and never resolve.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(1), View::new(2)),
+                View::zero(),
+                Sha256Digest::from([0u8; 32]),
+                Sha256Digest::from([7u8; 32]),
+            );
+            assert!(mailbox.proposal(proposal));
+
+            for _ in 0..20 {
+                if verify_calls.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                verify_calls.load(Ordering::Relaxed) > 0,
+                "expected verification request to be issued"
+            );
+
+            // Verification never resolves; after timeout, voter should nullify view 2.
+            for _ in 0..60 {
+                let sent_view2_nullify = vote_sender.take().into_iter().any(|message| {
+                    let mut buf = Bytes::from(message);
+                    let Ok(vote) = crate::minimmit::types::Vote::<ed25519::Scheme, Sha256Digest>::read_cfg(
+                        &mut buf,
+                        &(),
+                    ) else {
+                        return false;
+                    };
+                    matches!(vote, crate::minimmit::types::Vote::Nullify(v) if v.round.view() == View::new(2))
+                });
+                if sent_view2_nullify {
+                    return;
+                }
+                context.sleep(Duration::from_millis(2)).await;
+            }
+
+            panic!("expected nullify for view 2 after verification timeout");
+        });
+    }
+
+    #[test]
+    fn propose_hang_does_not_stall_voter_loop() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"minimmit-propose-hang", 6);
+
+            // For epoch=1 and view=1, round-robin leader is participant 2.
+            let scheme = schemes[2].clone();
+            let participants = scheme.participants().clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants,
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let cfg = Config {
+                scheme,
+                elector,
+                blocker: NoopBlocker,
+                automaton: NeverResolvesProposeAutomaton {
+                    genesis: Sha256Digest::from([0u8; 32]),
+                    propose_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                relay: NoopRelay,
+                reporter,
+                strategy: Sequential,
+                partition: "voter_propose_hang".to_string(),
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(1),
+                nullify_retry: Duration::from_secs(1),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let propose_calls = actor.automaton.propose_calls.clone();
+            let (batcher_sender, batcher_receiver) = mpsc::channel(8);
+            drop(batcher_receiver);
+            let (resolver_sender, resolver_receiver) = mpsc::channel(8);
+            drop(resolver_receiver);
+            let vote_sender = TestSender::<Ed25519PublicKey>::default();
+            let certificate_sender = TestSender::<Ed25519PublicKey>::default();
+
+            actor.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender.clone(),
+            );
+
+            for _ in 0..20 {
+                if propose_calls.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                propose_calls.load(Ordering::Relaxed) > 0,
+                "expected proposal request to be issued"
+            );
+
+            // Queue a certificate message; if the loop is responsive, it should be processed.
+            let nullify_votes: Vec<_> = [0usize, 1, 3]
+                .into_iter()
+                .map(|i| {
+                    crate::minimmit::types::Nullify::sign::<Sha256Digest>(
+                        &schemes[i],
+                        Round::new(Epoch::new(1), View::new(1)),
+                    )
+                    .expect("nullify")
+                })
+                .collect();
+            let nullification = crate::minimmit::types::Nullification::from_nullifies(
+                &schemes[0],
+                nullify_votes.iter(),
+                &Sequential,
+            )
+            .expect("nullification");
+            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+
+            for _ in 0..20 {
+                if certificate_sender.len() > 0 {
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            assert!(
+                certificate_sender.len() > 0,
+                "voter loop should keep processing messages even while a proposal request is pending"
+            );
         });
     }
 }
