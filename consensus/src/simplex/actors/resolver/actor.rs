@@ -18,7 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc},
     ordered::Quorum,
@@ -30,7 +30,7 @@ use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: Clock + CryptoRngCore + Metrics + Spawner,
+    E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -51,7 +51,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + CryptoRngCore + Metrics + Spawner,
+        E: BufferPooler + Clock + CryptoRngCore + Metrics + Spawner,
         S: Scheme<D>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
