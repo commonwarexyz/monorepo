@@ -9,7 +9,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -94,7 +94,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
-        payload: IoBuf,
+        payload: IoBufs,
     ) -> Result<(), Error> {
         sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();

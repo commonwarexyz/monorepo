@@ -1,6 +1,6 @@
 use crate::Channel;
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
-use commonware_runtime::{Buf, BufMut, IoBuf};
+use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,14 +41,40 @@ impl Read for Data {
 ///
 /// Contains the channel ID (for metrics) and the pre-encoded payload bytes.
 /// The `payload` field contains the fully encoded `Payload::Data(...)` bytes,
-/// ready to be sent directly to the stream layer.
+/// stored as one or more buffers ready to be sent directly to the stream layer.
 #[derive(Clone, Debug)]
 pub struct EncodedData {
     /// The channel this data belongs to (used for metrics/logging).
     pub channel: Channel,
 
     /// Pre-encoded `Payload::Data(...)` bytes ready for transmission.
-    pub payload: IoBuf,
+    pub payload: IoBufs,
+}
+
+impl EncodedData {
+    /// Encode `Payload::Data` bytes in-place as:
+    /// `data_prefix || channel || message_len || message`.
+    pub fn encode_with_prefix(
+        pool: &BufferPool,
+        channel: Channel,
+        mut message: IoBufs,
+        data_prefix: u8,
+    ) -> Self {
+        let payload_len = message.len();
+        let header_len =
+            data_prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
+        let mut header = pool.alloc(header_len);
+        data_prefix.write(&mut header);
+        UInt(channel).write(&mut header);
+        payload_len.write(&mut header);
+        debug_assert_eq!(header.len(), header_len, "data header size mismatch");
+        message.prepend(header.freeze());
+
+        Self {
+            channel,
+            payload: message,
+        }
+    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -68,6 +94,7 @@ impl arbitrary::Arbitrary<'_> for Data {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
+    use commonware_runtime::{deterministic, BufferPooler as _, Runner as _};
 
     #[test]
     fn test_data_codec() {
@@ -91,6 +118,29 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Data::decode_cfg(&invalid_payload[..], &(..).into());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encoded_data_encode_with_prefix_matches_data_encode() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut message = IoBufs::from(IoBuf::from(b"hello "));
+            message.append(IoBuf::from(b"world"));
+            message.append(IoBuf::from(b"!"));
+
+            let data = Data {
+                channel: 12345,
+                message: message.clone().coalesce(),
+            };
+
+            let mut expected = IoBufs::from(data.encode());
+            expected.prepend(IoBuf::from(vec![7]));
+
+            let encoded =
+                EncodedData::encode_with_prefix(context.network_buffer_pool(), 12345, message, 7);
+            assert_eq!(encoded.channel, 12345);
+            assert_eq!(encoded.payload.coalesce(), expected.coalesce());
+        });
     }
 
     #[cfg(feature = "arbitrary")]

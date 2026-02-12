@@ -30,13 +30,13 @@ pub enum Error {
 pub const MAX_PAYLOAD_DATA_OVERHEAD: u32 = 1 + 10 + 5;
 
 /// Prefix byte used to identify a [Payload] with variant Data.
-const DATA_PREFIX: u8 = 0;
+pub const DATA_PREFIX: u8 = 0;
 /// Prefix byte used to identify a [Payload] with variant Greeting.
-const GREETING_PREFIX: u8 = 1;
+pub const GREETING_PREFIX: u8 = 1;
 /// Prefix byte used to identify a [Payload] with variant BitVec.
-const BIT_VEC_PREFIX: u8 = 2;
+pub const BIT_VEC_PREFIX: u8 = 2;
 /// Prefix byte used to identify a [Payload] with variant Peers.
-const PEERS_PREFIX: u8 = 3;
+pub const PEERS_PREFIX: u8 = 3;
 
 // Use chunk size of 1 to minimize encoded size.
 type BitMap = commonware_utils::bitmap::BitMap<1>;

@@ -1,6 +1,6 @@
 use crate::{
     authenticated::{
-        data::{Data, EncodedData},
+        data::EncodedData,
         lookup::{channels::Channels, types},
         relay::Relay,
         Mailbox,
@@ -8,9 +8,8 @@ use crate::{
     utils::limited::Connected,
     Channel, Recipients,
 };
-use commonware_codec::Encode;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::IoBufMut;
+use commonware_runtime::{BufferPool, IoBufs};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, oneshot, ring},
     NZUsize,
@@ -66,14 +65,15 @@ impl<P: PublicKey> Mailbox<Message<P>> {
 /// Sends messages containing content to the router to send to peers.
 #[derive(Clone, Debug)]
 pub struct Messenger<P: PublicKey> {
+    pool: BufferPool,
     sender: Mailbox<Message<P>>,
 }
 
 impl<P: PublicKey> Messenger<P> {
     /// Returns a new [Messenger] with the given sender.
     /// (The router has the corresponding receiver.)
-    pub const fn new(sender: Mailbox<Message<P>>) -> Self {
-        Self { sender }
+    pub const fn new(pool: BufferPool, sender: Mailbox<Message<P>>) -> Self {
+        Self { pool, sender }
     }
 
     /// Sends a message to the given `recipients`.
@@ -84,19 +84,11 @@ impl<P: PublicKey> Messenger<P> {
         &mut self,
         recipients: Recipients<P>,
         channel: Channel,
-        message: IoBufMut,
+        message: IoBufs,
         priority: bool,
     ) -> Vec<P> {
-        // Build Data and encode Message::Data once for all recipients
-        let data = Data {
-            channel,
-            message: message.freeze(),
-        };
-        let payload_bytes = types::Message::Data(data).encode();
-        let encoded = EncodedData {
-            channel,
-            payload: payload_bytes.into(),
-        };
+        let encoded =
+            EncodedData::encode_with_prefix(&self.pool, channel, message, types::DATA_PREFIX);
 
         self.sender
             .0

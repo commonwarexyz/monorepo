@@ -2010,7 +2010,7 @@ mod tests {
 
             // Peer 0 can't send to anyone
             let sent = sender0
-                .send(Recipients::All, peer1.public_key().as_ref(), true)
+                .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
                 .await
                 .unwrap();
             assert!(sent.is_empty());
@@ -2036,7 +2036,7 @@ mod tests {
             // Now peer 0 should connect to peer 1 at correct address
             loop {
                 let sent = sender0
-                    .send(Recipients::All, peer0.public_key().as_ref(), true)
+                    .send(Recipients::All, peer0.public_key().as_ref().to_vec(), true)
                     .await
                     .unwrap();
                 if sent.len() == 1 {
@@ -2100,7 +2100,7 @@ mod tests {
             // Peer 0 can send to peer 2
             loop {
                 let sent = sender0
-                    .send(Recipients::All, peer2.public_key().as_ref(), true)
+                    .send(Recipients::All, peer2.public_key().as_ref().to_vec(), true)
                     .await
                     .unwrap();
                 if sent.len() == 1 {
@@ -2133,7 +2133,7 @@ mod tests {
             // Now peer 0 should connect to peer 1 at correct address and peer 2 should dial peer 1
             loop {
                 let sent = sender1
-                    .send(Recipients::All, peer1.public_key().as_ref(), true)
+                    .send(Recipients::All, peer1.public_key().as_ref().to_vec(), true)
                     .await
                     .unwrap();
                 if sent.len() == 2 {

@@ -505,7 +505,7 @@ impl From<IoBuf> for IoBufMut {
 }
 
 /// Container for one or more immutable buffers.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum IoBufs {
     /// Single buffer (common case, no VecDeque allocation).
     Single(IoBuf),

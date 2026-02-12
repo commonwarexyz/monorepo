@@ -15,7 +15,7 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufMut, Listener as _, Metrics,
+    spawn_cell, Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics,
     Network as RNetwork, Quota, Spawner,
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -765,10 +765,10 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<P>,
-        message: impl Into<IoBufMut> + Send,
+        message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<P>, Error> {
-        let message = message.into().freeze();
+        let message = message.into().coalesce();
 
         // Check message size
         if message.len() > self.max_size as usize {
@@ -967,11 +967,11 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
 
     async fn send(
         self,
-        message: impl Into<IoBufMut> + Send,
+        message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         // Convert to IoBuf here since forwarder needs to inspect the message
-        let message = message.into().freeze();
+        let message = message.into().coalesce();
 
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {

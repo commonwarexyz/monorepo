@@ -15,7 +15,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -106,7 +106,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
-        payload: IoBuf,
+        payload: IoBufs,
     ) -> Result<(), Error> {
         sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
@@ -396,7 +396,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_runtime::{deterministic, mocks, Runner, Spawner};
+    use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -439,9 +439,10 @@ mod tests {
         }
     }
 
-    fn create_channels() -> Channels<PublicKey> {
+    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
         let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger = router::Messenger::new(router_mailbox);
+        let messenger =
+            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -514,7 +515,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels();
+            let channels = create_channels(&context);
 
             // Send a non-greeting message first (BitVec)
             let bit_vec = types::Payload::<PublicKey>::BitVec(types::BitVec {
@@ -613,7 +614,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels();
+            let channels = create_channels(&context);
 
             // Send first greeting (valid)
             let first_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
@@ -718,7 +719,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels();
+            let channels = create_channels(&context);
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
@@ -840,7 +841,8 @@ mod tests {
 
             // Create channels with a very small backlog (1) to force drops
             let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-            let messenger = router::Messenger::new(router_mailbox);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
             let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
             let channel_id = 0u64;
             let (_sender, _receiver) = channels.register(
