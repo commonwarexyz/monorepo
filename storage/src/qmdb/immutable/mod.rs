@@ -534,7 +534,6 @@ pub(super) mod test {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
-
     const ITEMS_PER_SECTION: u64 = 5;
 
     pub(crate) fn db_config(
