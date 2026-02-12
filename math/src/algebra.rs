@@ -59,6 +59,15 @@ fn monoid_exp<T: Clone>(
     acc
 }
 
+/// Return `[1, base, base^2, ..., base^(len - 1)]`.
+pub fn powers<R: Ring>(base: &R, len: usize) -> impl Iterator<Item = R> + '_ {
+    (0..len).scan(R::one(), move |state, _| {
+        let out = state.clone();
+        *state *= base;
+        Some(out)
+    })
+}
+
 /// A basic trait we expect algebraic data structures to implement.
 ///
 /// Types implementing this trait need to support:
@@ -696,6 +705,15 @@ mod test {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn test_powers_matches_exp(base: F, index: u16) {
+            let index = usize::from(index);
+            let pow_i = powers(&base, index + 1)
+                .last()
+                .expect("len=index+1 guarantees at least one item");
+            assert_eq!(pow_i, base.exp(&[index as u64]));
+        }
+
         #[test]
         fn test_exp_one(x: F) {
             assert_eq!(x.exp(&[1]), x);
