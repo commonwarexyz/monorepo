@@ -1,4 +1,4 @@
-use crate::{Blob, BufferPool, Error, IoBufMut};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBufMut};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::new(blob, size, NZUsize!(buffer), context.storage_buffer_pool().clone());
+///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let mut header = [0u8; 16];
@@ -67,6 +67,16 @@ impl<B: Blob> Read<B> {
             buffer_size: buffer_size.get(),
             pool,
         }
+    }
+
+    /// Creates a new `Read`, extracting the storage [BufferPool] from a [BufferPooler].
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        blob: B,
+        blob_size: u64,
+        buffer_size: NonZeroUsize,
+    ) -> Self {
+        Self::new(blob, blob_size, buffer_size, pooler.storage_buffer_pool().clone())
     }
 
     /// Returns how many valid bytes are remaining in the buffer.

@@ -351,9 +351,9 @@ impl Cache {
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             let mut slot = pool.alloc(page_size);
-            // SAFETY: We immediately initialize all bytes below.
+            // SAFETY: cache() always overwrites the full slot via copy_from_slice
+            // before any read, so initialization here is unnecessary.
             unsafe { slot.set_len(page_size) };
-            slot.as_mut().fill(0);
             slots.push(slot);
         }
         Self {

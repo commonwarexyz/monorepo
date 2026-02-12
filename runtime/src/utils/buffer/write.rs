@@ -1,4 +1,4 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, Error, IoBuf, IoBufs, IoBufsMut, RwLock};
+use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBuf, IoBufs, IoBufsMut, RwLock};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -17,7 +17,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::new(blob, 0, NZUsize!(16), context.storage_buffer_pool().clone());
+///     let mut blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
 ///     blob.write_at(0, b"hello").await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
@@ -28,7 +28,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
-///     let mut reader = Read::new(blob, size, NZUsize!(8), context.storage_buffer_pool().clone());
+///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
 ///     let mut buf = vec![0u8; size as usize];
 ///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");
 ///     assert_eq!(&buf, b"hello world!");
@@ -59,6 +59,16 @@ impl<B: Blob> Write<B> {
             buffer: Arc::new(RwLock::new(Buffer::new(size, capacity.get(), pool.clone()))),
             pool,
         }
+    }
+
+    /// Creates a new [Write], extracting the storage [BufferPool] from a [BufferPooler].
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        blob: B,
+        size: u64,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        Self::new(blob, size, capacity, pooler.storage_buffer_pool().clone())
     }
 
     /// Returns the current logical size of the blob including any buffered data.

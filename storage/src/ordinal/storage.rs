@@ -143,12 +143,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             }
 
             debug!(blob = index, len, "found index blob");
-            let wrapped_blob = Write::new(
-                blob,
-                len,
-                config.write_buffer,
-                context.storage_buffer_pool().clone(),
-            );
+            let wrapped_blob = Write::from_pooler(&context, blob, len, config.write_buffer);
             blobs.insert(index, wrapped_blob);
         }
 
@@ -171,12 +166,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
 
             // Initialize read buffer
             let size = blob.size().await;
-            let mut replay_blob = ReadBuffer::new(
-                blob.clone(),
-                size,
-                config.replay_buffer,
-                context.storage_buffer_pool().clone(),
-            );
+            let mut replay_blob = ReadBuffer::from_pooler(&context, blob.clone(), size, config.replay_buffer);
 
             // Iterate over all records in the blob
             let mut offset = 0;
@@ -271,12 +261,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
                 .context
                 .open(&self.config.partition, &section.to_be_bytes())
                 .await?;
-            entry.insert(Write::new(
-                blob,
-                len,
-                self.config.write_buffer,
-                self.context.storage_buffer_pool().clone(),
-            ));
+            entry.insert(Write::from_pooler(&self.context, blob, len, self.config.write_buffer));
             debug!(section, "created blob");
         }
 

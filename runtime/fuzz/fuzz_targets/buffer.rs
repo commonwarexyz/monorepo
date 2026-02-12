@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, BufferPooler, Runner, Storage,
+    deterministic, Blob, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -130,11 +130,11 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
 
-                    read_buffer = Some(Read::new(
+                    read_buffer = Some(Read::from_pooler(
+                        &context,
                         blob,
                         blob_size.min(size),
                         NZUsize!(buffer_size),
-                        context.storage_buffer_pool().clone(),
                     ));
                 }
 
@@ -149,11 +149,11 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("cannot open context");
 
-                    write_buffer = Some(Write::new(
+                    write_buffer = Some(Write::from_pooler(
+                        &context,
                         blob,
                         initial_size as u64,
                         NZUsize!(capacity),
-                        context.storage_buffer_pool().clone(),
                     ));
                 }
 
