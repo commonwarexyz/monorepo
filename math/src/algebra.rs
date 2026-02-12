@@ -273,7 +273,7 @@ pub trait FieldNTT: Field {
     /// In other words, for `r = root_of_unity(lg)`, `k = 2^lg` should be the
     /// smallest power such that `r^k = 1`.
     ///
-    /// This function should return `None` only for `lg > MAX_ROOT_ORDER`.
+    /// This function should return `None` only for `lg > MAX_LG_ROOT_ORDER`.
     fn root_of_unity(lg: u8) -> Option<Self>;
 
     /// An element which is not a power of a root of unity.
