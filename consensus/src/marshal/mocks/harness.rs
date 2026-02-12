@@ -313,7 +313,7 @@ impl TestHarness for StandardHarness {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -672,7 +672,7 @@ impl TestHarness for CodingHarness {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -1331,7 +1331,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         let validator = participants[0].clone();
         let partition_prefix = format!("prune-test-{}", validator.clone());
-        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let init_marshal = |ctx: deterministic::Context| {
             let validator = validator.clone();

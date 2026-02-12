@@ -25,8 +25,8 @@ use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
-    Storage,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner, Storage,
 };
 use commonware_storage::{
     archive::Identifier as ArchiveID,
@@ -96,7 +96,7 @@ struct BlockSubscription<V: Variant> {
 /// behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
-    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -161,7 +161,7 @@ where
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
-    E: CryptoRngCore + Spawner + Metrics + Clock + Storage,
+    E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
