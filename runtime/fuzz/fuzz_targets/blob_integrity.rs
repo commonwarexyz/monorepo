@@ -94,7 +94,8 @@ fn fuzz(input: FuzzInput) {
         let page_size = input.page_size as u64;
         let physical_page_size = page_size + CRC_SIZE;
         let cache_capacity = input.cache_capacity as usize;
-        let cache_ref = CacheRef::from_pooler(&context,
+        let cache_ref = CacheRef::from_pooler(
+            &context,
             NZU16!(page_size as u16),
             NZUsize!(cache_capacity),
         );

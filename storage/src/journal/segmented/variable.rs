@@ -60,7 +60,9 @@
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
+//!     // Create a page cache
 //!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+//!
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config {
 //!         partition: "partition".to_string(),

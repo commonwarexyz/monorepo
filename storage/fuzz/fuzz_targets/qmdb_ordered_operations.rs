@@ -79,7 +79,8 @@ fn fuzz(data: FuzzInput) {
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            page_cache: CacheRef::from_pooler(&context,
+            page_cache: CacheRef::from_pooler(
+                &context,
                 PAGE_SIZE,
                 NZUsize!(PAGE_CACHE_SIZE),
             ),
