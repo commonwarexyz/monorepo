@@ -1502,6 +1502,94 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_to_bytes_full_drain_releases_pool_from_source() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0xAB; 100]);
+        let mut iobuf = buf.freeze();
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        // Full drain of remaining data.
+        let extracted = iobuf.copy_to_bytes(100);
+        assert_eq!(&extracted[..], &[0xAB; 100]);
+        assert_eq!(iobuf.remaining(), 0);
+
+        // Drained source should be detached and not pin the pooled allocation.
+        drop(iobuf);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(extracted);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_copy_to_bytes_partial_then_full_drain_releases_pool_from_source() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0xCD; 100]);
+        let mut iobuf = buf.freeze();
+
+        // Partial drain.
+        let partial = iobuf.copy_to_bytes(30);
+        assert_eq!(&partial[..], &[0xCD; 30]);
+        assert_eq!(iobuf.remaining(), 70);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        // Full drain of remainder.
+        let rest = iobuf.copy_to_bytes(70);
+        assert_eq!(&rest[..], &[0xCD; 70]);
+        assert_eq!(iobuf.remaining(), 0);
+
+        // Source should be detached after full drain.
+        drop(iobuf);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        // Both extracted views still share the allocation.
+        drop(partial);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(rest);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_copy_to_bytes_zero_len_on_empty_pooled_buffer_does_not_transfer_owner() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0xEF; 100]);
+        let mut iobuf = buf.freeze();
+
+        // Drain to empty first.
+        let full = iobuf.copy_to_bytes(100);
+        assert_eq!(iobuf.remaining(), 0);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        // Zero-length copy on already-empty source should not transfer pooled ownership.
+        let empty = iobuf.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        drop(empty);
+
+        // Source is already detached after the full-drain path.
+        drop(iobuf);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(full);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
     fn test_concurrent_clones_and_drops() {
         let page = page_size();
         let mut registry = test_registry();
