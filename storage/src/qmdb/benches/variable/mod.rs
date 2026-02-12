@@ -1,7 +1,6 @@
 //! Benchmarks of QMDB variants on variable-sized values.
 
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     kv::{Deletable as _, Updatable as _},
@@ -87,8 +86,7 @@ type UVCurrentDb = UVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_S
 type OVCurrentDb = OVCurrent<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
 fn any_cfg(
-    thread_pool: ThreadPool,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + ThreadPooler),
 ) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -101,26 +99,23 @@ fn any_cfg(
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
         translator: EightCap,
-        thread_pool: Some(thread_pool),
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
+        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 async fn get_any_unordered(ctx: Context) -> UVariableDb {
-    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(thread_pool, &ctx);
+    let any_cfg = any_cfg(&ctx);
     UVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 async fn get_any_ordered(ctx: Context) -> OVariableDb {
-    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
-    let any_cfg = any_cfg(thread_pool, &ctx);
+    let any_cfg = any_cfg(&ctx);
     OVariableDb::init(ctx, any_cfg).await.unwrap()
 }
 
 fn current_cfg(
-    thread_pool: ThreadPool,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + ThreadPooler),
 ) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
         mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
@@ -134,22 +129,20 @@ fn current_cfg(
         log_compression: None,
         bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
-        thread_pool: Some(thread_pool),
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
+        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 async fn get_current_unordered(ctx: Context) -> UVCurrentDb {
-    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(thread_pool, &ctx);
+    let current_cfg = current_cfg(&ctx);
     UVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
 }
 
 async fn get_current_ordered(ctx: Context) -> OVCurrentDb {
-    let thread_pool = ctx.create_thread_pool(THREADS).unwrap();
-    let current_cfg = current_cfg(thread_pool, &ctx);
+    let current_cfg = current_cfg(&ctx);
     OVCurrent::<_, _, _, Sha256, EightCap, CHUNK_SIZE>::init(ctx, current_cfg)
         .await
         .unwrap()
