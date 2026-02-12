@@ -368,21 +368,8 @@ impl<
         Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
     }
 
-    /// All updates are treated as "active" in a keyless store, so the inactivity floor is always the
-    /// location of the first update. This implementation assumes that if an update exists, it's at
-    /// location 1, even though technically there may be multiple commits without any updates.
-    ///
-    /// # Warning
-    ///
-    /// Note that the keyless store allows active operations to be pruned, so the inactivity floor
-    /// may precede the pruning boundary. If you wish to know the range of currently retrievable
-    /// operations, use `bounds`.
     async fn inactivity_floor_loc(&self) -> Location {
-        if *self.last_commit_loc == 0 {
-            Location::new_unchecked(0)
-        } else {
-            Location::new_unchecked(1)
-        }
+        Location::new_unchecked(self.journal.reader().await.bounds().start)
     }
 
     async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
