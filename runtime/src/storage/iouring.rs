@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry, OpBuffer},
+    iouring::{self, should_retry, OpBuffer, OpFd},
     BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
@@ -325,6 +325,7 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: Some(OpBuffer::Read(io_buf)),
+                    fd: Some(OpFd::File(self.file.clone())),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
@@ -395,6 +396,7 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: Some(OpBuffer::Write(buf)),
+                    fd: Some(OpFd::File(self.file.clone())),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
@@ -441,6 +443,7 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: None,
+                    fd: Some(OpFd::File(self.file.clone())),
                 })
                 .await
                 .map_err(|_| {

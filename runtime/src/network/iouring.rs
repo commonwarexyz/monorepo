@@ -23,7 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::{
-    iouring::{self, should_retry, OpBuffer},
+    iouring::{self, should_retry, OpBuffer, OpFd},
     BufferPool, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{mpsc, oneshot};
@@ -294,6 +294,7 @@ impl crate::Sink for Sink {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Write(buf)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
@@ -387,6 +388,7 @@ impl Stream {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Read(buffer)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
                 })
                 .await
                 .is_err()
@@ -496,9 +498,12 @@ mod tests {
         },
         BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
-    use commonware_macros::test_group;
+    use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     fn test_pool() -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
@@ -681,6 +686,58 @@ mod tests {
         // Verify we got the right data
         assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
         assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
+    }
+
+    #[tokio::test]
+    async fn test_op_fd_keeps_descriptor_alive() {
+        // When a recv future is cancelled (e.g. via select!) after the Op has
+        // been sent to the io_uring channel, the Stream can be dropped while
+        // the Op is still queued. The Op's `fd` field keeps the socket alive
+        // so the OS cannot reuse the FD number.
+        let op_timeout = Duration::from_millis(200);
+        let network = Network::start(
+            Config {
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(10),
+                    op_timeout: Some(op_timeout),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+        let (_addr, _server_sink, _server_stream) = listener.accept().await.unwrap();
+
+        // Sink + stream + our clone.
+        let fd = client_stream.fd.clone();
+        assert_eq!(Arc::strong_count(&fd), 3);
+
+        // Cancel a recv mid-flight (blocks because no data arrives).
+        // Polling the future submits the Op (with an fd clone) to the
+        // io_uring channel, the timeout then cancels the future.
+        select! {
+            _ = client_stream.recv(1) => unreachable!("no data was sent"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
+
+        // The queued Op holds an additional clone.
+        assert_eq!(Arc::strong_count(&fd), 4);
+
+        // Drop all handles. The queued Op still retains the fd.
+        drop(client_sink);
+        drop(client_stream);
+        assert_eq!(Arc::strong_count(&fd), 2); // our clone + Op
+
+        // After op_timeout, the Op completes and releases its fd clone.
+        tokio::time::sleep(op_timeout).await;
+        assert_eq!(Arc::strong_count(&fd), 1);
     }
 
     #[tokio::test]

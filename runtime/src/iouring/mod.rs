@@ -70,7 +70,7 @@ use io_uring::{
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, fs::File, os::fd::OwnedFd, sync::Arc, time::Duration};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
@@ -100,6 +100,19 @@ impl From<IoBuf> for OpBuffer {
     }
 }
 
+/// File descriptor for io_uring operations.
+///
+/// The variant must match the descriptor type:
+/// - `Fd`: For network sockets and other OS file descriptors
+/// - `File`: For file-backed descriptors
+#[allow(dead_code)]
+pub enum OpFd {
+    /// A socket or other OS file descriptor.
+    Fd(Arc<OwnedFd>),
+    /// A file-backed descriptor.
+    File(Arc<File>),
+}
+
 /// Active operations keyed by their work id.
 ///
 /// Each entry keeps the caller's oneshot sender, the buffer that must stay
@@ -110,6 +123,7 @@ type Waiters = HashMap<
     (
         oneshot::Sender<(i32, Option<OpBuffer>)>,
         Option<OpBuffer>,
+        Option<OpFd>,
         Option<Box<Timespec>>,
     ),
 >;
@@ -240,6 +254,11 @@ pub struct Op {
     /// We hold the buffer here so it's guaranteed to live until the operation
     /// completes, preventing use-after-free issues.
     pub buffer: Option<OpBuffer>,
+    /// The file descriptor used for the operation, if any.
+    ///
+    /// We hold the descriptor here so the OS cannot reuse the FD number
+    /// while the operation is queued or in-flight.
+    pub fd: Option<OpFd>,
 }
 
 // Returns false iff we received a shutdown timeout
@@ -262,7 +281,7 @@ fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
                 result
             };
 
-            let (result_sender, buffer, _) = waiters.remove(&work_id).expect("missing sender");
+            let (result_sender, buffer, _, _) = waiters.remove(&work_id).expect("missing sender");
             let _ = result_sender.send((result, buffer));
         }
     }
@@ -323,6 +342,7 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
                 mut work,
                 sender,
                 buffer,
+                fd,
             } = op;
 
             // Assign a unique id
@@ -355,11 +375,11 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
 
                 // Submit the op and timeout.
                 //
-                // SAFETY: Both `buffer` and `timespec` are stored in `waiters`
-                // until the CQE is processed, ensuring memory referenced by the
-                // SQEs remains valid. The ring was doubled in size for timeout
-                // support, and `waiters.len() < cfg.size` guarantees space for
-                // both entries.
+                // SAFETY: `buffer`, `timespec`, and `fd` are stored in
+                // `waiters` until the CQE is processed, ensuring memory
+                // referenced by the SQEs remains valid and the FD cannot be
+                // reused. The ring was doubled in size for timeout support, and
+                // `waiters.len() < cfg.size` guarantees space for both entries.
                 unsafe {
                     let mut sq = ring.submission();
                     sq.push(&work).expect("unable to push to queue");
@@ -370,10 +390,11 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             } else {
                 // No timeout, submit the operation normally.
                 //
-                // SAFETY: The `buffer` is stored in `waiters` until the CQE is
-                // processed, ensuring memory referenced by the SQE remains valid.
-                // The loop condition `waiters.len() < cfg.size` guarantees space
-                // in the submission queue.
+                // SAFETY: `buffer` and `fd` are stored in `waiters` until
+                // the CQE is processed, ensuring memory referenced by the SQE
+                // remains valid and the FD cannot be reused. The loop condition
+                // `waiters.len() < cfg.size` guarantees space in the submission
+                // queue.
                 unsafe {
                     ring.submission()
                         .push(&work)
@@ -384,7 +405,8 @@ pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::
             };
 
             // We'll send the result of this operation to `sender`.
-            waiters.insert(work_id, (sender, buffer, timespec));
+            // `fd` is retained to prevent FD reuse until completion.
+            waiters.insert(work_id, (sender, buffer, fd, timespec));
         }
 
         // Submit and wait for at least 1 item to be in the completion queue.
@@ -504,6 +526,7 @@ mod tests {
                 work: recv,
                 sender: recv_tx,
                 buffer: Some(buf.into()),
+                fd: None,
             })
             .await
             .expect("failed to send work");
@@ -522,6 +545,7 @@ mod tests {
                 work: write,
                 sender: write_tx,
                 buffer: Some(msg.into()),
+                fd: None,
             })
             .await
             .expect("failed to send work");
@@ -595,6 +619,7 @@ mod tests {
                 work,
                 sender: tx,
                 buffer: Some(buf.into()),
+                fd: None,
             })
             .await
             .expect("failed to send work");
@@ -625,6 +650,7 @@ mod tests {
                 work: timeout,
                 sender: tx,
                 buffer: None,
+                fd: None,
             })
             .await
             .unwrap();
@@ -658,6 +684,7 @@ mod tests {
                 work: timeout,
                 sender: tx,
                 buffer: None,
+                fd: None,
             })
             .await
             .unwrap();
@@ -701,6 +728,7 @@ mod tests {
                     work: nop,
                     sender: tx,
                     buffer: None,
+                    fd: None,
                 })
                 .await
                 .unwrap();
@@ -739,6 +767,7 @@ mod tests {
                 work: opcode::Nop::new().build(),
                 sender: tx,
                 buffer: None,
+                fd: None,
             })
             .await
             .unwrap();
