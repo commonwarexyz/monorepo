@@ -1374,6 +1374,94 @@ fn vote_on_current_view_m_notarization() {
     assert!(advanced, "Should advance after voting");
 }
 
+/// Test: Vote on future-view M-notarization before advancing.
+#[test]
+fn vote_before_advancing_on_higher_view_m_notarization() {
+    let mut harness = Harness::new(6);
+
+    let target_view = View::new(3);
+    let payload = Digest::from([1u8; 32]);
+
+    harness.deliver_m_notarization(
+        target_view,
+        payload,
+        &[
+            Participant::new(1),
+            Participant::new(2),
+            Participant::new(3),
+        ],
+    );
+
+    let actions = harness.drain_actions();
+    let voted_target_view = actions.iter().any(
+        |a| matches!(a, Action::BroadcastNotarize(v) if v.proposal.round.view() == target_view),
+    );
+    let advanced_to_next = actions
+        .iter()
+        .any(|a| matches!(a, Action::Advanced(v) if *v == target_view.next()));
+
+    assert!(
+        voted_target_view,
+        "Should vote on future-view M-notarization before advancing"
+    );
+    assert!(
+        advanced_to_next,
+        "Should advance on future-view M-notarization"
+    );
+}
+
+/// Integration test: one-shot future-view M-notarization should contribute local vote
+/// so L-quorum finalization can complete without certificate redelivery.
+#[test]
+fn higher_view_m_notarization_enables_finalization_without_redelivery() {
+    let mut harness = Harness::new(6);
+
+    let target_view = View::new(3);
+    let payload = Digest::from([1u8; 32]);
+
+    // Simulate one-shot certificate delivery (batcher suppresses duplicates).
+    harness.deliver_m_notarization(
+        target_view,
+        payload,
+        &[
+            Participant::new(1),
+            Participant::new(2),
+            Participant::new(3),
+        ],
+    );
+    let first_actions = harness.drain_actions();
+
+    // Later, observe only four notarize votes from peers. With our local Vote2,
+    // this reaches L=5 at n=6 and finalizes view 3.
+    harness.deliver_notarizes(
+        target_view,
+        payload,
+        &[
+            Participant::new(1),
+            Participant::new(2),
+            Participant::new(3),
+            Participant::new(4),
+        ],
+    );
+    let second_actions = harness.drain_actions();
+
+    let voted_target_view = first_actions.iter().any(
+        |a| matches!(a, Action::BroadcastNotarize(v) if v.proposal.round.view() == target_view),
+    );
+    let finalized_target_view = second_actions
+        .iter()
+        .any(|a| matches!(a, Action::Finalized(f) if f.proposal.round.view() == target_view));
+
+    assert!(
+        voted_target_view,
+        "Should emit local Vote2 on one-shot future-view M-notarization"
+    );
+    assert!(
+        finalized_target_view,
+        "Local Vote2 should allow L-quorum finalization without certificate redelivery"
+    );
+}
+
 /// Test: Invalid proposal verification does not trigger vote.
 #[test]
 fn invalid_proposal_no_vote() {

@@ -785,7 +785,7 @@ where
                         )));
                     }
                 }
-                actions.extend(self.handle_view_progress(view, Some(proposal), cert));
+                actions.extend(self.handle_view_progress(view, Some(proposal), true, cert));
             }
             Certificate::Nullification(nullification) => {
                 let inserted = self.ancestry.add_nullification(nullification.clone());
@@ -802,7 +802,7 @@ where
                             )));
                         }
                     }
-                    actions.extend(self.handle_view_progress(view, None, cert));
+                    actions.extend(self.handle_view_progress(view, None, false, cert));
                 }
             }
             Certificate::Finalization(finalization) => {
@@ -823,6 +823,7 @@ where
                     actions.extend(self.handle_view_progress(
                         view,
                         Some(finalization.proposal),
+                        false,
                         cert,
                     ));
                     self.prune();
@@ -837,6 +838,7 @@ where
         &mut self,
         view: View,
         proposal: Option<Proposal<D>>,
+        is_m_notarization: bool,
         certificate: S::Certificate,
     ) -> Vec<Action<S, D>> {
         let mut actions = Vec::new();
@@ -858,19 +860,15 @@ where
         // would otherwise never vote. Since the batcher de-duplicates M-nots, the
         // processor wouldn't get another chance to vote when ancestry arrives.
 
-        if view < self.view {
-            // Past view M-notarization: vote if we haven't already (Section 6.1)
+        if is_m_notarization {
             if let Some(ref proposal) = proposal {
                 actions.extend(self.try_vote_for_notarization(view, proposal.clone()));
             }
-            return actions;
         }
 
-        // Current view M-notarization: vote if we haven't already, then advance
-        if view == self.view {
-            if let Some(ref proposal) = proposal {
-                actions.extend(self.try_vote_for_notarization(view, proposal.clone()));
-            }
+        if view < self.view {
+            // Past view certificate: process local catch-up only.
+            return actions;
         }
 
         // Condition (b) nullification via M-notarization certificate:
