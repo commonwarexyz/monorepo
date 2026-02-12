@@ -23,7 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::{
-    iouring::{self, should_retry, OpBuffer},
+    iouring::{self, should_retry, OpBuffer, OpFd},
     BufferPool, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{mpsc, oneshot};
@@ -294,6 +294,7 @@ impl crate::Sink for Sink {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Write(buf)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
@@ -387,6 +388,7 @@ impl Stream {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Read(buffer)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
                 })
                 .await
                 .is_err()
