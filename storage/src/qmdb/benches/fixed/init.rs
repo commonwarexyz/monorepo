@@ -6,12 +6,12 @@ use crate::fixed::{
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
     get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
     variable_any_cfg, variable_current_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb, OVCurrentDb,
-    UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, THREADS, VARIANTS,
+    UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _, ThreadPooler,
+    Runner as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -111,11 +111,10 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.create_thread_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(pool.clone());
-                            let current_cfg = current_cfg(pool.clone());
-                            let variable_any_cfg = variable_any_cfg(pool.clone());
-                            let variable_current_cfg = variable_current_cfg(pool);
+                            let any_cfg = any_cfg(&ctx);
+                            let current_cfg = current_cfg(&ctx);
+                            let variable_any_cfg = variable_any_cfg(&ctx);
+                            let variable_current_cfg = variable_current_cfg(&ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {

@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier},
     metadata::{self, Metadata},
@@ -34,7 +34,7 @@ pub(crate) struct Config {
 }
 
 /// Prunable archives for a single epoch.
-struct Cache<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
+struct Cache<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -45,7 +45,9 @@ struct Cache<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> 
     finalizations: prunable::Archive<TwoCap, R, B::Commitment, Finalization<S, B::Commitment>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Cache<R, B, S> {
+impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme>
+    Cache<R, B, S>
+{
     /// Prune the archives to the given view.
     async fn prune(&mut self, min_view: View) {
         match futures::try_join!(
@@ -61,7 +63,11 @@ impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Cache<R,
 }
 
 /// Manages prunable caches and their metadata.
-pub(crate) struct Manager<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
+pub(crate) struct Manager<
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    B: Block,
+    S: Scheme,
+> {
     /// Context
     context: R,
 
@@ -79,7 +85,9 @@ pub(crate) struct Manager<R: Rng + Spawner + Metrics + Clock + Storage, B: Block
     caches: BTreeMap<Epoch, Cache<R, B, S>>,
 }
 
-impl<R: Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> Manager<R, B, S> {
+impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme>
+    Manager<R, B, S>
+{
     /// Initialize the cache manager and its metadata store.
     pub(crate) async fn init(context: R, cfg: Config, block_codec_config: B::Cfg) -> Self {
         // Initialize metadata

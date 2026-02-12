@@ -380,7 +380,7 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         fetch_concurrent: 1,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
@@ -607,7 +607,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);

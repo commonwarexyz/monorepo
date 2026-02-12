@@ -549,10 +549,7 @@ pub(super) mod test {
     use crate::{mmr::StandardHasher, qmdb::verify_proof, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        deterministic::{self},
-        Runner as _,
-    };
+    use commonware_runtime::{deterministic, BufferPooler, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -562,6 +559,7 @@ pub(super) mod test {
 
     pub(crate) fn db_config(
         suffix: &str,
+        pooler: &impl BufferPooler,
     ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -575,7 +573,7 @@ pub(super) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -583,9 +581,8 @@ pub(super) mod test {
     async fn open_db(
         context: deterministic::Context,
     ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
-        Immutable::init(context, db_config("partition"))
-            .await
-            .unwrap()
+        let cfg = db_config("partition", &context);
+        Immutable::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

@@ -255,7 +255,10 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(crate) fn fixed_db_config<T: Translator + Default>(suffix: &str) -> FixedConfig<T> {
+    pub(crate) fn fixed_db_config<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
             mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -266,12 +269,13 @@ pub(crate) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
+        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -285,7 +289,7 @@ pub(crate) mod test {
             log_codec_config: (),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -300,7 +304,7 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::deterministic::Context;
+    use commonware_runtime::{deterministic::Context, BufferPooler};
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 
@@ -890,7 +894,8 @@ pub(crate) mod test {
         ($ctx:expr, $sfx:expr, $f:expr, $l:literal, $db:ty, $cfg:ident) => {{
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
-                $f(<$db>::init($ctx.with_label($l), $cfg::<OneCap>(p))
+                let ctx = $ctx.with_label($l);
+                $f(<$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap())
                 .await;
@@ -904,12 +909,18 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p)).await.unwrap();
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                    .await
+                    .unwrap();
                 $f(
                     ctx,
                     db,
                     |ctx| {
-                        Box::pin(async move { <$db>::init(ctx, $cfg::<OneCap>(p)).await.unwrap() })
+                        Box::pin(async move {
+                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                                .await
+                                .unwrap()
+                        })
                     },
                     to_digest,
                 )
@@ -924,7 +935,9 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p)).await.unwrap();
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                    .await
+                    .unwrap();
                 $f(ctx, db, to_digest).await;
             })
             .await

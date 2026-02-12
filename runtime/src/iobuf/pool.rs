@@ -587,6 +587,34 @@ impl BufferPool {
         })
     }
 
+    /// Allocates a buffer and sets its readable length to `len` without
+    /// initializing bytes.
+    ///
+    /// Equivalent to `alloc(len)` followed by `set_len(len)`.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure all bytes are initialized before any read operation.
+    pub unsafe fn alloc_len(&self, len: usize) -> IoBufMut {
+        let mut buf = self.alloc(len);
+        // SAFETY: guaranteed by caller.
+        unsafe { buf.set_len(len) };
+        buf
+    }
+
+    /// Allocates a zero-initialized buffer with readable length `len`.
+    ///
+    /// Equivalent to `alloc(len)` followed by `put_bytes(0, len)`.
+    ///
+    /// Use this for read APIs that require an initialized `&mut [u8]`.
+    /// This avoids `unsafe set_len` at callsites, at the cost of zero-filling
+    /// `len` bytes before the read.
+    pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
+        let mut buf = self.alloc(len);
+        buf.put_bytes(0, len);
+        buf
+    }
+
     /// Attempts to allocate a pooled buffer, returning an error on failure.
     ///
     /// Unlike [`Self::alloc`], this method does not fall back to untracked
@@ -1022,6 +1050,31 @@ mod tests {
         let buf2 = pool.try_alloc(100).unwrap();
         assert!(buf2.capacity() >= page);
         assert_eq!(buf2.len(), 0);
+    }
+
+    #[test]
+    fn test_alloc_len_sets_len() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+
+        // SAFETY: we immediately initialize all bytes before reading.
+        let mut buf = unsafe { pool.alloc_len(100) };
+        assert_eq!(buf.len(), 100);
+        buf.as_mut().fill(0xAB);
+        let frozen = buf.freeze();
+        assert_eq!(frozen.as_ref(), &[0xAB; 100]);
+    }
+
+    #[test]
+    fn test_alloc_zeroed_sets_len_and_zeros() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+
+        let buf = pool.alloc_zeroed(100);
+        assert_eq!(buf.len(), 100);
+        assert!(buf.as_ref().iter().all(|&b| b == 0));
     }
 
     #[test]

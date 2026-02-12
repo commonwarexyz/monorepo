@@ -195,17 +195,15 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanAnyTest {
-        CleanAnyTest::init(context, fixed_db_config("partition"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("partition", &context);
+        CleanAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
-        CleanAnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string()))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        CleanAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -267,7 +265,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let seed = context.next_u64();
-            let config = fixed_db_config::<OneCap>(&seed.to_string());
+            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
             let db = Db::<
                 Context,
                 FixedBytes<2>,
@@ -276,7 +274,7 @@ pub(crate) mod test {
                 OneCap,
                 Merkleized<Sha256>,
                 Durable,
-            >::init(context.clone(), config)
+            >::init(context, config)
             .await
             .unwrap();
             let mut db = db.into_mutable();
@@ -912,7 +910,7 @@ pub(crate) mod test {
             let seed = context.next_u64();
 
             // Use a OneCap to ensure many collisions.
-            let config = fixed_db_config::<OneCap>(&seed.to_string());
+            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
             let db = Db::<Context, Digest, i32, Sha256, OneCap, Merkleized<Sha256>, Durable>::init(
                 context.with_label("first"),
                 config,
@@ -924,7 +922,7 @@ pub(crate) mod test {
             db.into_merkleized().destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
-            let config = fixed_db_config::<TwoCap>(&seed.to_string());
+            let config = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
             let db = Db::<Context, Digest, i32, Sha256, TwoCap, Merkleized<Sha256>, Durable>::init(
                 context.with_label("second"),
                 config,
@@ -969,9 +967,8 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        FixedDb::init(context, fixed_db_config("fixed_bytes_partition"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("fixed_bytes_partition", &context);
+        FixedDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -1212,9 +1209,8 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        PartitionedAnyTest::init(context, fixed_db_config("ordered_partitioned_p1"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("ordered_partitioned_p1", &context);
+        PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

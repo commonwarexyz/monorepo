@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{buffer, Blob, Buf, BufMut, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -386,7 +386,7 @@ where
 }
 
 /// Implementation of [Freezer].
-pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
+pub struct Freezer<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
@@ -423,7 +423,7 @@ pub struct Freezer<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     resizes: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -490,6 +490,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// - max_section: the section corresponding to `max_epoch`
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
+        pooler: &impl BufferPooler,
         blob: &E::Blob,
         table_size: u32,
         table_resize_frequency: u8,
@@ -498,7 +499,8 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader = buffer::Read::new(blob.clone(), blob_size, table_replay_buffer);
+        let mut reader =
+            buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
@@ -698,6 +700,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
 
                 // Validate and clean invalid entries
                 let (table_modified, _, _, resizable) = Self::recover_table(
+                    &context,
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
@@ -722,6 +725,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
                 let (modified, max_epoch, max_section, resizable) = Self::recover_table(
+                    &context,
                     &table,
                     table_size,
                     config.table_resize_frequency,
@@ -1153,7 +1157,9 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable for Freezer<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable
+    for Freezer<E, K, V>
+{
     type Key = K;
     type Value = V;
     type Error = Error;
@@ -1163,14 +1169,18 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Gettable for Fr
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable for Freezer<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::Updatable
+    for Freezer<E, K, V>
+{
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
         Ok(())
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable for Freezer<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable
+    for Freezer<E, K, V>
+{
     type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Self::Error> {
@@ -1236,7 +1246,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1291,7 +1301,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test_key_index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
                 value_partition: "test_value_journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

@@ -137,7 +137,8 @@ fn fuzz(input: FuzzInput) {
             write_buffer: NZUsize!(input.config.write_buffer),
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
-            page_cache: CacheRef::new(
+            page_cache: CacheRef::from_pooler(
+                &context,
                 input.config.page_cache_page_size,
                 NZUsize!(input.config.page_cache_capacity),
             ),

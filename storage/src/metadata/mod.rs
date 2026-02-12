@@ -45,7 +45,7 @@
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a store
-//!     let mut metadata = Metadata::init(context, Config{
+//!     let mut metadata = Metadata::init(context, Config {
 //!         partition: "partition".to_string(),
 //!         codec_config: ((0..).into(), ()),
 //!     }).await.unwrap();

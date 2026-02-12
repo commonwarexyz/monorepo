@@ -2,7 +2,7 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     mmr::{Location, Proof},
     qmdb::{
@@ -24,7 +24,7 @@ pub type Database<E> =
 pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config() -> Config<Translator, ()> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),
@@ -37,7 +37,11 @@ pub fn create_config() -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        page_cache: commonware_runtime::buffer::paged::CacheRef::new(NZU16!(1024), NZUsize!(10)),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            context,
+            NZU16!(1024),
+            NZUsize!(10),
+        ),
     }
 }
 

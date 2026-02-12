@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     mmr::Location,
     qmdb::{
@@ -90,7 +90,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
-fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
+fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("journal_{suffix}"),
         mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -103,7 +103,7 @@ fn db_config(suffix: &str) -> Config<TwoCap, (RangeCfg<usize>, ())> {
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -113,13 +113,11 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut rng = StdRng::seed_from_u64(input.seed);
 
-        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(
-            context.clone(),
-            db_config("fuzz_partition"),
-        )
-        .await
-        .unwrap()
-        .into_mutable();
+        let cfg = db_config("fuzz_partition", &context);
+        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
+            .await
+            .unwrap()
+            .into_mutable();
 
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();

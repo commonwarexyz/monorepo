@@ -6,7 +6,7 @@
 use clap::{Arg, Command};
 use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
-    tokio as tokio_runtime, Clock, Metrics, Network, Runner, Spawner, Storage,
+    tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
 use commonware_storage::qmdb::sync;
 use commonware_sync::{
@@ -108,7 +108,7 @@ where
 /// Repeatedly sync an Any database to the server's state.
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Any database sync process");
     let mut iteration = 0u32;
@@ -121,7 +121,7 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = any::create_config();
+        let db_config = any::create_config(&context);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {
@@ -168,7 +168,7 @@ where
 /// Repeatedly sync an Immutable database to the server's state.
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
-    E: Storage + Clock + Metrics + Network + Spawner,
+    E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
 {
     info!("starting Immutable database sync process");
     let mut iteration = 0u32;
@@ -181,7 +181,7 @@ where
 
         let initial_target = resolver.get_sync_target().await?;
 
-        let db_config = immutable::create_config();
+        let db_config = immutable::create_config(&context);
         let (update_sender, update_receiver) = mpsc::channel(UPDATE_CHANNEL_SIZE);
 
         let target_update_handle = {

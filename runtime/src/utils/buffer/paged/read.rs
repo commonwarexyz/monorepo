@@ -1,5 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Buf, Error};
+use crate::{Blob, Buf, Error, IoBuf};
 use commonware_codec::FixedSize;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -11,7 +11,7 @@ use tracing::error;
 /// `Bytes` slices per page.
 pub(super) struct BufferState {
     /// The raw physical buffer containing pages with interleaved CRCs.
-    buffer: Vec<u8>,
+    buffer: IoBuf,
     /// Number of pages in this buffer.
     num_pages: usize,
     /// Logical length of the last page (may be partial).
@@ -147,7 +147,7 @@ impl<B: Blob> PageReader<B> {
         self.blob_page += pages_to_read as u64;
 
         let state = BufferState {
-            buffer: physical_buf.into(),
+            buffer: physical_buf,
             num_pages: pages_to_read,
             last_page_len: last_len,
         };
@@ -235,7 +235,7 @@ impl Buf for ReplayBuf {
         let page_len = Self::page_len(buf, self.current_page, self.logical_page_size);
         let physical_start = self.current_page * self.page_size + self.offset_in_page;
         let physical_end = self.current_page * self.page_size + page_len;
-        &buf.buffer[physical_start..physical_end]
+        &buf.buffer.as_ref()[physical_start..physical_end]
     }
 
     fn advance(&mut self, mut cnt: usize) {
@@ -381,7 +381,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -418,7 +419,8 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -446,7 +448,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -501,7 +504,8 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -539,7 +543,8 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref =
+                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();

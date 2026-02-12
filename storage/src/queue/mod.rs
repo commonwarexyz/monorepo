@@ -42,13 +42,20 @@
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
+//!     // Create a page cache
+//!     let page_cache = CacheRef::from_pooler(
+//!         &context,
+//!         NonZeroU16::new(1024).unwrap(),
+//!         NonZeroUsize::new(10).unwrap(),
+//!     );
+//!
 //!     // Create a queue
-//!     let mut queue = Queue::<_, Vec<u8>>::init(context.clone(), Config {
+//!     let mut queue = Queue::<_, Vec<u8>>::init(context, Config {
 //!         partition: "my_queue".to_string(),
 //!         items_per_section: NonZeroU64::new(1000).unwrap(),
 //!         compression: None,
 //!         codec_config: ((0..).into(), ()), // RangeCfg for Vec length, () for u8
-//!         page_cache: CacheRef::new(NonZeroU16::new(1024).unwrap(), NonZeroUsize::new(10).unwrap()),
+//!         page_cache,
 //!         write_buffer: NonZeroUsize::new(4096).unwrap(),
 //!     }).await.unwrap();
 //!

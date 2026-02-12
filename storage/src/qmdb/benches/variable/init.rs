@@ -4,12 +4,12 @@
 use crate::variable::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered, get_any_unordered, get_current_ordered,
     get_current_unordered, Digest, OVCurrentDb, OVariableDb, UVCurrentDb, UVariableDb, Variant,
-    THREADS, VARIANTS,
+    VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _, ThreadPooler as _,
+    Runner as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -93,9 +93,8 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(pool.clone());
-                            let current_cfg = current_cfg(pool);
+                            let any_cfg = any_cfg(&ctx);
+                            let current_cfg = current_cfg(&ctx);
 
                             // Start the timer here to avoid including time to allocate page cache,
                             // thread pool, and other shared structures.
