@@ -612,10 +612,11 @@ impl<B: Blob> Append<B> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let pages_to_write = buffer.data.len() / logical_page_size;
+        let max_pages_to_write = pages_to_write + if include_partial_page { 1 } else { 0 };
         let mut write_buffer = self
             .cache_ref
             .pool()
-            .alloc((pages_to_write + 1) * physical_page_size);
+            .alloc(max_pages_to_write * physical_page_size);
         let buffer_data = buffer.data.as_ref();
 
         // For each logical page, copy over the data and then write a crc record for it.
@@ -666,10 +667,7 @@ impl<B: Blob> Append<B> {
         // Pad with zeros to fill up to logical_page_size.
         let zero_count = logical_page_size - partial_len;
         if zero_count > 0 {
-            let previous_len = write_buffer.len();
-            // SAFETY: We immediately initialize all newly exposed bytes.
-            unsafe { write_buffer.set_len(previous_len + zero_count) };
-            write_buffer.as_mut()[previous_len..previous_len + zero_count].fill(0);
+            write_buffer.put_bytes(0, zero_count);
         }
 
         // For partial pages: if this is the first page and there's an old CRC, preserve it.
@@ -843,9 +841,7 @@ impl<B: Blob> Blob for Append<B> {
         if size > current_size {
             let zeros_needed = (size - current_size) as usize;
             let mut zeros = self.cache_ref.pool().alloc(zeros_needed);
-            // SAFETY: We fully initialize the buffer with zeros immediately.
-            unsafe { zeros.set_len(zeros_needed) };
-            zeros.as_mut().fill(0);
+            zeros.put_bytes(0, zeros_needed);
             self.append(zeros.as_ref()).await?;
             return Ok(());
         }
