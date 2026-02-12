@@ -236,6 +236,12 @@ impl<B: Blob> Append<B> {
         buf_guard.immutable = true;
         self.flush_internal(buf_guard, true).await?;
 
+        // Release the buffer back to the pool since we won't be appending.
+        {
+            let mut buf_guard = self.buffer.write().await;
+            buf_guard.data = IoBufMut::default();
+        }
+
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
         // event of a crash.
         let blob_state = self.blob_state.read().await;

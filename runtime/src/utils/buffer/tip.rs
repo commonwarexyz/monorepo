@@ -27,10 +27,11 @@ pub(super) struct Buffer {
 
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
+    ///
+    /// The backing buffer starts empty and grows on demand via `merge`/`append`.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
-        let data = pool.alloc(capacity);
         Self {
-            data,
+            data: IoBufMut::default(),
             offset,
             capacity,
             immutable: false,
