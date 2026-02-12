@@ -126,11 +126,10 @@ impl<B: Blob> Blob for Write<B> {
             }
             // For chunked buffers, read into temp and copy back to preserve structure.
             IoBufsMut::Chunked(chunks) => {
-                let mut temp = self.pool.alloc(len);
                 // SAFETY: Uninitialized bytes are never read. On success, all bytes
                 // are initialized via extract + blob read before copying out. On
                 // error, the buffer is dropped without being read.
-                unsafe { temp.set_len(len) };
+                let mut temp = unsafe { self.pool.alloc_len(len) };
                 // Extract any bytes from the buffer that overlap with the
                 // requested range, into a temporary contiguous buffer
                 let remaining = buffer.extract(temp.as_mut(), offset);

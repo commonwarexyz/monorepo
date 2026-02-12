@@ -350,10 +350,7 @@ impl Cache {
         let capacity = capacity.get();
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
-            let mut slot = pool.alloc(page_size);
-            // SAFETY: We immediately initialize all bytes below.
-            unsafe { slot.set_len(page_size) };
-            slot.as_mut().fill(0);
+            let slot = pool.alloc_zeroed(page_size);
             slots.push(slot);
         }
         Self {

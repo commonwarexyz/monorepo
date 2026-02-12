@@ -791,9 +791,8 @@ impl<B: Blob> Blob for Append<B> {
             }
             IoBufsMut::Chunked(chunks) => {
                 // Read into a temporary buffer and copy back to preserve structure
-                let mut temp = self.cache_ref.pool().alloc(len);
                 // SAFETY: read_into below initializes all `len` bytes.
-                unsafe { temp.set_len(len) };
+                let mut temp = unsafe { self.cache_ref.pool().alloc_len(len) };
                 self.read_into(temp.as_mut(), logical_offset).await?;
                 let mut bufs = IoBufsMut::Chunked(chunks);
                 bufs.copy_from_slice(temp.as_ref());

@@ -155,9 +155,9 @@ impl Buffer {
         if end > self.data.len() {
             if end > self.data.capacity() {
                 // Grow backing buffer while preserving existing bytes.
-                let mut grown = self.pool.alloc(end);
-                // SAFETY: We immediately initialize all bytes in 0..current_len.
-                unsafe { grown.set_len(self.data.len()) };
+                // SAFETY: We truncate immediately and only read from the copied prefix.
+                let mut grown = unsafe { self.pool.alloc_len(end) };
+                grown.truncate(self.data.len());
                 grown.as_mut()[..self.data.len()].copy_from_slice(self.data.as_ref());
                 self.data = grown;
             }
@@ -182,9 +182,9 @@ impl Buffer {
         let start = self.data.len();
         let end = start + data.len();
         if end > self.data.capacity() {
-            let mut grown = self.pool.alloc(end);
-            // SAFETY: We initialize the copied range right away.
-            unsafe { grown.set_len(start) };
+            // SAFETY: We truncate immediately and only read from the copied prefix.
+            let mut grown = unsafe { self.pool.alloc_len(end) };
+            grown.truncate(start);
             grown.as_mut()[..start].copy_from_slice(self.data.as_ref());
             self.data = grown;
         }

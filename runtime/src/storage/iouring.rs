@@ -289,9 +289,8 @@ impl crate::Blob for Blob {
         let (mut io_buf, original_bufs) = match input_buf {
             IoBufsMut::Single(buf) => (buf, None),
             IoBufsMut::Chunked(bufs) => {
-                let mut tmp = self.pool.alloc(len);
                 // SAFETY: `len` bytes are filled via io_uring read loop below.
-                unsafe { tmp.set_len(len) };
+                let mut tmp = unsafe { self.pool.alloc_len(len) };
                 (tmp, Some(bufs))
             }
         };
