@@ -183,6 +183,11 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// data.bounds().start. This should never occur because we always prune the data journal
 /// before the offsets journal.
 pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
+    /// Inner state for data journal metadata.
+    ///
+    /// Write guards serialize mutating operations (`append`, `prune`, `rewind`).
+    /// Upgradable-read guards are used by `commit`/`sync` so readers can continue
+    /// while mutators are blocked.
     inner: RwLock<Inner<E, V>>,
 
     /// Index mapping positions to byte offsets within the data journal.
@@ -505,6 +510,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: V) -> Result<u64, Error> {
+        // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
         // Calculate which section this position belongs to
@@ -526,8 +532,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             return Ok(position);
         }
 
-        // The section was filled. Downgrade to an upgradable read guard so readers can continue
-        // while the flush is in progress, but other mutators remain blocked.
+        // The section was filled and must be synced. Downgrade so readers can continue during the
+        // sync while mutators remain blocked.
         let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
         futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
 
@@ -586,8 +592,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// This is faster than `sync()` but recovery will be required on startup if a crash occurs
     /// before the next call to `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
-        // Use an upgradable guard so mutators are blocked while section selection remains stable,
-        // while readers can still proceed.
+        // Serialize with append/prune/rewind so section selection is stable, while still allowing
+        // concurrent readers.
         let inner = self.inner.upgradable_read().await;
         let section = position_to_section(inner.size, self.items_per_section);
         inner.data.sync(section).await
@@ -597,8 +603,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// This is slower than `commit()` but ensures the journal doesn't require recovery on startup.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Use an upgradable guard so mutators are blocked while section selection remains stable,
-        // while readers can still proceed.
+        // Serialize with append/prune/rewind so section selection is stable, while still allowing
+        // concurrent readers.
         let inner = self.inner.upgradable_read().await;
         // Persist only the current (final) section of the data journal.
         // All non-final sections are already persisted per Invariant #1.

@@ -174,6 +174,10 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// by the underlying [SegmentedJournal] during init.
 pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     /// Inner state with segmented journal and size.
+    ///
+    /// Write guards serialize mutating operations (`append`, `prune`, `rewind`).
+    /// Upgradable-read guards are used by `sync` so readers can continue while
+    /// mutators are blocked.
     inner: RwLock<Inner<E, A>>,
 
     /// The maximum number of items per blob (section).
@@ -585,8 +589,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Only the tail section can have pending updates since historical sections are synced
     /// when they become full.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Use an upgradable guard so append/prune/rewind are blocked while sync is in progress,
-        // but readers can still proceed.
+        // Serialize with append/prune/rewind so section selection is stable, while still allowing
+        // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
         // Sync the tail section
@@ -620,6 +624,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         // Persist metadata only when pruning_boundary is mid-section.
         if let Some(update) = metadata_update {
+            // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
+            // the tail section above.
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
             match update {
                 MetadataUpdate::Put(value) => {
@@ -652,6 +658,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: A) -> Result<u64, Error> {
+        // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
         let position = inner.size;
         let (section, _pos_in_section) = self.position_to_section(position);
@@ -664,8 +671,9 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Ok(position);
         }
 
-        // The section was filled. Downgrade to an upgradable read guard so readers can continue
-        // while the flush is in progress, but other mutators remain blocked.
+        // The section was filled and must be synced. Downgrade so readers can continue during the
+        // sync, but keep mutators blocked. After sync, upgrade again to create the next tail
+        // section before any append can proceed.
         let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
         inner.journal.sync(section).await?;
 
