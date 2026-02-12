@@ -1,4 +1,6 @@
 use crate::algebra::{Additive, FieldNTT, Ring};
+use alloc::vec;
+use alloc::vec::Vec;
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::BitMap;
 use core::{
@@ -575,7 +577,7 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                         scratch.clear();
                         scratch.resize(next_chunk_size, F::zero());
                         for i in 0..chunk_size {
-                            std::mem::swap(&mut right[i], &mut scratch[2 * i]);
+                            core::mem::swap(&mut right[i], &mut scratch[2 * i]);
                         }
                         // We can skip moving index 0.
                         for i in (1..chunk_size).rev() {
