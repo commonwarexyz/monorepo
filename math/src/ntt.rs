@@ -182,7 +182,7 @@ impl<'a, const N: usize, F> IndexMut<(usize, usize)> for Columns<'a, N, F> {
 
 /// Used to keep track of the points at which a polynomial needs to vanish.
 ///
-/// This takes care of subtle details like padding an bit ordering.
+/// This takes care of subtle details like padding and bit ordering.
 ///
 /// This struct is associated with a particular size, which is a power of two,
 /// and thus a particular root of unity.
@@ -195,7 +195,7 @@ struct VanishingPoints {
 impl VanishingPoints {
     /// This will have size `2^lg_size`, and vanish everywhere.
     ///
-    /// Be aware that this is not considered
+    /// Be aware that this means all points are initially marked as vanishing.
     pub fn new(lg_size: u32) -> Self {
         Self {
             lg_size,
@@ -1000,7 +1000,7 @@ impl<F: FieldNTT> PolynomialVector<F> {
 
     /// Divide the roots of each polynomial by some factor.
     ///
-    /// c.f. [NTTPolynomial::divide_roots]. This performs the same operation on
+    /// c.f. [PolynomialColumn::divide_roots]. This performs the same operation on
     /// each polynomial in this vector.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
@@ -1023,7 +1023,8 @@ impl<F: FieldNTT> PolynomialVector<F> {
     /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
     ///
     /// This assumes that `q` has no zeroes over `coset_shift() * root_of_unity()^i`,
-    /// for any i. This will be the case for [NTTPolynomial::vanishing].
+    /// for any i. This will be the case for a vanishing polynomial produced by
+    /// [EvaluationColumn::vanishing] and then interpolated.
     /// If this isn't the case, the result may be junk.
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
@@ -1220,7 +1221,7 @@ impl<F> EvaluationVector<F> {
 /// `V_S(X) * V_Sbar(X) = X^N - 1`, which gives `V_S(0) = -1/V_Sbar(0)`.
 /// The scaling factor of `P_Sbar` cancels in the ratio.
 ///
-/// Building `P_Sbar` via [`NTTPolynomial::vanishing`] is cheaper than building `V_S`
+/// Building `P_Sbar` via [`EvaluationColumn::vanishing`] is cheaper than building `V_S`
 /// when most points are present (the typical erasure-coding case), since `|Sbar| << |S|`.
 ///
 /// # Arguments
