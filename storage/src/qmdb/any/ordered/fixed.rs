@@ -385,9 +385,10 @@ pub(crate) mod test {
                 map.remove(&k);
             }
 
-            assert_eq!(db.bounds().await.end, 2620);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, 2620);
             assert_eq!(db.inactivity_floor_loc(), 0);
-            assert_eq!(db.bounds().await.end, 2620);
+            assert_eq!(bounds.end, 2620);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.

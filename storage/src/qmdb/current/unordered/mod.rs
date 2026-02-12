@@ -118,10 +118,11 @@ pub mod tests {
             assert_eq!(db.root(), root3);
 
             // Confirm all activity bits are false except for the last commit.
-            for i in 0..*db.bounds().await.end - 1 {
+            let bounds = db.bounds().await;
+            for i in 0..*bounds.end - 1 {
                 assert!(!db.get_bit(i));
             }
-            assert!(db.get_bit(*db.bounds().await.end - 1));
+            assert!(db.get_bit(*bounds.end - 1));
 
             // Test that we can get a non-durable root.
             let mut db = db.into_mutable();

@@ -1032,8 +1032,9 @@ mod tests {
 
             // Prune to position 20 (removes sections 0-1, keeps sections 2-3)
             journal.prune(20).await.unwrap();
-            assert_eq!(journal.bounds().await.start, 20);
-            assert_eq!(journal.bounds().await.end, 40);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.start, 20);
+            assert_eq!(bounds.end, 40);
 
             journal.sync().await.unwrap();
             drop(journal);
@@ -1279,8 +1280,9 @@ mod tests {
             }
 
             // Initial state: all items accessible
-            assert_eq!(journal.bounds().await.start, 0);
-            assert_eq!(journal.bounds().await.end, 40);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.start, 0);
+            assert_eq!(bounds.end, 40);
 
             // First prune: remove section 0 (positions 0-9)
             let pruned = journal.prune(10).await.unwrap();
@@ -1365,16 +1367,18 @@ mod tests {
                 journal.append(i * 100).await.unwrap();
             }
 
-            assert_eq!(journal.bounds().await.end, 100);
-            assert_eq!(journal.bounds().await.start, 0);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 100);
+            assert_eq!(bounds.start, 0);
 
             // === Phase 2: Prune all data ===
             let pruned = journal.prune(100).await.unwrap();
             assert!(pruned);
 
             // All data is pruned - no items remain
-            assert_eq!(journal.bounds().await.end, 100);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 100);
+            assert!(bounds.is_empty());
 
             // All reads should fail with ItemPruned
             for i in 0..100 {
@@ -1393,8 +1397,9 @@ mod tests {
                 .unwrap();
 
             // Size should be preserved, but no items remain
-            assert_eq!(journal.bounds().await.end, 100);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 100);
+            assert!(bounds.is_empty());
 
             // All reads should still fail
             for i in 0..100 {
@@ -1407,9 +1412,10 @@ mod tests {
             // === Phase 4: Append new data ===
             // Next append should get position 100
             journal.append(10000).await.unwrap();
-            assert_eq!(journal.bounds().await.end, 101);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 101);
             // Now we have one item at position 100
-            assert_eq!(journal.bounds().await.start, 100);
+            assert_eq!(bounds.start, 100);
 
             // Can read the new item
             assert_eq!(journal.read(100).await.unwrap(), 10000);
@@ -1466,8 +1472,9 @@ mod tests {
                 .unwrap();
 
             // Init should auto-repair: offsets journal pruned to match data journal
-            assert_eq!(variable.bounds().await.start, 20);
-            assert_eq!(variable.bounds().await.end, 40);
+            let bounds = variable.bounds().await;
+            assert_eq!(bounds.start, 20);
+            assert_eq!(bounds.end, 40);
 
             // Reads before position 20 should fail (pruned from both journals)
             assert!(matches!(
@@ -1564,8 +1571,9 @@ mod tests {
                 .unwrap();
 
             // Init should rebuild offsets journal from data journal replay
-            assert_eq!(variable.bounds().await.end, 20);
-            assert_eq!(variable.bounds().await.start, 0);
+            let bounds = variable.bounds().await;
+            assert_eq!(bounds.end, 20);
+            assert_eq!(bounds.start, 0);
 
             // All items should be readable from both journals
             for i in 0..20u64 {
@@ -1621,8 +1629,9 @@ mod tests {
                 .unwrap();
 
             // Init should auto-repair: offsets journal pruned to match data journal
-            assert_eq!(variable.bounds().await.start, 30);
-            assert_eq!(variable.bounds().await.end, 50);
+            let bounds = variable.bounds().await;
+            assert_eq!(bounds.start, 30);
+            assert_eq!(bounds.end, 50);
 
             // Reads before position 30 should fail (pruned from both journals)
             assert!(matches!(
@@ -1687,8 +1696,9 @@ mod tests {
                 .unwrap();
 
             // Init should rebuild offsets[5-24] from data journal across all 3 sections
-            assert_eq!(variable.bounds().await.end, 25);
-            assert_eq!(variable.bounds().await.start, 0);
+            let bounds = variable.bounds().await;
+            assert_eq!(bounds.end, 25);
+            assert_eq!(bounds.start, 0);
 
             // All items should be readable - offsets rebuilt correctly across all sections
             for i in 0..25u64 {
@@ -1731,13 +1741,15 @@ mod tests {
             for i in 0..10u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            assert_eq!(journal.bounds().await.end, 10);
-            assert_eq!(journal.bounds().await.start, 0);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert_eq!(bounds.start, 0);
 
             // === Phase 2: Prune to create empty journal ===
             journal.prune(10).await.unwrap();
-            assert_eq!(journal.bounds().await.end, 10);
-            assert!(journal.bounds().await.is_empty()); // Empty!
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert!(bounds.is_empty()); // Empty!
 
             // === Phase 3: Append directly to data journal to simulate crash ===
             // Manually append to data journal only (bypassing Variable's append logic)
@@ -1758,8 +1770,9 @@ mod tests {
                 .expect("Should recover from crash after data sync but before offsets sync");
 
             // All data should be recovered
-            assert_eq!(journal.bounds().await.end, 20);
-            assert_eq!(journal.bounds().await.start, 10);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 20);
+            assert_eq!(bounds.start, 10);
 
             // All items from position 10-19 should be readable
             for i in 10..20u64 {
@@ -1870,10 +1883,11 @@ mod tests {
                 .unwrap();
 
             // Size should be 10
-            assert_eq!(journal.bounds().await.end, 10);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
 
             // No data yet, so no oldest retained position
-            assert!(journal.bounds().await.is_empty());
+            assert!(bounds.is_empty());
 
             // Next append should get position 10
             let pos = journal.append(1000).await.unwrap();
@@ -1909,10 +1923,11 @@ mod tests {
                 .unwrap();
 
             // Size should be 7
-            assert_eq!(journal.bounds().await.end, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 7);
 
             // No data yet, so no oldest retained position
-            assert!(journal.bounds().await.is_empty());
+            assert!(bounds.is_empty());
 
             // Next append should get position 7
             let pos = journal.append(700).await.unwrap();
@@ -1960,8 +1975,9 @@ mod tests {
                 .unwrap();
 
             // Size and data should be preserved
-            assert_eq!(journal.bounds().await.end, 20);
-            assert_eq!(journal.bounds().await.start, 15);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 20);
+            assert_eq!(bounds.start, 15);
 
             // Verify data
             for i in 0..5u64 {
@@ -1996,8 +2012,9 @@ mod tests {
                     .await
                     .unwrap();
 
-            assert_eq!(journal.bounds().await.end, 15);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 15);
+            assert!(bounds.is_empty());
 
             // Drop without writing any data
             drop(journal);
@@ -2007,8 +2024,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.bounds().await.end, 15);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 15);
+            assert!(bounds.is_empty());
 
             // Can append starting at position 15
             let pos = journal.append(1500).await.unwrap();
@@ -2045,8 +2063,9 @@ mod tests {
                 assert_eq!(pos, 7 + i);
             }
 
-            assert_eq!(journal.bounds().await.end, 10);
-            assert_eq!(journal.bounds().await.start, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert_eq!(bounds.start, 7);
 
             // Sync and reopen
             journal.sync().await.unwrap();
@@ -2058,8 +2077,9 @@ mod tests {
                 .unwrap();
 
             // Size and bounds.start should be preserved correctly
-            assert_eq!(journal.bounds().await.end, 10);
-            assert_eq!(journal.bounds().await.start, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert_eq!(bounds.start, 7);
 
             // Verify data
             for i in 0..3u64 {
@@ -2099,8 +2119,9 @@ mod tests {
                 assert_eq!(pos, 7 + i);
             }
 
-            assert_eq!(journal.bounds().await.end, 15);
-            assert_eq!(journal.bounds().await.start, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 15);
+            assert_eq!(bounds.start, 7);
 
             // Sync and reopen
             journal.sync().await.unwrap();
@@ -2112,8 +2133,9 @@ mod tests {
                 .unwrap();
 
             // Verify state preserved
-            assert_eq!(journal.bounds().await.end, 15);
-            assert_eq!(journal.bounds().await.start, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 15);
+            assert_eq!(bounds.start, 7);
 
             // Verify all data
             for i in 0..8u64 {
@@ -2155,8 +2177,9 @@ mod tests {
             let journal = Journal::<_, u64>::init(context.with_label("second"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await.end, 7);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 7);
+            assert!(bounds.is_empty());
 
             // Append one item at position 7.
             let pos = journal.append(777).await.unwrap();
@@ -2180,8 +2203,9 @@ mod tests {
             let journal = Journal::<_, u64>::init(context.with_label("third"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.bounds().await.end, 8);
-            assert_eq!(journal.bounds().await.start, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 8);
+            assert_eq!(bounds.start, 7);
             assert_eq!(journal.read(7).await.unwrap(), 777);
 
             journal.destroy().await.unwrap();
@@ -2224,8 +2248,9 @@ mod tests {
                 .unwrap();
 
             // Verify recovery
-            assert_eq!(journal.bounds().await.end, 10);
-            assert_eq!(journal.bounds().await.start, 7);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert_eq!(bounds.start, 7);
 
             // Verify data is accessible
             for i in 0..3u64 {
@@ -2289,9 +2314,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.bounds().await.end, 1000);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 1000);
             // No data yet, so no oldest retained position
-            assert!(journal.bounds().await.is_empty());
+            assert!(bounds.is_empty());
 
             // Next append should get position 1000
             let pos = journal.append(100000).await.unwrap();
@@ -2330,8 +2356,9 @@ mod tests {
             // Prune to position 25
             journal.prune(25).await.unwrap();
 
-            assert_eq!(journal.bounds().await.end, 30);
-            assert_eq!(journal.bounds().await.start, 25);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 30);
+            assert_eq!(bounds.start, 25);
 
             // Verify remaining items are readable
             for i in 25..30u64 {
@@ -2368,8 +2395,9 @@ mod tests {
                     .await
                     .expect("Failed to initialize journal with sync boundaries");
 
-            assert_eq!(journal.bounds().await.end, lower_bound);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, lower_bound);
+            assert!(bounds.is_empty());
 
             // Append items using the contiguous API
             let pos1 = journal.append(42u64).await.unwrap();
@@ -2807,8 +2835,9 @@ mod tests {
                 .unwrap();
 
             // Verify empty state
-            assert_eq!(journal.bounds().await.end, 0);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 0);
+            assert!(bounds.is_empty());
 
             // Append 1 item (value = position * 100, so position 0 has value 0)
             let pos = journal.append(0).await.unwrap();
@@ -2916,8 +2945,9 @@ mod tests {
 
             // Prune to position 5 (removes positions 0-4)
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.bounds().await.end, 10);
-            assert_eq!(journal.bounds().await.start, 5);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert_eq!(bounds.start, 5);
 
             // Sync and restart
             journal.sync().await.unwrap();
@@ -2929,8 +2959,9 @@ mod tests {
                 .unwrap();
 
             // Verify state after restart
-            assert_eq!(journal.bounds().await.end, 10);
-            assert_eq!(journal.bounds().await.start, 5);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 10);
+            assert_eq!(bounds.start, 5);
 
             // KEY TEST: Reading from bounds.end - 1 (position 9) should work
             let value = journal.read(journal.size().await - 1).await.unwrap();
@@ -2957,8 +2988,9 @@ mod tests {
 
             // Prune all items
             journal.prune(5).await.unwrap();
-            assert_eq!(journal.bounds().await.end, 5); // Size unchanged
-            assert!(journal.bounds().await.is_empty()); // All pruned
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 5); // Size unchanged
+            assert!(bounds.is_empty()); // All pruned
 
             // bounds.end - 1 = 4, but position 4 is pruned
             let result = journal.read(journal.size().await - 1).await;
@@ -2966,9 +2998,10 @@ mod tests {
 
             // After appending, reading works again
             journal.append(500).await.unwrap();
-            assert_eq!(journal.bounds().await.start, 5);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.start, 5);
             assert_eq!(
-                journal.read(journal.bounds().await.end - 1).await.unwrap(),
+                journal.read(bounds.end - 1).await.unwrap(),
                 500
             );
 
@@ -2997,14 +3030,16 @@ mod tests {
             for i in 0..25u64 {
                 journal.append(i * 100).await.unwrap();
             }
-            assert_eq!(journal.bounds().await.end, 25);
-            assert_eq!(journal.bounds().await.start, 0);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 25);
+            assert_eq!(bounds.start, 0);
             journal.sync().await.unwrap();
 
             // Clear to position 100, effectively resetting the journal
             journal.clear_to_size(100).await.unwrap();
-            assert_eq!(journal.bounds().await.end, 100);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 100);
+            assert!(bounds.is_empty());
 
             // Old positions should fail
             for i in 0..25 {
@@ -3020,16 +3055,18 @@ mod tests {
                 Journal::<_, u64>::init(context.with_label("journal_after_clear"), cfg.clone())
                     .await
                     .unwrap();
-            assert_eq!(journal.bounds().await.end, 100);
-            assert!(journal.bounds().await.is_empty());
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 100);
+            assert!(bounds.is_empty());
 
             // Append new data starting at position 100
             for i in 100..105u64 {
                 let pos = journal.append(i * 100).await.unwrap();
                 assert_eq!(pos, i);
             }
-            assert_eq!(journal.bounds().await.end, 105);
-            assert_eq!(journal.bounds().await.start, 100);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 105);
+            assert_eq!(bounds.start, 100);
 
             // New positions should be readable
             for i in 100..105u64 {
@@ -3044,8 +3081,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(journal.bounds().await.end, 105);
-            assert_eq!(journal.bounds().await.start, 100);
+            let bounds = journal.bounds().await;
+            assert_eq!(bounds.end, 105);
+            assert_eq!(bounds.start, 100);
             for i in 100..105u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }

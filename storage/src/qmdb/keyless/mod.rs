@@ -455,8 +455,9 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context.with_label("db1")).await;
-            assert_eq!(db.bounds().await.end, 1); // initial commit should exist
-            assert_eq!(db.bounds().await.start, Location::new_unchecked(0));
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, 1); // initial commit should exist
+            assert_eq!(bounds.start, Location::new_unchecked(0));
 
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.last_commit_loc(), Location::new_unchecked(0));
@@ -667,9 +668,10 @@ mod test {
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (_durable, _) = db.commit(None).await.unwrap();
             let db = open_db(context.with_label("db5")).await;
-            assert!(db.bounds().await.end > op_count);
+            let bounds = db.bounds().await;
+            assert!(bounds.end > op_count);
             assert_ne!(db.root(), root);
-            assert_eq!(db.last_commit_loc(), db.bounds().await.end - 1);
+            assert_eq!(db.last_commit_loc(), bounds.end - 1);
 
             db.destroy().await.unwrap();
         });
@@ -885,8 +887,9 @@ mod test {
             drop(db);
             let mut db = open_db(context.with_label("db2")).await;
             assert_eq!(db.root(), root);
-            assert_eq!(db.bounds().await.end, 2 * ELEMENTS + 3);
-            assert!(db.bounds().await.start <= PRUNE_LOC);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, 2 * ELEMENTS + 3);
+            assert!(bounds.start <= PRUNE_LOC);
 
             // Test that we can't get pruned values
             for i in 0..*oldest_retained {
@@ -951,10 +954,11 @@ mod test {
             let almost_all = db.bounds().await.end - 5;
             db.prune(almost_all).await.unwrap();
 
-            let final_oldest = db.bounds().await.start;
+            let bounds = db.bounds().await;
+            let final_oldest = bounds.start;
 
             // Should still be able to prove the remaining operations
-            if final_oldest < db.bounds().await.end {
+            if final_oldest < bounds.end {
                 let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
                     verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),

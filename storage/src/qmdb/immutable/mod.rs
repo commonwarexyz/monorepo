@@ -605,8 +605,9 @@ pub(super) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context.with_label("first")).await;
-            assert_eq!(db.bounds().await.end, 1);
-            assert_eq!(db.bounds().await.start, Location::new_unchecked(0));
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, 1);
+            assert_eq!(bounds.start, Location::new_unchecked(0));
             assert!(db.get_metadata().await.unwrap().is_none());
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
@@ -878,11 +879,12 @@ pub(super) mod test {
             db.prune(Location::new_unchecked((ELEMENTS+2) / 2))
                 .await
                 .unwrap();
-            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, ELEMENTS + 2);
 
             // items_per_section is 5, so half should be exactly at a blob boundary, in which case
             // the actual pruning location should match the requested.
-            let oldest_retained_loc = db.bounds().await.start;
+            let oldest_retained_loc = bounds.start;
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Try to fetch a pruned key.
@@ -901,8 +903,9 @@ pub(super) mod test {
 
             let mut db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().await.end, ELEMENTS + 2);
-            let oldest_retained_loc = db.bounds().await.start;
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, ELEMENTS + 2);
+            let oldest_retained_loc = bounds.start;
             assert_eq!(oldest_retained_loc, Location::new_unchecked(ELEMENTS / 2));
 
             // Prune to a non-blob boundary.

@@ -1035,8 +1035,9 @@ where
         // commit already done in apply_ops
 
         let sync_lower_bound = db.inactivity_floor_loc().await;
-        let sync_upper_bound = db.bounds().await.end;
-        let target_db_op_count = db.bounds().await.end;
+        let bounds = db.bounds().await;
+        let sync_upper_bound = bounds.end;
+        let target_db_op_count = bounds.end;
         let target_db_inactivity_floor_loc = db.inactivity_floor_loc().await;
 
         let pinned_nodes = db
@@ -1113,10 +1114,11 @@ where
         // commit already done in apply_ops
 
         // Capture target db state for comparison
-        let target_db_op_count = target_db.bounds().await.end;
+        let bounds = target_db.bounds().await;
+        let target_db_op_count = bounds.end;
         let target_db_inactivity_floor_loc = target_db.inactivity_floor_loc().await;
         let sync_lower_bound = target_db.inactivity_floor_loc().await;
-        let sync_upper_bound = target_db.bounds().await.end;
+        let sync_upper_bound = bounds.end;
         let target_hash = target_db.root();
 
         let (mmr, journal) = target_db.into_log_components();
