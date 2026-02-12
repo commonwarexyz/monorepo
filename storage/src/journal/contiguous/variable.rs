@@ -593,6 +593,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         // Serialize with append/prune/rewind so section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
+
         let section = position_to_section(inner.size, self.items_per_section);
         inner.data.sync(section).await
     }
@@ -604,6 +605,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         // Serialize with append/prune/rewind so section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
+
         // Persist only the current (final) section of the data journal.
         // All non-final sections are already persisted per Invariant #1.
         let section = position_to_section(inner.size, self.items_per_section);
