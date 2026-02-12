@@ -45,4 +45,4 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy "${CARGO_TARGET_DIR:-target}/doc" --project-name=commonware-rustdoc-release
+          command: pages deploy "${{ env.CARGO_TARGET_DIR || 'target' }}/doc" --project-name=commonware-rustdoc-release
