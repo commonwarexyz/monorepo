@@ -1005,7 +1005,7 @@ mod tests {
                 let mmr_cfg = mmr_config("rewind", &context);
                 let journal_cfg = journal_config("rewind", &context);
                 let mut journal = AuthenticatedJournal::new(
-                    context.clone(),
+                    context,
                     mmr_cfg,
                     journal_cfg,
                     |op| op.is_commit(),
