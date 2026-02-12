@@ -1,6 +1,6 @@
 use crate::algebra::{Additive, FieldNTT, Ring};
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::BitMap;
 use core::{
@@ -182,7 +182,7 @@ impl<'a, const N: usize, F> IndexMut<(usize, usize)> for Columns<'a, N, F> {
 
 /// Used to keep track of the points at which a polynomial needs to vanish.
 ///
-/// This takes care of subtle details like padding an bit ordering.
+/// This takes care of subtle details like padding and bit ordering.
 ///
 /// This struct is associated with a particular size, which is a power of two,
 /// and thus a particular root of unity.
@@ -195,7 +195,7 @@ pub struct VanishingPoints {
 impl VanishingPoints {
     /// This will have size `2^lg_size`, and vanish everywhere.
     ///
-    /// Be aware that this is not considered
+    /// Be aware that this means all points are initially marked as vanishing.
     pub fn new(lg_size: u32) -> Self {
         Self {
             lg_size,
@@ -1016,7 +1016,8 @@ impl<F: FieldNTT> PolynomialVector<F> {
     /// matches that of `q` (the coefficients can be 0, but need to be padded to the right size).
     ///
     /// This assumes that `q` has no zeroes over `coset_shift() * root_of_unity()^i`,
-    /// for any i. This will be the case for [`EvaluationColumn::vanishing`].
+    /// for any i. This will be the case for a vanishing polynomial produced by
+    /// [EvaluationColumn::vanishing] and then interpolated.
     /// If this isn't the case, the result may be junk.
     ///
     /// If `q` doesn't divide a partiular polynomial in this vector, the result
