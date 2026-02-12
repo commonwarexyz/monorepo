@@ -1,4 +1,5 @@
 use crate::{BufferPool, IoBufMut};
+use bytes::BufMut;
 
 /// A buffer for caching data written to the tip of a blob.
 ///
@@ -155,11 +156,8 @@ impl Buffer {
         // Expand buffer if necessary (fills with zeros).
         if end > self.data.len() {
             if end > self.data.capacity() {
-                // Grow backing buffer while preserving existing bytes.
-                // SAFETY: We truncate immediately and only read from the copied prefix.
-                let mut grown = unsafe { self.pool.alloc_len(end) };
-                grown.truncate(self.data.len());
-                grown.as_mut()[..self.data.len()].copy_from_slice(self.data.as_ref());
+                let mut grown = self.pool.alloc(end);
+                grown.put_slice(self.data.as_ref());
                 self.data = grown;
             }
             let prev = self.data.len();
@@ -180,18 +178,13 @@ impl Buffer {
     /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
     /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
-        let start = self.data.len();
-        let end = start + data.len();
+        let end = self.data.len() + data.len();
         if end > self.data.capacity() {
-            // SAFETY: We truncate immediately and only read from the copied prefix.
-            let mut grown = unsafe { self.pool.alloc_len(end) };
-            grown.truncate(start);
-            grown.as_mut()[..start].copy_from_slice(self.data.as_ref());
+            let mut grown = self.pool.alloc(end);
+            grown.put_slice(self.data.as_ref());
             self.data = grown;
         }
-        // SAFETY: We initialize the appended range right away.
-        unsafe { self.data.set_len(end) };
-        self.data.as_mut()[start..end].copy_from_slice(data);
+        self.data.put_slice(data);
 
         self.over_capacity()
     }
