@@ -9,7 +9,8 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::{
     fmt::{self, Formatter, Write as _},
-    ops::{BitAnd, BitOr, BitXor, Index},
+    iter,
+    ops::{BitAnd, BitOr, BitXor, Index, Range},
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
@@ -157,11 +158,15 @@ impl<const N: usize> BitMap<N> {
             bit,
             self.len()
         );
-        &self.chunks[Self::chunk(bit)]
+        &self.chunks[Self::to_chunk_index(bit)]
     }
 
     /// Get a reference to a chunk by its index in the current bitmap.
     /// Note this is an index into the chunks, not a bit.
+    ///
+    /// # Warning
+    ///
+    /// Panics if the `chunk` is out of bounds.
     #[inline]
     pub(super) fn get_chunk(&self, chunk: usize) -> &[u8; N] {
         assert!(
@@ -274,7 +279,7 @@ impl<const N: usize> BitMap<N> {
     #[inline]
     pub fn flip(&mut self, bit: u64) {
         self.assert_bit(bit);
-        let chunk = Self::chunk(bit);
+        let chunk = Self::to_chunk_index(bit);
         let byte = Self::chunk_byte_offset(bit);
         let mask = Self::chunk_byte_bitmask(bit);
         self.chunks[chunk][byte] ^= mask;
@@ -304,7 +309,7 @@ impl<const N: usize> BitMap<N> {
             self.len()
         );
 
-        let chunk = &mut self.chunks[Self::chunk(bit)];
+        let chunk = &mut self.chunks[Self::to_chunk_index(bit)];
         let byte = Self::chunk_byte_offset(bit);
         let mask = Self::chunk_byte_bitmask(bit);
         if value {
@@ -487,7 +492,7 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the chunk index overflows `usize`.
     #[inline]
-    pub(super) fn chunk(bit: u64) -> usize {
+    pub(super) fn to_chunk_index(bit: u64) -> usize {
         let chunk = bit / Self::CHUNK_SIZE_BITS;
         assert!(
             chunk <= usize::MAX as u64,
@@ -571,6 +576,103 @@ impl<const N: usize> BitMap<N> {
             self.len(),
             other.len()
         );
+    }
+
+    /// Check if all the bits in a given range are 0.
+    ///
+    /// Returns `true` if every index in the range is unset (i.e.
+    /// [`Self::get`] returns `false`). Returns `true` if the range
+    /// is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range.end` exceeds the length of the bitmap.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::bitmap::BitMap;
+    ///
+    /// let mut bitmap = BitMap::<8>::zeroes(128);
+    /// assert!(bitmap.is_unset(0..128));
+    ///
+    /// bitmap.set(64, true);
+    /// assert!(bitmap.is_unset(0..64));
+    /// assert!(!bitmap.is_unset(0..65));
+    /// ```
+    pub fn is_unset(&self, range: Range<u64>) -> bool {
+        assert!(
+            range.end <= self.len(),
+            "range end {} out of bounds (len: {})",
+            range.end,
+            self.len()
+        );
+        if range.start >= range.end {
+            return true;
+        }
+        let start = range.start;
+        let end = range.end;
+
+        // We know this can't underflow, because start < end.
+        //
+        // We now want "end" to represent the last bit we want to consider.
+        let end = end - 1;
+
+        // Get the chunks containing the start and end bits.
+        let first_chunk = Self::to_chunk_index(start);
+        let last_chunk = Self::to_chunk_index(end);
+
+        // All of these chunks require all of their bits to be checked.
+        // If first_chunk == last_chunk, we skip the loop.
+        let zero = [0u8; N];
+        for full_chunk in (first_chunk + 1)..last_chunk {
+            if self.chunks[full_chunk] != zero {
+                return false;
+            }
+        }
+
+        // Check first chunk tail (or whole range if first_chunk == last_chunk).
+        let start_byte = Self::chunk_byte_offset(start);
+        let end_byte = Self::chunk_byte_offset(end);
+        let start_mask = (0xFFu16 << ((start & 0b111) as u32)) as u8;
+        let end_mask = (0xFFu16 >> (7 - ((end & 0b111) as u32))) as u8;
+        let first = &self.chunks[first_chunk];
+        let first_end_byte = if first_chunk == last_chunk {
+            end_byte
+        } else {
+            N - 1
+        };
+        for (i, &byte) in first
+            .iter()
+            .enumerate()
+            .take(first_end_byte + 1)
+            .skip(start_byte)
+        {
+            let mut mask = 0xFFu8;
+            if i == start_byte {
+                mask &= start_mask;
+            }
+            if first_chunk == last_chunk && i == end_byte {
+                mask &= end_mask;
+            }
+            if (byte & mask) != 0 {
+                return false;
+            }
+        }
+        if first_chunk == last_chunk {
+            return true;
+        }
+
+        // Check last chunk head.
+        let last = &self.chunks[last_chunk];
+        for (i, &byte) in last.iter().enumerate().take(end_byte + 1) {
+            let mask = if i == end_byte { end_mask } else { 0xFF };
+            if (byte & mask) != 0 {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -748,7 +850,7 @@ pub struct Iterator<'a, const N: usize> {
     pos: u64,
 }
 
-impl<const N: usize> core::iter::Iterator for Iterator<'_, N> {
+impl<const N: usize> iter::Iterator for Iterator<'_, N> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2128,6 +2230,87 @@ mod tests {
         assert_eq!(prunable.pruned_chunks(), 0);
         assert_eq!(prunable.len(), Prunable::<4>::CHUNK_SIZE_BITS);
         assert_eq!(prunable.get_chunk_containing(0), &chunk);
+    }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn is_unset_matches_naive(
+                bits in prop::collection::vec(any::<bool>(), 1..=512usize),
+                start in 0u64..=512,
+                end in 0u64..=512,
+            ) {
+                let bitmap: BitMap = BitMap::from(bits.as_slice());
+                let len = bitmap.len();
+                let start = start.min(len);
+                let end = end.max(start).min(len);
+                let range = start..end;
+
+                let expected = range.clone().all(|i| !bitmap.get(i));
+
+                prop_assert_eq!(bitmap.is_unset(range), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn is_unset_all_zeros() {
+        let bitmap = BitMap::<8>::zeroes(256);
+        assert!(bitmap.is_unset(0..256));
+    }
+
+    #[test]
+    fn is_unset_all_ones() {
+        let bitmap = BitMap::<8>::ones(256);
+        assert!(!bitmap.is_unset(0..256));
+    }
+
+    #[test]
+    fn is_unset_single_bit() {
+        let mut bitmap = BitMap::<8>::zeroes(64);
+        bitmap.set(31, true);
+        assert!(bitmap.is_unset(0..31));
+        assert!(!bitmap.is_unset(0..32));
+        assert!(!bitmap.is_unset(31..32));
+        assert!(bitmap.is_unset(32..64));
+    }
+
+    #[test]
+    fn is_unset_empty_range() {
+        let bitmap = BitMap::<8>::ones(64);
+        assert!(bitmap.is_unset(0..0));
+        assert!(bitmap.is_unset(32..32));
+        assert!(bitmap.is_unset(64..64));
+    }
+
+    #[test]
+    fn is_unset_chunk_boundaries() {
+        // N=1 means 8 bits per chunk, so boundaries are more frequent
+        let mut bitmap = BitMap::<1>::zeroes(32);
+        bitmap.set(7, true);
+        assert!(bitmap.is_unset(0..7));
+        assert!(!bitmap.is_unset(0..8));
+        assert!(bitmap.is_unset(8..32));
+    }
+
+    #[test]
+    fn is_unset_small_chunk_multi_span() {
+        // N=4 means 32 bits per chunk, test spanning 3 chunks
+        let mut bitmap = BitMap::<4>::zeroes(128);
+        bitmap.set(96, true);
+        assert!(bitmap.is_unset(0..96));
+        assert!(!bitmap.is_unset(0..97));
+        assert!(bitmap.is_unset(97..128));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn is_unset_out_of_bounds() {
+        let bitmap = BitMap::<8>::zeroes(64);
+        bitmap.is_unset(0..65);
     }
 
     #[cfg(feature = "arbitrary")]
