@@ -7,9 +7,10 @@ use core::{
 };
 use rand_core::CryptoRngCore;
 
-/// Benchmarked to be optimal.
+/// Determines the size of polynomials we compute naively in [`EvaluationColumn::vanishing`].
+///
+/// Benchmarked to be optimal, based on BLS12381 threshold recovery time.
 const LG_VANISHING_BASE: u32 = 8;
-const _: () = assert!(LG_VANISHING_BASE >= 1);
 
 /// Reverse the first `bit_width` bits of `i`.
 ///
@@ -19,10 +20,14 @@ fn reverse_bits(bit_width: u32, i: u64) -> u64 {
     i.wrapping_shl(64 - bit_width).reverse_bits()
 }
 
+/// Turn a slice into reversed bit order in place.
+///
+/// `out` MUST have length `2^bit_width`.
 fn reverse_slice<T>(bit_width: u32, out: &mut [T]) {
     assert_eq!(out.len(), 1 << bit_width);
     for i in 0..out.len() {
         let j = reverse_bits(bit_width, i as u64) as usize;
+        // Only swap once, and don't swap if the location is the same.
         if i < j {
             out.swap(i, j);
         }
@@ -32,7 +37,7 @@ fn reverse_slice<T>(bit_width: u32, out: &mut [T]) {
 /// Calculate an NTT, or an inverse NTT (with FORWARD=false), in place.
 ///
 /// We implement this generically over anything we can index into, which allows
-/// performing NTTs in place
+/// performing NTTs in place.
 fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>>(
     rows: usize,
     cols: usize,
@@ -152,7 +157,7 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
     }
 }
 
-/// A single column of some larger data.
+/// Columns of some larger piece of data.
 ///
 /// This allows us to easily do NTTs over partial segments of some bigger matrix.
 struct Columns<'a, const N: usize, F> {
@@ -173,6 +178,12 @@ impl<'a, const N: usize, F> IndexMut<(usize, usize)> for Columns<'a, N, F> {
     }
 }
 
+/// Used to keep track of the points at which a polynomial needs to vanish.
+///
+/// This takes care of subtle details like padding an bit ordering.
+///
+/// This struct is associated with a particular size, which is a power of two,
+/// and thus a particular root of unity.
 #[derive(Debug, PartialEq)]
 pub struct VanishingPoints {
     lg_size: u32,
@@ -180,6 +191,9 @@ pub struct VanishingPoints {
 }
 
 impl VanishingPoints {
+    /// This will have size `2^lg_size`, and vanish everywhere.
+    ///
+    /// Be aware that this is not considered
     pub fn new(lg_size: u32) -> Self {
         Self {
             lg_size,
@@ -187,6 +201,7 @@ impl VanishingPoints {
         }
     }
 
+    /// This will have size `2^lg_size`, and vanish nowhere.
     pub fn all_non_vanishing(lg_size: u32) -> Self {
         Self {
             lg_size,
@@ -198,30 +213,46 @@ impl VanishingPoints {
         self.lg_size
     }
 
+    /// Set the root `w^index` to vanish, `value = false`, or not, `value = true`.
     fn set(&mut self, index: u64, value: bool) {
         self.bits.set(reverse_bits(self.lg_size, index), value);
     }
 
+    /// Set the root `w^index` to not vanish.
+    ///
+    /// cf. `set`;
     pub fn set_non_vanishing(&mut self, index: u64) {
         self.set(index, true);
     }
 
-    fn chunk_vanishes_everywhere(&self, lg_chunk_size: u32, index: u64) -> bool {
-        assert!(lg_chunk_size <= self.lg_size);
-        let start = index << lg_chunk_size;
-        self.bits.is_unset(start..start + (1 << lg_chunk_size))
-    }
-
-    fn get_chunk(&self, lg_chunk_size: u32, index: u64) -> impl Iterator<Item = bool> + '_ {
-        (index << lg_chunk_size..(index + 1) << lg_chunk_size).map(|i| self.bits.get(i))
+    pub fn get(&self, index: u64) -> bool {
+        self.bits.get(reverse_bits(self.lg_size, index))
     }
 
     pub fn count_non_vanishing(&self) -> u64 {
         self.bits.count_ones()
     }
 
-    pub fn get(&self, index: u64) -> bool {
-        self.bits.get(reverse_bits(self.lg_size, index))
+    /// Check that a particular chunk of this set vanishes.
+    ///
+    /// `lg_chunk_size` determines the size of the chunk, which must be a power of two.
+    ///
+    /// `index` determines which chunk to use. After chunk 0, you have chunk 1, and so on.
+    ///
+    /// The chunk is taken from the set in reverse bit order. This is what methods
+    /// that create a vanishing polynomial recursively want. Take care when using
+    /// this naively.
+    fn chunk_vanishes_everywhere(&self, lg_chunk_size: u32, index: u64) -> bool {
+        assert!(lg_chunk_size <= self.lg_size);
+        let start = index << lg_chunk_size;
+        self.bits.is_unset(start..start + (1 << lg_chunk_size))
+    }
+
+    /// Yield the bits of a chunk, in reverse bit order.
+    ///
+    /// cf. `chunk_vanishes_everywhere`, which uses the same chunk indexing scheme.
+    fn get_chunk(&self, lg_chunk_size: u32, index: u64) -> impl Iterator<Item = bool> + '_ {
+        (index << lg_chunk_size..(index + 1) << lg_chunk_size).map(|i| self.bits.get(i))
     }
 
     #[cfg(any(test, feature = "fuzz"))]
@@ -230,13 +261,82 @@ impl VanishingPoints {
     }
 }
 
+/// Represents the evaluation of a single polynomial over a full domain.
 #[derive(Debug)]
 struct EvaluationColumn<F> {
     evaluations: Vec<F>,
 }
 
 impl<F: FieldNTT> EvaluationColumn<F> {
+    /// Evaluate the vanishing polynomial over `points` on the domain.
+    ///
+    /// This returns the evaluation of the polynomial at `0`, and then the evaluation
+    /// of the polynomial over the whole domain.
+    ///
+    /// This assumes that `points` has at least one non-vanishing point.
     pub fn vanishing(points: &VanishingPoints) -> (F, Self) {
+        // The goal of this function is to produce a polynomial v such that
+        // v(w^j) = 0 for each index j where points.get(j) = false.
+        //
+        // The core idea is to split this up recursively. We split the possible
+        // roots into two groups, and figure out the vanishing polynomials
+        // v_L and v_R for the first and second groups, respectively. Then,
+        // multiplying v_L and v_R yields a polynomial with the appropriate roots.
+        //
+        // We can multiply the polynomials in O(N lg N) time, by performing an
+        // NTT on both of them, multiplying the evaluations point wise, and then
+        // using a reverse NTT to get a polynomial back.
+        //
+        // Naturally, we can extend this to construct each sub-polynomial recursively
+        // as well, giving an O(N lg^2 N) algorithm in total.
+        //
+        // This function doesn't return the polynomial directly, but rather an
+        // evaluation of the polynomial. This is because many consumers often
+        // need this anyways, and by providing them with this result, we avoid
+        // performing a reverse NTT that they then proceed to undo. However,
+        // they can also need the evaluation at 0, so we provide and calculate that
+        // as well. That can also be calculated recursively, and merged with the
+        // above calculation.
+        //
+        // One point we haven't clarified yet is how to split up the roots.
+        // Let's use an example. With size 8, the roots are:
+        //
+        // w^0 w^1 w^2 w^3 w^4 w^5 w^6 w^7
+        //
+        // or, writing down just the exponent
+        //
+        // 0 1 2 3 4 5 6 7
+        //
+        // We could build up our final polynomial by merging polynomials of size
+        // two, with roots chosen among the following possibilities:
+        //
+        // 0 1    2 3    4 5    6 7
+        //
+        // However, this requires using different roots for each polynomial.
+        //
+        // If we instead use reverse bit order, we can have things be:
+        //
+        // 0 4    2 6    1 5    3 7
+        //
+        // which is equal to:
+        //
+        // 0 4    2 + (0 4)    1 + (0 4    2 + (0 4))
+        //
+        // So, we can start by having polynomials with the same possible roots
+        // at the lowest level, and then merge by multiplying the roots by
+        // the right power, for the polynomial on the right.
+        //
+        // The roots of a polynomial can easily be multiplied by some factor
+        // by dividing its coefficients by powers of a factor.
+        // cf [`PolynomialColumn::divide_roots`].
+        //
+        // Another optimization we can do for the merges is to keep track
+        // of polynomials that vanish everywhere and nowhere. A polynomial
+        // vanishing nowhere has no effect when merging, so we can skip a multiplication.
+        // Similarly, a polynomial vanishing everywhere is of the form X^N - 1,
+        // with which multiplication is simple.
+
+        /// Used to keep track of special polynomial values.
         #[derive(Clone, Copy)]
         enum Where {
             /// Vanishes at none of the roots; i.e. is f(X) = 1.
@@ -251,9 +351,13 @@ impl<F: FieldNTT> EvaluationColumn<F> {
 
         let lg_len = points.lg_size();
         let len = 1usize << lg_len;
+        // This will store our in progress polynomials, and eventually,
+        // the final evaluations.
         let mut out = vec![F::zero(); len];
-        // For small inputs, one chunk might more than cover it all.
+        // For small inputs, one chunk might more than cover it all, so we
+        // need to make the chunk size be too big.
         let lg_chunk_size = LG_VANISHING_BASE.min(lg_len);
+        // We use this to keep track of the polynomial evaluated at 0.
         let mut at_zero = F::one();
 
         // Populate out with polynomials up to a low degree.
@@ -283,13 +387,19 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                 reverse_slice(lg_chunk_size, out.as_mut_slice());
                 out
             };
+            // Instead of actually negating `at_zero` inside of the loop below,
+            // we instead keep track of whether or not it needs to be negated
+            // after the loop, to just perform that operation once.
             let mut negate_at_zero = false;
+            // Populate each chunk with the initial polynomial,
             let vanishing = out
                 .chunks_exact_mut(chunk_size)
                 .enumerate()
                 .map(|(i, poly)| {
                     let i_u64 = i as u64;
                     if points.chunk_vanishes_everywhere(lg_chunk_size, i_u64) {
+                        // Implicitly, there's a 1 past the end of the polynomial,
+                        // which we handle when merging.
                         poly[0] = -F::one();
                         negate_at_zero ^= true;
                         return Where::Everywhere;
@@ -303,6 +413,7 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                         if b_j {
                             continue;
                         }
+                        // Multiply the polynomial by (X - w^j).
                         poly[coeffs] = F::one();
                         for k in (1..coeffs).rev() {
                             let (chunk_head, chunk_tail) = poly.split_at_mut(k);
@@ -391,8 +502,15 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                         Somewhere
                     }
                     (Nowhere, Everywhere) => {
+                        // (X^(N/2) - 1) is on the right.
+                        // First, we multiply its roots by w_N, yielding:
+                        //
+                        // -X^(N/2) - 1
+                        //
+                        // in reverse bit order we get the following:
                         left[0] = -F::one();
                         left[1] = -F::one();
+                        // And we remove the -1 on the right side.
                         right[0] = F::zero();
                         Somewhere
                     }
@@ -408,9 +526,11 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                         Somewhere
                     }
                     (Everywhere, Nowhere) => {
-                        right[0] = F::zero();
+                        // Like above, but with the polynomial on the left,
+                        // there's no need to adjust the roots.
                         left[0] = -F::one();
                         left[1] = F::one();
+                        right[0] = F::zero();
                         Somewhere
                     }
                     (Somewhere, Everywhere) => {
@@ -419,6 +539,8 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                         // the polynomial by X^(chunk_size), which is what we want.
                         for i in (0..chunk_size).rev() {
                             chunk.swap(i, 2 * i + 1);
+                            // We copy the value in i, negate it, and make it occupy
+                            // both 2 * i + 1 and 2 * i, thus multiplying by -(X^chunk_size + 1).
                             chunk[2 * i + 1] = -chunk[2 * i + 1].clone();
                             chunk[2 * i] = chunk[2 * i + 1].clone();
                         }
@@ -427,16 +549,20 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                     (Everywhere, Somewhere) => {
                         // Adjust the roots on the right.
                         shift_coeffs(right);
-                        // Like above, but moving the right side.
+                        // Like above, but moving the right side, and multiplying by
+                        // (X^chunk_size - 1).
                         for i in 0..chunk_size {
                             chunk.swap(chunk_size + i, 2 * i + 1);
                             chunk[2 * i] = -chunk[2 * i + 1].clone();
                         }
                         Somewhere
                     }
-                    // We have nothing to do in this case
                     (Everywhere, Everywhere) => {
+                        // Make sure to clear the -1 on the right side.
                         right[0] = F::zero();
+                        // By choosing to do things this way, we effectively
+                        // negate the final polynomial, so we need to correct
+                        // for this with the zero value.
                         at_zero = -at_zero.clone();
                         Everywhere
                     }
@@ -501,12 +627,14 @@ impl<F: FieldNTT> EvaluationColumn<F> {
     }
 }
 
+/// A column containing a single polynomial.
 #[derive(Debug)]
 struct PolynomialColumn<F> {
     coefficients: Vec<F>,
 }
 
 impl<F: FieldNTT> PolynomialColumn<F> {
+    /// Evaluate this polynomial over the domain, returning
     pub fn evaluate(self) -> EvaluationColumn<F> {
         let mut data = self.coefficients;
         ntt::<true, _, _>(
