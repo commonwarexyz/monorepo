@@ -377,16 +377,17 @@ where
         let new_grafted_leaves = status.complete_chunks();
 
         // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
-        let chunks_to_update = (old_grafted_leaves..new_grafted_leaves).chain(
-            state
-                .dirty_chunks
-                .iter()
-                .copied()
-                .filter(|&c| c < old_grafted_leaves),
-        );
+        let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
+            .chain(
+                state
+                    .dirty_chunks
+                    .iter()
+                    .copied()
+                    .filter(|&c| c < old_grafted_leaves),
+            )
+            .map(|chunk_idx| (chunk_idx, *status.get_chunk(chunk_idx)));
         let grafted_leaves = compute_grafted_leaves::<H, N>(
             &mut any.log.hasher,
-            &status,
             &any.log.mmr,
             chunks_to_update,
             pool.as_ref(),
@@ -751,30 +752,24 @@ pub(super) async fn compute_root<H: Hasher, S: mmr::storage::Storage<H::Digest>,
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
-    bitmap: &BitMap<N>,
     ops_mmr: &impl mmr::storage::Storage<H::Digest>,
-    chunks: impl Iterator<Item = usize>,
+    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
 ) -> Result<Vec<(Position, H::Digest)>, Error> {
     let grafting_height = grafting::height::<N>();
 
     // (ops_pos, ops_digest, chunk) for each chunk, where ops_pos is the position of the ops MMR
     // node on which to graft the chunk, and ops_digest is the digest of that node.
-    let inputs = try_join_all(
-        chunks
-            .map(|chunk_idx| {
-                let chunk = *bitmap.get_chunk(chunk_idx);
-                let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
-                async move {
-                    let ops_digest = ops_mmr
-                        .get_node(ops_pos)
-                        .await?
-                        .ok_or(mmr::Error::MissingGraftedLeaf(ops_pos))?;
-                    Ok::<_, Error>((ops_pos, ops_digest, chunk))
-                }
-            })
-            .collect::<Vec<_>>(),
-    )
+    let inputs = try_join_all(chunks.into_iter().map(|(chunk_idx, chunk)| {
+        let ops_pos = grafting::chunk_idx_to_ops_pos(chunk_idx as u64, grafting_height);
+        async move {
+            let ops_digest = ops_mmr
+                .get_node(ops_pos)
+                .await?
+                .ok_or(mmr::Error::MissingGraftedLeaf(ops_pos))?;
+            Ok::<_, Error>((ops_pos, ops_digest, chunk))
+        }
+    }))
     .await?;
 
     // Hash each: grafted_leaf = hash(chunk || ops_subtree_root).
@@ -820,9 +815,8 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     // Compute grafted leaves for each unpruned complete chunk.
     let leaves = compute_grafted_leaves::<H, N>(
         hasher,
-        bitmap,
         ops_mmr,
-        pruned_chunks..complete_chunks,
+        (pruned_chunks..complete_chunks).map(|chunk_idx| (chunk_idx, *bitmap.get_chunk(chunk_idx))),
         pool,
     )
     .await?;
