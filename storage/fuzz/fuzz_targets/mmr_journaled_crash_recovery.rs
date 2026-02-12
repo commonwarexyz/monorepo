@@ -4,7 +4,9 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
+};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr},
     Location, Position, StandardHasher,
@@ -87,11 +89,11 @@ struct FuzzInput {
 
 fn mmr_config(
     partition_suffix: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
     write_buffer: NonZeroUsize,
-    context: &deterministic::Context,
 ) -> Config {
     Config {
         journal_partition: format!("mmr_journal_{partition_suffix}"),
@@ -99,7 +101,7 @@ fn mmr_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(context, page_size, page_cache_size),
+        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
 }
 
@@ -291,11 +293,11 @@ fn fuzz(input: FuzzInput) {
                 &mut hasher,
                 mmr_config(
                     &partition_suffix,
+                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_blob,
                     write_buffer,
-                    &ctx,
                 ),
             )
             .await
@@ -323,11 +325,11 @@ fn fuzz(input: FuzzInput) {
             &mut hasher,
             mmr_config(
                 &partition_suffix,
+                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_blob,
                 write_buffer,
-                &ctx,
             ),
         )
         .await
