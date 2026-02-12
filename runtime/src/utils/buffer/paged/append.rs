@@ -236,10 +236,19 @@ impl<B: Blob> Append<B> {
         buf_guard.immutable = true;
         self.flush_internal(buf_guard, true).await?;
 
-        // Release the buffer back to the pool since we won't be appending.
+        // Shrink the buffer to release the pooled allocation since we won't be appending.
         {
             let mut buf_guard = self.buffer.write().await;
-            buf_guard.data = IoBufMut::default();
+            let len = buf_guard.data.len();
+            if len > 0 {
+                let mut shrunk = IoBufMut::with_capacity(len);
+                // SAFETY: We initialize all bytes immediately below.
+                unsafe { shrunk.set_len(len) };
+                shrunk.as_mut().copy_from_slice(buf_guard.data.as_ref());
+                buf_guard.data = shrunk;
+            } else {
+                buf_guard.data = IoBufMut::default();
+            }
         }
 
         // Sync the underlying blob to ensure new_immutable on restart will succeed even in the
