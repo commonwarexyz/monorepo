@@ -1384,7 +1384,7 @@ mod tests {
         let buf = pool.try_alloc(100).unwrap();
         let iobuf = buf.freeze();
 
-        // Clone the IoBuf multiple times (this clones the inner Bytes via Arc)
+        // Clone the IoBuf multiple times (this clones the pooled view via Arc).
         let clone1 = iobuf.clone();
         let clone2 = iobuf.clone();
         let clone3 = iobuf.clone();
@@ -1800,6 +1800,75 @@ mod tests {
         // Dropping the buffer should not panic (Weak upgrade fails, buffer is deallocated)
         drop(iobuf);
         // No assertion here - we just want to make sure it doesn't panic
+    }
+
+    /// Verify pooled IoBuf matches Bytes semantics for Buf trait methods.
+    #[test]
+    fn test_bytes_parity_iobuf_buf_trait() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let data: Vec<u8> = (0..100u8).collect();
+
+        let mut pooled_mut = pool.try_alloc(data.len()).unwrap();
+        pooled_mut.put_slice(&data);
+        let mut pooled = pooled_mut.freeze();
+        let mut bytes = Bytes::from(data);
+
+        // remaining() + chunk()
+        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
+        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
+
+        // advance()
+        Buf::advance(&mut bytes, 13);
+        Buf::advance(&mut pooled, 13);
+        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
+        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
+
+        // copy_to_bytes(0)
+        let bytes_zero = Buf::copy_to_bytes(&mut bytes, 0);
+        let pooled_zero = Buf::copy_to_bytes(&mut pooled, 0);
+        assert_eq!(bytes_zero, pooled_zero);
+        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
+        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
+
+        // copy_to_bytes(n)
+        let bytes_mid = Buf::copy_to_bytes(&mut bytes, 17);
+        let pooled_mid = Buf::copy_to_bytes(&mut pooled, 17);
+        assert_eq!(bytes_mid, pooled_mid);
+        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
+        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
+
+        // copy_to_bytes(remaining)
+        let remaining = Buf::remaining(&bytes);
+        let bytes_rest = Buf::copy_to_bytes(&mut bytes, remaining);
+        let pooled_rest = Buf::copy_to_bytes(&mut pooled, remaining);
+        assert_eq!(bytes_rest, pooled_rest);
+        assert_eq!(Buf::remaining(&bytes), 0);
+        assert_eq!(Buf::remaining(&pooled), 0);
+        assert!(!Buf::has_remaining(&bytes));
+        assert!(!Buf::has_remaining(&pooled));
+    }
+
+    /// Verify pooled IoBuf slice behavior matches Bytes for content semantics.
+    #[test]
+    fn test_bytes_parity_iobuf_slice() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+
+        let data: Vec<u8> = (0..32u8).collect();
+        let mut pooled_mut = pool.try_alloc(data.len()).unwrap();
+        pooled_mut.put_slice(&data);
+        let pooled = pooled_mut.freeze();
+        let bytes = Bytes::from(data);
+
+        assert_eq!(pooled.slice(..5).as_ref(), bytes.slice(..5).as_ref());
+        assert_eq!(pooled.slice(6..).as_ref(), bytes.slice(6..).as_ref());
+        assert_eq!(pooled.slice(3..8).as_ref(), bytes.slice(3..8).as_ref());
+        assert_eq!(pooled.slice(..=7).as_ref(), bytes.slice(..=7).as_ref());
+        assert_eq!(pooled.slice(10..10).as_ref(), bytes.slice(10..10).as_ref());
     }
 
     /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
