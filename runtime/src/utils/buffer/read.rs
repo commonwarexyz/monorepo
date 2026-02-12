@@ -52,10 +52,6 @@ pub struct Read<B: Blob> {
 
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buffer_size` is zero.
     pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,

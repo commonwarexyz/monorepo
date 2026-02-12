@@ -52,10 +52,6 @@ pub struct Write<B: Blob> {
 impl<B: Blob> Write<B> {
     /// Creates a new [Write] that buffers up to `capacity` bytes of data to be appended to the tip
     /// of `blob` with the provided `size`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity` is zero.
     pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,

@@ -771,7 +771,7 @@ impl<B: Blob> Append<B> {
 
 impl<B: Blob> Blob for Append<B> {
     async fn read_at(&self, logical_offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(logical_offset, len, IoBufMut::with_capacity(len))
+        self.read_at_buf(logical_offset, len, self.cache_ref.pool().alloc(len))
             .await
     }
 
