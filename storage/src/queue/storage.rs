@@ -124,21 +124,20 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
         // On restart, ack_floor is the pruning boundary (items below are deleted).
         // acked_above is empty (in-memory state lost on restart).
-        let ack_floor = journal.reader().await.bounds().start;
-        let size = journal.size().await;
+        let bounds = journal.reader().await.bounds();
         let acked_above = RMap::new();
 
-        debug!(ack_floor, size, "queue initialized");
+        debug!(floor = bounds.start, size = bounds.end, "queue initialized");
 
         // Set initial metric values
-        metrics.tip.set(size as i64);
-        metrics.floor.set(ack_floor as i64);
-        metrics.next.set(ack_floor as i64);
+        metrics.tip.set(bounds.end as i64);
+        metrics.floor.set(bounds.start as i64);
+        metrics.next.set(bounds.start as i64);
 
         Ok(Self {
             journal,
-            read_pos: ack_floor,
-            ack_floor,
+            read_pos: bounds.start,
+            ack_floor: bounds.start,
             acked_above,
             metrics,
         })
@@ -245,7 +244,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
             self.acked_above.remove(next, final_floor - 1);
             self.ack_floor = final_floor;
             self.metrics.floor.set(self.ack_floor as i64);
-            debug!(ack_floor = self.ack_floor, "advanced ack floor");
+            debug!(floor = self.ack_floor, "advanced ack floor");
         } else {
             // Floor is not advancing, so add to acked_above
             self.acked_above.insert(position);
@@ -281,7 +280,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         self.acked_above.remove(self.ack_floor, final_floor - 1);
         self.ack_floor = final_floor;
         self.metrics.floor.set(self.ack_floor as i64);
-        debug!(ack_floor = self.ack_floor, "batch acked up to");
+        debug!(floor = self.ack_floor, "batch acked up to");
         Ok(())
     }
 

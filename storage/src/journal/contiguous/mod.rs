@@ -67,7 +67,7 @@ pub trait Contiguous: Send + Sync {
     /// Return the total number of items that have been appended to the journal.
     ///
     /// This count is NOT affected by pruning. The next appended item will receive this
-    /// position as its value.
+    /// position as its value. Equivalent to [`Reader::bounds`]`.end`.
     fn size(&self) -> impl Future<Output = u64> + Send;
 }
 
