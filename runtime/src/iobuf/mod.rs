@@ -18,6 +18,16 @@ use std::{collections::VecDeque, ops::RangeBounds};
 ///
 /// Backed by either `Bytes` or a pooled aligned allocation.
 ///
+/// Use this for immutable payloads. To build or mutate data, use
+/// [`IoBufMut`] and then [`IoBufMut::freeze`].
+///
+/// For pooled-backed values, the underlying buffer is returned to the pool
+/// when the final reference is dropped.
+///
+/// All `From<*> for IoBuf` implementations are guaranteed to be non-copy
+/// conversions. Use [`IoBuf::copy_from_slice`] when an explicit copy from
+/// borrowed data is required.
+///
 /// Cloning is cheap and does not copy underlying bytes.
 #[derive(Clone, Debug)]
 pub struct IoBuf {
@@ -255,7 +265,7 @@ impl From<&'static [u8]> for IoBuf {
 /// Convert an `IoBuf` into a `Vec<u8>`.
 ///
 /// This conversion may copy:
-/// - `Bytes`-backed buffers may reuse allocation via `Vec::from(Bytes)` when possible
+/// - `Bytes`-backed buffers may reuse allocation when possible
 /// - pooled buffers copy readable bytes into a new `Vec<u8>`
 impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
@@ -315,12 +325,13 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 
 /// Mutable byte buffer.
 ///
-/// Use this to build or mutate payloads before freezing into `IoBuf`.
+/// Backed by either `BytesMut` or a pooled aligned allocation.
 ///
-/// Can be either an owned buffer (backed by `BytesMut`) or a pooled buffer
-/// (allocated from a `BufferPool`). Pooled buffers are automatically returned
-/// to the pool when dropped. Freezing transfers ownership to the resulting
-/// `IoBuf`, which returns the buffer to the pool when all references are dropped.
+/// Use this to build or mutate payloads before freezing into [`IoBuf`].
+///
+/// For pooled-backed values, dropping this buffer returns the underlying
+/// allocation to the pool. After [`IoBufMut::freeze`], the frozen `IoBuf`
+/// keeps the allocation alive until its final reference is dropped.
 #[derive(Debug)]
 pub struct IoBufMut {
     inner: IoBufMutInner,
