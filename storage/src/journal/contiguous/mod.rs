@@ -48,10 +48,10 @@ pub trait Reader: Send + Sync {
     > + Send;
 }
 
-/// Core trait for contiguous journals supporting sequential append operations.
+/// Journals that support sequential append operations.
 ///
-/// A contiguous journal maintains a consecutively increasing position counter where each
-/// appended item receives a unique position starting from 0.
+/// Maintains a monotonically increasing position counter where each appended item receives a unique
+/// position starting from 0.
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
