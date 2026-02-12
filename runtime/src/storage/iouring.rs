@@ -290,7 +290,7 @@ impl crate::Blob for Blob {
             IoBufsMut::Single(buf) => (buf, None),
             IoBufsMut::Chunked(bufs) => {
                 // SAFETY: `len` bytes are filled via io_uring read loop below.
-                let mut tmp = unsafe { self.pool.alloc_len(len) };
+                let tmp = unsafe { self.pool.alloc_len(len) };
                 (tmp, Some(bufs))
             }
         };
