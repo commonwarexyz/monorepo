@@ -306,6 +306,7 @@ where
                 .checked_sub(1)
                 .expect("commit should exist"),
         );
+
         // Build the snapshot.
         let mut snapshot = Index::new(context.with_label("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {

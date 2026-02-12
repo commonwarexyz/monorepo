@@ -555,11 +555,10 @@ mod tests {
                 |rw_lock| rw_lock.into_inner(),
             );
             {
-                assert_eq!(synced_db.bounds().await.end, target_db.bounds().await.end);
-                assert_eq!(
-                    synced_db.bounds().await.start,
-                    target_db.bounds().await.start
-                );
+                let bounds = synced_db.bounds().await;
+                let target_bounds = target_db.bounds().await;
+                assert_eq!(bounds.end, target_bounds.end);
+                assert_eq!(bounds.start, target_bounds.start);
                 assert_eq!(synced_db.root(), target_db.root());
             }
 

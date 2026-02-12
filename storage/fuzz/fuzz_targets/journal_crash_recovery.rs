@@ -12,6 +12,7 @@ use commonware_storage::journal::contiguous::{
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
+    future::Future,
     num::{NonZeroU16, NonZeroUsize},
     ops::Range,
 };
@@ -159,49 +160,48 @@ trait FuzzJournal: Sized {
     fn init(
         ctx: deterministic::Context,
         cfg: Self::Config,
-    ) -> impl std::future::Future<Output = Result<Self, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, commonware_storage::journal::Error>> + Send;
 
-    fn size(&self) -> impl std::future::Future<Output = u64> + Send;
-    fn bounds(&self) -> impl std::future::Future<Output = Range<u64>> + Send;
+    fn size(&self) -> impl Future<Output = u64> + Send;
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send;
 
     fn append(
         &mut self,
         item: Item,
-    ) -> impl std::future::Future<Output = Result<u64, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<u64, commonware_storage::journal::Error>> + Send;
 
     fn read(
         &self,
         pos: u64,
-    ) -> impl std::future::Future<Output = Result<Item, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send;
 
     fn sync(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
     fn rewind(
         &mut self,
         size: u64,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
     fn prune(
         &mut self,
         min_pos: u64,
-    ) -> impl std::future::Future<Output = Result<bool, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<bool, commonware_storage::journal::Error>> + Send;
 
     // Return value is ignored in the fuzz test.
     fn replay(
         &mut self,
         buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
     fn commit(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
-    fn destroy(
-        self,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    fn destroy(self)
+        -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 }
 
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
@@ -236,7 +236,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
-    fn bounds(&self) -> impl std::future::Future<Output = Range<u64>> + Send {
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
         async { self.reader().await.bounds() }
     }
 
@@ -249,8 +249,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     fn read(
         &self,
         pos: u64,
-    ) -> impl std::future::Future<Output = Result<Item, commonware_storage::journal::Error>> + Send
-    {
+    ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send {
         async move { self.reader().await.read(pos).await }
     }
 
@@ -317,7 +316,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
-    fn bounds(&self) -> impl std::future::Future<Output = Range<u64>> + Send {
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
         async { self.reader().await.bounds() }
     }
 
@@ -330,8 +329,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     fn read(
         &self,
         pos: u64,
-    ) -> impl std::future::Future<Output = Result<Item, commonware_storage::journal::Error>> + Send
-    {
+    ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send {
         async move { self.reader().await.read(pos).await }
     }
 
