@@ -75,6 +75,11 @@ use tracing::warn;
 /// Metadata key for storing the pruning boundary.
 const PRUNING_BOUNDARY_KEY: u64 = 1;
 
+enum MetadataUpdate {
+    Put(Vec<u8>),
+    Remove,
+}
+
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
@@ -602,10 +607,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let pruning_boundary = inner.pruning_boundary;
         let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
-        enum MetadataUpdate {
-            Put(Vec<u8>),
-            Remove,
-        }
 
         let metadata_update = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
             let needs_update = pruning_boundary_from_metadata
