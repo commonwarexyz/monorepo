@@ -24,7 +24,7 @@ pub type Database<E> =
 pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config<E: BufferPooler>(context: &E) -> Config<Translator, ()> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),

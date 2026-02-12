@@ -29,7 +29,7 @@ pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
-pub fn create_config<E: BufferPooler>(context: &E) -> Config<Translator> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
     Config {
         mmr_journal_partition: "mmr_journal".into(),
         mmr_metadata_partition: "mmr_metadata".into(),

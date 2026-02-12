@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     mmr::Location,
     qmdb::{
@@ -90,10 +90,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
-fn db_config(
-    suffix: &str,
-    context: &deterministic::Context,
-) -> Config<TwoCap, (RangeCfg<usize>, ())> {
+fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("journal_{suffix}"),
         mmr_metadata_partition: format!("metadata_{suffix}"),
@@ -106,7 +103,7 @@ fn db_config(
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     mmr::{self, hasher::Standard, MAX_LOCATION},
     qmdb::{
@@ -137,7 +137,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 
 fn test_config(
     test_name: &str,
-    context: &deterministic::Context,
+    pooler: &impl BufferPooler,
 ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
@@ -151,7 +151,7 @@ fn test_config(
         log_codec_config: ((0..=100000).into(), ()),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 
