@@ -109,7 +109,8 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = StoreDb::init(context.clone(), test_config("store_fuzz_test", &context))
+        let cfg = test_config("store_fuzz_test", &context);
+        let mut db = StoreDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init db")
             .into_dirty();
@@ -168,11 +169,12 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(db);
 
+                    let cfg = test_config("store_fuzz_test", &context);
                     db = StoreDb::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config("store_fuzz_test", &context),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init db")

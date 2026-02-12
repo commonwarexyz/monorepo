@@ -477,12 +477,8 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        PartitionedAnyTest::init(
-            context.clone(),
-            variable_db_config("ordered_partitioned_var_p1", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("ordered_partitioned_var_p1", &context);
+        PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

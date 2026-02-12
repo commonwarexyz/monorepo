@@ -191,23 +191,15 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(
-            context.clone(),
-            fixed_db_config::<TwoCap>("partition", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config::<TwoCap>("partition", &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        AnyTest::init(
-            context.clone(),
-            fixed_db_config::<TwoCap>(&seed.to_string(), &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -602,21 +594,13 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
 
     async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(
-            context.clone(),
-            fixed_db_config("unordered_partitioned_p1", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config("unordered_partitioned_p1", &context);
+        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        PartitionedAnyTestP2::init(
-            context.clone(),
-            fixed_db_config("unordered_partitioned_p2", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config("unordered_partitioned_p2", &context);
+        PartitionedAnyTestP2::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

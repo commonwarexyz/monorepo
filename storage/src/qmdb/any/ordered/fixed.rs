@@ -195,20 +195,15 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanAnyTest {
-        CleanAnyTest::init(context.clone(), fixed_db_config("partition", &context))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("partition", &context);
+        CleanAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
-        CleanAnyTest::init(
-            context.clone(),
-            fixed_db_config::<TwoCap>(&seed.to_string(), &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        CleanAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -279,7 +274,7 @@ pub(crate) mod test {
                 OneCap,
                 Merkleized<Sha256>,
                 Durable,
-            >::init(context.clone(), config)
+            >::init(context, config)
             .await
             .unwrap();
             let mut db = db.into_mutable();
@@ -1217,12 +1212,8 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        PartitionedAnyTest::init(
-            context.clone(),
-            fixed_db_config("ordered_partitioned_p1", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config("ordered_partitioned_p1", &context);
+        PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

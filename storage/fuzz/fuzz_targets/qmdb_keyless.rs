@@ -148,7 +148,8 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test", &context))
+        let cfg = test_config("keyless_fuzz_test", &context);
+        let mut db = CleanDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init keyless db")
             .into_mutable();
@@ -266,13 +267,14 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     drop(db);
 
+                    let cfg = test_config("keyless_fuzz_test", &context);
                     db = CleanDb::init(
                         context.with_label("db").with_attribute("instance", restarts),
-                        test_config("keyless_fuzz_test", &context),
+                        cfg,
                     )
-                        .await
-                        .expect("Failed to init keyless db")
-                        .into_mutable();
+                    .await
+                    .expect("Failed to init keyless db")
+                    .into_mutable();
                     restarts += 1;
                 }
             }

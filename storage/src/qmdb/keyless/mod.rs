@@ -431,9 +431,8 @@ mod test {
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
-        CleanDb::init(context.clone(), db_config("partition", &context))
-            .await
-            .unwrap()
+        let cfg = db_config("partition", &context);
+        CleanDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("INFO")]

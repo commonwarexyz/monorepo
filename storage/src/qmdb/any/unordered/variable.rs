@@ -229,12 +229,8 @@ pub(crate) mod test {
 
     /// Return a Digest-valued variable database for generic tests.
     async fn open_digest_db(context: Context) -> DigestAnyTest {
-        DigestAnyTest::init(
-            context.clone(),
-            variable_db_config("digest_partition", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("digest_partition", &context);
+        DigestAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -296,9 +292,8 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context.clone(), create_test_config(0, &context))
-            .await
-            .unwrap()
+        let cfg = create_test_config(0, &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -616,21 +611,13 @@ pub(crate) mod test {
 
     #[inline]
     async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(
-            context.clone(),
-            partitioned_config("partition_p1", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = partitioned_config("partition_p1", &context);
+        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
-        PartitionedAnyTestDigestP1::init(
-            context.clone(),
-            variable_db_config("unordered_partitioned_var_p1", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("unordered_partitioned_var_p1", &context);
+        PartitionedAnyTestDigestP1::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

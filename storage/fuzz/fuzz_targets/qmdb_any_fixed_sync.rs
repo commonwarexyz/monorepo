@@ -152,7 +152,8 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = FixedDb::init(context.clone(), test_config(TEST_NAME, &context))
+        let cfg = test_config(TEST_NAME, &context);
+        let mut db = FixedDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db")
             .into_mutable();
@@ -242,11 +243,12 @@ fn fuzz(mut input: FuzzInput) {
                     // Simulate unclean shutdown by dropping the db without committing
                     drop(db);
 
+                    let cfg = test_config(TEST_NAME, &context);
                     db = FixedDb::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config(TEST_NAME, &context),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init source db")

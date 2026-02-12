@@ -96,7 +96,9 @@ impl<B: Blob> Blob for Write<B> {
         buf: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         let mut buf = buf.into();
-        // SAFETY: `len` bytes are filled via extract + blob read below.
+        // SAFETY: Uninitialized bytes are never read. On success, all `len`
+        // bytes are filled via extract + blob read. On error, the buffer is
+        // dropped without being read.
         unsafe { buf.set_len(len) };
 
         // Ensure the read doesn't overflow.
@@ -121,7 +123,7 @@ impl<B: Blob> Blob for Write<B> {
                 // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
                 // of the range.
                 if remaining > 0 {
-                    let blob_result = self.blob.read_at(offset, remaining).await?;
+                    let blob_result = self.blob.read_at_buf(offset, remaining, self.pool.alloc(remaining)).await?;
                     single.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 Ok(IoBufsMut::Single(single))
@@ -129,7 +131,9 @@ impl<B: Blob> Blob for Write<B> {
             // For chunked buffers, read into temp and copy back to preserve structure.
             IoBufsMut::Chunked(chunks) => {
                 let mut temp = self.pool.alloc(len);
-                // SAFETY: We initialize all bytes via extract/blob read before copying out.
+                // SAFETY: Uninitialized bytes are never read. On success, all bytes
+                // are initialized via extract + blob read before copying out. On
+                // error, the buffer is dropped without being read.
                 unsafe { temp.set_len(len) };
                 // Extract any bytes from the buffer that overlap with the
                 // requested range, into a temporary contiguous buffer
@@ -138,7 +142,7 @@ impl<B: Blob> Blob for Write<B> {
                 // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
                 // of the range.
                 if remaining > 0 {
-                    let blob_result = self.blob.read_at(offset, remaining).await?;
+                    let blob_result = self.blob.read_at_buf(offset, remaining, self.pool.alloc(remaining)).await?;
                     temp.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
                 }
                 // Copy back to original chunks

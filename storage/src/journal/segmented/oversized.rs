@@ -535,10 +535,9 @@ mod tests {
     fn test_oversized_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.clone(), test_cfg(&context))
-                    .await
-                    .expect("Failed to init");
+                Oversized::init(context, cfg).await.expect("Failed to init");
 
             // Append entry with value
             let value: TestValue = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -674,10 +673,9 @@ mod tests {
     fn test_oversized_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.clone(), test_cfg(&context))
-                    .await
-                    .expect("Failed to init");
+                Oversized::init(context, cfg).await.expect("Failed to init");
 
             // Append to multiple sections
             for section in 1u64..=5 {
@@ -1886,10 +1884,9 @@ mod tests {
     fn test_oversized_get_value_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.clone(), test_cfg(&context))
-                    .await
-                    .expect("Failed to init");
+                Oversized::init(context, cfg).await.expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -1926,10 +1923,9 @@ mod tests {
     fn test_oversized_get_value_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.clone(), test_cfg(&context))
-                    .await
-                    .expect("Failed to init");
+                Oversized::init(context, cfg).await.expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2666,10 +2662,9 @@ mod tests {
         // This should fail because there's no actual data to decode.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.clone(), test_cfg(&context))
-                    .await
-                    .expect("Failed to init");
+                Oversized::init(context, cfg).await.expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -2694,10 +2689,9 @@ mod tests {
         // This should fail because the data is too short to decode.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            let cfg = test_cfg(&context);
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.clone(), test_cfg(&context))
-                    .await
-                    .expect("Failed to init");
+                Oversized::init(context, cfg).await.expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);

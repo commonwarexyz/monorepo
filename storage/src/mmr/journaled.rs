@@ -935,7 +935,8 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config(&context))
+            let cfg = test_config(&context);
+            let mut mmr = Mmr::init(context, &mut hasher, cfg)
                 .await
                 .unwrap()
                 .into_dirty();
@@ -1040,7 +1041,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::init(context.clone(), &mut hasher, test_config(&context))
+            let cfg = test_config(&context);
+            let mmr = Mmr::init(context, &mut hasher, cfg)
                 .await
                 .unwrap();
             // Build a test MMR with 255 leaves
@@ -1405,7 +1407,8 @@ mod tests {
         executor.start(|context| async move {
             // Create MMR with 10 elements
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config(&context))
+            let cfg = test_config(&context);
+            let mut mmr = Mmr::init(context, &mut hasher, cfg)
                 .await
                 .unwrap()
                 .into_dirty();
@@ -1617,7 +1620,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = Standard::<Sha256>::new();
-            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config(&context))
+            let cfg = test_config(&context);
+            let mut mmr = Mmr::init(context, &mut hasher, cfg)
                 .await
                 .unwrap()
                 .into_dirty();

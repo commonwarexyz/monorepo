@@ -162,12 +162,8 @@ pub mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(
-            context.clone(),
-            fixed_config::<TwoCap>(&partition_prefix, &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
+        CleanCurrentTest::init(context, cfg).await.unwrap()
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
