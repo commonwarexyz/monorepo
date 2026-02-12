@@ -5,7 +5,7 @@
 
 use crate::{
     index::Ordered as OrderedIndex,
-    journal::contiguous::{Contiguous, MutableContiguous},
+    journal::contiguous::{Contiguous, Mutable, Reader},
     kv::{self, Batchable},
     mmr::{grafting::Storage as GraftingStorage, Location},
     qmdb::{
@@ -145,7 +145,7 @@ where
 // Functionality for any Merkleized state (both Durable and NonDurable).
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
@@ -207,7 +207,11 @@ where
                 }
                 *loc
             }
-            None => self.size().checked_sub(1).expect("db shouldn't be empty"),
+            None => self
+                .size()
+                .await
+                .checked_sub(1)
+                .expect("db shouldn't be empty"),
         };
 
         let op_proof =
@@ -217,7 +221,7 @@ where
         Ok(match span {
             Some((_, key_data)) => super::ExclusionProof::KeyValue(op_proof, key_data),
             None => {
-                let value = match self.any.log.read(loc).await? {
+                let value = match self.any.log.reader().await.read(*loc).await? {
                     Operation::CommitFloor(value, _) => value,
                     _ => unreachable!("last commit is not a CommitFloor operation"),
                 };
@@ -230,7 +234,7 @@ where
 // Functionality for the Mutable state.
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
@@ -292,7 +296,7 @@ impl<E, C, K, V, I, H, const N: usize> Batchable
     for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = Operation<K, V>>,
+    C: Mutable<Item = Operation<K, V>>,
     K: Array,
     V: ValueEncoding,
     I: OrderedIndex<Value = Location> + 'static,

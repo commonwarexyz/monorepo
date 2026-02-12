@@ -6,7 +6,7 @@ use crate::{
     bitmap,
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, MutableContiguous},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     mmr::{
@@ -166,7 +166,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -227,7 +227,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -327,7 +327,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -354,7 +354,7 @@ where
 
         self.any.apply_commit_op(commit_op).await?;
 
-        Ok(start_loc..self.any.log.bounds().end)
+        Ok(start_loc..self.any.log.size().await)
     }
 
     /// Commit any pending operations to the database, ensuring their durability upon return.
@@ -395,7 +395,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -417,7 +417,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -449,7 +449,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -489,20 +489,16 @@ where
 {
     type Value = V::Value;
 
-    fn bounds(&self) -> std::ops::Range<Location> {
-        self.any.bounds()
+    async fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds().await
     }
 
-    fn inactivity_floor_loc(&self) -> Location {
+    async fn inactivity_floor_loc(&self) -> Location {
         self.inactivity_floor_loc()
     }
 
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 }
 
@@ -513,7 +509,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: MutableContiguous<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,

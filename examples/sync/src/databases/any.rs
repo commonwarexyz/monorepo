@@ -116,11 +116,11 @@ where
         self.root()
     }
 
-    fn size(&self) -> Location {
-        LogStore::bounds(self).end
+    async fn size(&self) -> Location {
+        LogStore::bounds(self).await.end
     }
 
-    fn inactivity_floor(&self) -> Location {
+    async fn inactivity_floor(&self) -> Location {
         self.inactivity_floor_loc()
     }
 

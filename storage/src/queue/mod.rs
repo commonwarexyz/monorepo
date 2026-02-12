@@ -62,7 +62,7 @@
 //!         println!("Processing item at position {}", position);
 //!
 //!         // Acknowledge after successful processing
-//!         queue.ack(position).unwrap();
+//!         queue.ack(position).await.unwrap();
 //!     }
 //! });
 //! ```

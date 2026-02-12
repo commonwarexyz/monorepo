@@ -368,7 +368,7 @@ pub mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.size();
+            let end_loc = db.size().await;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -720,7 +720,7 @@ pub mod test {
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
-            assert_ne!(db.bounds().end, 0);
+            assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
             let proof = db

@@ -61,10 +61,10 @@ pub trait Syncable: Sized {
     fn root(&self) -> Key;
 
     /// Get the total number of operations in the database (including pruned operations).
-    fn size(&self) -> Location;
+    fn size(&self) -> impl Future<Output = Location> + Send;
 
     /// Get the inactivity floor, the location below which all operations are inactive.
-    fn inactivity_floor(&self) -> Location;
+    fn inactivity_floor(&self) -> impl Future<Output = Location> + Send;
 
     /// Get historical proof and operations.
     fn historical_proof(

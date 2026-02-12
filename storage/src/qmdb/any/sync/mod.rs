@@ -6,7 +6,7 @@ use crate::{
     index::{ordered, unordered},
     journal::{
         authenticated,
-        contiguous::{fixed, variable, MutableContiguous},
+        contiguous::{fixed, variable, Mutable},
     },
     mmr::{journaled::Config as MmrConfig, mem::Clean, Location, Position, StandardHasher},
     qmdb::{
@@ -64,7 +64,7 @@ where
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
     U: Send + Sync + 'static,
-    C: MutableContiguous<Item = O>,
+    C: Mutable<Item = O>,
 {
     let mut hasher = StandardHasher::<H>::new();
 

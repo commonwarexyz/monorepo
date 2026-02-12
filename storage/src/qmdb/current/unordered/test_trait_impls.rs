@@ -15,6 +15,7 @@ use crate::{
             db::{Merkleized, Unmerkleized},
             BitmapPrunedBits,
         },
+        store::LogStore,
         Durable, Error, NonDurable,
     },
     translator::Translator,
@@ -227,8 +228,8 @@ impl<
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().await.start
     }
 }
 
@@ -251,8 +252,8 @@ where
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().await.start
     }
 }
 
@@ -368,8 +369,8 @@ impl<
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().await.start
     }
 }
 
@@ -496,7 +497,7 @@ where
         self.status.get_bit(index)
     }
 
-    fn oldest_retained(&self) -> u64 {
-        *self.any.log.bounds().start
+    async fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().await.start
     }
 }
