@@ -358,7 +358,27 @@ where
         if certificate.view() <= self.last_finalized {
             return Vec::new();
         }
-        self.process_certificate(certificate, true)
+        let mut actions = self.process_certificate(certificate, true);
+        actions.extend(self.retry_pending_proposals());
+        actions
+    }
+
+    /// Re-emits verification actions for proposals that were deferred due to missing ancestry.
+    ///
+    /// A proposal can be accepted into the current view before all ancestry certificates
+    /// needed to validate its parent chain are available locally. When new certificates
+    /// arrive and extend ancestry, this method scans unverified proposals in the current
+    /// view and retries only those whose parent can now be resolved.
+    fn retry_pending_proposals(&self) -> Vec<Action<S, D>> {
+        let Some(state) = self.views.get(&self.view) else {
+            return Vec::new();
+        };
+        state
+            .unverified_proposals()
+            .filter(|proposal| self.parent_payload(proposal).is_some())
+            .cloned()
+            .map(Action::VerifyProposal)
+            .collect()
     }
 
     /// Handles a pre-verified notarize vote.
@@ -1779,6 +1799,76 @@ mod tests {
         assert!(
             !voted,
             "Should NOT vote for proposal from past view (view 1 < current view 2)"
+        );
+    }
+
+    #[test]
+    fn late_ancestry_retries_pending_proposal_verification() {
+        let (mut state, schemes, _rng) = setup_state();
+
+        let nullifies_v1: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|scheme| {
+                Nullify::sign::<Sha256Digest>(scheme, Round::new(Epoch::new(1), View::new(1)))
+                    .expect("nullify")
+            })
+            .collect();
+        let nullification_v1 =
+            Nullification::from_nullifies(&schemes[0], nullifies_v1.iter(), &Sequential)
+                .expect("nullification");
+        let actions = state.receive_certificate(Certificate::Nullification(nullification_v1));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Advanced(v) if *v == View::new(2))),
+            "should advance to view 2"
+        );
+
+        let parent_payload = Sha256Digest::from([0x11u8; 32]);
+        let proposal_v2 = Proposal::new(
+            Round::new(Epoch::new(1), View::new(2)),
+            View::new(1),
+            parent_payload,
+            Sha256Digest::from([0x22u8; 32]),
+        );
+        let leader_v2 = state.leader(View::new(2), None);
+        let actions = state.receive_proposal(leader_v2, proposal_v2.clone());
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, Action::VerifyProposal(p) if p.payload == proposal_v2.payload)
+            ),
+            "proposal should enter verification"
+        );
+
+        let actions = state.proposal_verified(proposal_v2.clone(), false);
+        assert!(
+            actions.is_empty(),
+            "invalid verification should emit no actions"
+        );
+
+        let proposal_v1 = Proposal::new(
+            Round::new(Epoch::new(1), View::new(1)),
+            View::zero(),
+            Sha256Digest::from([0u8; 32]),
+            parent_payload,
+        );
+        let notarizes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .take(3)
+            .map(|scheme| Notarize::sign(scheme, proposal_v1.clone()).expect("notarize"))
+            .collect();
+        let m_notarization =
+            MNotarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
+                .expect("m-notarization");
+
+        let actions = state.receive_certificate(Certificate::MNotarization(m_notarization));
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, Action::VerifyProposal(p) if p.view() == View::new(2) && p.payload == proposal_v2.payload)
+            ),
+            "late ancestry should trigger verification retry for pending proposal"
         );
     }
 

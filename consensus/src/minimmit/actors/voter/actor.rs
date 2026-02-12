@@ -1054,6 +1054,38 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CountingVerifyAutomaton {
+        genesis: Sha256Digest,
+        verify_calls: Arc<AtomicUsize>,
+    }
+
+    impl Automaton for CountingVerifyAutomaton {
+        type Context = Context<Sha256Digest, Ed25519PublicKey>;
+        type Digest = Sha256Digest;
+
+        async fn genesis(&mut self, _epoch: Epoch) -> Self::Digest {
+            self.genesis
+        }
+
+        async fn propose(&mut self, _context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(self.genesis);
+            receiver
+        }
+
+        async fn verify(
+            &mut self,
+            _context: Self::Context,
+            _payload: Self::Digest,
+        ) -> oneshot::Receiver<bool> {
+            self.verify_calls.fetch_add(1, Ordering::Relaxed);
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(true);
+            receiver
+        }
+    }
+
     #[test]
     fn leader_timeout_used_when_inactive() {
         let executor = deterministic::Runner::default();
@@ -1593,6 +1625,124 @@ mod tests {
                 certificate_sender.len() > 0,
                 "voter loop should keep processing messages even while a proposal request is pending"
             );
+        });
+    }
+
+    #[test]
+    fn late_ancestry_retries_proposal_verification() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let mut rng = test_rng();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"minimmit-late-ancestry", 6);
+            let scheme = schemes[0].clone();
+            let participants = scheme.participants().clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = reporter::Config {
+                participants,
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let cfg = Config {
+                scheme,
+                elector,
+                blocker: NoopBlocker,
+                automaton: CountingVerifyAutomaton {
+                    genesis: Sha256Digest::from([0u8; 32]),
+                    verify_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                relay: NoopRelay,
+                reporter,
+                strategy: Sequential,
+                partition: "voter_late_ancestry_retry".to_string(),
+                epoch: Epoch::new(1),
+                mailbox_size: 16,
+                leader_timeout: Duration::from_millis(20),
+                notarization_timeout: Duration::from_millis(20),
+                nullify_retry: Duration::from_millis(20),
+                activity_timeout: ViewDelta::new(3),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let (actor, mut mailbox) = Actor::new(context.with_label("voter"), cfg);
+            let verify_calls = actor.automaton.verify_calls.clone();
+            let (batcher_sender, batcher_receiver) = mpsc::channel(8);
+            drop(batcher_receiver);
+            let (resolver_sender, resolver_receiver) = mpsc::channel(8);
+            drop(resolver_receiver);
+            let vote_sender = TestSender::<Ed25519PublicKey>::default();
+            let certificate_sender = TestSender::<Ed25519PublicKey>::default();
+
+            actor.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+
+            context.sleep(Duration::from_millis(30)).await;
+
+            let nullify_votes: Vec<_> = [1usize, 2, 3]
+                .into_iter()
+                .map(|i| {
+                    crate::minimmit::types::Nullify::sign::<Sha256Digest>(
+                        &schemes[i],
+                        Round::new(Epoch::new(1), View::new(1)),
+                    )
+                    .expect("nullify")
+                })
+                .collect();
+            let nullification = crate::minimmit::types::Nullification::from_nullifies(
+                &schemes[0],
+                nullify_votes.iter(),
+                &Sequential,
+            )
+            .expect("nullification");
+            assert!(mailbox.verified_certificate(Certificate::Nullification(nullification)));
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let parent_payload = Sha256Digest::from([0xA1u8; 32]);
+            let proposal_v2 = Proposal::new(
+                Round::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                parent_payload,
+                Sha256Digest::from([0xB2u8; 32]),
+            );
+            assert!(mailbox.proposal(proposal_v2.clone()));
+
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(verify_calls.load(Ordering::Relaxed), 0);
+
+            let proposal_v1 = Proposal::new(
+                Round::new(Epoch::new(1), View::new(1)),
+                View::zero(),
+                Sha256Digest::from([0u8; 32]),
+                parent_payload,
+            );
+            let notarizes: Vec<_> = schemes
+                .iter()
+                .skip(1)
+                .take(3)
+                .map(|s| Notarize::sign(s, proposal_v1.clone()).expect("notarize"))
+                .collect();
+            let m_notarization =
+                MNotarization::from_notarizes(&schemes[0], notarizes.iter(), &Sequential)
+                    .expect("m-notarization");
+            assert!(mailbox.verified_certificate(Certificate::MNotarization(m_notarization)));
+
+            for _ in 0..30 {
+                if verify_calls.load(Ordering::Relaxed) > 0 {
+                    return;
+                }
+                context.sleep(Duration::from_millis(2)).await;
+            }
+
+            panic!("expected late ancestry to trigger proposal verification retry");
         });
     }
 }

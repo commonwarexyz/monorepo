@@ -105,6 +105,13 @@ impl<D: Digest> ViewState<D> {
         self.verified.insert(digest)
     }
 
+    /// Returns proposals that have not been verified yet.
+    pub fn unverified_proposals(&self) -> impl Iterator<Item = &Proposal<D>> {
+        self.proposals
+            .values()
+            .filter(|proposal| !self.verified.contains(&proposal.payload))
+    }
+
     /// Records that we voted for a proposal digest.
     pub const fn vote(&mut self, digest: D) -> bool {
         if !self.can_vote() {
