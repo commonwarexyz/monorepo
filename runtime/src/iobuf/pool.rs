@@ -654,7 +654,32 @@ impl Drop for PooledBufInner {
     }
 }
 
-/// Immutable, reference-counted pooled buffer.
+/// Immutable, reference-counted view over a pooled allocation.
+///
+/// Cloning is cheap and shares the same underlying aligned allocation.
+///
+/// # View Layout
+///
+/// ```text
+/// [0................offset...........offset+len...........capacity]
+///  ^                 ^                   ^                    ^
+///  |                 |                   |                    |
+///  allocation start  first readable      end of readable      allocation end
+///                    byte of this view   region for this view
+/// ```
+///
+/// Regions:
+/// - `[0..offset)`: not readable from this view
+/// - `[offset..offset+len)`: readable bytes for this view
+/// - `[offset+len..capacity)`: not readable from this view
+///
+/// # Invariants
+///
+/// - `offset <= capacity`
+/// - `offset + len <= capacity`
+///
+/// This representation allows sliced views to preserve their current readable
+/// window while still supporting `try_into_mut` when uniquely owned.
 #[derive(Clone)]
 pub(crate) struct PooledBuf {
     inner: Arc<PooledBufInner>,
@@ -680,7 +705,10 @@ impl PooledBuf {
         unsafe { self.inner.buffer.as_ptr().add(self.offset) }
     }
 
-    /// Returns a slice of this buffer (zero-copy).
+    /// Returns a slice of this view (zero-copy).
+    ///
+    /// The range is resolved relative to this view's readable window
+    /// (`0..self.len`), not relative to the allocation start.
     ///
     /// Returns `None` for empty ranges, allowing callers to detach from the
     /// underlying pooled allocation.
@@ -711,10 +739,14 @@ impl PooledBuf {
 
     /// Try to recover mutable ownership without copying.
     ///
-    /// This succeeds only when the refcount is one.
+    /// This succeeds only when this is the sole remaining reference to the
+    /// underlying pooled allocation (`Arc` strong count is 1).
     ///
     /// On success, the returned mutable buffer preserves the readable bytes and
-    /// mutable capacity from the current view offset to the end of the allocation.
+    /// mutable capacity from this view's current offset to the end of the
+    /// allocation. This means uniquely-owned sliced views can also be recovered
+    /// as mutable buffers while keeping the same readable window.
+    ///
     /// On failure, returns `self` unchanged.
     pub fn try_into_mut(self) -> Result<PooledBufMut, Self> {
         let Self { inner, offset, len } = self;

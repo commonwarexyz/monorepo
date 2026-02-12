@@ -16,7 +16,9 @@ use std::{collections::VecDeque, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
-/// Cloning is cheap and does not copy.
+/// Backed by either `Bytes` or a pooled aligned allocation.
+///
+/// Cloning is cheap and does not copy underlying bytes.
 #[derive(Clone, Debug)]
 pub struct IoBuf {
     inner: IoBufInner,
@@ -68,6 +70,9 @@ impl IoBuf {
     }
 
     /// Returns a slice of self for the provided range (zero-copy).
+    ///
+    /// For pooled buffers, empty ranges return an empty detached buffer
+    /// (`IoBuf::default()`) so the underlying pooled allocation is not retained.
     #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         match &self.inner {
@@ -232,6 +237,11 @@ impl From<&'static [u8]> for IoBuf {
     }
 }
 
+/// Convert an `IoBuf` into a `Vec<u8>`.
+///
+/// This conversion may copy:
+/// - `Bytes`-backed buffers may reuse allocation via `Vec::from(Bytes)` when possible
+/// - pooled buffers copy readable bytes into a new `Vec<u8>`
 impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
@@ -241,6 +251,9 @@ impl From<IoBuf> for Vec<u8> {
     }
 }
 
+/// Convert an `IoBuf` into `Bytes` without copying readable data.
+///
+/// For pooled buffers, this wraps the pooled owner using `Bytes::from_owner`.
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
