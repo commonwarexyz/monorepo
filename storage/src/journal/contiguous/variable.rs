@@ -3000,10 +3000,7 @@ mod tests {
             journal.append(500).await.unwrap();
             let bounds = journal.bounds().await;
             assert_eq!(bounds.start, 5);
-            assert_eq!(
-                journal.read(bounds.end - 1).await.unwrap(),
-                500
-            );
+            assert_eq!(journal.read(bounds.end - 1).await.unwrap(), 500);
 
             journal.destroy().await.unwrap();
         });
