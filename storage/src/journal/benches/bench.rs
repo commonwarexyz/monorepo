@@ -3,7 +3,7 @@ use commonware_storage::{
     journal::contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
         variable::{Config as VariableConfig, Journal as VariableJournal},
-        MutableContiguous,
+        Mutable,
     },
     Persistable,
 };
@@ -61,7 +61,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
 /// Append `items_to_write` random items to the given fixed journal, syncing the changes before returning.
 async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(journal: &mut C, items_to_write: u64)
 where
-    C: MutableContiguous<Item = FixedBytes<ITEM_SIZE>> + Persistable,
+    C: Mutable<Item = FixedBytes<ITEM_SIZE>> + Persistable,
     C::Error: std::fmt::Debug,
 {
     // Append `items_to_write` random items to the journal.

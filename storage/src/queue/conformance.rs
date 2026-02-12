@@ -54,7 +54,7 @@ impl Conformance for QueueConformance {
             let dequeue_count = items_count / 2;
             for _ in 0..dequeue_count {
                 let (pos, _) = queue.dequeue().await.unwrap().unwrap();
-                queue.ack(pos).unwrap();
+                queue.ack(pos).await.unwrap();
             }
 
             // Sync (commit + prune), then drop
@@ -68,7 +68,7 @@ impl Conformance for QueueConformance {
                     .unwrap();
             while let Some((pos, item)) = queue.dequeue().await.unwrap() {
                 assert_eq!(item, data[pos as usize]);
-                queue.ack(pos).unwrap();
+                queue.ack(pos).await.unwrap();
             }
             queue.sync().await.unwrap();
             drop(queue);

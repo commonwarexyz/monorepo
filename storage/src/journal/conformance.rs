@@ -29,7 +29,7 @@ impl Conformance for ContiguousFixed {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
             };
-            let mut journal = fixed::Journal::<_, u64>::init(context.with_label("journal"), config)
+            let journal = fixed::Journal::<_, u64>::init(context.with_label("journal"), config)
                 .await
                 .unwrap();
 
@@ -62,7 +62,7 @@ impl Conformance for ContiguousVariable {
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let mut journal =
+            let journal =
                 variable::Journal::<_, Vec<u8>>::init(context.with_label("journal"), config)
                     .await
                     .unwrap();

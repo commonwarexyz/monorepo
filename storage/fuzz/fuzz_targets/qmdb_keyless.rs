@@ -171,7 +171,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
@@ -198,7 +198,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    let _ = db.bounds().await.end;
                 }
 
                 Operation::LastCommitLoc => {
@@ -206,7 +206,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().start;
+                    let _ = db.bounds().await.start;
                 }
 
                 Operation::Root => {
@@ -219,7 +219,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count == 0 {
                         continue;
                     }
@@ -242,7 +242,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count == 0 {
                         continue;
                     }

@@ -214,14 +214,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Ack { pos_offset } => {
-                    let size = queue.size();
+                    let size = queue.size().await;
                     if size == 0 {
                         continue;
                     }
                     // Map offset to a valid position range
                     let pos = (*pos_offset as u64) % size;
 
-                    let result = queue.ack(pos);
+                    let result = queue.ack(pos).await;
                     let ref_result = reference.ack(pos);
 
                     assert_eq!(
@@ -232,11 +232,11 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
-                    let size = queue.size();
+                    let size = queue.size().await;
                     // Map offset to valid range [0, size]
                     let up_to = (*pos_offset as u64) % (size + 1);
 
-                    let result = queue.ack_up_to(up_to);
+                    let result = queue.ack_up_to(up_to).await;
                     let ref_result = reference.ack_up_to(up_to);
 
                     assert_eq!(
@@ -257,7 +257,11 @@ fn fuzz(input: FuzzInput) {
             }
 
             // Verify invariants after each operation
-            assert_eq!(queue.size(), reference.size(), "size mismatch after {op:?}");
+            assert_eq!(
+                queue.size().await,
+                reference.size(),
+                "size mismatch after {op:?}"
+            );
             assert_eq!(
                 queue.ack_floor(),
                 reference.ack_floor(),
@@ -269,13 +273,13 @@ fn fuzz(input: FuzzInput) {
                 "read_position mismatch after {op:?}"
             );
             assert_eq!(
-                queue.is_empty(),
+                queue.is_empty().await,
                 reference.is_empty(),
                 "is_empty mismatch after {op:?}"
             );
 
             // Verify is_acked consistency for a sample of positions
-            for pos in 0..queue.size().min(20) {
+            for pos in 0..queue.size().await.min(20) {
                 assert_eq!(
                     queue.is_acked(pos),
                     reference.is_acked(pos),

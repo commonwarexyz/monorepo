@@ -43,7 +43,10 @@ where
     let mutable = db.into_mutable();
     let durable = gen_random_kv(mutable, elements, operations, COMMIT_FREQUENCY).await;
     let mut clean = durable.into_merkleized().await.unwrap();
-    clean.prune(clean.inactivity_floor_loc()).await.unwrap();
+    clean
+        .prune(clean.inactivity_floor_loc().await)
+        .await
+        .unwrap();
     clean.sync().await.unwrap();
     drop(clean);
 }
@@ -102,27 +105,27 @@ fn bench_variable_init(c: &mut Criterion) {
                                         let db = UVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::AnyOrdered => {
                                         let db = OVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentUnordered => {
                                         let db =
                                             UVCurrentDb::init(ctx.clone(), current_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentOrdered => {
                                         let db =
                                             OVCurrentDb::init(ctx.clone(), current_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                 }
                             }

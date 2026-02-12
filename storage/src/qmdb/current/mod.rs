@@ -307,7 +307,7 @@ pub trait BitmapPrunedBits {
     fn get_bit(&self, index: u64) -> bool;
 
     /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> u64;
+    fn oldest_retained(&self) -> impl core::future::Future<Output = u64> + Send;
 }
 
 #[cfg(test)]
@@ -387,7 +387,9 @@ pub mod tests {
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns a mutable db; callers should commit if needed.
-    pub async fn apply_random_ops<C>(
+    ///
+    /// Returns a boxed future to prevent stack overflow when monomorphized across many DB variants.
+    async fn apply_random_ops_inner<C>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
@@ -433,14 +435,34 @@ pub mod tests {
         Ok(db)
     }
 
+    pub fn apply_random_ops<C>(
+        num_elements: u64,
+        commit_changes: bool,
+        rng_seed: u64,
+        db: C::Mutable,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C::Mutable, Error>>>>
+    where
+        C: CleanAny + 'static,
+        C::Key: TestKey,
+        <C as LogStore>::Value: TestValue,
+    {
+        Box::pin(apply_random_ops_inner::<C>(
+            num_elements,
+            commit_changes,
+            rng_seed,
+            db,
+        ))
+    }
+
     /// Run `test_build_random_close_reopen` against a database factory.
     ///
     /// The factory should return a clean (Merkleized, Durable) database when given a context and
     /// partition name. The factory will be called multiple times to test reopening.
     pub fn test_build_random_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny,
+        C: CleanAny + 'static,
         C::Key: TestKey,
+        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -503,8 +525,9 @@ pub mod tests {
     /// failure scenarios.
     pub fn test_simulate_write_failures<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny,
+        C: CleanAny + 'static,
         C::Key: TestKey,
+        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -512,69 +535,72 @@ pub mod tests {
         const ELEMENTS: u64 = 1000;
 
         let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let partition = "build_random_fail_commit".to_string();
-            let rng_seed = context.next_u64();
-            let db: C = open_db(context.with_label("first"), partition.clone()).await;
-            let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
-                .await
-                .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
-            let committed_root = db.root();
-            let committed_op_count = db.bounds().end;
-            let committed_inactivity_floor = db.inactivity_floor_loc();
-            db.prune(committed_inactivity_floor).await.unwrap();
+        // Box the future to prevent stack overflow when monomorphized across DB variants.
+        executor.start(|mut context| {
+            Box::pin(async move {
+                let partition = "build_random_fail_commit".to_string();
+                let rng_seed = context.next_u64();
+                let db: C = open_db(context.with_label("first"), partition.clone()).await;
+                let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
+                    .await
+                    .unwrap();
+                let (db, _) = db.commit(None).await.unwrap();
+                let mut db: C = db.into_merkleized().await.unwrap();
+                let committed_root = db.root();
+                let committed_op_count = db.bounds().await.end;
+                let committed_inactivity_floor = db.inactivity_floor_loc().await;
+                db.prune(committed_inactivity_floor).await.unwrap();
 
-            // Perform more random operations without committing any of them.
-            let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
-                .await
-                .unwrap();
+                // Perform more random operations without committing any of them.
+                let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
+                    .await
+                    .unwrap();
 
-            // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
-            // state of the DB should be as of the last commit.
-            drop(db);
-            let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
-            assert_eq!(db.root(), committed_root);
-            assert_eq!(db.bounds().end, committed_op_count);
+                // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
+                // state of the DB should be as of the last commit.
+                drop(db);
+                let db: C = open_db(context.with_label("scenario1"), partition.clone()).await;
+                assert_eq!(db.root(), committed_root);
+                assert_eq!(db.bounds().await.end, committed_op_count);
 
-            // Re-apply the exact same uncommitted operations.
-            let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
-                .await
-                .unwrap();
+                // Re-apply the exact same uncommitted operations.
+                let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
+                    .await
+                    .unwrap();
 
-            // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-            // before the state of the pruned bitmap can be written to disk (i.e., before
-            // into_merkleized is called). We do this by committing and then dropping the durable
-            // db without calling close or into_merkleized.
-            let (durable_db, _) = db.commit(None).await.unwrap();
-            let committed_op_count = durable_db.bounds().end;
-            drop(durable_db);
+                // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
+                // before the state of the pruned bitmap can be written to disk (i.e., before
+                // into_merkleized is called). We do this by committing and then dropping the durable
+                // db without calling close or into_merkleized.
+                let (durable_db, _) = db.commit(None).await.unwrap();
+                let committed_op_count = durable_db.bounds().await.end;
+                drop(durable_db);
 
-            // We should be able to recover, so the root should differ from the previous commit, and
-            // the op count should be greater than before.
-            let db: C = open_db(context.with_label("scenario2"), partition.clone()).await;
-            let scenario_2_root = db.root();
+                // We should be able to recover, so the root should differ from the previous commit, and
+                // the op count should be greater than before.
+                let db: C = open_db(context.with_label("scenario2"), partition.clone()).await;
+                let scenario_2_root = db.root();
 
-            // To confirm the second committed hash is correct we'll re-build the DB in a new
-            // partition, but without any failures. They should have the exact same state.
-            let fresh_partition = "build_random_fail_commit_fresh".to_string();
-            let db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
-            let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
-                .await
-                .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-            let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
-                .await
-                .unwrap();
-            let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
-            // State from scenario #2 should match that of a successful commit.
-            assert_eq!(db.bounds().end, committed_op_count);
-            assert_eq!(db.root(), scenario_2_root);
+                // To confirm the second committed hash is correct we'll re-build the DB in a new
+                // partition, but without any failures. They should have the exact same state.
+                let fresh_partition = "build_random_fail_commit_fresh".to_string();
+                let db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
+                let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
+                    .await
+                    .unwrap();
+                let (db, _) = db.commit(None).await.unwrap();
+                let db = apply_random_ops::<C>(ELEMENTS, false, rng_seed + 1, db.into_mutable())
+                    .await
+                    .unwrap();
+                let (db, _) = db.commit(None).await.unwrap();
+                let mut db: C = db.into_merkleized().await.unwrap();
+                db.prune(db.inactivity_floor_loc().await).await.unwrap();
+                // State from scenario #2 should match that of a successful commit.
+                assert_eq!(db.bounds().await.end, committed_op_count);
+                assert_eq!(db.root(), scenario_2_root);
 
-            db.destroy().await.unwrap();
+                db.destroy().await.unwrap();
+            })
         });
     }
 
@@ -586,6 +612,7 @@ pub mod tests {
     where
         C: CleanAny,
         C::Key: TestKey,
+        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -628,7 +655,7 @@ pub mod tests {
                     let (db_2, _) = db_pruning_mut.commit(None).await.unwrap();
                     let mut clean_pruning: C = db_2.into_merkleized().await.unwrap();
                     clean_pruning
-                        .prune(clean_no_pruning.inactivity_floor_loc())
+                        .prune(clean_no_pruning.inactivity_floor_loc().await)
                         .await
                         .unwrap();
                     db_no_pruning_mut = clean_no_pruning.into_mutable();
@@ -649,8 +676,8 @@ pub mod tests {
 
             // Also verify inactivity floors match
             assert_eq!(
-                db_no_pruning.inactivity_floor_loc(),
-                db_pruning.inactivity_floor_loc()
+                db_no_pruning.inactivity_floor_loc().await,
+                db_pruning.inactivity_floor_loc().await
             );
 
             db_no_pruning.destroy().await.unwrap();
@@ -665,8 +692,9 @@ pub mod tests {
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
     pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
     where
-        C: CleanAny + BitmapPrunedBits,
+        C: CleanAny + BitmapPrunedBits + 'static,
         C::Key: TestKey,
+        C::Mutable: 'static,
         <C as LogStore>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
@@ -692,8 +720,8 @@ pub mod tests {
             warn!(
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
                 pruned_bits_before,
-                *db.inactivity_floor_loc(),
-                *db.bounds().end
+                *db.inactivity_floor_loc().await,
+                *db.bounds().await.end
             );
 
             // Verify we actually have some pruning (otherwise the test is meaningless).
@@ -793,12 +821,15 @@ pub mod tests {
             let (db, _) = db.commit(None).await.unwrap();
             let mut db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
-            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.prune(db.inactivity_floor_loc().await).await.unwrap();
 
             // Verify expected state after prune.
-            assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
-                db.inactivity_floor_loc(),
+                db.bounds().await.end,
+                Location::new_unchecked(expected_op_count)
+            );
+            assert_eq!(
+                db.inactivity_floor_loc().await,
                 Location::new_unchecked(expected_inactivity_floor)
             );
 
@@ -810,9 +841,12 @@ pub mod tests {
             // Reopen the db and verify it has exactly the same state.
             let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, Location::new_unchecked(expected_op_count));
             assert_eq!(
-                db.inactivity_floor_loc(),
+                db.bounds().await.end,
+                Location::new_unchecked(expected_op_count)
+            );
+            assert_eq!(
+                db.inactivity_floor_loc().await,
                 Location::new_unchecked(expected_inactivity_floor)
             );
 
