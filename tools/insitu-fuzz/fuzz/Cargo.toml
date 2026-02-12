@@ -1,0 +1,69 @@
+[package]
+name = "commonware-insitu-fuzz-targets"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+insitu-fuzz = { path = "..", features = ["test-registry"] }
+commonware-runtime = { path = "../../../runtime", features = ["fuzzing", "test-utils"] }
+commonware-consensus = { path = "../../../consensus", features = ["fuzzing"] }
+backtrace = "0.3"
+once_cell = "1.20.2"
+
+[[bin]]
+name = "all_tests"
+path = "fuzz_targets/all_tests.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fast_tests"
+path = "fuzz_targets/fast_tests.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "slow_tests"
+path = "fuzz_targets/slow_tests.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "simplex"
+path = "fuzz_targets/simplex.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "task_order_fast_tests"
+path = "fuzz_targets/task_order_fast_tests.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "task_order_aggregate"
+path = "fuzz_targets/task_order_aggregate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "task_order_simplex"
+path = "fuzz_targets/task_order_simplex.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 2  # Full debug info to preserve symbol names (ignored by cargo fuzz by default; you have to pass this via an explicit flag!)
+opt-level = 3
+incremental = true  # Enable incremental compilation for faster rebuilds
+
+[profile.dev]
+debug = 2
+opt-level = 1
