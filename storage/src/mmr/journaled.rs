@@ -1044,9 +1044,7 @@ mod tests {
         executor.start(|context| async move {
             let mut hasher: Standard<Sha256> = Standard::new();
             let cfg = test_config(&context);
-            let mmr = Mmr::init(context, &mut hasher, cfg)
-                .await
-                .unwrap();
+            let mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
             // Build a test MMR with 255 leaves
             const LEAF_COUNT: usize = 255;
             let mut leaves = Vec::with_capacity(LEAF_COUNT);

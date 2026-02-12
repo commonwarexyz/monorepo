@@ -617,7 +617,9 @@ pub(crate) mod test {
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
         let cfg = variable_db_config("unordered_partitioned_var_p1", &context);
-        PartitionedAnyTestDigestP1::init(context, cfg).await.unwrap()
+        PartitionedAnyTestDigestP1::init(context, cfg)
+            .await
+            .unwrap()
     }
 
     #[test_traced("WARN")]

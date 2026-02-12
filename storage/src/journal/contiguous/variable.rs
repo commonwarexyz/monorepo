@@ -1244,11 +1244,7 @@ mod tests {
                         items_per_section: NZU64!(10),
                         compression: None,
                         codec_config: (),
-                        page_cache: CacheRef::from_pooler(
-                            &context,
-                            LARGE_PAGE_SIZE,
-                            NZUsize!(10),
-                        ),
+                        page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
                         write_buffer: NZUsize!(1024),
                     };
                     Journal::<_, u64>::init(context, cfg).await

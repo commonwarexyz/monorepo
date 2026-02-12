@@ -612,12 +612,12 @@ mod tests {
     async fn create_empty_journal(context: Context, suffix: &str) -> AuthenticatedJournal {
         let mmr_cfg = mmr_config(suffix, &context);
         let journal_cfg = journal_config(suffix, &context);
-        AuthenticatedJournal::new(context, mmr_cfg, journal_cfg, |op: &Operation<
-            Digest,
-            Digest,
-        >| {
-            op.is_commit()
-        })
+        AuthenticatedJournal::new(
+            context,
+            mmr_cfg,
+            journal_cfg,
+            |op: &Operation<Digest, Digest>| op.is_commit(),
+        )
         .await
         .unwrap()
     }
@@ -1004,15 +1004,11 @@ mod tests {
             {
                 let mmr_cfg = mmr_config("rewind", &context);
                 let journal_cfg = journal_config("rewind", &context);
-                let mut journal = AuthenticatedJournal::new(
-                    context,
-                    mmr_cfg,
-                    journal_cfg,
-                    |op| op.is_commit(),
-                )
-                .await
-                .unwrap()
-                .into_dirty();
+                let mut journal =
+                    AuthenticatedJournal::new(context, mmr_cfg, journal_cfg, |op| op.is_commit())
+                        .await
+                        .unwrap()
+                        .into_dirty();
 
                 // Add operations with a commit at position 5 (in section 0: 0-6)
                 for i in 0..5 {
