@@ -967,12 +967,8 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        FixedDb::init(
-            context.clone(),
-            fixed_db_config("fixed_bytes_partition", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = fixed_db_config("fixed_bytes_partition", &context);
+        FixedDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

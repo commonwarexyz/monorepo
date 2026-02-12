@@ -610,12 +610,14 @@ mod tests {
 
     /// Create a new empty authenticated journal.
     async fn create_empty_journal(context: Context, suffix: &str) -> AuthenticatedJournal {
-        AuthenticatedJournal::new(
-            context.clone(),
-            mmr_config(suffix, &context),
-            journal_config(suffix, &context),
-            |op: &Operation<Digest, Digest>| op.is_commit(),
-        )
+        let mmr_cfg = mmr_config(suffix, &context);
+        let journal_cfg = journal_config(suffix, &context);
+        AuthenticatedJournal::new(context, mmr_cfg, journal_cfg, |op: &Operation<
+            Digest,
+            Digest,
+        >| {
+            op.is_commit()
+        })
         .await
         .unwrap()
     }
@@ -1000,10 +1002,12 @@ mod tests {
 
             // Test 7: Position based authenticated journal rewind.
             {
+                let mmr_cfg = mmr_config("rewind", &context);
+                let journal_cfg = journal_config("rewind", &context);
                 let mut journal = AuthenticatedJournal::new(
                     context.clone(),
-                    mmr_config("rewind", &context),
-                    journal_config("rewind", &context),
+                    mmr_cfg,
+                    journal_cfg,
                     |op| op.is_commit(),
                 )
                 .await

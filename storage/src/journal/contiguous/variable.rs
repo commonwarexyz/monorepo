@@ -1239,22 +1239,19 @@ mod tests {
             run_contiguous_tests(move |test_name: String, idx: usize| {
                 let context = context.with_label(&format!("{test_name}_{idx}"));
                 async move {
-                    Journal::<_, u64>::init(
-                        context.clone(),
-                        Config {
-                            partition: format!("generic_test_{test_name}"),
-                            items_per_section: NZU64!(10),
-                            compression: None,
-                            codec_config: (),
-                            page_cache: CacheRef::from_pooler(
-                                &context,
-                                LARGE_PAGE_SIZE,
-                                NZUsize!(10),
-                            ),
-                            write_buffer: NZUsize!(1024),
-                        },
-                    )
-                    .await
+                    let cfg = Config {
+                        partition: format!("generic_test_{test_name}"),
+                        items_per_section: NZU64!(10),
+                        compression: None,
+                        codec_config: (),
+                        page_cache: CacheRef::from_pooler(
+                            &context,
+                            LARGE_PAGE_SIZE,
+                            NZUsize!(10),
+                        ),
+                        write_buffer: NZUsize!(1024),
+                    };
+                    Journal::<_, u64>::init(context, cfg).await
                 }
                 .boxed()
             })

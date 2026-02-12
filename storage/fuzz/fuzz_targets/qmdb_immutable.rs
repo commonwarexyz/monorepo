@@ -113,13 +113,11 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut rng = StdRng::seed_from_u64(input.seed);
 
-        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(
-            context.clone(),
-            db_config("fuzz_partition", &context),
-        )
-        .await
-        .unwrap()
-        .into_mutable();
+        let cfg = db_config("fuzz_partition", &context);
+        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
+            .await
+            .unwrap()
+            .into_mutable();
 
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();

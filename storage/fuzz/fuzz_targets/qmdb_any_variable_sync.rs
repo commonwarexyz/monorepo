@@ -160,13 +160,11 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
-            context.clone(),
-            test_config("qmdb_any_variable_fuzz_test", &context),
-        )
-        .await
-        .expect("Failed to init source db")
-        .into_mutable();
+        let cfg = test_config("qmdb_any_variable_fuzz_test", &context);
+        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
+            .await
+            .expect("Failed to init source db")
+            .into_mutable();
         let mut restarts = 0usize;
 
         let mut historical_roots: HashMap<
@@ -285,11 +283,12 @@ fn fuzz(input: FuzzInput) {
                     // Simulate unclean shutdown by dropping the db without committing
                     drop(db);
 
+                    let cfg = test_config("qmdb_any_variable_fuzz_test", &context);
                     db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config("qmdb_any_variable_fuzz_test", &context),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init source db")

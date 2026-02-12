@@ -290,12 +290,8 @@ pub(crate) mod test {
 
     /// Return a variable db with Digest keys and values for generic tests.
     async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
-        DigestVariableDb::init(
-            context.clone(),
-            variable_db_config("digest_partition", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("digest_partition", &context);
+        DigestVariableDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -329,12 +325,8 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        VariableDb::init(
-            context.clone(),
-            variable_db_config("fixed_bytes_var_partition", &context),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("fixed_bytes_var_partition", &context);
+        VariableDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
