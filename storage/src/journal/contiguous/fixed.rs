@@ -622,9 +622,10 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // the tail section above.
         let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
         if put {
-            inner
-                .metadata
-                .put(PRUNING_BOUNDARY_KEY, pruning_boundary.to_be_bytes().to_vec());
+            inner.metadata.put(
+                PRUNING_BOUNDARY_KEY,
+                pruning_boundary.to_be_bytes().to_vec(),
+            );
         } else {
             inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
