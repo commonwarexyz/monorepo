@@ -603,17 +603,17 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let pruning_boundary = inner.pruning_boundary;
         let pruning_boundary_from_metadata = inner.metadata.get(&PRUNING_BOUNDARY_KEY).cloned();
 
-        let metadata_update = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
+        let put = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
             let needs_update = pruning_boundary_from_metadata
                 .is_none_or(|bytes| bytes.as_slice() != pruning_boundary.to_be_bytes());
 
             if needs_update {
-                Some(pruning_boundary.to_be_bytes().to_vec())
+                true
             } else {
                 return Ok(());
             }
         } else if pruning_boundary_from_metadata.is_some() {
-            None
+            false
         } else {
             return Ok(());
         };
@@ -621,11 +621,12 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
         // the tail section above.
         let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
-        match metadata_update {
-            Some(value) => inner.metadata.put(PRUNING_BOUNDARY_KEY, value),
-            None => {
-                inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
-            }
+        if put {
+            inner
+                .metadata
+                .put(PRUNING_BOUNDARY_KEY, pruning_boundary.to_be_bytes().to_vec());
+        } else {
+            inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
         inner.metadata.sync().await?;
 
