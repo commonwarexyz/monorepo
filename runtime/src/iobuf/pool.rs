@@ -46,6 +46,7 @@ use std::{
     alloc::{alloc, dealloc, Layout},
     mem::ManuallyDrop,
     num::NonZeroUsize,
+    ops::{Bound, RangeBounds},
     ptr::NonNull,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -620,6 +621,159 @@ impl BufferPool {
     }
 }
 
+/// Shared pooled allocation.
+///
+/// On drop, returns the aligned buffer to the pool if tracked.
+struct PooledBufInner {
+    buffer: ManuallyDrop<AlignedBuffer>,
+    pool: Weak<BufferPoolInner>,
+}
+
+impl PooledBufInner {
+    const fn new(buffer: AlignedBuffer, pool: Weak<BufferPoolInner>) -> Self {
+        Self {
+            buffer: ManuallyDrop::new(buffer),
+            pool,
+        }
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.buffer.capacity()
+    }
+}
+
+impl Drop for PooledBufInner {
+    fn drop(&mut self) {
+        // SAFETY: Drop is called at most once for this value.
+        let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
+        if let Some(pool) = self.pool.upgrade() {
+            pool.return_buffer(buffer);
+        }
+        // else: buffer is dropped here, which deallocates it
+    }
+}
+
+/// Immutable, reference-counted pooled buffer.
+#[derive(Clone)]
+pub(crate) struct PooledBuf {
+    inner: Arc<PooledBufInner>,
+    offset: usize,
+    len: usize,
+}
+
+impl std::fmt::Debug for PooledBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledBuf")
+            .field("offset", &self.offset)
+            .field("len", &self.len)
+            .field("capacity", &self.inner.capacity())
+            .finish()
+    }
+}
+
+impl PooledBuf {
+    /// Returns a pointer to the first readable byte.
+    #[inline]
+    pub fn as_ptr(&self) -> *const u8 {
+        // SAFETY: offset is always within the underlying allocation.
+        unsafe { self.inner.buffer.as_ptr().add(self.offset) }
+    }
+
+    /// Returns a slice of this buffer (zero-copy).
+    ///
+    /// Returns `None` for empty ranges, allowing callers to detach from the
+    /// underlying pooled allocation.
+    pub fn slice(&self, range: impl RangeBounds<usize>) -> Option<Self> {
+        let start = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.checked_add(1).expect("range start overflow"),
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n.checked_add(1).expect("range end overflow"),
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.len,
+        };
+        assert!(start <= end, "slice start must be <= end");
+        assert!(end <= self.len, "slice out of bounds");
+
+        if start == end {
+            return None;
+        }
+
+        Some(Self {
+            inner: Arc::clone(&self.inner),
+            offset: self.offset + start,
+            len: end - start,
+        })
+    }
+
+    /// Try to recover mutable ownership without copying.
+    ///
+    /// This succeeds only when the refcount is one.
+    ///
+    /// On success, the returned mutable buffer preserves the readable bytes and
+    /// mutable capacity from the current view offset to the end of the allocation.
+    /// On failure, returns `self` unchanged.
+    pub fn try_into_mut(self) -> Result<PooledBufMut, Self> {
+        let Self { inner, offset, len } = self;
+        match Arc::try_unwrap(inner) {
+            // Preserve the existing readable view:
+            // - cursor = view start
+            // - len = view end
+            Ok(inner) => Ok(PooledBufMut {
+                inner: ManuallyDrop::new(inner),
+                cursor: offset,
+                len: offset.checked_add(len).expect("slice end overflow"),
+            }),
+            Err(inner) => Err(Self { inner, offset, len }),
+        }
+    }
+}
+
+impl AsRef<[u8]> for PooledBuf {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: offset/len are always bounded within the underlying allocation.
+        unsafe { std::slice::from_raw_parts(self.inner.buffer.as_ptr().add(self.offset), self.len) }
+    }
+}
+
+impl Buf for PooledBuf {
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn chunk(&self) -> &[u8] {
+        self.as_ref()
+    }
+
+    #[inline]
+    fn advance(&mut self, cnt: usize) {
+        assert!(cnt <= self.len, "cannot advance past end of buffer");
+        self.offset += cnt;
+        self.len -= cnt;
+    }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        assert!(len <= self.len, "copy_to_bytes out of bounds");
+        if len == 0 {
+            return Bytes::new();
+        }
+        let slice = Self {
+            inner: Arc::clone(&self.inner),
+            offset: self.offset,
+            len,
+        };
+        self.advance(len);
+        Bytes::from_owner(slice)
+    }
+}
+
 /// A mutable aligned buffer.
 ///
 /// When dropped, the underlying buffer is returned to the pool if tracked,
@@ -661,14 +815,12 @@ impl BufferPool {
 /// exceed capacity will panic (per the `BufMut` trait contract).
 ///
 /// Always check `remaining_mut()` before writing variable-length data.
-pub struct PooledBufMut {
-    buffer: ManuallyDrop<AlignedBuffer>,
+pub(crate) struct PooledBufMut {
+    inner: ManuallyDrop<PooledBufInner>,
     /// Read cursor position (for `Buf` trait).
     cursor: usize,
     /// Number of bytes written (initialized).
     len: usize,
-    /// Reference to the pool.
-    pool: Weak<BufferPoolInner>,
 }
 
 impl std::fmt::Debug for PooledBufMut {
@@ -684,10 +836,9 @@ impl std::fmt::Debug for PooledBufMut {
 impl PooledBufMut {
     const fn new(buffer: AlignedBuffer, pool: Weak<BufferPoolInner>) -> Self {
         Self {
-            buffer: ManuallyDrop::new(buffer),
+            inner: ManuallyDrop::new(PooledBufInner::new(buffer, pool)),
             cursor: 0,
             len: 0,
-            pool,
         }
     }
 
@@ -696,8 +847,8 @@ impl PooledBufMut {
     /// Tracked buffers will be returned to their pool when dropped. Untracked
     /// buffers (from fallback allocations) are deallocated directly.
     #[inline]
-    pub(crate) fn is_tracked(&self) -> bool {
-        self.pool.strong_count() > 0
+    pub fn is_tracked(&self) -> bool {
+        self.inner.pool.strong_count() > 0
     }
 
     /// Returns the number of readable bytes remaining in the buffer.
@@ -717,20 +868,20 @@ impl PooledBufMut {
     /// Returns the number of bytes the buffer can hold without reallocating.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.buffer.capacity() - self.cursor
+        self.inner.capacity() - self.cursor
     }
 
     /// Returns the raw allocation capacity (internal use only).
     #[inline]
     fn raw_capacity(&self) -> usize {
-        self.buffer.capacity()
+        self.inner.capacity()
     }
 
     /// Returns an unsafe mutable pointer to the buffer's data.
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         // SAFETY: cursor is always <= raw capacity
-        unsafe { self.buffer.as_ptr().add(self.cursor) }
+        unsafe { self.inner.buffer.as_ptr().add(self.cursor) }
     }
 
     /// Sets the length of the buffer (view-relative).
@@ -780,13 +931,13 @@ impl PooledBufMut {
         // if any subsequent code panics.
         let mut me = ManuallyDrop::new(self);
         // SAFETY: me is wrapped in ManuallyDrop so its Drop impl won't run.
-        // ManuallyDrop::take moves the inner buffer out, leaving the wrapper empty.
-        let buffer = unsafe { ManuallyDrop::take(&mut me.buffer) };
-        let cursor = me.cursor;
-        let len = me.len;
-        let pool = std::mem::take(&mut me.pool);
-
-        Bytes::from_owner(PooledOwner::new(buffer, cursor, len, pool)).into()
+        // ManuallyDrop::take moves the inner value out, leaving the wrapper empty.
+        let inner = unsafe { ManuallyDrop::take(&mut me.inner) };
+        IoBuf::from_pooled(PooledBuf {
+            inner: Arc::new(inner),
+            offset: me.cursor,
+            len: me.len - me.cursor,
+        })
     }
 }
 
@@ -794,7 +945,9 @@ impl AsRef<[u8]> for PooledBufMut {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         // SAFETY: bytes from cursor..len have been initialized.
-        unsafe { std::slice::from_raw_parts(self.buffer.as_ptr().add(self.cursor), self.len()) }
+        unsafe {
+            std::slice::from_raw_parts(self.inner.buffer.as_ptr().add(self.cursor), self.len())
+        }
     }
 }
 
@@ -803,7 +956,7 @@ impl AsMut<[u8]> for PooledBufMut {
     fn as_mut(&mut self) -> &mut [u8] {
         let len = self.len();
         // SAFETY: bytes from cursor..len have been initialized.
-        unsafe { std::slice::from_raw_parts_mut(self.buffer.as_ptr().add(self.cursor), len) }
+        unsafe { std::slice::from_raw_parts_mut(self.inner.buffer.as_ptr().add(self.cursor), len) }
     }
 }
 
@@ -811,11 +964,7 @@ impl Drop for PooledBufMut {
     fn drop(&mut self) {
         // SAFETY: Drop is only called once. freeze() wraps self in ManuallyDrop
         // to prevent this Drop impl from running after ownership is transferred.
-        let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        if let Some(pool) = self.pool.upgrade() {
-            pool.return_buffer(buffer);
-        }
-        // else: buffer is dropped here, which deallocates it
+        unsafe { ManuallyDrop::drop(&mut self.inner) };
     }
 }
 
@@ -830,7 +979,7 @@ impl Buf for PooledBufMut {
         // SAFETY: bytes from cursor..len have been initialized.
         unsafe {
             std::slice::from_raw_parts(
-                self.buffer.as_ptr().add(self.cursor),
+                self.inner.buffer.as_ptr().add(self.cursor),
                 self.len - self.cursor,
             )
         }
@@ -869,59 +1018,9 @@ unsafe impl BufMut for PooledBufMut {
         let len = self.len;
         // SAFETY: We have exclusive access and the slice is within raw capacity.
         unsafe {
-            let ptr = self.buffer.as_ptr().add(len);
+            let ptr = self.inner.buffer.as_ptr().add(len);
             bytes::buf::UninitSlice::from_raw_parts_mut(ptr, raw_cap - len)
         }
-    }
-}
-
-/// Owner for pooled bytes that returns the buffer to the pool on drop.
-struct PooledOwner {
-    buffer: ManuallyDrop<AlignedBuffer>,
-    /// Start offset of the data.
-    cursor: usize,
-    /// End offset of the data (exclusive).
-    len: usize,
-    pool: Weak<BufferPoolInner>,
-}
-
-impl PooledOwner {
-    const fn new(
-        buffer: AlignedBuffer,
-        cursor: usize,
-        len: usize,
-        pool: Weak<BufferPoolInner>,
-    ) -> Self {
-        Self {
-            buffer: ManuallyDrop::new(buffer),
-            cursor,
-            len,
-            pool,
-        }
-    }
-}
-
-// Required for Bytes::from_owner
-impl AsRef<[u8]> for PooledOwner {
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: bytes from cursor..len have been initialized.
-        unsafe {
-            std::slice::from_raw_parts(
-                self.buffer.as_ptr().add(self.cursor),
-                self.len - self.cursor,
-            )
-        }
-    }
-}
-
-impl Drop for PooledOwner {
-    fn drop(&mut self) {
-        // SAFETY: Drop is only called once.
-        let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        if let Some(pool) = self.pool.upgrade() {
-            pool.return_buffer(buffer);
-        }
-        // else: buffer is dropped here, which deallocates it
     }
 }
 
@@ -1287,6 +1386,25 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_slice_does_not_hold_buffer_reference() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0u8; 100]);
+        let iobuf = buf.freeze();
+
+        // Empty slices should not retain the original backing allocation.
+        let empty = iobuf.slice(10..10);
+        assert!(empty.is_empty());
+
+        drop(iobuf);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
     fn test_copy_to_bytes_on_pooled_buffer() {
         let page = page_size();
         let mut registry = test_registry();
@@ -1340,9 +1458,8 @@ mod tests {
     }
 
     #[test]
-    fn test_iobuf_to_iobufmut_conversion_returns_pooled_buffer() {
-        // This tests the IoBuf -> IoBufMut conversion that happens
-        // when send() takes impl Into<IoBufMut>
+    fn test_iobuf_to_iobufmut_conversion_reuses_pool_for_non_full_unique_view() {
+        // IoBuf -> IoBufMut should recover pooled ownership for unique non-full views.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -1353,24 +1470,103 @@ mod tests {
         let iobuf = buf.freeze();
         assert_eq!(get_allocated(&pool, page), 1);
 
-        // This is what happens when you call send(iobuf) where send takes impl Into<IoBufMut>
-        // The IoBuf is converted to IoBufMut via From<IoBuf> for IoBufMut
         let iobufmut: IoBufMut = iobuf.into();
 
-        // The conversion copies data to a new BytesMut and drops the original Bytes
-        // So the pooled buffer should be returned!
+        // Conversion reused pooled storage instead of copying.
         assert_eq!(
             get_allocated(&pool, page),
-            0,
-            "pooled buffer should be returned after IoBuf->IoBufMut conversion"
+            1,
+            "pooled buffer should remain allocated after zero-copy IoBuf->IoBufMut conversion"
         );
-        assert_eq!(get_available(&pool, page), 1);
+        assert_eq!(get_available(&pool, page), 0);
 
-        // The IoBufMut is now backed by BytesMut, not the pool
+        // Dropping returns the pooled buffer.
         drop(iobufmut);
-        // Pool state unchanged
         assert_eq!(get_allocated(&pool, page), 0);
         assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_iobuf_to_iobufmut_conversion_preserves_full_unique_view() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(page).unwrap();
+        buf.put_slice(&vec![0xEE; page]);
+        let iobuf = buf.freeze();
+
+        let iobufmut: IoBufMut = iobuf.into();
+        assert_eq!(iobufmut.len(), page);
+        assert!(iobufmut.as_ref().iter().all(|&b| b == 0xEE));
+        assert_eq!(get_allocated(&pool, page), 1);
+        assert_eq!(get_available(&pool, page), 0);
+
+        drop(iobufmut);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_iobuf_try_into_mut_recycles_full_unique_view() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(page).unwrap();
+        buf.put_slice(&vec![0xAB; page]);
+        let iobuf = buf.freeze();
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        let recycled = iobuf
+            .try_into_mut()
+            .expect("unique full-view pooled buffer should recycle");
+        assert_eq!(recycled.len(), page);
+        assert!(recycled.as_ref().iter().all(|&b| b == 0xAB));
+        assert_eq!(recycled.capacity(), page);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(recycled);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_iobuf_try_into_mut_succeeds_for_unique_slice_and_fails_for_shared() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        // Unique sliced views can recover mutable ownership without copying.
+        let mut buf = pool.try_alloc(page).unwrap();
+        buf.put_slice(&vec![0xCD; page]);
+        let iobuf = buf.freeze();
+        let sliced = iobuf.slice(1..page);
+        drop(iobuf);
+        let recycled = sliced
+            .try_into_mut()
+            .expect("unique sliced pooled buffer should recycle");
+        assert_eq!(recycled.len(), page - 1);
+        assert!(recycled.as_ref().iter().all(|&b| b == 0xCD));
+        assert_eq!(recycled.capacity(), page - 1);
+        assert_eq!(get_allocated(&pool, page), 1);
+        drop(recycled);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+
+        // Shared views still cannot recover mutable ownership.
+        let mut buf = pool.try_alloc(page).unwrap();
+        buf.put_slice(&vec![0xEF; page]);
+        let iobuf = buf.freeze();
+        let cloned = iobuf.clone();
+        let iobuf = iobuf
+            .try_into_mut()
+            .expect_err("shared pooled buffer must not convert to mutable");
+
+        drop(cloned);
+        drop(iobuf);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert!(get_available(&pool, page) >= 1);
     }
 
     #[test]

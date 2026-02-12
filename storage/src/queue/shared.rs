@@ -395,7 +395,7 @@ mod tests {
                 item = reader.recv() => item,
                 _ = context.sleep(std::time::Duration::from_secs(1)) => {
                     panic!("timeout")
-                }
+                },
             };
 
             let (pos, item) = result.unwrap().unwrap();
