@@ -619,7 +619,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         };
 
         // Data journal is empty if there are no sections or if there is one section and it has no items.
-        // The latter should only occur if a crash occured after opening a data journal blob but
+        // The latter should only occur if a crash occurred after opening a data journal blob but
         // before writing to it.
         let data_empty =
             data.is_empty() || (data.num_sections() == 1 && items_in_last_section == 0);
