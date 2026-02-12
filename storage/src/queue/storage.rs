@@ -7,7 +7,9 @@ use crate::{
     Persistable,
 };
 use commonware_codec::CodecShared;
-use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::status::GaugeExt, Clock, Metrics, Storage};
+use commonware_runtime::{
+    buffer::paged::CacheRef, telemetry::metrics::status::GaugeExt, Clock, Metrics, Storage,
+};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
 
