@@ -1,4 +1,7 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBuf, IoBufs, IoBufsMut, RwLock};
+use crate::{
+    buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBuf, IoBufs, IoBufsMut,
+    RwLock,
+};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or

@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Metrics, Runner,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
@@ -84,14 +82,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, pool: BufferPool) -> Config {
+fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
     Config {
         journal_partition: format!("journal_{partition_suffix}"),
         metadata_partition: format!("metadata_{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        page_cache: CacheRef::new(pool, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -112,10 +110,7 @@ fn fuzz(input: FuzzInput) {
         let mmr = Mmr::init(
             context.clone(),
             &mut hasher,
-            test_config(
-                "fuzz_test_mmr_journaled",
-                context.storage_buffer_pool().clone(),
-            ),
+            test_config("fuzz_test_mmr_journaled", &context),
         )
         .await
         .unwrap();
@@ -438,10 +433,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
                         &mut hasher,
-                        test_config(
-                            "fuzz_test_mmr_journaled",
-                            context.storage_buffer_pool().clone(),
-                        ),
+                        test_config("fuzz_test_mmr_journaled", &context),
                     )
                     .await
                     .unwrap();
@@ -467,7 +459,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     let sync_config = SyncConfig {
-                        config: test_config("sync", context.storage_buffer_pool().clone()),
+                        config: test_config("sync", &context),
                         range: lower_bound_pos..upper_bound_pos,
                         pinned_nodes: None,
                     };

@@ -156,7 +156,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPooler, Metrics as _, Runner as _};
+    use commonware_runtime::{deterministic, Metrics as _, Runner as _};
     use commonware_utils::NZU64;
     use rand::RngCore;
 
@@ -173,10 +173,12 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        let pool = context.storage_buffer_pool().clone();
-        CleanCurrentTest::init(context, variable_config::<TwoCap>(&partition_prefix, pool))
-            .await
-            .unwrap()
+        CleanCurrentTest::init(
+            context.clone(),
+            variable_config::<TwoCap>(&partition_prefix, &context),
+        )
+        .await
+        .unwrap()
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a

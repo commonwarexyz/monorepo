@@ -184,7 +184,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPool, BufferPooler, Runner as _,
+        BufferPooler, Runner as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -201,7 +201,7 @@ pub(crate) mod test {
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-    pub(crate) fn create_test_config(seed: u64, pool: BufferPool) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
             mmr_journal_partition: format!("mmr_journal_{seed}"),
             mmr_metadata_partition: format!("mmr_metadata_{seed}"),
@@ -214,14 +214,14 @@ pub(crate) mod test {
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(pool, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, context.storage_buffer_pool().clone());
+        let config = create_test_config(seed, &context);
         AnyTest::init(context, config).await.unwrap()
     }
 
@@ -290,10 +290,12 @@ pub(crate) mod test {
 
     /// Return a variable db with Digest keys and values for generic tests.
     async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
-        let pool = context.storage_buffer_pool().clone();
-        DigestVariableDb::init(context, variable_db_config("digest_partition", pool))
-            .await
-            .unwrap()
+        DigestVariableDb::init(
+            context.clone(),
+            variable_db_config("digest_partition", &context),
+        )
+        .await
+        .unwrap()
     }
 
     #[test_traced("WARN")]
@@ -327,10 +329,9 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let pool = context.storage_buffer_pool().clone();
         VariableDb::init(
-            context,
-            variable_db_config("fixed_bytes_var_partition", pool),
+            context.clone(),
+            variable_db_config("fixed_bytes_var_partition", &context),
         )
         .await
         .unwrap()
@@ -476,10 +477,9 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        let pool = context.storage_buffer_pool().clone();
         PartitionedAnyTest::init(
-            context,
-            variable_db_config("ordered_partitioned_var_p1", pool),
+            context.clone(),
+            variable_db_config("ordered_partitioned_var_p1", &context),
         )
         .await
         .unwrap()

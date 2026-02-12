@@ -872,9 +872,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
-    };
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;
@@ -1012,16 +1010,19 @@ mod tests {
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String, idx: usize| {
                 let context = context.with_label(&format!("{test_name}_{idx}"));
-                let pool = context.storage_buffer_pool().clone();
                 async move {
                     Journal::<_, u64>::init(
-                        context,
+                        context.clone(),
                         Config {
                             partition: format!("generic_test_{test_name}"),
                             items_per_section: NZU64!(10),
                             compression: None,
                             codec_config: (),
-                            page_cache: CacheRef::new(pool, LARGE_PAGE_SIZE, NZUsize!(10)),
+                            page_cache: CacheRef::from_pooler(
+                                &context,
+                                LARGE_PAGE_SIZE,
+                                NZUsize!(10),
+                            ),
                             write_buffer: NZUsize!(1024),
                         },
                     )

@@ -331,7 +331,7 @@ pub mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPool, BufferPooler, Metrics as _, Runner as _,
+        BufferPooler, Metrics as _, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::future::Future;
@@ -346,7 +346,7 @@ pub mod tests {
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-        pool: BufferPool,
+        pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
@@ -359,14 +359,14 @@ pub mod tests {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pool: BufferPool,
+        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
@@ -381,7 +381,7 @@ pub mod tests {
             bitmap_metadata_partition: format!("{partition_prefix}_bitmap_metadata_partition"),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -865,8 +865,7 @@ pub mod tests {
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {
             |ctx: Context, partition: String| async move {
-                let pool = ctx.storage_buffer_pool().clone();
-                <$db>::init(ctx, $cfg::<OneCap>(&partition, pool))
+                <$db>::init(ctx.clone(), $cfg::<OneCap>(&partition, &ctx))
                     .await
                     .unwrap()
             }

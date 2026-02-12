@@ -257,7 +257,7 @@ pub(crate) mod test {
 
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
-        pool: BufferPool,
+        pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
         FixedConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -269,13 +269,13 @@ pub(crate) mod test {
             log_write_buffer: NZUsize!(1024),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
-        pool: BufferPool,
+        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -289,7 +289,7 @@ pub(crate) mod test {
             log_codec_config: (),
             translator: T::default(),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -304,7 +304,7 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Context, BufferPool, BufferPooler};
+    use commonware_runtime::{deterministic::Context, BufferPooler};
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 
@@ -895,8 +895,10 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let pool = ctx.storage_buffer_pool().clone();
-                $f(<$db>::init(ctx, $cfg::<OneCap>(p, pool)).await.unwrap()).await;
+                $f(<$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                    .await
+                    .unwrap())
+                .await;
             })
             .await
         }};
@@ -907,8 +909,7 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let pool = ctx.storage_buffer_pool().clone();
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pool))
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(
@@ -916,8 +917,9 @@ pub(crate) mod test {
                     db,
                     |ctx| {
                         Box::pin(async move {
-                            let pool = ctx.storage_buffer_pool().clone();
-                            <$db>::init(ctx, $cfg::<OneCap>(p, pool)).await.unwrap()
+                            <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
+                                .await
+                                .unwrap()
                         })
                     },
                     to_digest,
@@ -933,8 +935,7 @@ pub(crate) mod test {
             let p = concat!($l, "_", $sfx);
             Box::pin(async {
                 let ctx = $ctx.with_label($l);
-                let pool = ctx.storage_buffer_pool().clone();
-                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, pool))
+                let db = <$db>::init(ctx.clone(), $cfg::<OneCap>(p, &ctx))
                     .await
                     .unwrap();
                 $f(ctx, db, to_digest).await;

@@ -76,7 +76,12 @@ impl<B: Blob> Read<B> {
         blob_size: u64,
         buffer_size: NonZeroUsize,
     ) -> Self {
-        Self::new(blob, blob_size, buffer_size, pooler.storage_buffer_pool().clone())
+        Self::new(
+            blob,
+            blob_size,
+            buffer_size,
+            pooler.storage_buffer_pool().clone(),
+        )
     }
 
     /// Returns how many valid bytes are remaining in the buffer.

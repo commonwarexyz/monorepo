@@ -569,7 +569,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPool, BufferPooler, Metrics, Runner as _,
+        BufferPooler, Metrics, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -579,24 +579,24 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     /// Create MMR configuration for tests.
-    fn mmr_config(suffix: &str, pool: BufferPool) -> MmrConfig {
+    fn mmr_config(suffix: &str, pooler: &impl BufferPooler) -> MmrConfig {
         MmrConfig {
             journal_partition: format!("mmr_journal_{suffix}"),
             metadata_partition: format!("mmr_metadata_{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pool: BufferPool) -> JConfig {
+    fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
         JConfig {
             partition: format!("journal_{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -609,11 +609,10 @@ mod tests {
 
     /// Create a new empty authenticated journal.
     async fn create_empty_journal(context: Context, suffix: &str) -> AuthenticatedJournal {
-        let pool = context.storage_buffer_pool().clone();
         AuthenticatedJournal::new(
-            context,
-            mmr_config(suffix, pool.clone()),
-            journal_config(suffix, pool),
+            context.clone(),
+            mmr_config(suffix, &context),
+            journal_config(suffix, &context),
             |op: &Operation<Digest, Digest>| op.is_commit(),
         )
         .await
@@ -665,13 +664,13 @@ mod tests {
         let mmr = Mmr::init(
             context.with_label("mmr"),
             &mut hasher,
-            mmr_config(suffix, context.storage_buffer_pool().clone()),
+            mmr_config(suffix, &context),
         )
         .await
         .unwrap();
         let journal = ContiguousJournal::init(
             context.with_label("journal"),
-            journal_config(suffix, context.storage_buffer_pool().clone()),
+            journal_config(suffix, &context),
         )
         .await
         .unwrap();
@@ -821,7 +820,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_match"),
-                    journal_config("rewind_match", context.storage_buffer_pool().clone()),
+                    journal_config("rewind_match", &context),
                 )
                 .await
                 .unwrap();
@@ -852,7 +851,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_multiple"),
-                    journal_config("rewind_multiple", context.storage_buffer_pool().clone()),
+                    journal_config("rewind_multiple", &context),
                 )
                 .await
                 .unwrap();
@@ -886,7 +885,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_no_match"),
-                    journal_config("rewind_no_match", context.storage_buffer_pool().clone()),
+                    journal_config("rewind_no_match", &context),
                 )
                 .await
                 .unwrap();
@@ -906,7 +905,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_with_pruning"),
-                    journal_config("rewind_with_pruning", context.storage_buffer_pool().clone()),
+                    journal_config("rewind_with_pruning", &context),
                 )
                 .await
                 .unwrap();
@@ -946,10 +945,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_no_match_pruned"),
-                    journal_config(
-                        "rewind_no_match_pruned",
-                        context.storage_buffer_pool().clone(),
-                    ),
+                    journal_config("rewind_no_match_pruned", &context),
                 )
                 .await
                 .unwrap();
@@ -987,7 +983,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_empty"),
-                    journal_config("rewind_empty", context.storage_buffer_pool().clone()),
+                    journal_config("rewind_empty", &context),
                 )
                 .await
                 .unwrap();
@@ -1003,11 +999,10 @@ mod tests {
 
             // Test 7: Position based authenticated journal rewind.
             {
-                let pool = context.storage_buffer_pool().clone();
                 let mut journal = AuthenticatedJournal::new(
-                    context,
-                    mmr_config("rewind", pool.clone()),
-                    journal_config("rewind", pool),
+                    context.clone(),
+                    mmr_config("rewind", &context),
+                    journal_config("rewind", &context),
                     |op| op.is_commit(),
                 )
                 .await

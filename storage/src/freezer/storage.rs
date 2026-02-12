@@ -7,9 +7,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
-use commonware_runtime::{
-    buffer, Blob, Buf, BufMut, BufferPooler, Clock, Metrics, Storage,
-};
+use commonware_runtime::{buffer, Blob, Buf, BufMut, BufferPooler, Clock, Metrics, Storage};
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use prometheus_client::metrics::counter::Counter;
@@ -501,7 +499,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     ) -> Result<(bool, u64, u64, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader = buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
+        let mut reader =
+            buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;

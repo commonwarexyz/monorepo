@@ -395,7 +395,7 @@ mod test {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPool, BufferPooler, Metrics, Runner as _};
+    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::num::NonZeroU16;
@@ -406,7 +406,7 @@ mod test {
 
     fn db_config(
         suffix: &str,
-        pool: BufferPool,
+        pooler: &impl BufferPooler,
     ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
         Config {
             mmr_journal_partition: format!("journal_{suffix}"),
@@ -419,7 +419,7 @@ mod test {
             log_codec_config: ((0..=10000).into(), ()),
             log_items_per_section: NZU64!(7),
             thread_pool: None,
-            page_cache: CacheRef::new(pool, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -431,8 +431,7 @@ mod test {
 
     /// Return a [Keyless] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanDb {
-        let pool = context.storage_buffer_pool().clone();
-        CleanDb::init(context, db_config("partition", pool))
+        CleanDb::init(context.clone(), db_config("partition", &context))
             .await
             .unwrap()
     }

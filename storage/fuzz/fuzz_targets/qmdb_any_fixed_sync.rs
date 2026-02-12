@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Metrics, Runner, RwLock,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, RwLock,
 };
 use commonware_storage::{
     qmdb::{
@@ -91,7 +91,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pool: BufferPool) -> Config<TwoCap> {
+fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     Config {
         mmr_journal_partition: format!("{test_name}_mmr"),
         mmr_metadata_partition: format!("{test_name}_meta"),
@@ -102,7 +102,7 @@ fn test_config(test_name: &str, pool: BufferPool) -> Config<TwoCap> {
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::new(pool, PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 
@@ -119,7 +119,7 @@ async fn test_sync<
     test_name: &str,
     sync_id: usize,
 ) -> bool {
-    let db_config = test_config(test_name, context.storage_buffer_pool().clone());
+    let db_config = test_config(test_name, &context);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
@@ -152,13 +152,10 @@ fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = FixedDb::init(
-            context.clone(),
-            test_config(TEST_NAME, context.storage_buffer_pool().clone()),
-        )
-        .await
-        .expect("Failed to init source db")
-        .into_mutable();
+        let mut db = FixedDb::init(context.clone(), test_config(TEST_NAME, &context))
+            .await
+            .expect("Failed to init source db")
+            .into_mutable();
         let mut restarts = 0usize;
 
         let mut sync_id = 0;
@@ -249,7 +246,7 @@ fn fuzz(mut input: FuzzInput) {
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config(TEST_NAME, context.storage_buffer_pool().clone()),
+                        test_config(TEST_NAME, &context),
                     )
                     .await
                     .expect("Failed to init source db")

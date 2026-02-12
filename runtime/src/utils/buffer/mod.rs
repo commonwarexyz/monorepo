@@ -750,7 +750,8 @@ mod tests {
             let (final_blob, final_size) =
                 context.open("partition", b"read_at_writer").await.unwrap();
             assert_eq!(final_size, 30);
-            let mut final_reader = Read::from_pooler(&context, final_blob, final_size, NZUsize!(30));
+            let mut final_reader =
+                Read::from_pooler(&context, final_blob, final_size, NZUsize!(30));
             let mut full_content = vec![0u8; 30];
             final_reader
                 .read_exact(&mut full_content, 30)
