@@ -1,5 +1,5 @@
 use crate::algebra::{
-    msm_naive, Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space,
+    msm_naive, powers, Additive, CryptoGroup, Field, FieldNTT, Object, Random, Ring, Space,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
@@ -476,6 +476,13 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
 }
 
 impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
+    fn filtered_roots_of_unity_points(
+        total_u32: u32,
+        points: impl IntoIterator<Item = (I, u32)>,
+    ) -> Vec<(I, u32)> {
+        points.into_iter().filter(|(_, k)| *k < total_u32).collect()
+    }
+
     /// Create an interpolator for evaluation points at roots of unity.
     ///
     /// This uses the fast O(n log n) algorithm from [`crate::ntt::lagrange_coefficients`].
@@ -506,17 +513,16 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
         {
             let total_u32 = total.get();
             let points: Map<I, u32> =
-                Map::from_iter_dedup(points.into_iter().filter(|(_, k)| *k < total_u32));
+                Map::from_iter_dedup(Self::filtered_roots_of_unity_points(total_u32, points));
             let coeffs: Map<u32, F> = Map::from_iter_dedup(crate::ntt::lagrange_coefficients(
                 total,
                 points.values().iter().copied(),
             ));
             let weights = Map::from_iter_dedup(points.into_iter().map(|(i, k)| {
-                debug_assert!(
-                    coeffs.get_value(&k).is_some(),
-                    "coefficient missing for index {k}"
-                );
-                let coeff = coeffs.get_value(&k).cloned().unwrap_or_else(F::zero);
+                let coeff = coeffs
+                    .get_value(&k)
+                    .cloned()
+                    .expect("coefficient missing for index");
                 (i, coeff)
             }));
             Self { weights }
@@ -538,15 +544,9 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
         let lg_size = size.ilog2() as u8;
         let w = F::root_of_unity(lg_size).expect("domain too large for NTT");
 
-        let points: Vec<(I, u32)> = points.into_iter().filter(|(_, k)| *k < total_u32).collect();
+        let points = Self::filtered_roots_of_unity_points(total_u32, points);
         let max_k = points.iter().map(|(_, k)| *k).max().unwrap_or(0) as usize;
-
-        let mut powers = Vec::with_capacity(max_k + 1);
-        powers.push(F::one());
-        for _ in 0..max_k {
-            let next = powers.last().unwrap().clone() * &w;
-            powers.push(next);
-        }
+        let powers: Vec<_> = powers(&w, max_k + 1).collect();
 
         let eval_points = points
             .into_iter()
