@@ -1,7 +1,7 @@
 //! Benchmark sequential append performance.
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::time::Instant;
@@ -15,11 +15,7 @@ pub fn bench(c: &mut Criterion) {
 
                 let executor = deterministic::Runner::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::new(
-                        ctx.storage_buffer_pool().clone(),
-                        PAGE_SIZE,
-                        NZUsize!(CACHE_SIZE),
-                    );
+                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     let append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();

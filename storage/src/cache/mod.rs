@@ -40,7 +40,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
 //! use commonware_storage::cache::{Cache, Config};
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //!
@@ -54,7 +54,7 @@
 //!         items_per_blob: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
-//!         page_cache: CacheRef::new(context.storage_buffer_pool().clone(), NZU16!(1024), NZUsize!(10)),
+//!         page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
 //!     };
 //!     let mut cache = Cache::init(context, cfg).await.unwrap();
 //!
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
-    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner};
+    use commonware_runtime::{deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
     use std::{collections::BTreeMap, num::NonZeroU16};
@@ -151,11 +151,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.with_label("first"), cfg.clone())
                 .await
@@ -178,11 +174,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Cache::<_, i32>::init(context.with_label("second"), cfg.clone()).await;
             assert!(matches!(
@@ -205,11 +197,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(1), // no mask - each item is its own section
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -271,11 +259,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.with_label("init1"), cfg.clone())
                 .await
@@ -319,11 +303,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::<_, [u8; 1024]>::init(context.with_label("init2"), cfg.clone())
                 .await
@@ -395,11 +375,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -453,11 +429,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -536,11 +508,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Insert data and sync
@@ -589,11 +557,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for easier testing
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -645,11 +609,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for testing
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -707,11 +667,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await
@@ -764,11 +720,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.clone(), cfg.clone())
                 .await

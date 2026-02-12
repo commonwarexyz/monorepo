@@ -2,7 +2,7 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, BufferPool, Error, IoBuf, IoBufMut, RwLock};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, RwLock};
 use futures::{future::Shared, FutureExt};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -113,6 +113,16 @@ impl CacheRef {
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             pool,
         }
+    }
+
+    /// Create a shared page-cache handle, extracting the storage [BufferPool] from a
+    /// [BufferPooler].
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        page_size: NonZeroU16,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        Self::new(pooler.storage_buffer_pool().clone(), page_size, capacity)
     }
 
     /// The page size used by this page cache.
@@ -459,8 +469,8 @@ impl Cache {
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, BufferPooler,
-        Runner as _, Storage as _,
+        buffer::paged::CHECKSUM_SIZE, deterministic, BufferPool, BufferPoolConfig, Runner as _,
+        Storage as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -547,11 +557,7 @@ mod tests {
             }
 
             // Fill the page cache with the blob's data via CacheRef::read.
-            let cache_ref = CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                NZUsize!(10),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
             assert_eq!(cache_ref.next_id().await, 0);
             assert_eq!(cache_ref.next_id().await, 1);
             for i in 0..11 {
@@ -584,11 +590,7 @@ mod tests {
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                PAGE_SIZE,
-                NZUsize!(2),
-            );
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
@@ -617,11 +619,8 @@ mod tests {
         executor.start(|context| async move {
             // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
-            let cache_ref = CacheRef::new(
-                context.storage_buffer_pool().clone(),
-                NZU16!(MIN_PAGE_SIZE as u16),
-                NZUsize!(2),
-            );
+            let cache_ref =
+                CacheRef::from_pooler(&context, NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
             // only).

@@ -37,8 +37,8 @@ pub fn create_config<E: BufferPooler>(context: &E) -> Config<Translator, ()> {
         log_write_buffer: NZUsize!(1024),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        page_cache: commonware_runtime::buffer::paged::CacheRef::new(
-            context.storage_buffer_pool().clone(),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            context,
             NZU16!(1024),
             NZUsize!(10),
         ),

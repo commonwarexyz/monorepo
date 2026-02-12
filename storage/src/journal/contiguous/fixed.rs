@@ -1802,11 +1802,7 @@ mod tests {
             let cfg = Config {
                 partition: "single_item_per_blob".into(),
                 items_per_blob: NZU64!(1),
-                page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),
             };
 

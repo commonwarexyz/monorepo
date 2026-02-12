@@ -918,8 +918,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),
@@ -1458,8 +1458,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),
@@ -1743,8 +1743,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),
@@ -2476,8 +2476,8 @@ mod tests {
             let cfg = Config {
                 index_partition: "test_index".to_string(),
                 value_partition: "test_values".to_string(),
-                index_page_cache: CacheRef::new(
-                    context.storage_buffer_pool().clone(),
+                index_page_cache: CacheRef::from_pooler(
+                    &context,
                     NZU16!(TestEntry::SIZE as u16),
                     NZUsize!(8),
                 ),

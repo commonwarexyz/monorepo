@@ -40,11 +40,7 @@ pub fn create_config<E: BufferPooler>(context: &E) -> Config<Translator> {
         log_write_buffer: NZUsize!(1024),
         translator: Translator::default(),
         thread_pool: None,
-        page_cache: buffer::paged::CacheRef::new(
-            context.storage_buffer_pool().clone(),
-            NZU16!(1024),
-            NZUsize!(10),
-        ),
+        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
     }
 }
 

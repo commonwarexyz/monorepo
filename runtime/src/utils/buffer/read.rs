@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 ///
 /// ```
 /// use commonware_utils::NZUsize;
-/// use commonware_runtime::{Runner, buffer::Read, Blob, BufferPooler, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::Read, Blob, Error, Storage, deterministic, BufferPooler};
 ///
 /// let executor = deterministic::Runner::default();
 /// executor.start(|context| async move {
