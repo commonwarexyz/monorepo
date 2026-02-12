@@ -23,7 +23,7 @@ mod tests;
 //
 // TODO(<https://github.com/commonwarexyz/monorepo/issues/3084>): Relax locking to allow `append`
 // since it doesn't invalidate reads within the cached bounds.
-pub trait ContiguousReader: Send + Sync {
+pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
@@ -62,7 +62,7 @@ pub trait Contiguous: Send + Sync {
     /// internal write lock (such as `append`, `prune`, and `rewind`) may block
     /// until the guard is dropped. This ensures any position within
     /// `reader.bounds()` remains readable.
-    fn reader(&self) -> impl Future<Output = impl ContiguousReader<Item = Self::Item> + '_> + Send;
+    fn reader(&self) -> impl Future<Output = impl Reader<Item = Self::Item> + '_> + Send;
 
     /// Return the total number of items that have been appended to the journal.
     ///
@@ -72,7 +72,7 @@ pub trait Contiguous: Send + Sync {
 }
 
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.
-pub trait MutableContiguous: Contiguous + Send + Sync {
+pub trait Mutable: Contiguous + Send + Sync {
     /// Append a new item to the journal, returning its position.
     ///
     /// Positions are consecutively increasing starting from 0. The position of each item

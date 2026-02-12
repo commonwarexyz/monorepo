@@ -8,7 +8,7 @@ use crate::{
     journal::{
         contiguous::{
             fixed::{Config as JConfig, Journal},
-            ContiguousReader,
+            Reader,
         },
         Error as JError,
     },

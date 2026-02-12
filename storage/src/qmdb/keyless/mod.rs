@@ -6,7 +6,7 @@ use crate::{
         authenticated,
         contiguous::{
             variable::{Config as JournalConfig, Journal as ContiguousJournal},
-            Contiguous, ContiguousReader,
+            Contiguous, Reader,
         },
     },
     mmr::{journaled::Config as MmrConfig, Location, Proof},

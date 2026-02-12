@@ -2,7 +2,7 @@
 
 use super::{fixed, variable};
 use crate::{
-    journal::contiguous::{Contiguous, ContiguousReader},
+    journal::contiguous::{Contiguous, Reader},
     mmr::Location,
     qmdb::{
         any::{

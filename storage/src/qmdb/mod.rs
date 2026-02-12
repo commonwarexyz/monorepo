@@ -52,7 +52,7 @@
 
 use crate::{
     index::{Cursor, Unordered as Index},
-    journal::contiguous::{ContiguousReader, MutableContiguous},
+    journal::contiguous::{Mutable, Reader},
     mmr::{mem::State as MerkleizationState, Location},
     qmdb::{operation::Operation, store::State as DurabilityState},
 };
@@ -145,7 +145,7 @@ pub(super) async fn build_snapshot_from_log<C, I, F>(
     mut callback: F,
 ) -> Result<usize, Error>
 where
-    C: ContiguousReader<Item: Operation>,
+    C: Reader<Item: Operation>,
     I: Index<Value = Location>,
     F: FnMut(bool, Option<Location>),
 {
@@ -190,7 +190,7 @@ async fn delete_key<I, R>(
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    R: ContiguousReader,
+    R: Reader,
     R::Item: Operation,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
@@ -216,7 +216,7 @@ async fn update_key<I, R>(
 ) -> Result<Option<Location>, Error>
 where
     I: Index<Value = Location>,
-    R: ContiguousReader,
+    R: Reader,
     R::Item: Operation,
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
@@ -250,7 +250,7 @@ async fn find_update_op<R>(
     key: &<R::Item as Operation>::Key,
 ) -> Result<Option<Location>, Error>
 where
-    R: ContiguousReader,
+    R: Reader,
     R::Item: Operation,
 {
     while let Some(&loc) = cursor.next() {
@@ -300,8 +300,7 @@ fn delete_known_loc<I: Index<Value = Location>>(snapshot: &mut I, key: &[u8], ol
 }
 
 /// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: MutableContiguous<Item: Operation>>
-{
+pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: Mutable<Item: Operation>> {
     pub snapshot: &'a mut I,
     pub log: &'a mut C,
 }
@@ -309,7 +308,7 @@ pub(crate) struct FloorHelper<'a, I: Index<Value = Location>, C: MutableContiguo
 impl<I, C> FloorHelper<'_, I, C>
 where
     I: Index<Value = Location>,
-    C: MutableContiguous<Item: Operation>,
+    C: Mutable<Item: Operation>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the

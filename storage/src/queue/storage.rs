@@ -2,7 +2,7 @@
 
 use super::{metrics, Error};
 use crate::{
-    journal::contiguous::{variable, ContiguousReader as _},
+    journal::contiguous::{variable, Reader as _},
     rmap::RMap,
     Persistable,
 };
@@ -124,14 +124,14 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 
         // On restart, ack_floor is the pruning boundary (items below are deleted).
         // acked_above is empty (in-memory state lost on restart).
-        let bounds = journal.reader().await.bounds();
-        let ack_floor = bounds.start;
+        let ack_floor = journal.reader().await.bounds().start;
+        let size = journal.size().await;
         let acked_above = RMap::new();
 
-        debug!(ack_floor, size = bounds.end, "queue initialized");
+        debug!(ack_floor, size, "queue initialized");
 
         // Set initial metric values
-        metrics.tip.set(bounds.end as i64);
+        metrics.tip.set(size as i64);
         metrics.floor.set(ack_floor as i64);
         metrics.next.set(ack_floor as i64);
 
@@ -207,7 +207,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
         let pos = self.read_pos;
         self.read_pos += 1;
         self.metrics.next.set(self.read_pos as i64);
-        debug!(pos, "dequeued item");
+        debug!(position = pos, "dequeued item");
         Ok(Some((pos, item)))
     }
 

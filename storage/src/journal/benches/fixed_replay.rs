@@ -4,7 +4,7 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
     Runner as _,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, ContiguousReader as _};
+use commonware_storage::journal::contiguous::{fixed::Journal, Reader as _};
 use commonware_utils::{sequence::FixedBytes, NZUsize};
 use criterion::{criterion_group, Criterion};
 use futures::{pin_mut, StreamExt};

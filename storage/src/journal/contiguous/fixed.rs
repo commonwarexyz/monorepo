@@ -53,10 +53,11 @@
 //!
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
-use super::ContiguousReader;
+#[cfg(test)]
+use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::MutableContiguous,
+        contiguous::Mutable,
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
@@ -189,7 +190,7 @@ pub struct Reader<'a, E: Clock + Storage + Metrics, A: CodecFixedShared> {
     items_per_blob: u64,
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> ContiguousReader for Reader<'_, E, A> {
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     type Item = A;
 
     fn bounds(&self) -> std::ops::Range<u64> {
@@ -313,7 +314,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
         let mut journal =
             SegmentedJournal::init(context.with_label("blobs"), segmented_cfg).await?;
-
         // Initialize metadata store
         let meta_cfg = MetadataConfig {
             partition: format!("{}-metadata", cfg.partition),
@@ -831,7 +831,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
-    async fn reader(&self) -> impl ContiguousReader<Item = A> + '_ {
+    async fn reader(&self) -> impl super::Reader<Item = A> + '_ {
         Self::reader(self).await
     }
 
@@ -840,7 +840,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Jo
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> MutableContiguous for Journal<E, A> {
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }

@@ -1,24 +1,21 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, ContiguousReader as _};
+use super::{Contiguous, Reader as _};
 use crate::{
-    journal::{contiguous::MutableContiguous, Error},
+    journal::{contiguous::Mutable, Error},
     Persistable,
 };
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Helper trait for tests combining [MutableContiguous] and [Persistable].
+/// Helper trait for tests combining [Mutable] and [Persistable].
 pub(super) trait PersistableContiguous<I>:
-    MutableContiguous<Item = I> + Persistable<Error = Error>
+    Mutable<Item = I> + Persistable<Error = Error>
 {
 }
 
-impl<I, T: MutableContiguous<Item = I> + Persistable<Error = Error>> PersistableContiguous<I>
-    for T
-{
-}
+impl<I, T: Mutable<Item = I> + Persistable<Error = Error>> PersistableContiguous<I> for T {}
 
 async fn get_bounds<J: Contiguous>(journal: &J) -> std::ops::Range<u64> {
     let reader = journal.reader().await;
@@ -324,8 +321,8 @@ where
 {
     let mut journal = factory("through_trait".to_string()).await.unwrap();
 
-    let pos1 = MutableContiguous::append(&mut journal, 42).await.unwrap();
-    let pos2 = MutableContiguous::append(&mut journal, 100).await.unwrap();
+    let pos1 = Mutable::append(&mut journal, 42).await.unwrap();
+    let pos2 = Mutable::append(&mut journal, 100).await.unwrap();
 
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);

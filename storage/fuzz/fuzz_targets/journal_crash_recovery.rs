@@ -7,7 +7,7 @@ use commonware_runtime::{deterministic, Metrics as _, Runner};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
-    ContiguousReader,
+    Reader,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;

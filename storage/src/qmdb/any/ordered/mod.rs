@@ -1,6 +1,6 @@
 use crate::{
     index::Ordered as Index,
-    journal::contiguous::{Contiguous, ContiguousReader, MutableContiguous},
+    journal::contiguous::{Contiguous, Mutable, Reader},
     kv::{self, Batchable},
     mmr::Location,
     qmdb::{
@@ -56,7 +56,7 @@ where
     V::Value: Send + Sync,
 {
     async fn get_update_op(
-        reader: &impl ContiguousReader<Item = Operation<K, V>>,
+        reader: &impl Reader<Item = Operation<K, V>>,
         loc: Location,
     ) -> Result<Update<K, V>, Error> {
         match reader.read(*loc).await? {
@@ -233,7 +233,7 @@ impl<
         E: Storage + Clock + Metrics,
         K: Array,
         V: ValueEncoding,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
     > Db<E, C, I, H, Update<K, V>, Unmerkleized, NonDurable>
@@ -534,7 +534,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: MutableContiguous<Item = Operation<K, V>>,
+    C: Mutable<Item = Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -555,7 +555,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -575,7 +575,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -602,7 +602,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -621,7 +621,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: MutableContiguous<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,

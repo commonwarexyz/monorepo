@@ -77,7 +77,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::contiguous::{
         variable::{Config as JournalConfig, Journal},
-        ContiguousReader, MutableContiguous as _,
+        Mutable as _, Reader,
     },
     kv::Batchable,
     mmr::Location,

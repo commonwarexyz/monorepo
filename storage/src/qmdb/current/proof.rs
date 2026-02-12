@@ -6,7 +6,7 @@
 
 use crate::{
     bitmap::{partial_chunk_root, MerkleizedBitMap},
-    journal::contiguous::{Contiguous, ContiguousReader as _},
+    journal::contiguous::{Contiguous, Reader as _},
     mmr::{
         grafting::{Storage as GraftingStorage, Verifier},
         hasher::Hasher,

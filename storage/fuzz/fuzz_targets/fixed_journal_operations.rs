@@ -5,7 +5,7 @@ use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as JournalConfig, Journal},
-    ContiguousReader,
+    Reader,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};

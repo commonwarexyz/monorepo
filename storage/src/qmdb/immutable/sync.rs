@@ -2,7 +2,7 @@ use crate::{
     index::unordered::Index,
     journal::{
         authenticated,
-        contiguous::{variable, ContiguousReader as _},
+        contiguous::{variable, Reader as _},
     },
     mmr::{
         journaled::{Config as MmrConfig, Mmr},
@@ -297,8 +297,9 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(got_db.bounds().await.end, target_op_count);
-            assert_eq!(got_db.bounds().await.start, target_oldest_retained_loc);
+            let bounds = got_db.bounds().await;
+            assert_eq!(bounds.end, target_op_count);
+            assert_eq!(bounds.start, target_oldest_retained_loc);
 
             // Verify the root digest matches the target
             assert_eq!(got_db.root(), target_root);
@@ -378,8 +379,9 @@ mod tests {
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify database state
-            assert_eq!(got_db.bounds().await.end, target_op_count);
-            assert_eq!(got_db.bounds().await.start, target_oldest_retained_loc);
+            let bounds = got_db.bounds().await;
+            assert_eq!(bounds.end, target_op_count);
+            assert_eq!(bounds.start, target_oldest_retained_loc);
             assert_eq!(got_db.root(), target_root);
             assert_eq!(got_db.get_metadata().await.unwrap(), Some(Sha256::fill(1)));
 
@@ -448,11 +450,9 @@ mod tests {
 
             // Verify state is preserved
             assert_eq!(reopened_db.root(), expected_root);
-            assert_eq!(reopened_db.bounds().await.end, expected_op_count);
-            assert_eq!(
-                reopened_db.bounds().await.start,
-                expected_oldest_retained_loc
-            );
+            let bounds = reopened_db.bounds().await;
+            assert_eq!(bounds.end, expected_op_count);
+            assert_eq!(bounds.start, expected_oldest_retained_loc);
 
             // Verify data integrity
             for op in &target_ops {
@@ -992,8 +992,9 @@ mod tests {
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), final_root);
-            assert_eq!(synced_db.bounds().await.end, final_upper_bound);
-            assert_eq!(synced_db.bounds().await.start, final_lower_bound);
+            let bounds = synced_db.bounds().await;
+            assert_eq!(bounds.end, final_upper_bound);
+            assert_eq!(bounds.start, final_lower_bound);
 
             synced_db.destroy().await.unwrap();
             let target_db = Arc::try_unwrap(target_db).map_or_else(
@@ -1112,8 +1113,9 @@ mod tests {
 
             // Verify the synced database has the expected state
             assert_eq!(synced_db.root(), root);
-            assert_eq!(synced_db.bounds().await.end, upper_bound);
-            assert_eq!(synced_db.bounds().await.start, lower_bound);
+            let bounds = synced_db.bounds().await;
+            assert_eq!(bounds.end, upper_bound);
+            assert_eq!(bounds.start, lower_bound);
 
             synced_db.destroy().await.unwrap();
             Arc::try_unwrap(target_db)

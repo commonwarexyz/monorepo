@@ -5,7 +5,7 @@
 
 use crate::{
     index::Ordered as OrderedIndex,
-    journal::contiguous::{Contiguous, ContiguousReader, MutableContiguous},
+    journal::contiguous::{Contiguous, Mutable, Reader},
     kv::{self, Batchable},
     mmr::{grafting::Storage as GraftingStorage, Location},
     qmdb::{
@@ -145,7 +145,7 @@ where
 // Functionality for any Merkleized state (both Durable and NonDurable).
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
@@ -234,7 +234,7 @@ where
 // Functionality for the Mutable state.
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
@@ -296,7 +296,7 @@ impl<E, C, K, V, I, H, const N: usize> Batchable
     for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = Operation<K, V>>,
+    C: Mutable<Item = Operation<K, V>>,
     K: Array,
     V: ValueEncoding,
     I: OrderedIndex<Value = Location> + 'static,

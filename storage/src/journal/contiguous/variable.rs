@@ -3,9 +3,10 @@
 //! This journal enforces section fullness: all non-final sections are full and synced.
 //! On init, only the last section needs to be replayed to determine the exact size.
 
+use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::{fixed, Contiguous, ContiguousReader, MutableContiguous},
+        contiguous::{fixed, Contiguous, Mutable},
         segmented::variable,
         Error,
     },
@@ -129,7 +130,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Inner<E, V> {
         &self,
         position: u64,
         items_per_section: u64,
-        offsets: &impl ContiguousReader<Item = u64>,
+        offsets: &impl super::Reader<Item = u64>,
     ) -> Result<V, Error> {
         if position >= self.size {
             return Err(Error::ItemOutOfRange(position));
@@ -209,7 +210,7 @@ pub struct Reader<'a, E: Clock + Storage + Metrics, V: Codec> {
     items_per_section: u64,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> super::ContiguousReader for Reader<'_, E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> super::Reader for Reader<'_, E, V> {
     type Item = V;
 
     fn bounds(&self) -> std::ops::Range<u64> {
@@ -227,8 +228,6 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> super::ContiguousReader for R
         buffer_size: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let items_per_section = self.items_per_section;
-
         // Validate bounds.
         if start_pos < self.guard.pruning_boundary {
             return Err(Error::ItemPruned(start_pos));
@@ -241,7 +240,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> super::ContiguousReader for R
         // use a section beyond existing data so data.replay returns empty naturally.
         let (start_section, start_offset) = if start_pos < self.guard.size {
             let offset = self.offsets.read(start_pos).await?;
-            let section = position_to_section(start_pos, items_per_section);
+            let section = position_to_section(start_pos, self.items_per_section);
             (section, offset)
         } else {
             (u64::MAX, 0)
@@ -892,7 +891,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
-    async fn reader(&self) -> impl ContiguousReader<Item = V> + '_ {
+    async fn reader(&self) -> impl super::Reader<Item = V> + '_ {
         Self::reader(self).await
     }
 
@@ -901,7 +900,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> 
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> MutableContiguous for Journal<E, V> {
+impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
     async fn append(&mut self, item: Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }

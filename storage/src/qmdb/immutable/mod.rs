@@ -7,7 +7,7 @@ use crate::{
         authenticated,
         contiguous::{
             variable::{self, Config as JournalConfig},
-            Contiguous as _, ContiguousReader,
+            Contiguous as _, Reader,
         },
     },
     kv,
@@ -150,7 +150,7 @@ impl<
     /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
     /// otherwise assumed valid.
     async fn get_from_loc(
-        reader: &impl ContiguousReader<Item = Operation<K, V>>,
+        reader: &impl Reader<Item = Operation<K, V>>,
         key: &K,
         loc: Location,
     ) -> Result<Option<V>, Error> {

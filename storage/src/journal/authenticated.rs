@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, ContiguousReader, MutableContiguous},
+        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     mmr::{
@@ -85,7 +85,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: EncodeShared>,
+    C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
     /// Create a new [Journal] from the given components after aligning the MMR with the journal.
@@ -330,7 +330,7 @@ where
 impl<E, C, H> Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: EncodeShared>,
+    C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
     pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
@@ -458,7 +458,7 @@ where
 {
     type Item = C::Item;
 
-    async fn reader(&self) -> impl ContiguousReader<Item = C::Item> + '_ {
+    async fn reader(&self) -> impl Reader<Item = C::Item> + '_ {
         self.journal.reader().await
     }
 
@@ -467,10 +467,10 @@ where
     }
 }
 
-impl<E, C, H> MutableContiguous for Journal<E, C, H, Dirty>
+impl<E, C, H> Mutable for Journal<E, C, H, Dirty>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item: EncodeShared>,
+    C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
     async fn append(&mut self, item: Self::Item) -> Result<u64, JournalError> {
