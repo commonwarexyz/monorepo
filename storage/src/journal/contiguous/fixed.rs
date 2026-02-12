@@ -623,7 +623,9 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
         match metadata_update {
             Some(value) => inner.metadata.put(PRUNING_BOUNDARY_KEY, value),
-            None => inner.metadata.remove(&PRUNING_BOUNDARY_KEY),
+            None => {
+                inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+            }
         }
         inner.metadata.sync().await?;
 
