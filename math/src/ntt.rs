@@ -1248,7 +1248,7 @@ pub fn lagrange_coefficients<F: FieldNTT>(
     let n_f = F::one().scale(&[size]);
     if num_present == size {
         let n_inv = n_f.inv();
-        return (0..size as u32).map(|i| (i, n_inv.clone())).collect();
+        return (0..size).map(|i| (i as u32, n_inv.clone())).collect();
     }
 
     // Build P_Sbar (vanishes at indices NOT in present) and evaluate at all
@@ -1263,10 +1263,10 @@ pub fn lagrange_coefficients<F: FieldNTT>(
     let factor = (n_f * &p_sbar_at_zero).inv();
 
     let mut out = Vec::with_capacity(num_present as usize);
-    for j in 0..size as u32 {
-        if present.get(u64::from(j)) {
+    for j in 0..size {
+        if present.get(j) {
             let coeff = factor.clone() * &complement_evals.evaluations[j as usize];
-            out.push((j, coeff));
+            out.push((j as u32, coeff));
         }
     }
     out
