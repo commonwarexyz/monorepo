@@ -377,8 +377,6 @@ where
         let new_grafted_leaves = status.complete_chunks();
 
         // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
-        // Dirty chunks are always at or above the pruning boundary because their sources
-        // (last_commit_loc, floor-raising old/new locations) are all above the inactivity floor.
         let chunks_to_update = (old_grafted_leaves..new_grafted_leaves).chain(
             state
                 .dirty_chunks
