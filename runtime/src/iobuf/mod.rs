@@ -746,15 +746,6 @@ impl IoBufs {
         };
     }
 
-    fn first_chunk_mut(&mut self) -> Option<&mut IoBuf> {
-        match &mut self.inner {
-            IoBufsInner::Single(buf) => Some(buf),
-            IoBufsInner::Pair(pair) => Some(&mut pair[0]),
-            IoBufsInner::Triple(triple) => Some(&mut triple[0]),
-            IoBufsInner::Chunked(bufs) => bufs.front_mut(),
-        }
-    }
-
     /// Returns a reference to the single contiguous buffer, if present.
     ///
     /// Returns `Some` only when all remaining data is in one contiguous buffer.
@@ -1067,26 +1058,21 @@ impl Buf for IoBufs {
         }
     }
 
-    fn advance(&mut self, mut cnt: usize) {
-        match &mut self.inner {
-            IoBufsInner::Single(buf) => return buf.advance(cnt),
-            IoBufsInner::Pair(_) | IoBufsInner::Triple(_) | IoBufsInner::Chunked(_) => {}
-        }
+    fn advance(&mut self, cnt: usize) {
+        let should_canonicalize = match &mut self.inner {
+            IoBufsInner::Single(buf) => {
+                buf.advance(cnt);
+                false
+            }
+            IoBufsInner::Pair(pair) => advance_small_chunks(pair.as_mut_slice(), cnt),
+            IoBufsInner::Triple(triple) => advance_small_chunks(triple.as_mut_slice(), cnt),
+            IoBufsInner::Chunked(bufs) => {
+                advance_chunked_front(bufs, cnt);
+                bufs.len() <= 3
+            }
+        };
 
-        while cnt > 0 {
-            let front = self
-                .first_chunk_mut()
-                .expect("cannot advance past end of buffer");
-            let avail = front.remaining();
-            if avail == 0 {
-                panic!("cannot advance past end of buffer");
-            }
-            if cnt < avail {
-                front.advance(cnt);
-                return;
-            }
-            front.advance(avail);
-            cnt -= avail;
+        if should_canonicalize {
             self.canonicalize();
         }
     }
@@ -1263,15 +1249,6 @@ impl IoBufsMut {
         };
     }
 
-    fn first_chunk_mut(&mut self) -> Option<&mut IoBufMut> {
-        match &mut self.inner {
-            IoBufsMutInner::Single(buf) => Some(buf),
-            IoBufsMutInner::Pair(pair) => Some(&mut pair[0]),
-            IoBufsMutInner::Triple(triple) => Some(&mut triple[0]),
-            IoBufsMutInner::Chunked(bufs) => bufs.front_mut(),
-        }
-    }
-
     #[inline]
     fn for_each_chunk_mut(&mut self, mut f: impl FnMut(&mut IoBufMut)) {
         match &mut self.inner {
@@ -1294,27 +1271,9 @@ impl IoBufsMut {
         }
     }
 
-    /// Advance writable cursors across `chunks` by up to `*remaining` bytes.
-    ///
-    /// Returns `true` when the full request has been satisfied.
-    #[inline]
-    unsafe fn advance_mut_in_chunks(chunks: &mut [IoBufMut], remaining: &mut usize) -> bool {
-        for buf in chunks.iter_mut() {
-            let avail = buf.remaining_mut();
-            if *remaining <= avail {
-                buf.advance_mut(*remaining);
-                *remaining = 0;
-                return true;
-            }
-            buf.advance_mut(avail);
-            *remaining -= avail;
-        }
-        false
-    }
-
     /// Returns a reference to the single contiguous buffer, if present.
     ///
-    /// Returns `Some` only when all remaining data is in one contiguous buffer.
+    /// Returns `Some` only when this is currently represented as one chunk.
     pub const fn as_single(&self) -> Option<&IoBufMut> {
         match &self.inner {
             IoBufsMutInner::Single(buf) => Some(buf),
@@ -1324,7 +1283,7 @@ impl IoBufsMut {
 
     /// Returns a mutable reference to the single contiguous buffer, if present.
     ///
-    /// Returns `Some` only when all remaining data is in one contiguous buffer.
+    /// Returns `Some` only when this is currently represented as one chunk.
     pub const fn as_single_mut(&mut self) -> Option<&mut IoBufMut> {
         match &mut self.inner {
             IoBufsMutInner::Single(buf) => Some(buf),
@@ -1688,32 +1647,21 @@ impl Buf for IoBufsMut {
         }
     }
 
-    fn advance(&mut self, mut cnt: usize) {
-        match &mut self.inner {
-            IoBufsMutInner::Single(buf) => return buf.advance(cnt),
-            IoBufsMutInner::Pair(_) | IoBufsMutInner::Triple(_) | IoBufsMutInner::Chunked(_) => {}
-        }
+    fn advance(&mut self, cnt: usize) {
+        let should_canonicalize = match &mut self.inner {
+            IoBufsMutInner::Single(buf) => {
+                buf.advance(cnt);
+                false
+            }
+            IoBufsMutInner::Pair(pair) => advance_small_chunks(pair.as_mut_slice(), cnt),
+            IoBufsMutInner::Triple(triple) => advance_small_chunks(triple.as_mut_slice(), cnt),
+            IoBufsMutInner::Chunked(bufs) => {
+                advance_chunked_front(bufs, cnt);
+                bufs.len() <= 3
+            }
+        };
 
-        while cnt > 0 {
-            let front = self
-                .first_chunk_mut()
-                .expect("cannot advance past end of buffer");
-            let avail = front.remaining();
-            if avail == 0 {
-                // Leading writable-but-empty chunks can appear after construction
-                // from capacity-only buffers. Drop empty readable chunks and retry.
-                self.canonicalize();
-                if self.remaining() == 0 {
-                    panic!("cannot advance past end of buffer");
-                }
-                continue;
-            }
-            if cnt < avail {
-                front.advance(cnt);
-                return;
-            }
-            front.advance(avail);
-            cnt -= avail;
+        if should_canonicalize {
             self.canonicalize();
         }
     }
@@ -1758,14 +1706,14 @@ unsafe impl BufMut for IoBufsMut {
             IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
             IoBufsMutInner::Pair(pair) => {
                 let mut remaining = cnt;
-                if Self::advance_mut_in_chunks(pair, &mut remaining) {
+                if advance_mut_in_chunks(pair, &mut remaining) {
                     return;
                 }
                 panic!("cannot advance past end of buffer");
             }
             IoBufsMutInner::Triple(triple) => {
                 let mut remaining = cnt;
-                if Self::advance_mut_in_chunks(triple, &mut remaining) {
+                if advance_mut_in_chunks(triple, &mut remaining) {
                     return;
                 }
                 panic!("cannot advance past end of buffer");
@@ -1773,8 +1721,8 @@ unsafe impl BufMut for IoBufsMut {
             IoBufsMutInner::Chunked(bufs) => {
                 let mut remaining = cnt;
                 let (first, second) = bufs.as_mut_slices();
-                if Self::advance_mut_in_chunks(first, &mut remaining)
-                    || Self::advance_mut_in_chunks(second, &mut remaining)
+                if advance_mut_in_chunks(first, &mut remaining)
+                    || advance_mut_in_chunks(second, &mut remaining)
                 {
                     return;
                 }
@@ -1855,6 +1803,83 @@ impl<const N: usize> From<[u8; N]> for IoBufsMut {
             inner: IoBufsMutInner::Single(IoBufMut::from(array)),
         }
     }
+}
+
+/// Advance across a `VecDeque` of chunks by consuming from the front.
+#[inline]
+fn advance_chunked_front<B: Buf>(bufs: &mut VecDeque<B>, mut cnt: usize) {
+    while cnt > 0 {
+        let front = bufs.front_mut().expect("cannot advance past end of buffer");
+        let avail = front.remaining();
+        if avail == 0 {
+            bufs.pop_front();
+            continue;
+        }
+        if cnt < avail {
+            front.advance(cnt);
+            break;
+        }
+        front.advance(avail);
+        bufs.pop_front();
+        cnt -= avail;
+    }
+}
+
+/// Advance across a small fixed set of chunks (`Pair`/`Triple`).
+///
+/// Returns `true` when one or more chunks became (or were) empty, so callers
+/// can canonicalize once after the operation.
+#[inline]
+fn advance_small_chunks<B: Buf>(chunks: &mut [B], mut cnt: usize) -> bool {
+    let mut idx = 0;
+    let mut needs_canonicalize = false;
+
+    while cnt > 0 {
+        let chunk = chunks
+            .get_mut(idx)
+            .expect("cannot advance past end of buffer");
+        let avail = chunk.remaining();
+        if avail == 0 {
+            idx += 1;
+            needs_canonicalize = true;
+            continue;
+        }
+        if cnt < avail {
+            chunk.advance(cnt);
+            return needs_canonicalize;
+        }
+        chunk.advance(avail);
+        cnt -= avail;
+        idx += 1;
+        needs_canonicalize = true;
+    }
+
+    needs_canonicalize
+}
+
+/// Advance writable cursors across `chunks` by up to `*remaining` bytes.
+///
+/// Returns `true` when the full request has been satisfied.
+///
+/// # Safety
+///
+/// Forwards to [`BufMut::advance_mut`], so callers must ensure the advanced
+/// region has been initialized according to `BufMut`'s contract.
+#[inline]
+unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usize) -> bool {
+    for buf in chunks.iter_mut() {
+        let avail = buf.remaining_mut();
+        if *remaining <= avail {
+            // SAFETY: Upheld by this function's safety contract.
+            unsafe { buf.advance_mut(*remaining) };
+            *remaining = 0;
+            return true;
+        }
+        // SAFETY: Upheld by this function's safety contract.
+        unsafe { buf.advance_mut(avail) };
+        *remaining -= avail;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2224,6 +2249,24 @@ mod tests {
 
         let rest = bufs.copy_to_bytes(2);
         assert_eq!(&rest[..], b"lo");
+    }
+
+    #[test]
+    fn test_iobufs_copy_to_bytes_pair_and_triple() {
+        let mut pair = IoBufs::from(IoBuf::from(b"ab"));
+        pair.append(IoBuf::from(b"cd"));
+        let first = pair.copy_to_bytes(3);
+        assert_eq!(&first[..], b"abc");
+        assert!(pair.is_single());
+        assert_eq!(pair.chunk(), b"d");
+
+        let mut triple = IoBufs::from(IoBuf::from(b"ab"));
+        triple.append(IoBuf::from(b"cd"));
+        triple.append(IoBuf::from(b"ef"));
+        let first = triple.copy_to_bytes(5);
+        assert_eq!(&first[..], b"abcde");
+        assert!(triple.is_single());
+        assert_eq!(triple.chunk(), b"f");
     }
 
     #[test]
@@ -2656,6 +2699,15 @@ mod tests {
         // Advance exactly to end
         bufs.advance(3);
         assert_eq!(bufs.remaining(), 0);
+    }
+
+    #[test]
+    fn test_iobufs_advance_canonicalizes_pair_to_single() {
+        let mut bufs = IoBufs::from(IoBuf::from(b"ab"));
+        bufs.append(IoBuf::from(b"cd"));
+        bufs.advance(2);
+        assert!(bufs.is_single());
+        assert_eq!(bufs.chunk(), b"cd");
     }
 
     #[test]
