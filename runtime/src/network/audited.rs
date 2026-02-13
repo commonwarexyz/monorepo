@@ -10,8 +10,8 @@ pub struct Sink<S: crate::Sink> {
 }
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = buf.into().coalesce();
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let buf = bufs.into().coalesce();
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
             hasher.update(buf.as_ref());

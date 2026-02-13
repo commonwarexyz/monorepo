@@ -17,12 +17,15 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all_buf(&mut buf.into()))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
+        timeout(
+            self.write_timeout,
+            self.sink.write_all_buf(&mut bufs.into()),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }

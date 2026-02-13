@@ -89,13 +89,13 @@ impl<B: Blob> Blob for Write<B> {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut buf = buf.into();
+        let mut bufs = bufs.into();
         // SAFETY: Uninitialized bytes are never read. On success, all `len`
         // bytes are filled via extract + blob read. On error, the buffer is
         // dropped without being read.
-        unsafe { buf.set_len(len) };
+        unsafe { bufs.set_len(len) };
 
         // Ensure the read doesn't overflow.
         let end_offset = offset
@@ -110,56 +110,52 @@ impl<B: Blob> Blob for Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        match buf {
-            // For single buffers, work directly to avoid copies.
-            IoBufsMut::Single(mut single) => {
-                // Extract any bytes from the buffer that overlap with the requested range.
-                let remaining = buffer.extract(single.as_mut(), offset);
+        // For single buffers, work directly to avoid copies.
+        if let Some(buf) = bufs.as_single_mut() {
+            // Extract any bytes from the buffer that overlap with the requested range.
+            let remaining = buffer.extract(buf.as_mut(), offset);
 
-                // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-                // of the range.
-                if remaining > 0 {
-                    let blob_result = self
-                        .blob
-                        .read_at_buf(offset, remaining, self.pool.alloc(remaining))
-                        .await?;
-                    single.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
-                }
-                Ok(IoBufsMut::Single(single))
+            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+            // of the range.
+            if remaining > 0 {
+                let blob_result = self
+                    .blob
+                    .read_at_buf(offset, remaining, self.pool.alloc(remaining))
+                    .await?;
+                buf.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
             }
-            // For chunked buffers, read into temp and copy back to preserve structure.
-            IoBufsMut::Chunked(chunks) => {
-                // SAFETY: Uninitialized bytes are never read. On success, all bytes
-                // are initialized via extract + blob read before copying out. On
-                // error, the buffer is dropped without being read.
-                let mut temp = unsafe { self.pool.alloc_len(len) };
-                // Extract any bytes from the buffer that overlap with the
-                // requested range, into a temporary contiguous buffer
-                let remaining = buffer.extract(temp.as_mut(), offset);
+            Ok(bufs)
+        } else {
+            // For multi-chunk buffers, read into temp and copy back to preserve structure.
+            // SAFETY: Uninitialized bytes are never read. On success, all bytes
+            // are initialized via extract + blob read before copying out. On
+            // error, the buffer is dropped without being read.
+            let mut temp = unsafe { self.pool.alloc_len(len) };
+            // Extract any bytes from the buffer that overlap with the
+            // requested range, into a temporary contiguous buffer.
+            let remaining = buffer.extract(temp.as_mut(), offset);
 
-                // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-                // of the range.
-                if remaining > 0 {
-                    let blob_result = self
-                        .blob
-                        .read_at_buf(offset, remaining, self.pool.alloc(remaining))
-                        .await?;
-                    temp.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
-                }
-                // Copy back to original chunks
-                let mut bufs = IoBufsMut::Chunked(chunks);
-                bufs.copy_from_slice(temp.as_ref());
-                Ok(bufs)
+            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+            // of the range.
+            if remaining > 0 {
+                let blob_result = self
+                    .blob
+                    .read_at_buf(offset, remaining, self.pool.alloc(remaining))
+                    .await?;
+                temp.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
             }
+            // Copy back to original chunks.
+            bufs.copy_from_slice(temp.as_ref());
+            Ok(bufs)
         }
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let mut buf = buf.into();
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
         offset
-            .checked_add(buf.remaining() as u64)
+            .checked_add(bufs.remaining() as u64)
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a write lock on the buffer.
@@ -168,13 +164,13 @@ impl<B: Blob> Blob for Write<B> {
         // Process each chunk of the input buffer, attempting to merge into the tip buffer
         // or writing directly to the underlying blob.
         let mut current_offset = offset;
-        while buf.has_remaining() {
-            let chunk = buf.chunk();
+        while bufs.has_remaining() {
+            let chunk = bufs.chunk();
             let chunk_len = chunk.len();
 
             // Chunk falls entirely within the buffer's current range and can be merged.
             if buffer.merge(chunk, current_offset) {
-                buf.advance(chunk_len);
+                bufs.advance(chunk_len);
                 current_offset += chunk_len as u64;
                 continue;
             }
@@ -186,7 +182,7 @@ impl<B: Blob> Blob for Write<B> {
                 if let Some((old_buf, old_offset)) = buffer.take() {
                     self.blob.write_at(old_offset, old_buf).await?;
                     if buffer.merge(chunk, current_offset) {
-                        buf.advance(chunk_len);
+                        bufs.advance(chunk_len);
                         current_offset += chunk_len as u64;
                         continue;
                     }
@@ -200,7 +196,7 @@ impl<B: Blob> Blob for Write<B> {
             self.blob
                 .write_at(current_offset, IoBuf::copy_from_slice(chunk))
                 .await?;
-            buf.advance(chunk_len);
+            bufs.advance(chunk_len);
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this

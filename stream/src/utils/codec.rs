@@ -37,10 +37,10 @@ pub(crate) async fn send_frame_with<S: Sink>(
 /// Returns an error if the message is too large or the sink is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
-    buf: impl Into<IoBufs> + Send,
+    bufs: impl Into<IoBufs> + Send,
     max_message_size: u32,
 ) -> Result<(), Error> {
-    let mut bufs = buf.into();
+    let mut bufs = bufs.into();
 
     send_frame_with(sink, bufs.len(), max_message_size, |prefix| {
         // Prepend varint-encoded length

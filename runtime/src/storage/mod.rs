@@ -803,39 +803,56 @@ pub(crate) mod tests {
         );
         assert_eq!(output.chunk(), b"hello world");
 
-        // Test with chunked buffers - verify same buffers are returned with correct data
+        // Test with multi-chunk buffers - verify same buffers are returned with correct data
         let buf1 = IoBufMut::zeroed(5);
         let buf2 = IoBufMut::zeroed(6);
         let ptr1 = buf1.as_ref().as_ptr();
         let ptr2 = buf2.as_ref().as_ptr();
         let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
-        assert!(!input_bufs.is_single(), "Should be chunked");
+        assert!(!input_bufs.is_single(), "Should be multi-chunk");
 
-        let output = blob.read_at_buf(0, 11, input_bufs).await.unwrap();
+        let mut output = blob.read_at_buf(0, 11, input_bufs).await.unwrap();
         assert!(
             !output.is_single(),
-            "Chunked input should return chunked output"
+            "Multi-chunk input should return multi-chunk output"
         );
 
-        // Verify the buffers are the same and contain correct data
-        match output {
-            IoBufsMut::Chunked(chunks) => {
-                assert_eq!(chunks.len(), 2);
-                assert_eq!(
-                    chunks[0].as_ref().as_ptr(),
-                    ptr1,
-                    "First chunk must be the same buffer"
-                );
-                assert_eq!(
-                    chunks[1].as_ref().as_ptr(),
-                    ptr2,
-                    "Second chunk must be the same buffer"
-                );
-                assert_eq!(chunks[0], b"hello");
-                assert_eq!(chunks[1], b" world");
-            }
-            _ => panic!("Expected Chunked variant"),
-        }
+        // Verify the buffers are the same and contain correct data.
+        assert_eq!(
+            output.chunk().as_ptr(),
+            ptr1,
+            "First chunk must be the same buffer"
+        );
+        assert_eq!(output.chunk(), b"hello");
+        output.advance(5);
+        assert_eq!(
+            output.chunk().as_ptr(),
+            ptr2,
+            "Second chunk must be the same buffer"
+        );
+        assert_eq!(output.chunk(), b" world");
+        output.advance(6);
+        assert_eq!(output.remaining(), 0);
+
+        // when requested len only fills the first chunk, read_at_buf
+        // should still preserve caller-provided multi-chunk layout.
+        let buf1 = IoBufMut::zeroed(2);
+        let buf2 = IoBufMut::zeroed(2);
+        let ptr1 = buf1.as_ref().as_ptr();
+        let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
+        assert!(!input_bufs.is_single(), "Should be multi-chunk");
+
+        let output = blob.read_at_buf(0, 2, input_bufs).await.unwrap();
+        assert!(
+            !output.is_single(),
+            "Multi-chunk input should remain multi-chunk when len only uses first chunk"
+        );
+        assert_eq!(
+            output.chunk().as_ptr(),
+            ptr1,
+            "First chunk must be the same buffer"
+        );
+        assert_eq!(output.chunk(), b"he");
     }
 
     /// Test that read_at_buf panics when buffer capacity < len.
@@ -868,7 +885,7 @@ pub(crate) mod tests {
             .await;
         assert!(
             result.is_err(),
-            "Expected panic for insufficient chunked buffer capacity"
+            "Expected panic for insufficient multi-chunk buffer capacity"
         );
     }
 
