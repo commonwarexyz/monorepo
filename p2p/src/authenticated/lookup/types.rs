@@ -30,7 +30,7 @@ pub enum Message {
 impl Message {
     /// Encode `Message::Data` bytes for transmission using pooled header allocation.
     pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
-        EncodedData::encode_with_prefix(pool, channel, message, DATA_PREFIX)
+        EncodedData::encode_with_prefix(pool, DATA_PREFIX, channel, message)
     }
 }
 

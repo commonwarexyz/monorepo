@@ -53,18 +53,18 @@ pub struct EncodedData {
 
 impl EncodedData {
     /// Encode `Payload::Data` bytes in-place as:
-    /// `msg_prefix || channel || message_len || message`.
+    /// `prefix || channel || message_len || message`.
     pub fn encode_with_prefix(
         pool: &BufferPool,
+        prefix: u8,
         channel: Channel,
         mut message: IoBufs,
-        msg_prefix: u8,
     ) -> Self {
         let payload_len = message.len();
         let header_len =
-            msg_prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
+            prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
         let mut header = pool.alloc(header_len);
-        msg_prefix.write(&mut header);
+        prefix.write(&mut header);
         UInt(channel).write(&mut header);
         payload_len.write(&mut header);
         assert_eq!(header.len(), header_len, "data header size mismatch");
@@ -137,7 +137,7 @@ mod tests {
             expected.prepend(IoBuf::from(vec![7]));
 
             let encoded =
-                EncodedData::encode_with_prefix(context.network_buffer_pool(), 12345, message, 7);
+                EncodedData::encode_with_prefix(context.network_buffer_pool(), 7, 12345, message);
             assert_eq!(encoded.channel, 12345);
             assert_eq!(encoded.payload.coalesce(), expected.coalesce());
         });
