@@ -879,133 +879,6 @@ impl IoBufs {
             }
         }
     }
-
-    /// Drain `len` readable bytes from a two-chunk representation.
-    ///
-    /// Returns the drained bytes plus a flag indicating whether the caller
-    /// should canonicalize (for example when a chunk became empty).
-    fn copy_to_bytes_pair(pair: &mut [IoBuf; 2], len: usize) -> (Bytes, bool) {
-        let total = pair[0].remaining().saturating_add(pair[1].remaining());
-        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
-
-        // Fast path: the first chunk alone satisfies the request, so we keep
-        // zero-copy semantics from `IoBuf::copy_to_bytes`.
-        if pair[0].remaining() >= len {
-            let bytes = pair[0].copy_to_bytes(len);
-            // If chunk 0 was fully drained, we need to collapse Pair -> Single.
-            let needs_canonicalize = pair[0].remaining() == 0;
-            (bytes, needs_canonicalize)
-        } else {
-            // Slow path: read across both chunks, advancing in place so caller
-            // observes consumed bytes.
-            let mut out = BytesMut::with_capacity(len);
-            let mut remaining = len;
-            for buf in pair.iter_mut() {
-                if remaining == 0 {
-                    break;
-                }
-                let to_copy = remaining.min(buf.remaining());
-                out.extend_from_slice(&buf.chunk()[..to_copy]);
-                buf.advance(to_copy);
-                remaining -= to_copy;
-            }
-            // Any exhausted chunk means we should remove empties and re-shape.
-            let needs_canonicalize = pair.iter().any(|buf| buf.remaining() == 0);
-            (out.freeze(), needs_canonicalize)
-        }
-    }
-
-    /// Drain `len` readable bytes from a three-chunk representation.
-    ///
-    /// Returns the drained bytes plus a flag indicating whether the caller
-    /// should canonicalize (for example when a chunk became empty).
-    fn copy_to_bytes_triple(triple: &mut [IoBuf; 3], len: usize) -> (Bytes, bool) {
-        let total = triple[0]
-            .remaining()
-            .saturating_add(triple[1].remaining())
-            .saturating_add(triple[2].remaining());
-        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
-
-        // Fast path: same idea as Pair, but for the 3-chunk layout.
-        if triple[0].remaining() >= len {
-            let bytes = triple[0].copy_to_bytes(len);
-            // If chunk 0 was fully drained, Triple can collapse after cleanup.
-            let needs_canonicalize = triple[0].remaining() == 0;
-            (bytes, needs_canonicalize)
-        } else {
-            // Slow path: copy across chunk boundaries while advancing sources.
-            let mut out = BytesMut::with_capacity(len);
-            let mut remaining = len;
-            for buf in triple.iter_mut() {
-                if remaining == 0 {
-                    break;
-                }
-                let to_copy = remaining.min(buf.remaining());
-                out.extend_from_slice(&buf.chunk()[..to_copy]);
-                buf.advance(to_copy);
-                remaining -= to_copy;
-            }
-            // Any exhausted chunk means representation likely needs to shrink.
-            let needs_canonicalize = triple.iter().any(|buf| buf.remaining() == 0);
-            (out.freeze(), needs_canonicalize)
-        }
-    }
-
-    /// Drain `len` readable bytes from a deque-backed multi-chunk representation.
-    ///
-    /// Returns the drained bytes plus a flag indicating whether the caller
-    /// should canonicalize (for example when the deque shrank to <= 3 chunks).
-    fn copy_to_bytes_chunked(bufs: &mut VecDeque<IoBuf>, len: usize) -> (Bytes, bool) {
-        // Defensive cleanup: remove empty front chunks before doing any work.
-        while bufs.front().is_some_and(|buf| buf.remaining() == 0) {
-            bufs.pop_front();
-        }
-
-        if bufs.front().is_none() {
-            assert_eq!(len, 0, "IoBufs::copy_to_bytes: not enough data");
-            return (Bytes::new(), false);
-        }
-
-        // Fast path: front chunk alone satisfies the request.
-        if bufs.front().is_some_and(|front| front.remaining() >= len) {
-            let front = bufs.front_mut().expect("front checked above");
-            let bytes = front.copy_to_bytes(len);
-            if front.remaining() == 0 {
-                // Preserve invariant: do not keep drained chunks in deque.
-                bufs.pop_front();
-            }
-            // If size shrank into fast-path range, rebuild as Pair/Triple/Single.
-            let needs_canonicalize = bufs.len() <= 3;
-            return (bytes, needs_canonicalize);
-        }
-
-        let total = bufs
-            .iter()
-            .map(|buf| buf.remaining())
-            .fold(0, usize::saturating_add);
-        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
-
-        // Multi-chunk path: consume from the front until we produce exactly `len`.
-        let mut out = BytesMut::with_capacity(len);
-        let mut remaining = len;
-        while remaining > 0 {
-            let front = bufs
-                .front_mut()
-                .expect("remaining > 0 implies non-empty bufs");
-            let to_copy = remaining.min(front.remaining());
-            out.extend_from_slice(&front.chunk()[..to_copy]);
-            front.advance(to_copy);
-            if front.remaining() == 0 {
-                // Keep deque normalized as chunks are fully consumed.
-                bufs.pop_front();
-            }
-            remaining -= to_copy;
-        }
-
-        // Shrink back into specialized representations when possible.
-        let needs_canonicalize = bufs.len() <= 3;
-        (out.freeze(), needs_canonicalize)
-    }
 }
 
 impl Buf for IoBufs {
@@ -1080,9 +953,15 @@ impl Buf for IoBufs {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         let (result, needs_canonicalize) = match &mut self.inner {
             IoBufsInner::Single(buf) => return buf.copy_to_bytes(len),
-            IoBufsInner::Pair(pair) => Self::copy_to_bytes_pair(pair, len),
-            IoBufsInner::Triple(triple) => Self::copy_to_bytes_triple(triple, len),
-            IoBufsInner::Chunked(bufs) => Self::copy_to_bytes_chunked(bufs, len),
+            IoBufsInner::Pair(pair) => {
+                copy_to_bytes_small_chunks(pair, len, "IoBufs::copy_to_bytes: not enough data")
+            }
+            IoBufsInner::Triple(triple) => {
+                copy_to_bytes_small_chunks(triple, len, "IoBufs::copy_to_bytes: not enough data")
+            }
+            IoBufsInner::Chunked(bufs) => {
+                copy_to_bytes_chunked(bufs, len, "IoBufs::copy_to_bytes: not enough data")
+            }
         };
 
         if needs_canonicalize {
@@ -1178,9 +1057,12 @@ impl Default for IoBufsMut {
 }
 
 impl IoBufsMut {
-    /// Build canonical mutable chunk storage from pre-filtered chunks.
+    /// Build mutable chunk storage from already-filtered chunks.
     ///
-    /// This function assumes filtering has already been applied by the caller.
+    /// This helper intentionally does not filter.
+    /// Callers choose filter policy first:
+    /// - [`Self::from_writable_chunks_iter`] for construction from writable chunks (`capacity() > 0`)
+    /// - [`Self::from_readable_chunks_iter`] for read-canonicalization (`remaining() > 0`)
     fn from_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
         let mut iter = chunks.into_iter();
         let first = match iter.next() {
@@ -1470,131 +1352,6 @@ impl IoBufsMut {
             offset += len;
         });
     }
-
-    /// Drain `len` readable bytes from a two-chunk representation.
-    ///
-    /// Returns the drained bytes plus a flag indicating whether the caller
-    /// should canonicalize (for example when a chunk became empty).
-    fn copy_to_bytes_pair(pair: &mut [IoBufMut; 2], len: usize) -> (Bytes, bool) {
-        let total = pair[0].remaining().saturating_add(pair[1].remaining());
-        assert!(total >= len, "IoBufsMut::copy_to_bytes: not enough data");
-
-        // Fast path: first chunk alone satisfies the request.
-        if pair[0].remaining() >= len {
-            let bytes = pair[0].copy_to_bytes(len);
-            // If chunk 0 was fully drained, Pair can collapse after cleanup.
-            let needs_canonicalize = pair[0].remaining() == 0;
-            (bytes, needs_canonicalize)
-        } else {
-            // Slow path: copy across both chunks while advancing sources.
-            let mut out = BytesMut::with_capacity(len);
-            let mut remaining = len;
-            for buf in pair.iter_mut() {
-                if remaining == 0 {
-                    break;
-                }
-                let to_copy = remaining.min(buf.remaining());
-                out.extend_from_slice(&buf.chunk()[..to_copy]);
-                buf.advance(to_copy);
-                remaining -= to_copy;
-            }
-            // Any exhausted chunk means representation likely needs to shrink.
-            let needs_canonicalize = pair.iter().any(|buf| buf.remaining() == 0);
-            (out.freeze(), needs_canonicalize)
-        }
-    }
-
-    /// Drain `len` readable bytes from a three-chunk representation.
-    ///
-    /// Returns the drained bytes plus a flag indicating whether the caller
-    /// should canonicalize (for example when a chunk became empty).
-    fn copy_to_bytes_triple(triple: &mut [IoBufMut; 3], len: usize) -> (Bytes, bool) {
-        let total = triple[0]
-            .remaining()
-            .saturating_add(triple[1].remaining())
-            .saturating_add(triple[2].remaining());
-        assert!(total >= len, "IoBufsMut::copy_to_bytes: not enough data");
-
-        // Fast path: same idea as Pair, but for the 3-chunk layout.
-        if triple[0].remaining() >= len {
-            let bytes = triple[0].copy_to_bytes(len);
-            // If chunk 0 was fully drained, Triple can collapse after cleanup.
-            let needs_canonicalize = triple[0].remaining() == 0;
-            (bytes, needs_canonicalize)
-        } else {
-            // Slow path: copy across chunk boundaries while advancing sources.
-            let mut out = BytesMut::with_capacity(len);
-            let mut remaining = len;
-            for buf in triple.iter_mut() {
-                if remaining == 0 {
-                    break;
-                }
-                let to_copy = remaining.min(buf.remaining());
-                out.extend_from_slice(&buf.chunk()[..to_copy]);
-                buf.advance(to_copy);
-                remaining -= to_copy;
-            }
-            // Any exhausted chunk means representation likely needs to shrink.
-            let needs_canonicalize = triple.iter().any(|buf| buf.remaining() == 0);
-            (out.freeze(), needs_canonicalize)
-        }
-    }
-
-    /// Drain `len` readable bytes from a deque-backed multi-chunk representation.
-    ///
-    /// Returns the drained bytes plus a flag indicating whether the caller
-    /// should canonicalize (for example when the deque shrank to <= 3 chunks).
-    fn copy_to_bytes_chunked(bufs: &mut VecDeque<IoBufMut>, len: usize) -> (Bytes, bool) {
-        // Defensive cleanup: remove empty front chunks before doing any work.
-        while bufs.front().is_some_and(|buf| buf.remaining() == 0) {
-            bufs.pop_front();
-        }
-
-        if bufs.front().is_none() {
-            assert_eq!(len, 0, "IoBufsMut::copy_to_bytes: not enough data");
-            return (Bytes::new(), false);
-        }
-
-        // Fast path: front chunk alone satisfies the request.
-        if bufs.front().is_some_and(|front| front.remaining() >= len) {
-            let front = bufs.front_mut().expect("front checked above");
-            let bytes = front.copy_to_bytes(len);
-            if front.remaining() == 0 {
-                // Preserve invariant: do not keep drained chunks in deque.
-                bufs.pop_front();
-            }
-            // If size shrank into fast-path range, rebuild as Pair/Triple/Single.
-            let needs_canonicalize = bufs.len() <= 3;
-            return (bytes, needs_canonicalize);
-        }
-
-        let total = bufs
-            .iter()
-            .map(|buf| buf.remaining())
-            .fold(0, usize::saturating_add);
-        assert!(total >= len, "IoBufsMut::copy_to_bytes: not enough data");
-
-        // Multi-chunk path: consume from the front until we produce exactly `len`.
-        let mut out = BytesMut::with_capacity(len);
-        let mut remaining = len;
-        while remaining > 0 {
-            let front = bufs
-                .front_mut()
-                .expect("remaining > 0 implies non-empty bufs");
-            let to_copy = remaining.min(front.remaining());
-            out.extend_from_slice(&front.chunk()[..to_copy]);
-            front.advance(to_copy);
-            if front.remaining() == 0 {
-                // Keep deque normalized as chunks are fully consumed.
-                bufs.pop_front();
-            }
-            remaining -= to_copy;
-        }
-
-        // Shrink back into specialized representations when possible.
-        let needs_canonicalize = bufs.len() <= 3;
-        (out.freeze(), needs_canonicalize)
-    }
 }
 
 impl Buf for IoBufsMut {
@@ -1669,9 +1426,15 @@ impl Buf for IoBufsMut {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         let (result, needs_canonicalize) = match &mut self.inner {
             IoBufsMutInner::Single(buf) => return buf.copy_to_bytes(len),
-            IoBufsMutInner::Pair(pair) => Self::copy_to_bytes_pair(pair, len),
-            IoBufsMutInner::Triple(triple) => Self::copy_to_bytes_triple(triple, len),
-            IoBufsMutInner::Chunked(bufs) => Self::copy_to_bytes_chunked(bufs, len),
+            IoBufsMutInner::Pair(pair) => {
+                copy_to_bytes_small_chunks(pair, len, "IoBufsMut::copy_to_bytes: not enough data")
+            }
+            IoBufsMutInner::Triple(triple) => {
+                copy_to_bytes_small_chunks(triple, len, "IoBufsMut::copy_to_bytes: not enough data")
+            }
+            IoBufsMutInner::Chunked(bufs) => {
+                copy_to_bytes_chunked(bufs, len, "IoBufsMut::copy_to_bytes: not enough data")
+            }
         };
 
         if needs_canonicalize {
@@ -1803,6 +1566,93 @@ impl<const N: usize> From<[u8; N]> for IoBufsMut {
             inner: IoBufsMutInner::Single(IoBufMut::from(array)),
         }
     }
+}
+
+/// Drain `len` readable bytes from a small fixed chunk array (`Pair`/`Triple`).
+///
+/// Returns drained bytes plus whether the caller should canonicalize afterward.
+#[inline]
+fn copy_to_bytes_small_chunks<B: Buf, const N: usize>(
+    chunks: &mut [B; N],
+    len: usize,
+    not_enough_data_msg: &str,
+) -> (Bytes, bool) {
+    let total = chunks
+        .iter()
+        .map(|buf| buf.remaining())
+        .fold(0, usize::saturating_add);
+    assert!(total >= len, "{not_enough_data_msg}");
+
+    if chunks[0].remaining() >= len {
+        let bytes = chunks[0].copy_to_bytes(len);
+        return (bytes, chunks[0].remaining() == 0);
+    }
+
+    let mut out = BytesMut::with_capacity(len);
+    let mut remaining = len;
+    for buf in chunks.iter_mut() {
+        if remaining == 0 {
+            break;
+        }
+        let to_copy = remaining.min(buf.remaining());
+        out.extend_from_slice(&buf.chunk()[..to_copy]);
+        buf.advance(to_copy);
+        remaining -= to_copy;
+    }
+
+    // Slow path always consumes past chunk 0, so canonicalization is required.
+    (out.freeze(), true)
+}
+
+/// Drain `len` readable bytes from a deque-backed chunk representation.
+///
+/// Returns drained bytes plus whether the caller should canonicalize afterward.
+#[inline]
+fn copy_to_bytes_chunked<B: Buf>(
+    bufs: &mut VecDeque<B>,
+    len: usize,
+    not_enough_data_msg: &str,
+) -> (Bytes, bool) {
+    while bufs.front().is_some_and(|buf| buf.remaining() == 0) {
+        bufs.pop_front();
+    }
+
+    if bufs.front().is_none() {
+        assert_eq!(len, 0, "{not_enough_data_msg}");
+        return (Bytes::new(), false);
+    }
+
+    if bufs.front().is_some_and(|front| front.remaining() >= len) {
+        let front = bufs.front_mut().expect("front checked above");
+        let bytes = front.copy_to_bytes(len);
+        if front.remaining() == 0 {
+            bufs.pop_front();
+        }
+        return (bytes, bufs.len() <= 3);
+    }
+
+    let total = bufs
+        .iter()
+        .map(|buf| buf.remaining())
+        .fold(0, usize::saturating_add);
+    assert!(total >= len, "{not_enough_data_msg}");
+
+    let mut out = BytesMut::with_capacity(len);
+    let mut remaining = len;
+    while remaining > 0 {
+        let front = bufs
+            .front_mut()
+            .expect("remaining > 0 implies non-empty bufs");
+        let to_copy = remaining.min(front.remaining());
+        out.extend_from_slice(&front.chunk()[..to_copy]);
+        front.advance(to_copy);
+        if front.remaining() == 0 {
+            bufs.pop_front();
+        }
+        remaining -= to_copy;
+    }
+
+    (out.freeze(), bufs.len() <= 3)
 }
 
 /// Advance across a `VecDeque` of chunks by consuming from the front.
