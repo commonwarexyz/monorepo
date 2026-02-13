@@ -832,8 +832,7 @@ mod tests {
             };
             let mut buf = BytesMut::new();
             shard.write(&mut buf);
-            let decoded_shard =
-                Shard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
+            let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
             assert_eq!(decoded_shard, *shard);
 
             let (_, _, reshard) =
