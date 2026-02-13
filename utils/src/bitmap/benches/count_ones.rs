@@ -10,10 +10,7 @@ fn bench_count_ones<const CHUNK_SIZE: usize>(c: &mut Criterion, size: u64) {
         bitmap.push(rng.gen::<bool>());
     }
     c.bench_function(
-        &format!(
-            "{}/size={size} chunk_size={CHUNK_SIZE}",
-            module_path!()
-        ),
+        &format!("{}/size={size} chunk_size={CHUNK_SIZE}", module_path!()),
         |b| {
             b.iter(|| black_box(&bitmap).count_ones());
         },
