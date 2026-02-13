@@ -199,29 +199,30 @@ where
     /// proceed concurrently. The number of concurrent decode tasks is bounded
     /// by the strategy's parallelism hint provided at construction.
     async fn run(mut self) {
-        let max_concurrency = self.max_concurrency;
         let mut decode_pool = Pool::default();
 
         select_loop! {
             self.context,
             on_start => {
-                while decode_pool.len() >= max_concurrency {
-                    let result = decode_pool.next_completed().await;
+                while decode_pool.len() >= self.max_concurrency {
+                    let Ok(result) = decode_pool.next_completed().await else {
+                        break;
+                    };
                     self.handle_decode_result(result).await;
                 }
             },
             on_stopped => {},
-            result = decode_pool.next_completed() => {
+            Ok(result) = decode_pool.next_completed() else break => {
                 self.handle_decode_result(result).await;
             },
             Ok((peer, bytes)) = self.receiver.recv() else break => {
                 let config = self.codec_config.clone();
                 let sender = self.sender.clone();
-
-                decode_pool.push(async move {
+                let handle = self.context.clone().spawn(|_| async move {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result, sender)
                 });
+                decode_pool.push(handle);
             }
         }
     }

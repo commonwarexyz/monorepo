@@ -9,7 +9,7 @@
 //! - Reconstructing a total order of finalized blocks
 //! - Providing a backfill mechanism for missing blocks
 //!
-//! The actor interacts with several main components:
+//! The actor interacts with several components:
 //! - [`crate::Reporter`]: Receives ordered, finalized blocks at-least-once
 //! - [`crate::simplex`]: Provides consensus messages
 //! - Application: Provides verified blocks

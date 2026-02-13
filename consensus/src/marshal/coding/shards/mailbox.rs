@@ -26,8 +26,8 @@ where
         /// The round in which the block was proposed.
         round: Round,
     },
-    /// A notification from consensus that a [`CodingCommitment`] was externally proposed.
-    ExternalProposed {
+    /// A notification from consensus that a [`CodingCommitment`] has been discovered.
+    Discovered {
         /// The [`CodingCommitment`] of the proposed block.
         commitment: CodingCommitment,
         /// The leader's public key.
@@ -111,13 +111,8 @@ where
     }
 
     /// Inform the engine of an externally proposed [`CodingCommitment`].
-    pub async fn external_proposed(
-        &mut self,
-        commitment: CodingCommitment,
-        leader: P,
-        round: Round,
-    ) {
-        let msg = Message::ExternalProposed {
+    pub async fn discovered(&mut self, commitment: CodingCommitment, leader: P, round: Round) {
+        let msg = Message::Discovered {
             commitment,
             leader,
             round,

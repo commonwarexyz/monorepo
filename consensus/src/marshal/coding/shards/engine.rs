@@ -50,7 +50,7 @@
 //!    |  leader) |         |  leader) |         |  leader) |
 //!    +----------+         +----------+         +----------+
 //!         |                    |                    |
-//!         | ExternalProposed   | ExternalProposed   |
+//!         | Discovered         | Discovered         |
 //!         | (leader identity)  | (leader identity)  |
 //!         v                    v                    v
 //!    +----------+         +----------+         +----------+
@@ -147,10 +147,10 @@
 //!
 //! Note: Strong shards are only accepted from the leader. If the leader is not
 //! yet known, shards are buffered in fixed-size per-peer queues until consensus
-//! signals the leader via [`ExternalProposed`]. Once leader is known, buffered
+//! signals the leader via [`Discovered`]. Once leader is known, buffered
 //! shards for that commitment are ingested into the active state machine.
 //!
-//! [`ExternalProposed`]: super::Message::ExternalProposed
+//! [`Discovered`]: super::Message::Discovered
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -252,7 +252,7 @@ where
     /// Shards for commitments without a reconstruction state are buffered per
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
     /// shards are only ingested when consensus provides a leader via
-    /// [`ExternalProposed`](super::Message::ExternalProposed).
+    /// [`Discovered`](super::Message::Discovered).
     ///
     /// The worst-case total memory usage for pre-leader buffers is
     /// `num_participants * pre_leader_buffer_size * max_shard_size`.
@@ -425,7 +425,7 @@ where
                     Message::Proposed { block, round } => {
                         self.broadcast_shards(&mut sender, round, block).await;
                     },
-                    Message::ExternalProposed {
+                    Message::Discovered {
                         commitment,
                         leader,
                         round,
@@ -520,6 +520,10 @@ where
         let Some(state) = self.state.get(&commitment) else {
             return Ok(None);
         };
+        if commitment.config().minimum_shards == 0 {
+            debug!(%commitment, "commitment has zero minimum shards, skipping reconstruction");
+            return Ok(None);
+        }
         if state.checked_shards().len() < usize::from(commitment.config().minimum_shards) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
@@ -1078,7 +1082,9 @@ where
     ) -> Option<ReadyState<P, C, H>> {
         self.checking_data.as_ref()?;
         let minimum = usize::from(commitment.config().minimum_shards);
-        if self.common.checked_shards.len() + self.pending_weak_shards.len() < minimum {
+        if minimum == 0
+            || self.common.checked_shards.len() + self.pending_weak_shards.len() < minimum
+        {
             return None;
         }
 
@@ -1211,7 +1217,7 @@ where
     ///   duplicates are silently ignored.
     /// - MUST pass cryptographic verification via [`CodingScheme::weaken`].
     /// - When leader is unknown, buffering happens at the engine level in
-    ///   bounded pre-leader queues until [`ExternalProposed`](super::Message::ExternalProposed)
+    ///   bounded pre-leader queues until [`Discovered`](super::Message::Discovered)
     ///   creates a reconstruction state for this commitment.
     ///
     /// Weak shards (`CodingScheme::WeakShard`):
@@ -1663,7 +1669,7 @@ mod tests {
             // Inform all peers of the leader so strong shards are processed.
             for peer in peers[1..].iter_mut() {
                 peer.mailbox
-                    .external_proposed(commitment, leader.clone(), round)
+                    .discovered(commitment, leader.clone(), round)
                     .await;
             }
             context.sleep(config.link.latency).await;
@@ -1714,7 +1720,7 @@ mod tests {
             // Inform all peers of the leader so strong shards are processed.
             for peer in peers[1..].iter_mut() {
                 peer.mailbox
-                    .external_proposed(commitment, leader.clone(), round)
+                    .discovered(commitment, leader.clone(), round)
                     .await;
             }
             context.sleep(config.link.latency * 2).await;
@@ -1768,7 +1774,7 @@ mod tests {
                 let leader = peers[1].public_key.clone();
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let mut shard_sub = peers[2].mailbox.subscribe_shard(commitment).await;
 
@@ -1903,7 +1909,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Send peer 2 their strong shard from peer 0 (leader, first time - should succeed).
@@ -1973,7 +1979,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Send peer 2 their strong shard from the leader (first time - succeeds).
@@ -2023,7 +2029,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Peer 1 (not the leader) sends peer 2 their strong shard.
@@ -2083,7 +2089,7 @@ mod tests {
                 let leader = peers[0].public_key.clone();
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2119,12 +2125,12 @@ mod tests {
                 // First leader update should stick.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader_a.clone(), Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader_a.clone(), Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 // Conflicting update should be ignored.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader_b, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader_b, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Original leader sends strong shard; this should still be accepted.
@@ -2198,7 +2204,7 @@ mod tests {
                 // A non-participant leader update should be ignored.
                 peers[2]
                     .mailbox
-                    .external_proposed(
+                    .discovered(
                         commitment,
                         non_participant_leader,
                         Round::new(Epoch::zero(), View::new(1)),
@@ -2229,7 +2235,7 @@ mod tests {
                 // A valid leader update should then process buffered shards and resolve subscription.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 context.sleep(config.link.latency * 2).await;
 
@@ -2278,7 +2284,7 @@ mod tests {
 
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 let peer2_index = peers[2].index.get() as u16;
@@ -2347,7 +2353,7 @@ mod tests {
 
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 context.sleep(config.link.latency * 2).await;
 
@@ -2388,7 +2394,7 @@ mod tests {
                 // Inform peer 2 of the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(
+                    .discovered(
                         coded_block.commitment(),
                         leader,
                         Round::new(Epoch::zero(), View::new(1)),
@@ -2485,7 +2491,7 @@ mod tests {
                 // Inform peer 2 of the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(
+                    .discovered(
                         coded_block1.commitment(),
                         leader,
                         Round::new(Epoch::zero(), View::new(1)),
@@ -2557,7 +2563,7 @@ mod tests {
                 // Create state for A and ingest one weak shard from peer1.
                 peers[2]
                     .mailbox
-                    .external_proposed(
+                    .discovered(
                         commitment_a,
                         leader.clone(),
                         Round::new(Epoch::zero(), View::new(1)),
@@ -2580,7 +2586,7 @@ mod tests {
                 // Create/reconstruct B at higher view.
                 peers[2]
                     .mailbox
-                    .external_proposed(
+                    .discovered(
                         commitment_b,
                         leader,
                         Round::new(Epoch::zero(), View::new(2)),
@@ -2701,7 +2707,7 @@ mod tests {
                 let leader = peers[2].public_key.clone();
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Now send peer 2's strong shard. This should:
@@ -2745,7 +2751,7 @@ mod tests {
     #[test_traced]
     fn test_pre_leader_shards_buffered_until_external_proposed() {
         // Test that shards received before leader announcement do not progress
-        // reconstruction until ExternalProposed is delivered.
+        // reconstruction until Discovered is delivered.
         let fixture = Fixture {
             num_peers: 10,
             ..Default::default()
@@ -2808,7 +2814,7 @@ mod tests {
                 // Announce leader, which drains buffered shards and should progress immediately.
                 peers[receiver_idx]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 select! {
@@ -2858,7 +2864,7 @@ mod tests {
                     .await;
                 peers[receiver_idx]
                     .mailbox
-                    .external_proposed(
+                    .discovered(
                         commitment,
                         leader.clone(),
                         Round::new(Epoch::zero(), View::new(1)),
@@ -3033,7 +3039,7 @@ mod tests {
                 // Inform peer 2 that peer 0 is the leader.
                 peers[2]
                     .mailbox
-                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
 
                 // Leader (peer 0) sends the invalid strong shard.
@@ -3087,7 +3093,7 @@ mod tests {
                 // Inform peer 3 of the leader and send them the strong shard.
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let strong_bytes = peer3_strong_shard.encode();
                 peers[0]
@@ -3152,7 +3158,7 @@ mod tests {
                 // Inform peer 3 of the leader and send the valid strong shard.
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let strong_bytes = peer3_strong_shard.encode();
                 peers[0]
@@ -3231,7 +3237,7 @@ mod tests {
                 let leader = peers[0].public_key.clone();
                 peers[receiver_idx]
                     .mailbox
-                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let receiver_strong = coded_block1
                     .shard::<H>(peers[receiver_idx].index.get() as u16)
@@ -3380,7 +3386,7 @@ mod tests {
                 let leader = peers[0].public_key.clone();
                 peers[3]
                     .mailbox
-                    .external_proposed(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
+                    .discovered(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let peer3_index = peers[3].index.get() as u16;
                 let peer3_strong_shard =
@@ -3515,7 +3521,7 @@ mod tests {
             // Announce the leader with an epoch 1 round.
             let leader = epoch0_pks[1].clone();
             mailbox
-                .external_proposed(commitment, leader, Round::new(Epoch::new(1), View::new(1)))
+                .discovered(commitment, leader, Round::new(Epoch::new(1), View::new(1)))
                 .await;
             context.sleep(DEFAULT_LINK.latency * 2).await;
 

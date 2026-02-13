@@ -780,7 +780,7 @@ where
 
         // Inform the shard engine of an externally proposed commitment.
         self.shards
-            .external_proposed(payload, context.leader.clone(), context.round)
+            .discovered(payload, context.leader.clone(), context.round)
             .await;
 
         // Kick off deferred verification early to hide verification latency behind
@@ -913,7 +913,7 @@ where
 
                 // Inform the shard engine of an externally proposed commitment.
                 shards
-                    .external_proposed(
+                    .discovered(
                         payload,
                         embedded_context.leader.clone(),
                         embedded_context.round,

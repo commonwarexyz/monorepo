@@ -717,7 +717,6 @@ where
 
                                 // Valid finalization received
                                 debug!(%height, "received finalization");
-                                response.send_lossy(true);
                                 self.finalize(
                                     height,
                                     digest,
@@ -728,6 +727,7 @@ where
                                     &mut resolver,
                                 )
                                 .await;
+                                response.send_lossy(true);
                             }
                             Request::Notarized { round } => {
                                 let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {

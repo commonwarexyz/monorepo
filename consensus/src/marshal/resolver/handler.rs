@@ -211,6 +211,7 @@ impl<B: Block> PartialOrd for Request<B> {
 
 impl<B: Block> Hash for Request<B> {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.subject().hash(state);
         match self {
             Self::Block(digest) => digest.hash(state),
             Self::Finalized { height } => height.hash(state),
@@ -587,6 +588,28 @@ mod tests {
         assert_eq!(block.cmp(&block), std::cmp::Ordering::Equal);
         assert_eq!(min_finalized.cmp(&min_finalized), std::cmp::Ordering::Equal);
         assert_eq!(max_notarized.cmp(&max_notarized), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn test_cross_variant_hash_differs() {
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
+
+        fn hash_of<T: Hash>(t: &T) -> u64 {
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            h.finish()
+        }
+
+        let finalized = Request::<B>::Finalized {
+            height: Height::new(1),
+        };
+        let notarized = Request::<B>::Notarized {
+            round: Round::new(Epoch::new(0), View::new(1)),
+        };
+        assert_ne!(hash_of(&finalized), hash_of(&notarized));
     }
 
     #[cfg(feature = "arbitrary")]

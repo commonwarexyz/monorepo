@@ -14,15 +14,15 @@ use std::{future::Future, sync::Arc};
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
-    /// The application block type.
-    type ApplicationBlock: Block + Clone;
-
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
     type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>
         + Clone;
+
+    /// The application block type.
+    type ApplicationBlock: Block + Clone;
 
     /// The type of block stored in the archive.
     ///
