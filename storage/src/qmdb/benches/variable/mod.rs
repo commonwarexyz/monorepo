@@ -127,7 +127,7 @@ fn current_cfg(
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
-        bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
+        grafted_mmr_metadata_partition: format!("grafted_mmr_metadata_{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),

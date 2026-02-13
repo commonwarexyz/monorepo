@@ -19,12 +19,12 @@ use crate::{
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    Persistable, UnmerkleizedBitMap,
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
@@ -421,14 +421,12 @@ where
     }
 
     /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip, using the
-    /// provided bitmap to find the active operations without I/O.
-    pub(crate) async fn raise_floor_with_bitmap<
-        F: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
+    /// provided bitmap to find the active operations without I/O. Calls `on_move(old_loc, new_loc)`
+    /// for each moved operation.
+    pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
         &mut self,
-        status: &mut UnmerkleizedBitMap<F, D, N>,
+        status: &mut BitMap<N>,
+        on_move: &mut impl FnMut(Location, Location),
     ) -> Result<Location, Error> {
         let reader = self.log.reader().await;
         let tip = Location::new_unchecked(reader.bounds().end);
@@ -469,7 +467,9 @@ where
                 helper.move_op_if_active(op, loc).await?,
                 "op should be active based on status bitmap"
             );
+            let new_loc = Location::new_unchecked(status.len());
             status.push(true);
+            on_move(loc, new_loc);
         }
 
         self.inactivity_floor_loc = floor;

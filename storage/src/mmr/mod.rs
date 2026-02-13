@@ -79,7 +79,6 @@ pub(crate) mod conformance;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
-        pub mod grafting;
         pub mod journaled;
         pub mod storage;
         pub mod verification;
@@ -118,8 +117,8 @@ pub enum Error {
     InvalidPosition(Position),
     #[error("missing digest: {0}")]
     MissingDigest(Position),
-    #[error("missing grafted digest for leaf: {0}")]
-    MissingGraftedDigest(Location),
+    #[error("missing grafted leaf digest: {0}")]
+    MissingGraftedLeaf(Position),
     #[error("invalid proof length")]
     InvalidProofLength,
     #[error("invalid size: {0}")]
