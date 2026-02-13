@@ -11,11 +11,12 @@ use crate::authenticated::{
     relay::Relay,
     Mailbox,
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
+    RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -27,7 +28,7 @@ use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -47,7 +48,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -90,12 +91,13 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send_payload<Si: Sink>(
+        pool: &BufferPool,
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
-        let msg = payload.encode();
+        let msg = payload.encode_with_pool(pool);
         sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
@@ -130,9 +132,11 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
+        let pool = self.context.network_buffer_pool().clone();
 
         // Send greeting first before any other messages
         Self::send_payload(
+            &pool,
             &mut conn_sender,
             &self.sent_messages,
             metrics::Message::new_greeting(&peer),
@@ -177,6 +181,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             };
                             Self::send_payload(
+                                &pool,
                                 &mut conn_sender,
                                 &self.sent_messages,
                                 metric,

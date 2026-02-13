@@ -5,11 +5,12 @@ use crate::authenticated::{
     relay::Relay,
     Mailbox,
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
+    RateLimiter, Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -21,7 +22,7 @@ use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
@@ -37,7 +38,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     _phantom: std::marker::PhantomData<C>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -78,12 +79,13 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send_payload<Si: Sink>(
+        pool: &BufferPool,
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
         payload: types::Message,
     ) -> Result<(), Error> {
-        let msg = payload.encode();
+        let msg = payload.encode_with_pool(pool);
         sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
@@ -116,6 +118,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
+        let pool = self.context.network_buffer_pool().clone();
         // Use half the ping frequency for rate limiting to allow for timing
         // jitter at message boundaries.
         let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
@@ -138,6 +141,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                         _ = context.sleep_until(deadline) => {
                             // Periodically send a ping to the peer
                             Self::send_payload(
+                                &pool,
                                 &mut conn_sender,
                                 &self.sent_messages,
                                 metrics::Message::new_ping(&peer),

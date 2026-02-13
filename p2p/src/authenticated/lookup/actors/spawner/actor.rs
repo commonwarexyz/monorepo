@@ -9,13 +9,15 @@ use crate::authenticated::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream};
+use commonware_runtime::{
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Sink, Spawner, Stream,
+};
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
@@ -30,7 +32,7 @@ pub struct Actor<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Str
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey>
+impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey>
     Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
