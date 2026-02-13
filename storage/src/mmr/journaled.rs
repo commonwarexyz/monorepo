@@ -545,7 +545,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 return Ok(());
             }
 
-            let mut missing_nodes = Vec::new();
+            let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
             for pos in *journal_size..*size {
                 let node = *inner.mem_mmr.get_node_unchecked(Position::new(pos));
                 missing_nodes.push(node);
