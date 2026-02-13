@@ -212,7 +212,7 @@ impl VanishingPoints {
     }
 
     /// Get the lg of this set's size.
-    pub fn lg_size(&self) -> u32 {
+    pub const fn lg_size(&self) -> u32 {
         self.lg_size
     }
 
@@ -253,7 +253,7 @@ impl VanishingPoints {
 
     /// Yield the bits of a chunk, in reverse bit order.
     ///
-    /// cf [`chunk_vanishes_everywhere`], which uses the same chunk indexing scheme.
+    /// cf [`Self::chunk_vanishes_everywhere`], which uses the same chunk indexing scheme.
     fn get_chunk(&self, lg_chunk_size: u32, index: u64) -> impl Iterator<Item = bool> + '_ {
         (index << lg_chunk_size..(index + 1) << lg_chunk_size).map(|i| self.bits.get(i))
     }
@@ -484,8 +484,7 @@ impl<F: FieldNTT> EvaluationColumn<F> {
             let next_chunk_size = 1 << next_lg_chunk_size;
             for (i, chunk) in out.chunks_exact_mut(1 << next_lg_chunk_size).enumerate() {
                 let (left, right) = chunk.split_at_mut(1 << lg_chunk_size);
-                let (vanishes_l, vanishes_r) =
-                    (vanishes[2 * i].clone(), vanishes[2 * i + 1].clone());
+                let (vanishes_l, vanishes_r) = (vanishes[2 * i], vanishes[2 * i + 1]);
                 // We keep track of whether or not the polynomial resulting from
                 // the merge is evaluated or not.
                 let mut evaluated = false;
@@ -618,7 +617,7 @@ impl<F: FieldNTT> EvaluationColumn<F> {
             lg_chunk_size = next_lg_chunk_size;
         }
         // We do, however, need to turn the coefficients into evaluations.
-        return (at_zero, EvaluationColumn { evaluations: out });
+        (at_zero, Self { evaluations: out })
     }
 
     pub fn interpolate(self) -> PolynomialColumn<F> {
@@ -685,7 +684,7 @@ impl<F: FieldNTT> PolynomialColumn<F> {
     ///
     /// The number of roots does not change.
     ///
-    /// c.f. [Self::vanishing] for an explanation of how this works.
+    /// c.f. [`EvaluationColumn::vanishing`] for an explanation of how this works.
     fn divide_roots(&mut self, factor: F) {
         let mut factor_i = F::one();
         let lg_rows = self.coefficients.len().ilog2();
@@ -1221,7 +1220,8 @@ impl<F> EvaluationVector<F> {
 /// `V_S(X) * V_Sbar(X) = X^N - 1`, which gives `V_S(0) = -1/V_Sbar(0)`.
 /// The scaling factor of `P_Sbar` cancels in the ratio.
 ///
-/// Building `P_Sbar` via [`EvaluationColumn::vanishing`] is cheaper than building `V_S`
+/// Building `P_Sbar` via the same vanishing-polynomial construction used internally
+/// is cheaper than building `V_S`
 /// when most points are present (the typical erasure-coding case), since `|Sbar| << |S|`.
 ///
 /// # Arguments
