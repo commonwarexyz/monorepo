@@ -141,19 +141,6 @@ impl FuzzRng {
         self.ctr = self.ctr.wrapping_add(1);
         out
     }
-
-    /// Returns a uniformly distributed value in `[0, upper)`.
-    ///
-    /// This uses Lemire-style multiplication reduction and avoids modulo bias.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `upper == 0`.
-    pub fn gen_range(&mut self, upper: u64) -> u64 {
-        assert_ne!(upper, 0, "upper must be non-zero");
-        let x = self.next_u64();
-        ((x as u128 * upper as u128) >> 64) as u64
-    }
 }
 
 impl RngCore for FuzzRng {
@@ -377,34 +364,6 @@ mod tests {
         expected ^= expected >> 31;
 
         assert_eq!(rng.next_u64(), expected);
-    }
-
-    #[test]
-    fn test_gen_range_bounds() {
-        let mut rng = FuzzRng::new((0..32u8).collect());
-        for upper in [1u64, 2, 3, 10, 255, 1024, u32::MAX as u64, u64::MAX] {
-            for _ in 0..256 {
-                let value = rng.gen_range(upper);
-                assert!(value < upper);
-            }
-        }
-    }
-
-    #[test]
-    fn test_gen_range_deterministic() {
-        let bytes: Vec<u8> = (0..32u8).collect();
-        let mut a = FuzzRng::new(bytes.clone());
-        let mut b = FuzzRng::new(bytes);
-        for _ in 0..512 {
-            assert_eq!(a.gen_range(97), b.gen_range(97));
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "upper must be non-zero")]
-    fn test_gen_range_zero_panics() {
-        let mut rng = FuzzRng::new(vec![1, 2, 3]);
-        let _ = rng.gen_range(0);
     }
 
     mod conformance {
