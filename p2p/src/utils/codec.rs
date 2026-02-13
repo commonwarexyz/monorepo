@@ -217,7 +217,7 @@ where
             Ok((peer, bytes)) = self.receiver.recv() else break => {
                 let config = self.codec_config.clone();
                 let sender = self.sender.clone();
-                let handle = self.context.clone().spawn(|_| async move {
+                let handle = self.context.clone().shared(true).spawn(|_| async move {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
                     (peer, result, sender)
                 });

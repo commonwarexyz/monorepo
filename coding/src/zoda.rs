@@ -270,7 +270,7 @@ mod topology {
         /// Figure out what size different values will have, based on the config and the data.
         pub fn reckon(config: &Config, data_bytes: usize) -> Self {
             let n = config.minimum_shards.get() as usize;
-            let k = config.extra_shards as usize;
+            let k = config.extra_shards.get() as usize;
             // The following calculations don't tolerate data_bytes = 0, so we
             // temporarily correct that to be at least 1, then make sure to adjust
             // it back again to 0.
@@ -802,7 +802,7 @@ mod tests {
     fn topology_reckon_handles_small_extra_shards() {
         let config = Config {
             minimum_shards: NZU16!(3),
-            extra_shards: 1,
+            extra_shards: NZU16!(1),
         };
         let topology = Topology::reckon(&config, 16);
         assert_eq!(topology.min_shards, 3);
@@ -824,7 +824,7 @@ mod tests {
     fn weak_shard_roundtrip_handles_field_packing() {
         let config = Config {
             minimum_shards: NZU16!(3),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
         let data = vec![0xAA; 64];
 
@@ -852,7 +852,7 @@ mod tests {
     fn decode_rejects_duplicate_indices() {
         let config = Config {
             minimum_shards: NZU16!(2),
-            extra_shards: 0,
+            extra_shards: NZU16!(1),
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();

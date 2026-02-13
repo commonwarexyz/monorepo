@@ -834,7 +834,7 @@ mod tests {
         assert!(ReedSolomon::<Sha256>::encode(
             &Config {
                 minimum_shards: NZU16!(u16::MAX / 2 + 1),
-                extra_shards: u16::MAX,
+                extra_shards: NZU16!(u16::MAX),
             },
             [].as_slice(),
             &STRATEGY,

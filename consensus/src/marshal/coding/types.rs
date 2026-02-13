@@ -386,7 +386,7 @@ impl<B: CertifiableBlock, C: Scheme> Committable for CodedBlock<B, C> {
         Commitment::from((
             self.digest(),
             self.commitment,
-            context_hash(&self.inner.context()),
+            hash_context(&self.inner.context()),
             self.config,
         ))
     }
@@ -461,7 +461,7 @@ impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for CodedBlock<B, C> {
 }
 
 /// Hashes a consensus context for inclusion in a [`Commitment`].
-pub fn context_hash<C: EncodeSize + Write>(context: &C) -> Sha256Digest {
+pub fn hash_context<C: EncodeSize + Write>(context: &C) -> Sha256Digest {
     let mut buf = Vec::with_capacity(context.encode_size());
     context.write(&mut buf);
     Sha256::hash(&buf)
@@ -629,7 +629,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
     let max_faults = (n_participants - 1) / 3;
     CodingConfig {
         minimum_shards: NZU16!(max_faults + 1),
-        extra_shards: n_participants - (max_faults + 1),
+        extra_shards: NZU16!(n_participants - (max_faults + 1)),
     }
 }
 
@@ -655,7 +655,7 @@ mod test {
         const MOCK_BLOCK_DATA: &[u8] = b"commonware shape rotator club";
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
 
         let (_, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA, &Sequential).unwrap();
@@ -679,7 +679,7 @@ mod test {
         const MOCK_BLOCK_DATA: &[u8] = b"deadc0de";
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
 
         let (commitment, shards) = RS::encode(&CONFIG, MOCK_BLOCK_DATA, &Sequential).unwrap();
@@ -702,7 +702,7 @@ mod test {
     fn test_coded_block_codec_roundtrip() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
@@ -718,7 +718,7 @@ mod test {
     fn test_stored_coded_block_codec_roundtrip() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
@@ -742,7 +742,7 @@ mod test {
     fn test_stored_coded_block_into_coded_block() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
@@ -763,7 +763,7 @@ mod test {
     fn test_stored_coded_block_corruption_detection() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
-            extra_shards: 2,
+            extra_shards: NZU16!(2),
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);

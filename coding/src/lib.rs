@@ -14,7 +14,7 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
-    use std::{num::NonZeroU16, fmt::Debug};
+    use std::{fmt::Debug, num::NonZeroU16};
 
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
@@ -35,13 +35,13 @@ commonware_macros::stability_scope!(ALPHA {
         /// Alternatively, one can think of the configuration as having a total number
         /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
         /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
-        pub extra_shards: u16,
+        pub extra_shards: NonZeroU16,
     }
 
     impl Config {
         /// Returns the total number of shards produced by this configuration.
         pub fn total_shards(&self) -> u32 {
-            u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards)
+            u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards.get())
         }
     }
 
@@ -52,7 +52,7 @@ commonware_macros::stability_scope!(ALPHA {
     impl Write for Config {
         fn write(&self, buf: &mut impl bytes::BufMut) {
             self.minimum_shards.get().write(buf);
-            self.extra_shards.write(buf);
+            self.extra_shards.get().write(buf);
         }
     }
 
@@ -66,7 +66,9 @@ commonware_macros::stability_scope!(ALPHA {
                     "minimum_shards must be a non-zero value",
                 )
             })?;
-            let extra_shards = u16::read_cfg(buf, cfg)?;
+            let extra_shards = NonZeroU16::new(u16::read_cfg(buf, cfg)?).ok_or_else(|| {
+                commonware_codec::Error::Invalid("config", "extra_shards must be a non-zero value")
+            })?;
 
             Ok(Self {
                 minimum_shards,
@@ -79,10 +81,10 @@ commonware_macros::stability_scope!(ALPHA {
     impl arbitrary::Arbitrary<'_> for Config {
         fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
             let minimum_shards = u.int_in_range(1..=512)?;
-            let extra_shards = u.int_in_range(0..=512)?;
+            let extra_shards = u.int_in_range(1..=512)?;
             Ok(Self {
                 minimum_shards: NonZeroU16::new(minimum_shards).unwrap(),
-                extra_shards,
+                extra_shards: NonZeroU16::new(extra_shards).unwrap(),
             })
         }
     }
@@ -110,7 +112,7 @@ commonware_macros::stability_scope!(ALPHA {
     ///
     /// type RS = ReedSolomon<Sha256>;
     ///
-    /// let config = Config { minimum_shards: NZU16!(2), extra_shards: 1 };
+    /// let config = Config { minimum_shards: NZU16!(2), extra_shards: NZU16!(1) };
     /// let data = b"Hello!";
     /// // Turn the data into shards, and a commitment to those shards.
     /// let (commitment, shards) =
@@ -312,7 +314,7 @@ mod test {
             (
                 Just(Config {
                     minimum_shards: NZU16!(min_shards),
-                    extra_shards,
+                    extra_shards: NZU16!(extra_shards),
                 }),
                 data,
                 indices,
@@ -324,7 +326,7 @@ mod test {
     fn roundtrip_empty_data() {
         let config = Config {
             minimum_shards: NZU16!(30),
-            extra_shards: 70,
+            extra_shards: NZU16!(70),
         };
         let selected: Vec<u16> = (0..30).collect();
 
@@ -338,7 +340,7 @@ mod test {
     fn roundtrip_2_pow_16_25_total_shards() {
         let config = Config {
             minimum_shards: NZU16!(8),
-            extra_shards: 17,
+            extra_shards: NZU16!(17),
         };
         let data = vec![0x67; 1 << 16];
         let selected: Vec<u16> = (0..8).collect();
@@ -351,7 +353,7 @@ mod test {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
-        // Reed-Solomon requires extra_shards >= 1 (i.e., total > min).
+        // All schemes require extra_shards >= 1.
         #[test]
         fn proptest_roundtrip_reed_solomon(
             (config, data, selected) in roundtrip_strategy(1)
@@ -361,14 +363,14 @@ mod test {
 
         #[test]
         fn proptest_roundtrip_no_coding(
-            (config, data, selected) in roundtrip_strategy(0)
+            (config, data, selected) in roundtrip_strategy(1)
         ) {
             roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
         }
 
         #[test]
         fn proptest_roundtrip_zoda(
-            (config, data, selected) in roundtrip_strategy(0)
+            (config, data, selected) in roundtrip_strategy(1)
         ) {
             roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
         }

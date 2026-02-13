@@ -710,8 +710,8 @@ commonware_macros::stability_scope!(ALPHA {
         impl Commitment {
             const DIGEST_BYTES: usize = 32;
             const BLOCK_DIGEST_OFFSET: usize = 0;
-            const CODING_DIGEST_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + Self::DIGEST_BYTES;
-            const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_DIGEST_OFFSET + Self::DIGEST_BYTES;
+            const CODING_ROOT_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + Self::DIGEST_BYTES;
+            const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_ROOT_OFFSET + Self::DIGEST_BYTES;
             const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + Self::DIGEST_BYTES;
 
             /// Extracts the [`CodingConfig`] from this [`Commitment`].
@@ -735,7 +735,7 @@ commonware_macros::stability_scope!(ALPHA {
             ///
             /// Panics if the [`Digest`]'s [`FixedSize::SIZE`] is > 32 bytes.
             pub fn root<D: Digest>(&self) -> D {
-                self.take(Self::CODING_DIGEST_OFFSET..Self::CODING_DIGEST_OFFSET + D::SIZE)
+                self.take(Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + D::SIZE)
             }
 
             /// Returns the context [`Digest`] from this [`Commitment`].
@@ -856,7 +856,7 @@ commonware_macros::stability_scope!(ALPHA {
 
                 let mut buf = [0u8; Self::SIZE];
                 buf[..D1::SIZE].copy_from_slice(&digest);
-                buf[Self::CODING_DIGEST_OFFSET..Self::CODING_DIGEST_OFFSET + D2::SIZE]
+                buf[Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + D2::SIZE]
                     .copy_from_slice(&commitment);
                 buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + D3::SIZE]
                     .copy_from_slice(&context_digest);

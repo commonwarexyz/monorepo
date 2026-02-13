@@ -18,7 +18,7 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context hash matches the consensus context and subscribes to shard validity
+//! ensures the commitment's context digest matches the consensus context and subscribes to shard validity
 //! for the shard received by the proposer. If the shard is valid, the local shard is relayed to all
 //! other participants to aid in block reconstruction.
 //!
@@ -85,7 +85,7 @@ use crate::{
         },
         coding::{
             shards,
-            types::{coding_config_for_participants, context_hash, CodedBlock},
+            types::{coding_config_for_participants, hash_context, CodedBlock},
             Coding,
         },
         core, Update,
@@ -124,7 +124,7 @@ use tracing::{debug, warn};
 /// the proposal phase, and thus the configuration is irrelevant.
 const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
     minimum_shards: NZU16!(1),
-    extra_shards: 0,
+    extra_shards: NZU16!(1),
 };
 
 /// Configuration for initializing [`Marshaled`].
@@ -269,7 +269,7 @@ where
     /// 2. Re-proposals are only allowed for the last block in an epoch
     /// 3. The block's parent digest matches the consensus context's expected parent
     /// 4. The block's height is exactly one greater than the parent's height
-    /// 5. The block's embedded context hash matches the commitment
+    /// 5. The block's embedded context digest matches the commitment
     /// 6. The block's embedded context matches the consensus context
     /// 7. The underlying application's verification logic passes
     ///
@@ -409,14 +409,14 @@ where
                     return;
                 }
 
-                // Ensure the block's embedded context matches the commitment's context hash.
+                // Ensure the block's embedded context matches the commitment's context digest.
                 let expected_context_hash = commitment.context::<Sha256Digest>();
-                let got_context_hash = context_hash(&block.context());
+                let got_context_hash = hash_context(&block.context());
                 if expected_context_hash != got_context_hash {
                     debug!(
                         expected_context_hash = ?expected_context_hash,
                         got_context_hash = ?got_context_hash,
-                        "block context hash does not match commitment"
+                        "block context digest does not match commitment"
                     );
                     tx.send_lossy(false);
                     return;
@@ -424,7 +424,7 @@ where
 
                 // Ensure the block's embedded context matches the consensus context.
                 //
-                // We already checked the commitment's context hash against the block's embedded
+                // We already checked the commitment's context digest against the block's embedded
                 // context above (and `verify()` ties the commitment hash to the consensus context).
                 // This check enforces full context equality for certification, rejecting any
                 // reconstructed block whose context does not exactly match the consensus context.
@@ -665,7 +665,7 @@ where
     ///
     /// This method validates that:
     /// 1. The coding configuration matches the expected configuration for the current scheme.
-    /// 2. The commitment's context hash matches the consensus context (unless this is a re-proposal).
+    /// 2. The commitment's context digest matches the consensus context (unless this is a re-proposal).
     /// 3. The shard is contained within the consensus commitment.
     ///
     /// Verification is spawned in a background task and returns a receiver that will contain
@@ -774,14 +774,14 @@ where
             return rx;
         }
 
-        let expected = context_hash(&context);
+        let expected = hash_context(&context);
         let got = payload.context::<Sha256Digest>();
         if expected != got {
             warn!(
                 round = %context.round,
                 expected = ?expected,
                 got = ?got,
-                "rejected proposal with mismatched context hash"
+                "rejected proposal with mismatched context digest"
             );
 
             let (tx, rx) = oneshot::channel();
@@ -1060,7 +1060,7 @@ fn genesis_coding_commitment<B: CertifiableBlock>(block: &B) -> Commitment {
     Commitment::from((
         block.digest(),
         block.digest(),
-        context_hash(&block.context()),
+        hash_context(&block.context()),
         GENESIS_CODING_CONFIG,
     ))
 }

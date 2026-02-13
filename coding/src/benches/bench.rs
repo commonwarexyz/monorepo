@@ -18,7 +18,7 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                 let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min as u16),
-                    extra_shards: (chunks - min) as u16,
+                    extra_shards: NZU16!((chunks - min) as u16),
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
@@ -56,7 +56,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                 let min = chunks / 3;
                 let config = Config {
                     minimum_shards: NZU16!(min as u16),
-                    extra_shards: (chunks - min) as u16,
+                    extra_shards: NZU16!((chunks - min) as u16),
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
@@ -94,7 +94,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                 let (checking_data, _, _) = S::weaken(
                                     &config,
                                     &commitment,
-                                    config.minimum_shards.get() + config.extra_shards - 1,
+                                    config.minimum_shards.get() + config.extra_shards.get() - 1,
                                     my_shard,
                                 )
                                 .unwrap();

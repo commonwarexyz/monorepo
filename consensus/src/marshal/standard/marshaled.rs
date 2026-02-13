@@ -41,6 +41,26 @@
 //!   while subsequent epochs use the last block of the previous epoch as genesis
 //! - Blocks are automatically verified to be within the current epoch
 //!
+//! # Notarization and Data Availability
+//!
+//! In rare crash cases, it is possible for a notarization certificate to exist without a block being
+//! available to the honest parties if [`CertifiableAutomaton::certify`] fails after a notarization is
+//! formed.
+//!
+//! For this reason, it should not be expected that every notarized payload will be certifiable due
+//! to the lack of an available block. However, if even one honest and online party has the block,
+//! they will attempt to forward it to others via marshal's resolver.
+//!
+//! ```text
+//!                                      ┌───────────────────────────────────────────────────┐
+//!                                      ▼                                                   │
+//! ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
+//! │          B1         │◀──│          B2         │◀──│          B3         │XXX│          B4         │
+//! └─────────────────────┘   └─────────────────────┘   └──────────┬──────────┘   └─────────────────────┘
+//!                                                                │
+//!                                                          Failed Certify
+//! ```
+//!
 //! # Future Work
 //!
 //! - To further reduce view latency, a participant could optimistically vote for a block prior to

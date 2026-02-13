@@ -629,7 +629,7 @@ type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, K>;
 /// Genesis blocks use a special coding config that doesn't actually encode.
 pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
     minimum_shards: NZU16!(1),
-    extra_shards: 0,
+    extra_shards: NZU16!(1),
 };
 
 /// Create a genesis Commitment (all zeros for digests, genesis config).

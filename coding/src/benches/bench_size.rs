@@ -17,7 +17,7 @@ fn bench_size<S: Scheme>(name: &str) {
             let min = chunks / 3;
             let config = Config {
                 minimum_shards: NZU16!(min as u16),
-                extra_shards: (chunks - min) as u16,
+                extra_shards: NZU16!((chunks - min) as u16),
             };
 
             let data = {
@@ -39,7 +39,7 @@ fn bench_size<S: Scheme>(name: &str) {
             let (_, _, weak_shard) = S::weaken(
                 &config,
                 &commitment,
-                config.minimum_shards.get() + config.extra_shards - 1,
+                config.minimum_shards.get() + config.extra_shards.get() - 1,
                 shard,
             )
             .unwrap();
