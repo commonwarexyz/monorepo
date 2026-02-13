@@ -585,19 +585,16 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Sync any pending updates to disk.
     ///
-    /// Only the tail section can have pending updates since historical sections are synced
-    /// when they become full.
+    /// All sections may have pending updates if a previous auto-sync failed.
     pub async fn sync(&self) -> Result<(), Error> {
         // Serialize with append/prune/rewind to ensure section selection is stable, while still allowing
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
-        // Sync the tail section
-        let tail_section = inner.size / self.items_per_blob;
-
-        // The tail section may not exist yet if the previous section was just filled, but syncing a
-        // non-existent section is safe (returns Ok).
-        inner.journal.sync(tail_section).await?;
+        // Sync all sections. We use sync_all rather than targeting only the tail section because
+        // a previous section's auto-sync (triggered when a section fills in `append`) may have
+        // failed, leaving that section's data only in the write buffer.
+        inner.journal.sync_all().await?;
 
         // Persist metadata only when pruning_boundary is mid-section.
         let pruning_boundary = inner.pruning_boundary;

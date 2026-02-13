@@ -342,22 +342,33 @@ async fn verify_recovery(
 
     // Verify all unacked items can be dequeued and have correct content
     let mut dequeued_count = 0u64;
-    while let Ok(Some((pos, item))) = queue.dequeue().await {
-        dequeued_count += 1;
+    loop {
+        match queue.dequeue().await {
+            Ok(Some((pos, item))) => {
+                dequeued_count += 1;
 
-        // Verify item content if we know what it should be
-        if let Some(value) = state.committed.get(&pos) {
-            let expected = make_item(*value);
-            assert_eq!(
-                item, expected,
-                "item at position {} has wrong content after recovery",
-                pos
-            );
-        }
+                // Verify item content if we know what it should be
+                if let Some(value) = state.committed.get(&pos) {
+                    let expected = make_item(*value);
+                    assert_eq!(
+                        item, expected,
+                        "item at position {} has wrong content after recovery",
+                        pos
+                    );
+                }
 
-        // Prevent infinite loop
-        if dequeued_count > size {
-            panic!("dequeued more items than queue size");
+                // Prevent infinite loop
+                if dequeued_count > size {
+                    panic!("dequeued more items than queue size");
+                }
+            }
+            Ok(None) => break,
+            Err(e) => panic!(
+                "dequeue at position {} failed after recovery: {e} (size={}, ack_floor={})",
+                ack_floor + dequeued_count,
+                size,
+                ack_floor
+            ),
         }
     }
 

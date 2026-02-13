@@ -594,8 +594,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
-        let section = position_to_section(inner.size, self.items_per_section);
-        inner.data.sync(section).await
+        // Sync all data sections. We use sync_all rather than targeting a single section because
+        // a previous section's auto-sync (triggered when a section fills in `append`) may have
+        // failed, leaving that section's data only in the write buffer. Syncing just the current
+        // section would miss the unflushed previous section, violating the section-fullness
+        // invariant after a crash.
+        inner.data.sync_all().await
     }
 
     /// Durably persist the journal and ensure recovery is not required on startup.
@@ -606,13 +610,10 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         // concurrent readers.
         let inner = self.inner.upgradable_read().await;
 
-        // Persist only the current (final) section of the data journal.
-        // All non-final sections are already persisted per Invariant #1.
-        let section = position_to_section(inner.size, self.items_per_section);
-
-        // Persist both journals concurrently. These journals may not exist yet if the
-        // previous section was just filled. This is checked internally.
-        futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
+        // Persist both journals concurrently. We use sync_all rather than targeting a single
+        // section because a previous section's auto-sync (triggered when a section fills in
+        // `append`) may have failed, leaving data only in the write buffer.
+        futures::try_join!(inner.data.sync_all(), self.offsets.sync())?;
 
         Ok(())
     }
