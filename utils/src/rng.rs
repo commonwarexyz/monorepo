@@ -98,7 +98,7 @@ pub struct FuzzRng {
 
 impl FuzzRng {
     /// Creates a new `FuzzRng` from a byte buffer.
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub const fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             ctr: 0,
@@ -123,8 +123,8 @@ impl FuzzRng {
         let mut bytes = [0u8; BLOCK_BYTES];
         if !self.bytes.is_empty() {
             let len = self.bytes.len() as u64;
-            for i in 0..BLOCK_BYTES {
-                bytes[i] = self.bytes[(self.ctr.wrapping_add(i as u64) % len) as usize];
+            for (i, byte) in bytes.iter_mut().enumerate().take(BLOCK_BYTES) {
+                *byte = self.bytes[(self.ctr.wrapping_add(i as u64) % len) as usize];
             }
         }
         let word = u64::from_le_bytes(bytes);
