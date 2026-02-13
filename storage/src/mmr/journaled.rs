@@ -346,8 +346,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             assert_eq!(pos, journal_size);
 
             // Inline sync: flush recovered nodes to journal.
-            let js = Position::new(journal.size().await);
-            for p in *js..*mem_mmr.size() {
+            for p in journal.size().await..*mem_mmr.size() {
                 let p = Position::new(p);
                 let node = *mem_mmr.get_node_unchecked(p);
                 journal.append(node).await?;
@@ -834,12 +833,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
         let clean_mmr = self.merkleize(hasher);
         let inner = clean_mmr.inner.read().await;
-        let journal_size = Position::new(clean_mmr.journal.size().await);
+        let journal_size = clean_mmr.journal.size().await;
 
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.
         let mut written_count = 0usize;
-        for i in *journal_size..*inner.mem_mmr.size() {
+        for i in journal_size..*inner.mem_mmr.size() {
             let node = *inner.mem_mmr.get_node_unchecked(Position::new(i));
             clean_mmr.journal.append(node).await?;
             written_count += 1;
@@ -1450,7 +1449,6 @@ mod tests {
                     positions.push(pos);
                     dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
                     mmr = dirty_mmr.merkleize(&mut hasher);
-                    assert_eq!(mmr.root().await, mmr.root().await);
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
