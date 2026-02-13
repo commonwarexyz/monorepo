@@ -33,7 +33,9 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
         block.commitment()
     }
 
-    fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
+    fn commitment_to_application(
+        commitment: Self::Commitment,
+    ) -> <Self::Block as Digestible>::Digest {
         commitment.block_digest()
     }
 

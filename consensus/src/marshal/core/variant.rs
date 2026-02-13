@@ -41,7 +41,9 @@ pub trait Variant: Clone + Send + Sync + 'static {
     fn commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Extracts the block digest from a consensus commitment.
-    fn commitment_to_digest(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
+    fn commitment_to_application(
+        commitment: Self::Commitment,
+    ) -> <Self::Block as Digestible>::Digest;
 
     /// Converts a working block to an application block.
     ///

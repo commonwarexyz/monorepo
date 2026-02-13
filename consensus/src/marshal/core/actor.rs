@@ -365,7 +365,7 @@ where
                                 .await
                                 .ok()
                                 .flatten()
-                                .map(|f| (height, V::commitment_to_digest(f.proposal.payload))),
+                                .map(|f| (height, V::commitment_to_application(f.proposal.payload))),
                             BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                         };
                         response.send_lossy(info);
@@ -380,7 +380,7 @@ where
                     Message::Notarization { notarization } => {
                         let round = notarization.round();
                         let commitment = notarization.proposal.payload;
-                        let digest = V::commitment_to_digest(commitment);
+                        let digest = V::commitment_to_application(commitment);
 
                         // Store notarization by view
                         self.cache.put_notarization(
@@ -402,7 +402,7 @@ where
                         // Cache finalization by round
                         let round = finalization.round();
                         let commitment = finalization.proposal.payload;
-                        let digest = V::commitment_to_digest(commitment);
+                        let digest = V::commitment_to_application(commitment);
                         self.cache.put_finalization(
                             round,
                             digest,
@@ -523,7 +523,7 @@ where
                         }
 
                         // Extract the digest from the commitment for subscription tracking
-                        let digest = V::commitment_to_digest(commitment);
+                        let digest = V::commitment_to_application(commitment);
 
                         // We don't have the block locally, so fetch the block from the network
                         // if we have an associated view.
@@ -644,7 +644,7 @@ where
                                 // Get block
                                 let commitment = notarization.proposal.payload;
                                 let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await else {
-                                    let digest = V::commitment_to_digest(commitment);
+                                    let digest = V::commitment_to_application(commitment);
                                     debug!(?digest, "block missing on request");
                                     continue;
                                 };
@@ -706,7 +706,7 @@ where
 
                                 // Validation
                                 let commitment = finalization.proposal.payload;
-                                let digest = V::commitment_to_digest(commitment);
+                                let digest = V::commitment_to_application(commitment);
                                 if block.height() != height
                                     || V::commitment(&block) != commitment
                                     || !finalization.verify(&mut self.context, &scheme, &self.strategy)
@@ -748,7 +748,7 @@ where
 
                                 // Validation
                                 let commitment = notarization.proposal.payload;
-                                let digest = V::commitment_to_digest(commitment);
+                                let digest = V::commitment_to_application(commitment);
                                 if notarization.round() != round
                                     || V::commitment(&block) != commitment
                                     || !notarization.verify(&mut self.context, &scheme, &self.strategy)
@@ -855,7 +855,7 @@ where
         self.set_processed_height(height, resolver).await?;
 
         // Cancel any useless requests
-        let digest = V::commitment_to_digest(commitment);
+        let digest = V::commitment_to_application(commitment);
         resolver.cancel(Request::<V::Block>::Block(digest)).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -1029,7 +1029,7 @@ where
             .expect("finalization missing");
         Some((
             height,
-            V::commitment_to_digest(finalization.proposal.payload),
+            V::commitment_to_application(finalization.proposal.payload),
             finalization.proposal.round,
         ))
     }
@@ -1080,7 +1080,7 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block.into_block());
         }
-        self.find_block_in_storage(V::commitment_to_digest(commitment))
+        self.find_block_in_storage(V::commitment_to_application(commitment))
             .await
     }
 
