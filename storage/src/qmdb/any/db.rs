@@ -129,8 +129,8 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    pub const fn root(&self) -> H::Digest {
-        self.log.root()
+    pub async fn root(&self) -> H::Digest {
+        self.log.root().await
     }
 
     pub async fn proof(
@@ -530,8 +530,8 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    fn root(&self) -> H::Digest {
-        self.root()
+    async fn root(&self) -> H::Digest {
+        self.root().await
     }
 
     async fn historical_proof(

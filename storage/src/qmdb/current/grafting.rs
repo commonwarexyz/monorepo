@@ -338,8 +338,8 @@ impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
 }
 
 impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
-    fn size(&self) -> Position {
-        self.ops_mmr.size()
+    async fn size(&self) -> Position {
+        self.ops_mmr.size().await
     }
 
     async fn get_node(&self, pos: Position) -> Result<Option<D>, Error> {
@@ -599,7 +599,7 @@ mod tests {
 
             {
                 let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-                assert_eq!(combined.size(), ops_mmr.size());
+                assert_eq!(combined.size().await, ops_mmr.size());
 
                 // Compute the combined root by iterating ops peaks.
                 let combined_root = {
@@ -756,7 +756,7 @@ mod tests {
             let ops_mmr = ops_mmr.merkleize(&mut standard, None);
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-            assert_eq!(combined.size(), ops_mmr.size());
+            assert_eq!(combined.size().await, ops_mmr.size());
 
             // Compute the combined root.
             let combined_root = {

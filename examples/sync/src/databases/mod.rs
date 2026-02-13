@@ -58,7 +58,7 @@ pub trait Syncable: Sized {
     ) -> impl Future<Output = Result<Self, qmdb::Error>>;
 
     /// Get the database's root digest.
-    fn root(&self) -> Key;
+    fn root(&self) -> impl Future<Output = Key> + Send;
 
     /// Get the total number of operations in the database (including pruned operations).
     fn size(&self) -> impl Future<Output = Location> + Send;

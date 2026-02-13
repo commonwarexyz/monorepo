@@ -10,16 +10,34 @@ mod pool;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
-use pool::PooledBufMut;
 pub use pool::{BufferPool, BufferPoolConfig, PoolError};
+use pool::{PooledBuf, PooledBufMut};
 use std::{collections::VecDeque, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
-/// Cloning is cheap and does not copy.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Backed by either `Bytes` or a pooled aligned allocation.
+///
+/// Use this for immutable payloads. To build or mutate data, use
+/// [`IoBufMut`] and then [`IoBufMut::freeze`].
+///
+/// For pooled-backed values, the underlying buffer is returned to the pool
+/// when the final reference is dropped.
+///
+/// All `From<*> for IoBuf` implementations are guaranteed to be non-copy
+/// conversions. Use [`IoBuf::copy_from_slice`] when an explicit copy from
+/// borrowed data is required.
+///
+/// Cloning is cheap and does not copy underlying bytes.
+#[derive(Clone, Debug)]
 pub struct IoBuf {
-    inner: Bytes,
+    inner: IoBufInner,
+}
+
+#[derive(Clone, Debug)]
+enum IoBufInner {
+    Bytes(Bytes),
+    Pooled(PooledBuf),
 }
 
 impl IoBuf {
@@ -29,7 +47,29 @@ impl IoBuf {
     /// `IoBuf`. For static slices, prefer `IoBuf::from(b"...")` which is zero-copy.
     pub fn copy_from_slice(data: &[u8]) -> Self {
         Self {
-            inner: Bytes::copy_from_slice(data),
+            inner: IoBufInner::Bytes(Bytes::copy_from_slice(data)),
+        }
+    }
+
+    /// Create a buffer from a pooled allocation.
+    const fn from_pooled(pooled: PooledBuf) -> Self {
+        Self {
+            inner: IoBufInner::Pooled(pooled),
+        }
+    }
+
+    /// Returns `true` if this buffer is tracked by a pool.
+    ///
+    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// returned to the pool when the final reference is dropped.
+    ///
+    /// Buffers backed by `Bytes`, and untracked fallback allocations from
+    /// [`BufferPool::alloc`], return `false`.
+    #[inline]
+    pub fn is_pooled(&self) -> bool {
+        match &self.inner {
+            IoBufInner::Bytes(_) => false,
+            IoBufInner::Pooled(p) => p.is_tracked(),
         }
     }
 
@@ -48,14 +88,55 @@ impl IoBuf {
     /// Get raw pointer to the buffer data.
     #[inline]
     pub fn as_ptr(&self) -> *const u8 {
-        self.inner.as_ptr()
+        match &self.inner {
+            IoBufInner::Bytes(b) => b.as_ptr(),
+            IoBufInner::Pooled(p) => p.as_ptr(),
+        }
     }
 
     /// Returns a slice of self for the provided range (zero-copy).
+    ///
+    /// For pooled buffers, empty ranges return an empty detached buffer
+    /// (`IoBuf::default()`) so the underlying pooled allocation is not retained.
     #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
-        Self {
-            inner: self.inner.slice(range),
+        match &self.inner {
+            IoBufInner::Bytes(b) => Self {
+                inner: IoBufInner::Bytes(b.slice(range)),
+            },
+            IoBufInner::Pooled(p) => p.slice(range).map_or_else(Self::default, Self::from_pooled),
+        }
+    }
+
+    /// Try to convert this buffer into `IoBufMut` without copying.
+    ///
+    /// Succeeds when `self` holds exclusive ownership of the backing storage
+    /// and returns an `IoBufMut` with the same contents. Fails and returns
+    /// `self` unchanged when ownership is shared.
+    ///
+    /// For `Bytes`-backed buffers, this matches `Bytes::try_into_mut`
+    /// semantics: succeeds only for uniquely-owned full buffers, and always
+    /// fails for `from_owner` and `from_static` buffers. For pooled buffers,
+    /// this succeeds for any uniquely-owned view (including slices) and fails
+    /// when shared.
+    pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
+        match self.inner {
+            IoBufInner::Bytes(bytes) => bytes
+                .try_into_mut()
+                .map(|mut_bytes| IoBufMut {
+                    inner: IoBufMutInner::Bytes(mut_bytes),
+                })
+                .map_err(|bytes| Self {
+                    inner: IoBufInner::Bytes(bytes),
+                }),
+            IoBufInner::Pooled(pooled) => pooled
+                .try_into_mut()
+                .map(|mut_pooled| IoBufMut {
+                    inner: IoBufMutInner::Pooled(mut_pooled),
+                })
+                .map_err(|pooled| Self {
+                    inner: IoBufInner::Pooled(pooled),
+                }),
         }
     }
 }
@@ -63,9 +144,28 @@ impl IoBuf {
 impl AsRef<[u8]> for IoBuf {
     #[inline]
     fn as_ref(&self) -> &[u8] {
-        self.inner.as_ref()
+        match &self.inner {
+            IoBufInner::Bytes(b) => b.as_ref(),
+            IoBufInner::Pooled(p) => p.as_ref(),
+        }
     }
 }
+
+impl Default for IoBuf {
+    fn default() -> Self {
+        Self {
+            inner: IoBufInner::Bytes(Bytes::new()),
+        }
+    }
+}
+
+impl PartialEq for IoBuf {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for IoBuf {}
 
 impl PartialEq<[u8]> for IoBuf {
     #[inline]
@@ -98,35 +198,62 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
 impl Buf for IoBuf {
     #[inline]
     fn remaining(&self) -> usize {
-        self.inner.remaining()
+        match &self.inner {
+            IoBufInner::Bytes(b) => b.remaining(),
+            IoBufInner::Pooled(p) => p.remaining(),
+        }
     }
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        self.inner.chunk()
+        match &self.inner {
+            IoBufInner::Bytes(b) => b.chunk(),
+            IoBufInner::Pooled(p) => p.chunk(),
+        }
     }
 
     #[inline]
     fn advance(&mut self, cnt: usize) {
-        self.inner.advance(cnt);
+        match &mut self.inner {
+            IoBufInner::Bytes(b) => b.advance(cnt),
+            IoBufInner::Pooled(p) => p.advance(cnt),
+        }
     }
 
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        self.inner.copy_to_bytes(len)
+        match &mut self.inner {
+            IoBufInner::Bytes(b) => b.copy_to_bytes(len),
+            IoBufInner::Pooled(p) => {
+                // Full non-empty drain: transfer ownership so the drained source no
+                // longer retains the pooled allocation. Keep len == 0 on the normal
+                // path to avoid creating an empty Bytes that still pins pool memory.
+                if len != 0 && len == p.remaining() {
+                    let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
+                    match inner {
+                        IoBufInner::Pooled(p) => Bytes::from_owner(p),
+                        IoBufInner::Bytes(_) => unreachable!(),
+                    }
+                } else {
+                    p.copy_to_bytes(len)
+                }
+            }
+        }
     }
 }
 
 impl From<Bytes> for IoBuf {
     fn from(bytes: Bytes) -> Self {
-        Self { inner: bytes }
+        Self {
+            inner: IoBufInner::Bytes(bytes),
+        }
     }
 }
 
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
         Self {
-            inner: Bytes::from(vec),
+            inner: IoBufInner::Bytes(Bytes::from(vec)),
         }
     }
 }
@@ -134,7 +261,7 @@ impl From<Vec<u8>> for IoBuf {
 impl<const N: usize> From<&'static [u8; N]> for IoBuf {
     fn from(array: &'static [u8; N]) -> Self {
         Self {
-            inner: Bytes::from_static(array),
+            inner: IoBufInner::Bytes(Bytes::from_static(array)),
         }
     }
 }
@@ -142,20 +269,34 @@ impl<const N: usize> From<&'static [u8; N]> for IoBuf {
 impl From<&'static [u8]> for IoBuf {
     fn from(slice: &'static [u8]) -> Self {
         Self {
-            inner: Bytes::from_static(slice),
+            inner: IoBufInner::Bytes(Bytes::from_static(slice)),
         }
     }
 }
 
+/// Convert an `IoBuf` into a `Vec<u8>`.
+///
+/// This conversion may copy:
+/// - `Bytes`-backed buffers may reuse allocation when possible
+/// - pooled buffers copy readable bytes into a new `Vec<u8>`
 impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
-        Self::from(buf.inner)
+        match buf.inner {
+            IoBufInner::Bytes(bytes) => Self::from(bytes),
+            IoBufInner::Pooled(pooled) => pooled.as_ref().to_vec(),
+        }
     }
 }
 
+/// Convert an `IoBuf` into `Bytes` without copying readable data.
+///
+/// For pooled buffers, this wraps the pooled owner using `Bytes::from_owner`.
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
-        buf.inner
+        match buf.inner {
+            IoBufInner::Bytes(bytes) => bytes,
+            IoBufInner::Pooled(pooled) => Self::from_owner(pooled),
+        }
     }
 }
 
@@ -196,12 +337,13 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 
 /// Mutable byte buffer.
 ///
-/// Use this to build or mutate payloads before freezing into `IoBuf`.
+/// Backed by either `BytesMut` or a pooled aligned allocation.
 ///
-/// Can be either an owned buffer (backed by `BytesMut`) or a pooled buffer
-/// (allocated from a `BufferPool`). Pooled buffers are automatically returned
-/// to the pool when dropped. Freezing transfers ownership to the resulting
-/// `IoBuf`, which returns the buffer to the pool when all references are dropped.
+/// Use this to build or mutate payloads before freezing into [`IoBuf`].
+///
+/// For pooled-backed values, dropping this buffer returns the underlying
+/// allocation to the pool. After [`IoBufMut::freeze`], the frozen `IoBuf`
+/// keeps the allocation alive until its final reference is dropped.
 #[derive(Debug)]
 pub struct IoBufMut {
     inner: IoBufMutInner,
@@ -209,14 +351,14 @@ pub struct IoBufMut {
 
 #[derive(Debug)]
 enum IoBufMutInner {
-    Owned(BytesMut),
+    Bytes(BytesMut),
     Pooled(PooledBufMut),
 }
 
 impl Default for IoBufMut {
     fn default() -> Self {
         Self {
-            inner: IoBufMutInner::Owned(BytesMut::new()),
+            inner: IoBufMutInner::Bytes(BytesMut::new()),
         }
     }
 }
@@ -225,7 +367,7 @@ impl IoBufMut {
     /// Create a buffer with the given capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: IoBufMutInner::Owned(BytesMut::with_capacity(capacity)),
+            inner: IoBufMutInner::Bytes(BytesMut::with_capacity(capacity)),
         }
     }
 
@@ -236,12 +378,12 @@ impl IoBufMut {
     /// (e.g., `file.read_exact`).
     pub fn zeroed(len: usize) -> Self {
         Self {
-            inner: IoBufMutInner::Owned(BytesMut::zeroed(len)),
+            inner: IoBufMutInner::Bytes(BytesMut::zeroed(len)),
         }
     }
 
     /// Create a buffer from a pooled allocation.
-    pub(crate) const fn from_pooled(pooled: PooledBufMut) -> Self {
+    const fn from_pooled(pooled: PooledBufMut) -> Self {
         Self {
             inner: IoBufMutInner::Pooled(pooled),
         }
@@ -249,13 +391,15 @@ impl IoBufMut {
 
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers will be returned to their pool when dropped. Fallback
-    /// allocations from [`BufferPool::alloc`] when the pool is exhausted or
-    /// oversized are aligned but untracked, so this returns `false`.
+    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// returned to the pool when dropped.
+    ///
+    /// Buffers backed by `BytesMut`, and untracked fallback allocations from
+    /// [`BufferPool::alloc`], return `false`.
     #[inline]
     pub fn is_pooled(&self) -> bool {
         match &self.inner {
-            IoBufMutInner::Owned(_) => false,
+            IoBufMutInner::Bytes(_) => false,
             IoBufMutInner::Pooled(p) => p.is_tracked(),
         }
     }
@@ -282,7 +426,7 @@ impl IoBufMut {
             self.capacity()
         );
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.set_len(len),
+            IoBufMutInner::Bytes(b) => b.set_len(len),
             IoBufMutInner::Pooled(b) => b.set_len(len),
         }
     }
@@ -297,7 +441,7 @@ impl IoBufMut {
     #[inline]
     pub fn is_empty(&self) -> bool {
         match &self.inner {
-            IoBufMutInner::Owned(b) => b.is_empty(),
+            IoBufMutInner::Bytes(b) => b.is_empty(),
             IoBufMutInner::Pooled(b) => b.is_empty(),
         }
     }
@@ -306,7 +450,7 @@ impl IoBufMut {
     #[inline]
     pub fn freeze(self) -> IoBuf {
         match self.inner {
-            IoBufMutInner::Owned(b) => b.freeze().into(),
+            IoBufMutInner::Bytes(b) => b.freeze().into(),
             IoBufMutInner::Pooled(b) => b.freeze(),
         }
     }
@@ -315,7 +459,7 @@ impl IoBufMut {
     #[inline]
     pub fn capacity(&self) -> usize {
         match &self.inner {
-            IoBufMutInner::Owned(b) => b.capacity(),
+            IoBufMutInner::Bytes(b) => b.capacity(),
             IoBufMutInner::Pooled(b) => b.capacity(),
         }
     }
@@ -324,7 +468,7 @@ impl IoBufMut {
     #[inline]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.as_mut_ptr(),
+            IoBufMutInner::Bytes(b) => b.as_mut_ptr(),
             IoBufMutInner::Pooled(b) => b.as_mut_ptr(),
         }
     }
@@ -335,7 +479,7 @@ impl IoBufMut {
     #[inline]
     pub fn truncate(&mut self, len: usize) {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.truncate(len),
+            IoBufMutInner::Bytes(b) => b.truncate(len),
             IoBufMutInner::Pooled(b) => b.truncate(len),
         }
     }
@@ -344,7 +488,7 @@ impl IoBufMut {
     #[inline]
     pub fn clear(&mut self) {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.clear(),
+            IoBufMutInner::Bytes(b) => b.clear(),
             IoBufMutInner::Pooled(b) => b.clear(),
         }
     }
@@ -354,7 +498,7 @@ impl AsRef<[u8]> for IoBufMut {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         match &self.inner {
-            IoBufMutInner::Owned(b) => b.as_ref(),
+            IoBufMutInner::Bytes(b) => b.as_ref(),
             IoBufMutInner::Pooled(b) => b.as_ref(),
         }
     }
@@ -364,7 +508,7 @@ impl AsMut<[u8]> for IoBufMut {
     #[inline]
     fn as_mut(&mut self) -> &mut [u8] {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.as_mut(),
+            IoBufMutInner::Bytes(b) => b.as_mut(),
             IoBufMutInner::Pooled(b) => b.as_mut(),
         }
     }
@@ -402,7 +546,7 @@ impl Buf for IoBufMut {
     #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
-            IoBufMutInner::Owned(b) => b.remaining(),
+            IoBufMutInner::Bytes(b) => b.remaining(),
             IoBufMutInner::Pooled(b) => b.remaining(),
         }
     }
@@ -410,7 +554,7 @@ impl Buf for IoBufMut {
     #[inline]
     fn chunk(&self) -> &[u8] {
         match &self.inner {
-            IoBufMutInner::Owned(b) => b.chunk(),
+            IoBufMutInner::Bytes(b) => b.chunk(),
             IoBufMutInner::Pooled(b) => b.chunk(),
         }
     }
@@ -418,7 +562,7 @@ impl Buf for IoBufMut {
     #[inline]
     fn advance(&mut self, cnt: usize) {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.advance(cnt),
+            IoBufMutInner::Bytes(b) => b.advance(cnt),
             IoBufMutInner::Pooled(b) => b.advance(cnt),
         }
     }
@@ -429,7 +573,7 @@ unsafe impl BufMut for IoBufMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
         match &self.inner {
-            IoBufMutInner::Owned(b) => b.remaining_mut(),
+            IoBufMutInner::Bytes(b) => b.remaining_mut(),
             IoBufMutInner::Pooled(b) => b.remaining_mut(),
         }
     }
@@ -437,7 +581,7 @@ unsafe impl BufMut for IoBufMut {
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.advance_mut(cnt),
+            IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
             IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
         }
     }
@@ -445,7 +589,7 @@ unsafe impl BufMut for IoBufMut {
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
         match &mut self.inner {
-            IoBufMutInner::Owned(b) => b.chunk_mut(),
+            IoBufMutInner::Bytes(b) => b.chunk_mut(),
             IoBufMutInner::Pooled(b) => b.chunk_mut(),
         }
     }
@@ -460,7 +604,7 @@ impl From<Vec<u8>> for IoBufMut {
 impl From<&[u8]> for IoBufMut {
     fn from(slice: &[u8]) -> Self {
         Self {
-            inner: IoBufMutInner::Owned(BytesMut::from(slice)),
+            inner: IoBufMutInner::Bytes(BytesMut::from(slice)),
         }
     }
 }
@@ -480,7 +624,7 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
         Self {
-            inner: IoBufMutInner::Owned(bytes),
+            inner: IoBufMutInner::Bytes(bytes),
         }
     }
 }
@@ -491,16 +635,18 @@ impl From<Bytes> for IoBufMut {
     /// `from_static`.
     fn from(bytes: Bytes) -> Self {
         Self {
-            inner: IoBufMutInner::Owned(BytesMut::from(bytes)),
+            inner: IoBufMutInner::Bytes(BytesMut::from(bytes)),
         }
     }
 }
 
 impl From<IoBuf> for IoBufMut {
-    /// Zero-copy if `buf` is unique for the entire original buffer (refcount is 1),
-    /// copies otherwise. Always copies for pooled buffers and static slices.
+    /// Zero-copy when exclusive ownership can be recovered, copies otherwise.
     fn from(buf: IoBuf) -> Self {
-        Self::from(buf.inner)
+        match buf.try_into_mut() {
+            Ok(buf) => buf,
+            Err(buf) => Self::from(buf.as_ref()),
+        }
     }
 }
 

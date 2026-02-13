@@ -458,12 +458,23 @@ impl<const N: usize> BitMap<N> {
     #[inline]
     pub fn count_ones(&self) -> u64 {
         // Thanks to the invariant that trailing bits are always 0,
-        // we can simply count all set bits in all chunks
-        self.chunks
-            .iter()
-            .flat_map(|chunk| chunk.iter())
-            .map(|byte| byte.count_ones() as u64)
-            .sum()
+        // we can simply count all set bits in all chunks.
+        // Iterate over both contiguous deque segments and count 64-bit words first.
+        let (front, back) = self.chunks.as_slices();
+        Self::count_ones_in_chunk_slice(front) + Self::count_ones_in_chunk_slice(back)
+    }
+
+    #[inline]
+    fn count_ones_in_chunk_slice(chunks: &[[u8; N]]) -> u64 {
+        let mut total = 0u64;
+        let mut words = chunks.as_flattened().chunks_exact(8);
+        for word in &mut words {
+            total += u64::from_le_bytes(word.try_into().unwrap()).count_ones() as u64;
+        }
+        for byte in words.remainder() {
+            total += byte.count_ones() as u64;
+        }
+        total
     }
 
     /// Returns the number of bits set to 0.

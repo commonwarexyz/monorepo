@@ -633,7 +633,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    fn root(&self) -> H::Digest {
+    async fn root(&self) -> H::Digest {
         self.root()
     }
 
@@ -715,7 +715,7 @@ pub(super) async fn compute_root<H: Hasher, S: mmr::storage::Storage<H::Digest>,
     storage: &grafting::Storage<'_, H::Digest, S>,
     partial_chunk: Option<(&[u8; N], u64)>,
 ) -> Result<H::Digest, Error> {
-    let size = storage.size();
+    let size = storage.size().await;
     let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
 
     // Collect peak digests from the grafted storage, which transparently dispatches

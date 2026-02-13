@@ -177,6 +177,93 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 - Benchmarks: Performance regression detection
 - Coverage: Track test coverage with llvm-cov (see CI section)
 
+## Benchmarks
+
+Benchmarks use [Criterion](https://docs.rs/criterion) and are organized per-module with one file per operation. Benchmark names are parsed by the [benchmarks dashboard](https://commonware.xyz/benchmarks) and must follow the format `module::operation/key=value key=value`.
+
+### Directory Structure
+
+Each module that has benchmarks places them in a `benches/` directory alongside the module code:
+
+```
+crate/src/module/
+  mod.rs
+  benches/
+    bench.rs          # criterion_main! entry point
+    operation_a.rs    # one file per benchmarked operation
+    operation_b.rs
+```
+
+### Adding a New Benchmark
+
+#### 1. Create the benchmark file
+
+Create `crate/src/module/benches/operation_name.rs`:
+
+```rust
+use criterion::{criterion_group, Criterion};
+use std::hint::black_box;
+
+fn bench_operation_name(c: &mut Criterion) {
+    for n in [10, 100, 1000] {
+        c.bench_function(
+            &format!("{}/n={n}", module_path!()),
+            |b| {
+                b.iter(|| black_box(/* benchmarked call */));
+            },
+        );
+    }
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_operation_name,
+}
+```
+
+#### 2. Create or update the entry point
+
+Create `crate/src/module/benches/bench.rs` (or add to an existing one):
+
+```rust
+use criterion::criterion_main;
+
+mod operation_name;
+
+criterion_main!(operation_name::benches);
+```
+
+#### 3. Register the benchmark binary in `Cargo.toml`
+
+```toml
+[[bench]]
+name = "module"
+harness = false
+path = "src/module/benches/bench.rs"
+```
+
+The `name` field becomes the first segment of the benchmark name (e.g., `module::operation_name/...`).
+
+### Naming Rules
+
+These are enforced by CI (`lint_benchmark_names.py`):
+
+1. Use `module_path!()` macro to include the `module::operation` prefix
+2. Use `key=value` format for parameters (e.g., `size=1024`, not just `1024`)
+3. Separate parameters with spaces, not commas
+4. Use only one `/` separator (between the operation name and parameters)
+
+### Examples from the Codebase
+
+```
+bls12381::combine_signatures/sigs=100
+ed25519::signature_generation/ns_len=9 msg_len=32
+bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=10%
+bitmap::count_ones/size=1024 chunk_size=8
+rational::log2_ceil/value=1:2 precision=4
+```
+
 ## Development Workflow
 
 1. Make changes in relevant primitive directory
