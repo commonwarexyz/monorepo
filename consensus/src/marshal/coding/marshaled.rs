@@ -76,12 +76,19 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
+        application::{
+            validation::{
+                has_contiguous_height, is_block_in_expected_epoch,
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
+            },
+            verification_tasks::VerificationTasks,
+        },
         coding::{
             shards,
             types::{coding_config_for_participants, context_hash, CodedBlock},
             Coding,
         },
-        core, is_at_epoch_boundary, Update,
+        core, Update,
     },
     simplex::{scheme::Scheme, types::Context},
     types::{coding::Commitment, Epoch, Epocher, Round},
@@ -108,7 +115,6 @@ use futures::{
 use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
 use rand::Rng;
 use std::{
-    collections::HashMap,
     sync::{Arc, OnceLock},
     time::Instant,
 };
@@ -120,8 +126,6 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
     minimum_shards: NZU16!(1),
     extra_shards: 0,
 };
-
-type TasksMap = HashMap<(Round, Commitment), oneshot::Receiver<bool>>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -174,7 +178,7 @@ where
     strategy: S,
     #[allow(clippy::type_complexity)]
     last_built: Arc<Mutex<Option<(Round, CodedBlock<B, C>)>>>,
-    verification_tasks: Arc<Mutex<TasksMap>>,
+    verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C>)>>,
 
     build_duration: Gauge,
@@ -248,7 +252,7 @@ where
             strategy,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
-            verification_tasks: Arc::new(Mutex::new(HashMap::new())),
+            verification_tasks: VerificationTasks::new(),
             cached_genesis: Arc::new(OnceLock::new()),
 
             build_duration,
@@ -374,15 +378,11 @@ where
                 }
 
                 // Epoch boundary check
-                let Some(block_bounds) = epocher.containing(block.height()) else {
+                if !is_block_in_expected_epoch(&epocher, block.height(), context.epoch()) {
                     debug!(
                         height = %block.height(),
                         "block height not covered by epoch strategy"
                     );
-                    tx.send_lossy(false);
-                    return;
-                };
-                if block_bounds.epoch() != context.epoch() {
                     tx.send_lossy(false);
                     return;
                 }
@@ -399,7 +399,7 @@ where
                 }
 
                 // Validate that heights are contiguous.
-                if parent.height().next() != block.height() {
+                if !has_contiguous_height(parent.height(), block.height()) {
                     debug!(
                         parent_height = %parent.height(),
                         block_height = %block.height(),
@@ -721,15 +721,12 @@ where
             let mut marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = context.round;
-            let verification_tasks = Arc::clone(&self.verification_tasks);
+            let verification_tasks = self.verification_tasks.clone();
 
             // Register a verification task synchronously before spawning work so
             // `certify` can always find it (no race with task startup).
             let (task_tx, task_rx) = oneshot::channel();
-            verification_tasks
-                .lock()
-                .await
-                .insert((round, payload), task_rx);
+            verification_tasks.insert(round, payload, task_rx).await;
 
             let (mut tx, rx) = oneshot::channel();
             self.context
@@ -758,7 +755,7 @@ where
                         },
                     };
 
-                    if !is_at_epoch_boundary(&epocher, block.height(), round.epoch()) {
+                    if !is_valid_reproposal_at_verify(&epocher, block.height(), round.epoch()) {
                         debug!(
                             height = %block.height(),
                             "re-proposal is not at epoch boundary"
@@ -801,10 +798,7 @@ where
         // shard validity checks and network latency for collecting votes.
         let round = context.round;
         let task = self.deferred_verify(context, payload, None).await;
-        self.verification_tasks
-            .lock()
-            .await
-            .insert((round, payload), task);
+        self.verification_tasks.insert(round, payload, task).await;
 
         match scheme.me() {
             Some(_) => {
@@ -847,9 +841,7 @@ where
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         // First, check for an in-progress verification task from `verify()`.
-        let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, payload));
-        drop(tasks_guard);
+        let task = self.verification_tasks.take(round, payload).await;
         if let Some(task) = task {
             return task;
         }
@@ -907,12 +899,12 @@ where
                 //    the block was re-proposed)
                 // 3. Same epoch (re-proposals don't cross epoch boundaries)
                 let embedded_context = block.context();
-                let is_reproposal = is_at_epoch_boundary(
+                let is_reproposal = is_inferred_reproposal_at_certify(
                     &marshaled.epocher,
                     block.height(),
-                    embedded_context.round.epoch(),
-                ) && round.view() > embedded_context.round.view()
-                    && round.epoch() == embedded_context.round.epoch();
+                    embedded_context.round,
+                    round,
+                );
                 if is_reproposal {
                     // NOTE: It is possible that, during crash recovery, we call
                     // `marshal.verified` twice for the same block. That function is
@@ -1011,10 +1003,7 @@ where
     async fn report(&mut self, update: Self::Activity) {
         // Clean up verification tasks and contexts for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
-            // Clean up in-memory verification tasks
-            let mut tasks_guard = self.verification_tasks.lock().await;
-            tasks_guard.retain(|(task_round, _), _| task_round > round);
-            drop(tasks_guard);
+            self.verification_tasks.retain_after(round).await;
         }
         self.application.report(update).await
     }

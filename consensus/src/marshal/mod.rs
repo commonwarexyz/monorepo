@@ -81,17 +81,8 @@ pub mod standard;
 pub mod store;
 
 commonware_macros::stability_scope!(ALPHA {
-    use crate::types::{Epoch, Epocher};
-
+    pub(crate) mod application;
     pub mod coding;
-
-    /// Returns true if the block is at an epoch boundary (last block in its epoch).
-    ///
-    /// This is used to validate re-proposals, which are only allowed for boundary blocks.
-    #[inline]
-    fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: Epoch) -> bool {
-        epocher.last(epoch).is_some_and(|last| last == block_height)
-    }
 });
 
 #[cfg(test)]

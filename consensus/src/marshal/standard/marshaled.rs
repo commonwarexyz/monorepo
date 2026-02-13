@@ -52,7 +52,17 @@
 
 use crate::{
     marshal::{
-        ancestry::AncestorStream, core::Mailbox, is_at_epoch_boundary, standard::Standard, Update,
+        ancestry::AncestorStream,
+        application::{
+            validation::{
+                has_contiguous_height, is_block_in_expected_epoch,
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
+            },
+            verification_tasks::VerificationTasks,
+        },
+        core::Mailbox,
+        standard::Standard,
+        Update,
     },
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
@@ -69,10 +79,8 @@ use futures::{
 };
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 use tracing::{debug, warn};
-
-type TasksMap<B> = HashMap<(Round, <B as Digestible>::Digest), oneshot::Receiver<bool>>;
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -116,7 +124,7 @@ where
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
     last_built: Arc<Mutex<Option<(Round, B)>>>,
-    verification_tasks: Arc<Mutex<TasksMap<B>>>,
+    verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
     build_duration: Gauge,
 }
@@ -149,7 +157,7 @@ where
             marshal,
             epocher,
             last_built: Arc::new(Mutex::new(None)),
-            verification_tasks: Arc::new(Mutex::new(HashMap::new())),
+            verification_tasks: VerificationTasks::new(),
 
             build_duration,
         }
@@ -217,7 +225,7 @@ where
                     tx.send_lossy(false);
                     return;
                 }
-                if parent.height().next() != block.height() {
+                if !has_contiguous_height(parent.height(), block.height()) {
                     debug!(
                         parent_height = %parent.height(),
                         block_height = %block.height(),
@@ -461,19 +469,10 @@ where
 
                 // Blocks are invalid if they are not within the current epoch and they aren't
                 // a re-proposal of the boundary block.
-                let Some(block_bounds) = marshaled.epocher.containing(block.height()) else {
+                if !is_block_in_expected_epoch(&marshaled.epocher, block.height(), context.epoch()) {
                     debug!(
                         height = %block.height(),
                         "block height not in any known epoch"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                };
-                if block_bounds.epoch() != context.epoch() {
-                    debug!(
-                        epoch = %context.epoch(),
-                        block_epoch = %block_bounds.epoch(),
-                        "block is not in the current epoch"
                     );
                     tx.send_lossy(false);
                     return;
@@ -487,10 +486,9 @@ where
                 // 2. The parent-child height check would fail (parent IS the block)
                 let is_reproposal = digest == context.parent.1;
                 if is_reproposal {
-                    if !is_at_epoch_boundary(&marshaled.epocher, block.height(), context.epoch()) {
+                    if !is_valid_reproposal_at_verify(&marshaled.epocher, block.height(), context.epoch()) {
                         debug!(
                             height = %block.height(),
-                            last_in_epoch = %block_bounds.last(),
                             "re-proposal is not at epoch boundary"
                         );
                         tx.send_lossy(false);
@@ -503,11 +501,7 @@ where
 
                     let (task_tx, task_rx) = oneshot::channel();
                     task_tx.send_lossy(true);
-                    marshaled
-                        .verification_tasks
-                        .lock()
-                        .await
-                        .insert((round, digest), task_rx);
+                    marshaled.verification_tasks.insert(round, digest, task_rx).await;
 
                     tx.send_lossy(true);
                     return;
@@ -534,11 +528,7 @@ where
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
                 let task = marshaled.deferred_verify(context, block).await;
-                marshaled
-                    .verification_tasks
-                    .lock()
-                    .await
-                    .insert((round, digest), task);
+                marshaled.verification_tasks.insert(round, digest, task).await;
 
                 tx.send_lossy(true);
             });
@@ -561,9 +551,7 @@ where
 {
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         // Attempt to retrieve the existing verification task for this (round, payload).
-        let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, digest));
-        drop(tasks_guard);
+        let task = self.verification_tasks.take(round, digest).await;
         if let Some(task) = task {
             return task;
         }
@@ -616,10 +604,12 @@ where
                 //    original embedded context, so a later view indicates the block was re-proposed)
                 // 3. Same epoch (re-proposals don't cross epoch boundaries)
                 let embedded_context = block.context();
-                let is_reproposal =
-                    is_at_epoch_boundary(&epocher, block.height(), embedded_context.round.epoch())
-                        && round.view() > embedded_context.round.view()
-                        && round.epoch() == embedded_context.round.epoch();
+                let is_reproposal = is_inferred_reproposal_at_certify(
+                    &epocher,
+                    block.height(),
+                    embedded_context.round,
+                    round,
+                );
                 if is_reproposal {
                     // NOTE: It is possible that, during crash recovery, we call `marshal.verified`
                     // twice for the same block. That function is idempotent, so this is safe.
@@ -692,8 +682,7 @@ where
     async fn report(&mut self, update: Self::Activity) {
         // Clean up verification tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
-            let mut tasks_guard = self.verification_tasks.lock().await;
-            tasks_guard.retain(|(task_round, _), _| task_round > round);
+            self.verification_tasks.retain_after(round).await;
         }
         self.application.report(update).await
     }
