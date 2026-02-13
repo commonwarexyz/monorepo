@@ -218,8 +218,15 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use proptest::{
+        prelude::{any, prop, Just, ProptestConfig},
+        proptest,
+        strategy::Strategy as PStrategy,
+    };
 
     const MAX_SHARD_SIZE: usize = 1 << 31;
+    const MAX_SHARDS: u16 = 32;
+    const MAX_DATA: usize = 1024;
 
     fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
         // Encode data into shards.
@@ -269,17 +276,13 @@ mod test {
         assert_eq!(decoded, data);
     }
 
-    fn roundtrip_strategy(
-        min_extra: u16,
-    ) -> impl proptest::strategy::Strategy<Value = (Config, Vec<u8>, Vec<u16>)> {
-        use proptest::prelude::*;
-
-        (1u16..=16, min_extra..=16).prop_flat_map(|(min_shards, extra_shards)| {
+    fn roundtrip_strategy(min_extra: u16) -> impl PStrategy<Value = (Config, Vec<u8>, Vec<u16>)> {
+        (1u16..=MAX_SHARDS, min_extra..=MAX_SHARDS).prop_flat_map(|(min_shards, extra_shards)| {
             let total = min_shards + extra_shards;
             let all_indices: Vec<u16> = (0..total).collect();
             let indices = (min_shards as usize..=total as usize)
                 .prop_flat_map(move |n| proptest::sample::subsequence(all_indices.clone(), n));
-            let data = prop::collection::vec(any::<u8>(), 0..=4096);
+            let data = prop::collection::vec(any::<u8>(), 0..=MAX_DATA);
             (
                 Just(Config {
                     minimum_shards: min_shards,
@@ -291,8 +294,8 @@ mod test {
         })
     }
 
-    proptest::proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
 
         #[test]
         fn proptest_roundtrip_reed_solomon(
