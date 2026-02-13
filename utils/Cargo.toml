@@ -75,6 +75,11 @@ bench = false
 crate-type = ["rlib", "cdylib"]
 
 [[bench]]
-name = "utils"
+name = "bitmap"
 harness = false
-path = "src/benches/bench.rs"
+path = "src/bitmap/benches/bench.rs"
+
+[[bench]]
+name = "rational"
+harness = false
+path = "src/rational/benches/bench.rs"
