@@ -467,14 +467,12 @@ impl<const N: usize> BitMap<N> {
     #[inline]
     fn count_ones_in_chunk_slice(chunks: &[[u8; N]]) -> u64 {
         let mut total = 0u64;
-        for chunk in chunks {
-            let mut words = chunk.chunks_exact(8);
-            for word in &mut words {
-                total += u64::from_le_bytes(word.try_into().unwrap()).count_ones() as u64;
-            }
-            for byte in words.remainder() {
-                total += byte.count_ones() as u64;
-            }
+        let mut words = chunks.as_flattened().chunks_exact(8);
+        for word in &mut words {
+            total += u64::from_le_bytes(word.try_into().unwrap()).count_ones() as u64;
+        }
+        for byte in words.remainder() {
+            total += byte.count_ones() as u64;
         }
         total
     }
