@@ -628,7 +628,7 @@ type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, K>;
 
 /// Genesis blocks use a special coding config that doesn't actually encode.
 pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
-    minimum_shards: 0,
+    minimum_shards: NZU16!(1),
     extra_shards: 0,
 };
 
@@ -781,7 +781,7 @@ impl TestHarness for CodingHarness {
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: 10,
-            pre_leader_buffer_size: NZUsize!(64),
+            peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
         };
         let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);
@@ -958,7 +958,7 @@ impl TestHarness for CodingHarness {
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: 10,
-            pre_leader_buffer_size: NZUsize!(64),
+            peer_buffer_size: NZUsize!(64),
             background_channel_capacity: 1024,
         };
         let (shard_engine, shard_mailbox) = shards::Engine::new(context.clone(), shard_config);

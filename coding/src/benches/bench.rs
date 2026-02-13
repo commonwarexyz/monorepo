@@ -1,6 +1,6 @@
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, NZU16};
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
@@ -17,7 +17,7 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
             for conc in [1, 4, 8] {
                 let min = chunks / 3;
                 let config = Config {
-                    minimum_shards: min as u16,
+                    minimum_shards: NZU16!(min as u16),
                     extra_shards: (chunks - min) as u16,
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
@@ -55,7 +55,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
             for conc in [1, 4, 8] {
                 let min = chunks / 3;
                 let config = Config {
-                    minimum_shards: min as u16,
+                    minimum_shards: NZU16!(min as u16),
                     extra_shards: (chunks - min) as u16,
                 };
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
@@ -94,7 +94,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                 let (checking_data, _, _) = S::weaken(
                                     &config,
                                     &commitment,
-                                    config.minimum_shards + config.extra_shards - 1,
+                                    config.minimum_shards.get() + config.extra_shards - 1,
                                     my_shard,
                                 )
                                 .unwrap();

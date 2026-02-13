@@ -10,6 +10,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
 };
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::NZU16;
 use std::{marker::PhantomData, ops::Deref};
 
 const STRONG_SHARD_TAG: u8 = 0;
@@ -631,7 +632,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
     );
     let max_faults = (n_participants - 1) / 3;
     CodingConfig {
-        minimum_shards: max_faults + 1,
+        minimum_shards: NZU16!(max_faults + 1),
         extra_shards: n_participants - (max_faults + 1),
     }
 }
@@ -657,7 +658,7 @@ mod test {
     fn test_distribution_shard_codec_roundtrip() {
         const MOCK_BLOCK_DATA: &[u8] = b"commonware shape rotator club";
         const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: 1,
+            minimum_shards: NZU16!(1),
             extra_shards: 2,
         };
 
@@ -681,7 +682,7 @@ mod test {
     fn test_shard_codec_roundtrip() {
         const MOCK_BLOCK_DATA: &[u8] = b"deadc0de";
         const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: 1,
+            minimum_shards: NZU16!(1),
             extra_shards: 2,
         };
 
@@ -704,7 +705,7 @@ mod test {
     #[test]
     fn test_coded_block_codec_roundtrip() {
         const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: 1,
+            minimum_shards: NZU16!(1),
             extra_shards: 2,
         };
 
@@ -720,7 +721,7 @@ mod test {
     #[test]
     fn test_stored_coded_block_codec_roundtrip() {
         const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: 1,
+            minimum_shards: NZU16!(1),
             extra_shards: 2,
         };
 
@@ -744,7 +745,7 @@ mod test {
     #[test]
     fn test_stored_coded_block_into_coded_block() {
         const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: 1,
+            minimum_shards: NZU16!(1),
             extra_shards: 2,
         };
 
@@ -765,7 +766,7 @@ mod test {
     #[test]
     fn test_stored_coded_block_corruption_detection() {
         const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: 1,
+            minimum_shards: NZU16!(1),
             extra_shards: 2,
         };
 

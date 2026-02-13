@@ -70,14 +70,14 @@ where
         &mut self,
         digest: <CodedBlock<B, C> as Digestible>::Digest,
     ) -> oneshot::Receiver<Self::CachedBlock> {
-        self.subscribe_block_by_digest(digest).await
+        self.subscribe_by_digest(digest).await
     }
 
     async fn subscribe_by_commitment(
         &mut self,
         commitment: CodingCommitment,
     ) -> oneshot::Receiver<Self::CachedBlock> {
-        self.subscribe_block(commitment).await
+        self.subscribe(commitment).await
     }
 
     async fn finalized(&mut self, commitment: CodingCommitment) {

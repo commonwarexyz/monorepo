@@ -23,6 +23,9 @@
 //!   by participants. These require checking data (derived from a strong shard)
 //!   for validation.
 //!
+//! _These are separated because some coding schemes enable the proposer to send extra data along
+//! with the shard, reducing redundant transmission of checking data from multiple participants._
+//!
 //! # Message Flow
 //!
 //! ```text
@@ -145,10 +148,10 @@
 //! tracked in reconstruction state. Once a block is already reconstructed and
 //! cached, additional shards for that commitment are ignored.
 //!
-//! Note: Strong shards are only accepted from the leader. If the leader is not
+//! _Strong shards are only accepted from the leader. If the leader is not
 //! yet known, shards are buffered in fixed-size per-peer queues until consensus
 //! signals the leader via [`Discovered`]. Once leader is known, buffered
-//! shards for that commitment are ingested into the active state machine.
+//! shards for that commitment are ingested into the active state machine._
 //!
 //! [`Discovered`]: super::Message::Discovered
 
@@ -197,7 +200,7 @@ use tracing::{debug, warn};
 pub enum Error<C: CodingScheme> {
     /// An error occurred while recovering the encoded blob from the [`Shard`]s
     #[error(transparent)]
-    CodingRecovery(C::Error),
+    Coding(C::Error),
 
     /// An error occurred while decoding the reconstructed blob into a [`CodedBlock`]
     #[error(transparent)]
@@ -215,7 +218,7 @@ pub enum Error<C: CodingScheme> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BlockSubscriptionKey<D> {
     Commitment(CodingCommitment),
-    Digest(D),
+    Block(D),
 }
 
 /// Configuration for the [`Engine`].
@@ -256,7 +259,7 @@ where
     ///
     /// The worst-case total memory usage for pre-leader buffers is
     /// `num_participants * pre_leader_buffer_size * max_shard_size`.
-    pub pre_leader_buffer_size: NonZeroUsize,
+    pub peer_buffer_size: NonZeroUsize,
 
     /// Capacity of the channel between the background receiver and the engine.
     ///
@@ -362,7 +365,7 @@ where
                 strategy: config.strategy,
                 state: BTreeMap::new(),
                 pre_leader_buffers: BTreeMap::new(),
-                pre_leader_buffer_size: config.pre_leader_buffer_size,
+                pre_leader_buffer_size: config.peer_buffer_size,
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 shard_subscriptions: BTreeMap::new(),
@@ -402,7 +405,14 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.sync_metrics();
+                let _ = self
+                    .metrics
+                    .reconstruction_states_count
+                    .try_set(self.state.len());
+                let _ = self
+                    .metrics
+                    .reconstructed_blocks_cache_count
+                    .try_set(self.reconstructed_blocks.len());
 
                 // Clean up closed subscriptions.
                 self.block_subscriptions.retain(|_, subscribers| {
@@ -447,20 +457,20 @@ where
                     Message::SubscribeShard { commitment, response } => {
                         self.handle_shard_subscription(commitment, response).await;
                     }
-                    Message::SubscribeBlockByCommitment { commitment, response } => {
+                    Message::SubscribeByCommitment { commitment, response } => {
                         self.handle_block_subscription(
                             BlockSubscriptionKey::Commitment(commitment),
                             response
                         ).await;
                     },
-                    Message::SubscribeBlockByDigest { digest, response } => {
+                    Message::SubscribeByDigest { digest, response } => {
                         self.handle_block_subscription(
-                            BlockSubscriptionKey::Digest(digest),
+                            BlockSubscriptionKey::Block(digest),
                             response
                         ).await;
                     },
                     Message::Prune { commitment } => {
-                        self.prune_reconstructed(commitment);
+                        self.prune(commitment);
                     },
                 }
             },
@@ -520,17 +530,13 @@ where
         let Some(state) = self.state.get(&commitment) else {
             return Ok(None);
         };
-        if commitment.config().minimum_shards == 0 {
-            debug!(%commitment, "commitment has zero minimum shards, skipping reconstruction");
-            return Ok(None);
-        }
-        if state.checked_shards().len() < usize::from(commitment.config().minimum_shards) {
+        if state.checked_shards().len() < usize::from(commitment.config().minimum_shards.get()) {
             debug!(%commitment, "not enough checked shards to reconstruct block");
             return Ok(None);
         }
-        let Some(checking_data) = state.checking_data() else {
-            unreachable!("checked shards cannot be present without checking data");
-        };
+        let checking_data = state
+            .checking_data()
+            .expect("checking data must be present");
 
         // Attempt to reconstruct the encoded blob
         let start = Instant::now();
@@ -541,7 +547,7 @@ where
             state.checked_shards(),
             &self.strategy,
         )
-        .map_err(Error::CodingRecovery)?;
+        .map_err(Error::Coding)?;
         self.metrics
             .erasure_decode_duration
             .observe(start.elapsed().as_secs_f64());
@@ -610,8 +616,12 @@ where
             return;
         }
 
-        self.state
-            .insert(commitment, ReconstructionState::new(leader, round));
+        let participants_len = u64::try_from(scheme.participants().len())
+            .expect("participant count impossibly out of bounds");
+        self.state.insert(
+            commitment,
+            ReconstructionState::new(leader, round, participants_len),
+        );
         let buffered_progress = self.ingest_buffered_shards(commitment).await;
         if buffered_progress {
             self.try_advance(sender, commitment).await;
@@ -815,7 +825,7 @@ where
             BlockSubscriptionKey::Commitment(commitment) => {
                 self.reconstructed_blocks.get(&commitment)
             }
-            BlockSubscriptionKey::Digest(digest) => self
+            BlockSubscriptionKey::Block(digest) => self
                 .reconstructed_blocks
                 .iter()
                 .find_map(|(_, block)| (block.digest() == digest).then_some(block)),
@@ -860,7 +870,7 @@ where
         // Notify by-digest subscribers.
         if let Some(mut subscribers) = self
             .block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(digest))
+            .remove(&BlockSubscriptionKey::Block(digest))
         {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(Arc::clone(&block));
@@ -871,7 +881,7 @@ where
     /// Prunes all blocks in the reconstructed block cache that are older than the block
     /// with the given commitment. Also cleans up stale reconstruction state
     /// and subscriptions.
-    fn prune_reconstructed(&mut self, commitment: CodingCommitment) {
+    fn prune(&mut self, commitment: CodingCommitment) {
         let Some(height) = self
             .reconstructed_blocks
             .get(&commitment)
@@ -897,18 +907,6 @@ where
             false
         });
         self.state = state;
-    }
-
-    /// Syncs gauge metrics for map sizes.
-    fn sync_metrics(&self) {
-        let _ = self
-            .metrics
-            .reconstruction_states_count
-            .try_set(self.state.len());
-        let _ = self
-            .metrics
-            .reconstructed_blocks_cache_count
-            .try_set(self.reconstructed_blocks.len());
     }
 }
 
@@ -1006,24 +1004,14 @@ where
     H: Hasher,
 {
     /// Create a new empty common state for the provided leader and round.
-    const fn new(leader: P, round: Round) -> Self {
+    fn new(leader: P, round: Round, participants_len: u64) -> Self {
         Self {
             leader,
             our_weak_shard: None,
             checked_shards: Vec::new(),
-            contributed: BitMap::new(),
+            contributed: BitMap::zeroes(participants_len),
             round,
             received_strong: None,
-        }
-    }
-
-    /// Lazily initialize the contributor bitmap for the participant set size.
-    fn ensure_contributed(&mut self, participants_len: usize) {
-        if self.contributed.is_empty() {
-            self.contributed = BitMap::zeroes(
-                u64::try_from(participants_len)
-                    .expect("participant count impossibly out of bounds"),
-            );
         }
     }
 }
@@ -1077,14 +1065,13 @@ where
     async fn try_transition(
         &mut self,
         commitment: CodingCommitment,
+        participants_len: u64,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> Option<ReadyState<P, C, H>> {
         self.checking_data.as_ref()?;
-        let minimum = usize::from(commitment.config().minimum_shards);
-        if minimum == 0
-            || self.common.checked_shards.len() + self.pending_weak_shards.len() < minimum
-        {
+        let minimum = usize::from(commitment.config().minimum_shards.get());
+        if self.common.checked_shards.len() + self.pending_weak_shards.len() < minimum {
             return None;
         }
 
@@ -1118,7 +1105,10 @@ where
         let checking_data = self.checking_data.take().unwrap();
         let round = self.common.round;
         let leader = self.common.leader.clone();
-        let common = std::mem::replace(&mut self.common, CommonState::new(leader, round));
+        let common = std::mem::replace(
+            &mut self.common,
+            CommonState::new(leader, round, participants_len),
+        );
         Some(ReadyState {
             common,
             checking_data,
@@ -1143,9 +1133,9 @@ where
     H: Hasher,
 {
     /// Create an initial reconstruction state for a commitment.
-    const fn new(leader: P, round: Round) -> Self {
+    fn new(leader: P, round: Round, participants_len: u64) -> Self {
         Self::AwaitingQuorum(AwaitingQuorumState {
-            common: CommonState::new(leader, round),
+            common: CommonState::new(leader, round, participants_len),
             pending_weak_shards: BTreeMap::new(),
             checking_data: None,
         })
@@ -1256,9 +1246,6 @@ where
         let commitment = shard.commitment();
         let index = shard.index();
 
-        self.common_mut()
-            .ensure_contributed(ctx.scheme.participants().len());
-
         let progressed = match shard.into_inner() {
             DistributionShard::Strong(data) => {
                 let strong = StrongShard {
@@ -1278,8 +1265,10 @@ where
 
         if progressed {
             if let Self::AwaitingQuorum(state) = self {
+                let participants_len = u64::try_from(ctx.scheme.participants().len())
+                    .expect("participant count impossibly out of bounds");
                 if let Some(ready) = state
-                    .try_transition(commitment, ctx.strategy, blocker)
+                    .try_transition(commitment, participants_len, ctx.strategy, blocker)
                     .await
                 {
                     *self = Self::Ready(ready);
@@ -1631,7 +1620,7 @@ mod tests {
                         block_codec_cfg: (),
                         strategy: STRATEGY,
                         mailbox_size: 1024,
-                        pre_leader_buffer_size: NZUsize!(64),
+                        peer_buffer_size: NZUsize!(64),
                         background_channel_capacity: 1024,
                     };
 
@@ -1759,8 +1748,8 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe before broadcasting.
-            let commitment_sub = peers[1].mailbox.subscribe_block(commitment).await;
-            let digest_sub = peers[2].mailbox.subscribe_block_by_digest(digest).await;
+            let commitment_sub = peers[1].mailbox.subscribe(commitment).await;
+            let digest_sub = peers[2].mailbox.subscribe_by_digest(digest).await;
 
             peers[0].mailbox.proposed(round, coded_block.clone()).await;
 
@@ -3496,7 +3485,7 @@ mod tests {
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: 1024,
-                pre_leader_buffer_size: NZUsize!(64),
+                peer_buffer_size: NZUsize!(64),
                 background_channel_capacity: 1024,
             };
 

@@ -14,7 +14,7 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
-    use std::fmt::Debug;
+    use std::{num::NonZeroU16, fmt::Debug};
 
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
@@ -27,10 +27,9 @@ commonware_macros::stability_scope!(ALPHA {
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct Config {
         /// The minimum number of shards needed to encode the data.
-        pub minimum_shards: u16,
+        pub minimum_shards: NonZeroU16,
         /// Extra shards beyond the minimum number.
         ///
         /// Alternatively, one can think of the configuration as having a total number
@@ -42,7 +41,7 @@ commonware_macros::stability_scope!(ALPHA {
     impl Config {
         /// Returns the total number of shards produced by this configuration.
         pub fn total_shards(&self) -> u32 {
-            u32::from(self.minimum_shards) + u32::from(self.extra_shards)
+            u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards)
         }
     }
 
@@ -52,7 +51,7 @@ commonware_macros::stability_scope!(ALPHA {
 
     impl Write for Config {
         fn write(&self, buf: &mut impl bytes::BufMut) {
-            self.minimum_shards.write(buf);
+            self.minimum_shards.get().write(buf);
             self.extra_shards.write(buf);
         }
     }
@@ -61,9 +60,29 @@ commonware_macros::stability_scope!(ALPHA {
         type Cfg = ();
 
         fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let minimum_shards = NonZeroU16::new(u16::read_cfg(buf, cfg)?).ok_or_else(|| {
+                commonware_codec::Error::Invalid(
+                    "config",
+                    "minimum_shards must be a non-zero value",
+                )
+            })?;
+            let extra_shards = u16::read_cfg(buf, cfg)?;
+
             Ok(Self {
-                minimum_shards: u16::read_cfg(buf, cfg)?,
-                extra_shards: u16::read_cfg(buf, cfg)?,
+                minimum_shards,
+                extra_shards,
+            })
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    impl arbitrary::Arbitrary<'_> for Config {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let minimum_shards = u.int_in_range(1..=512)?;
+            let extra_shards = u.int_in_range(0..=512)?;
+            Ok(Self {
+                minimum_shards: NonZeroU16::new(minimum_shards).unwrap(),
+                extra_shards,
             })
         }
     }
@@ -85,12 +104,13 @@ commonware_macros::stability_scope!(ALPHA {
     /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
     /// use commonware_cryptography::Sha256;
     /// use commonware_parallel::Sequential;
+    /// use commonware_utils::NZU16;
     ///
     /// const STRATEGY: Sequential = Sequential;
     ///
     /// type RS = ReedSolomon<Sha256>;
     ///
-    /// let config = Config { minimum_shards: 2, extra_shards: 1 };
+    /// let config = Config { minimum_shards: NZU16!(2), extra_shards: 1 };
     /// let data = b"Hello!";
     /// // Turn the data into shards, and a commitment to those shards.
     /// let (commitment, shards) =
@@ -218,6 +238,7 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
     use proptest::{
         prelude::{any, prop, Just, ProptestConfig},
         proptest,
@@ -240,7 +261,8 @@ mod test {
             assert_eq!(decoded_shard, *shard);
 
             // Weak shard codec roundtrip.
-            let (_, _, weak_shard) = S::weaken(config, &commitment, i as u16, shard.clone()).unwrap();
+            let (_, _, weak_shard) =
+                S::weaken(config, &commitment, i as u16, shard.clone()).unwrap();
             let decoded_weak_shard =
                 S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
             assert_eq!(decoded_weak_shard, weak_shard);
@@ -254,7 +276,8 @@ mod test {
             if !selected.contains(&(i as u16)) {
                 continue;
             }
-            let (cd, checked, weak_shard) = S::weaken(config, &commitment, i as u16, shard).unwrap();
+            let (cd, checked, weak_shard) =
+                S::weaken(config, &commitment, i as u16, shard).unwrap();
             if let Some(cd) = &checking_data {
                 let checked = S::check(config, &commitment, cd, i as u16, weak_shard).unwrap();
                 checked_shards.push(checked);
@@ -288,7 +311,7 @@ mod test {
             let data = prop::collection::vec(any::<u8>(), 0..=MAX_DATA);
             (
                 Just(Config {
-                    minimum_shards: min_shards,
+                    minimum_shards: NZU16!(min_shards),
                     extra_shards,
                 }),
                 data,
@@ -300,7 +323,7 @@ mod test {
     #[test]
     fn roundtrip_empty_data() {
         let config = Config {
-            minimum_shards: 30,
+            minimum_shards: NZU16!(30),
             extra_shards: 70,
         };
         let selected: Vec<u16> = (0..30).collect();
@@ -314,7 +337,7 @@ mod test {
     #[test]
     fn roundtrip_2_pow_16_25_total_shards() {
         let config = Config {
-            minimum_shards: 8,
+            minimum_shards: NZU16!(8),
             extra_shards: 17,
         };
         let data = vec![0x67; 1 << 16];

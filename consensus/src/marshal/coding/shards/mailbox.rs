@@ -59,7 +59,7 @@ where
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its [`CodingCommitment`].
-    SubscribeBlockByCommitment {
+    SubscribeByCommitment {
         /// The block's digest.
         commitment: CodingCommitment,
         /// The response channel.
@@ -67,7 +67,7 @@ where
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its digest.
-    SubscribeBlockByDigest {
+    SubscribeByDigest {
         /// The block's digest.
         digest: B::Digest,
         /// The response channel.
@@ -154,12 +154,12 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`CodingCommitment`].
-    pub async fn subscribe_block(
+    pub async fn subscribe(
         &mut self,
         commitment: CodingCommitment,
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeBlockByCommitment {
+        let msg = Message::SubscribeByCommitment {
             commitment,
             response: responder,
         };
@@ -168,12 +168,12 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub async fn subscribe_block_by_digest(
+    pub async fn subscribe_by_digest(
         &mut self,
         digest: B::Digest,
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeBlockByDigest {
+        let msg = Message::SubscribeByDigest {
             digest,
             response: responder,
         };

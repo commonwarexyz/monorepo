@@ -59,7 +59,25 @@
 //!
 //! For this reason, it should not be expected that every notarized payload will be certifiable due
 //! to the lack of an available block. However, if even one honest and online party has the block,
-//! they will attempt to forward it to others via marshal's resolver.
+//! they will attempt to forward it to others via marshal's resolver. This case is already present
+//! in the event of a block that was proposed with invalid codec; Marshal will not be able to reconstruct
+//! the block, and therefore won't serve it.
+//!
+//! Consensus Chain
+//!                                      ┌───────────────────────────────────────────────────┐
+//!                                      ▼                                                   │
+//! ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
+//! │   commitment: App A1│◀──│   commitment: App A2│◀──│   commitment: App A3│XXX│   commitment: App A4│
+//! └──────────┬──────────┘   └──────────┬──────────┘   └──────────┬──────────┘   └──────────┬──────────┘
+//!            │                         │                         │                         │
+//!            ▼                         ▼                         ▼                         ▼
+//! ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
+//! │ Application Block A1│◀──│ Application Block A2│◀──│ Application Block A3│XXX│ Application Block A4│
+//! └─────────────────────┘   └─────────────────────┘   │  (irrecoverable) X  │   └──────────┬──────────┘
+//!                                      ▲              └─────────────────────┘              │
+//!                                      │                                                   │
+//!                                      └───────────────────────────────────────────────────┘
+//! Application Chain
 
 use crate::{
     marshal::{
@@ -85,7 +103,10 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
-use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, oneshot},
+    NZU16,
+};
 use futures::{
     future::{try_join, Either, Ready},
     lock::Mutex,
@@ -102,7 +123,7 @@ use tracing::{debug, warn};
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
 /// the proposal phase, and thus the configuration is irrelevant.
 const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
-    minimum_shards: 0,
+    minimum_shards: NZU16!(1),
     extra_shards: 0,
 };
 

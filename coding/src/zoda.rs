@@ -269,7 +269,7 @@ mod topology {
 
         /// Figure out what size different values will have, based on the config and the data.
         pub fn reckon(config: &Config, data_bytes: usize) -> Self {
-            let n = config.minimum_shards as usize;
+            let n = config.minimum_shards.get() as usize;
             let k = config.extra_shards as usize;
             // The following calculations don't tolerate data_bytes = 0, so we
             // temporarily correct that to be at least 1, then make sure to adjust
@@ -790,16 +790,18 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Config;
-    use commonware_cryptography::Sha256;
+    use crate::{CodecConfig, Config};
+    use bytes::BytesMut;
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
 
     const STRATEGY: Sequential = Sequential;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {
         let config = Config {
-            minimum_shards: 3,
+            minimum_shards: NZU16!(3),
             extra_shards: 1,
         };
         let topology = Topology::reckon(&config, 16);
@@ -821,7 +823,7 @@ mod tests {
     #[test]
     fn weak_shard_roundtrip_handles_field_packing() {
         let config = Config {
-            minimum_shards: 3,
+            minimum_shards: NZU16!(3),
             extra_shards: 2,
         };
         let data = vec![0xAA; 64];
@@ -849,7 +851,7 @@ mod tests {
     #[test]
     fn decode_rejects_duplicate_indices() {
         let config = Config {
-            minimum_shards: 2,
+            minimum_shards: NZU16!(2),
             extra_shards: 0,
         };
         let data = b"duplicate shard coverage";

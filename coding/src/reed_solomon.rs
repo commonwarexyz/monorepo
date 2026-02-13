@@ -484,7 +484,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode::<H, _>(total_shards(config)?, config.minimum_shards, data, strategy)
+        encode::<H, _>(
+            total_shards(config)?,
+            config.minimum_shards.get(),
+            data,
+            strategy,
+        )
     }
 
     fn weaken(
@@ -528,7 +533,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     ) -> Result<Vec<u8>, Self::Error> {
         decode::<H, _>(
             total_shards(config)?,
-            config.minimum_shards,
+            config.minimum_shards.get(),
             commitment,
             shards,
             strategy,
@@ -541,6 +546,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
 
     const STRATEGY: Sequential = Sequential;
 
@@ -827,7 +833,7 @@ mod tests {
     fn test_too_many_total_shards() {
         assert!(ReedSolomon::<Sha256>::encode(
             &Config {
-                minimum_shards: u16::MAX / 2 + 1,
+                minimum_shards: NZU16!(u16::MAX / 2 + 1),
                 extra_shards: u16::MAX,
             },
             [].as_slice(),

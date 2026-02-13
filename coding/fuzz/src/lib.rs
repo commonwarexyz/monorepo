@@ -1,7 +1,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::Sequential;
-use std::iter;
+use std::{iter, num::NonZeroU16};
 
 const STRATEGY: Sequential = Sequential;
 
@@ -68,7 +68,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     } = input;
 
     let config = Config {
-        minimum_shards: min,
+        minimum_shards: NonZeroU16::new(min.max(1)).unwrap(),
         extra_shards: recovery,
     };
     let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
