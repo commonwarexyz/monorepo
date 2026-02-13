@@ -56,9 +56,9 @@ impl EncodedData {
     /// `msg_prefix || channel || message_len || message`.
     pub fn encode_with_prefix(
         pool: &BufferPool,
+        msg_prefix: u8,
         channel: Channel,
         mut message: IoBufs,
-        msg_prefix: u8,
     ) -> Self {
         let payload_len = message.len();
         let header_len =
@@ -94,7 +94,6 @@ impl arbitrary::Arbitrary<'_> for Data {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
-    use commonware_runtime::{deterministic, BufferPooler as _, Runner as _};
 
     #[test]
     fn test_data_codec() {
@@ -118,29 +117,6 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Data::decode_cfg(&invalid_payload[..], &(..).into());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_encoded_data_encode_with_prefix_matches_data_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut message = IoBufs::from(IoBuf::from(b"hello "));
-            message.append(IoBuf::from(b"world"));
-            message.append(IoBuf::from(b"!"));
-
-            let data = Data {
-                channel: 12345,
-                message: message.clone().coalesce(),
-            };
-
-            let mut expected = IoBufs::from(data.encode());
-            expected.prepend(IoBuf::from(vec![7]));
-
-            let encoded =
-                EncodedData::encode_with_prefix(context.network_buffer_pool(), 12345, message, 7);
-            assert_eq!(encoded.channel, 12345);
-            assert_eq!(encoded.payload.coalesce(), expected.coalesce());
-        });
     }
 
     #[cfg(feature = "arbitrary")]

@@ -15,8 +15,8 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
-    RateLimiter, Sink, Spawner, Stream,
+    BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner,
+    Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -97,7 +97,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         metric: metrics::Message,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
-        let msg = payload.encode_with_pool(pool);
+        let msg = pool.encode(&payload);
         sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())

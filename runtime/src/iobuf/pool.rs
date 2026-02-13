@@ -35,6 +35,7 @@
 
 use super::{IoBuf, IoBufMut};
 use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{EncodeSize, Write};
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
 use prometheus_client::{
@@ -612,6 +613,30 @@ impl BufferPool {
             .ok_or(PoolError::Exhausted)?;
         let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
         Ok(IoBufMut::from_pooled(pooled))
+    }
+
+    /// Encode a value into a pooled immutable buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`EncodeSize::encode_size`] does not match the number of
+    /// bytes written by [`Write::write`].
+    pub fn encode(&self, value: &(impl EncodeSize + Write)) -> IoBuf {
+        self.encode_mut(value).freeze()
+    }
+
+    /// Encode a value into a pooled mutable buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`EncodeSize::encode_size`] does not match the number of
+    /// bytes written by [`Write::write`].
+    pub fn encode_mut(&self, value: &(impl EncodeSize + Write)) -> IoBufMut {
+        let len = value.encode_size();
+        let mut buf = self.alloc(len);
+        value.write(&mut buf);
+        assert_eq!(buf.len(), len, "encode_size/write mismatch");
+        buf
     }
 
     /// Returns the pool configuration.

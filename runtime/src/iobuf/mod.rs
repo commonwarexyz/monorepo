@@ -1046,42 +1046,6 @@ impl<const N: usize> From<[u8; N]> for IoBufsMut {
     }
 }
 
-/// Extension trait for encoding values into pooled I/O buffers.
-///
-/// This is useful for hot paths that need to avoid frequent heap allocations
-/// when serializing values that implement [`Write`] and [`EncodeSize`].
-pub trait EncodeExt: EncodeSize + Write {
-    /// Encode this value into an [`IoBufMut`] allocated from `pool`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if [`EncodeSize::encode_size`] does not match the number of
-    /// bytes written by [`Write::write`].
-    fn encode_with_pool_mut(&self, pool: &BufferPool) -> IoBufMut {
-        let len = self.encode_size();
-        let mut buf = pool.alloc(len);
-        self.write(&mut buf);
-        assert_eq!(
-            buf.len(),
-            len,
-            "write() did not write expected bytes into pooled buffer"
-        );
-        buf
-    }
-
-    /// Encode this value into an immutable [`IoBuf`] allocated from `pool`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if [`EncodeSize::encode_size`] does not match the number of
-    /// bytes written by [`Write::write`].
-    fn encode_with_pool(&self, pool: &BufferPool) -> IoBuf {
-        self.encode_with_pool_mut(pool).freeze()
-    }
-}
-
-impl<T: EncodeSize + Write> EncodeExt for T {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2225,18 +2189,18 @@ mod tests {
         let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
         let value = vec![1u8, 2, 3, 4, 5, 6];
 
-        let pooled = value.encode_with_pool(&pool);
+        let pooled = pool.encode(&value);
         let baseline = value.encode();
         assert_eq!(pooled.as_ref(), baseline.as_ref());
     }
 
     #[test]
-    fn test_encode_with_pool_mut_len_matches_encode_size() {
+    fn test_encode_mut_len_matches_encode_size() {
         let mut registry = prometheus_client::registry::Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
         let value = vec![9u8, 8, 7, 6];
 
-        let buf = value.encode_with_pool_mut(&pool);
+        let buf = pool.encode_mut(&value);
         assert_eq!(buf.len(), value.encode_size());
     }
 

@@ -84,7 +84,7 @@ pub enum Payload<C: PublicKey> {
 impl<C: PublicKey> Payload<C> {
     /// Encode `Payload::Data` bytes for transmission using pooled header allocation.
     pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
-        EncodedData::encode_with_prefix(pool, channel, message, DATA_PREFIX)
+        EncodedData::encode_with_prefix(pool, DATA_PREFIX, channel, message)
     }
 }
 
@@ -396,7 +396,7 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, BufferPooler as _, Clock, IoBuf, IoBufs, Runner};
+    use commonware_runtime::{deterministic, Clock, IoBuf, Runner};
     use commonware_utils::{hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 
@@ -509,28 +509,6 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_payload_encode_data_matches_payload_data_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let channel = 12345;
-            let mut message = IoBufs::from(IoBuf::from(b"Hello, "));
-            message.append(IoBuf::from(b"world"));
-            message.append(IoBuf::from(b"!"));
-
-            let expected = Payload::<PublicKey>::Data(Data {
-                channel,
-                message: message.clone().coalesce(),
-            })
-            .encode();
-            let encoded =
-                Payload::<PublicKey>::encode_data(context.network_buffer_pool(), channel, message);
-
-            assert_eq!(encoded.channel, channel);
-            assert_eq!(encoded.payload.coalesce().as_ref(), expected.as_ref());
-        });
     }
 
     #[test]

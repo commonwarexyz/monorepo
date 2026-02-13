@@ -2,7 +2,7 @@
 
 use crate::{CheckedSender, Receiver, Recipients, Sender};
 use commonware_codec::{Codec, Error};
-use commonware_runtime::{iobuf::EncodeExt, BufferPool};
+use commonware_runtime::BufferPool;
 use std::time::SystemTime;
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
@@ -46,7 +46,7 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
         message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
-        let encoded = message.encode_with_pool(&self.pool);
+        let encoded = self.pool.encode(&message);
         self.sender.send(recipients, encoded, priority).await
     }
 
@@ -81,7 +81,7 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
         message: V,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'a> as CheckedSender>::Error> {
-        let encoded = message.encode_with_pool(self.pool);
+        let encoded = self.pool.encode(&message);
         self.sender.send(encoded, priority).await
     }
 }
