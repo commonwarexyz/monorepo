@@ -67,7 +67,7 @@ impl EncodedData {
         msg_prefix.write(&mut header);
         UInt(channel).write(&mut header);
         payload_len.write(&mut header);
-        debug_assert_eq!(header.len(), header_len, "data header size mismatch");
+        assert_eq!(header.len(), header_len, "data header size mismatch");
         message.prepend(header.freeze());
 
         Self {
