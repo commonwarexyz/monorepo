@@ -1760,6 +1760,8 @@ unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
+    use commonware_codec::{Decode, Encode, RangeCfg};
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -1827,8 +1829,6 @@ mod tests {
 
     #[test]
     fn test_iobuf_codec_roundtrip() {
-        use commonware_codec::{Decode, Encode, RangeCfg};
-
         let cfg: RangeCfg<usize> = (0..=1024).into();
 
         let original = IoBuf::from(b"hello world");
@@ -2017,6 +2017,7 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_pair_and_triple() {
+        // Pair: crossing one boundary should collapse to the trailing single chunk.
         let mut pair = IoBufs::from(IoBuf::from(b"ab"));
         pair.append(IoBuf::from(b"cd"));
         let first = pair.copy_to_bytes(3);
@@ -2024,6 +2025,7 @@ mod tests {
         assert!(pair.is_single());
         assert_eq!(pair.chunk(), b"d");
 
+        // Triple: draining across two chunks leaves the final chunk readable.
         let mut triple = IoBufs::from(IoBuf::from(b"ab"));
         triple.append(IoBuf::from(b"cd"));
         triple.append(IoBuf::from(b"ef"));
@@ -2057,10 +2059,12 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_edge_cases() {
+        // Leading empty chunk should not affect copied payload.
         let mut iobufs = IoBufs::from(IoBuf::from(b""));
         iobufs.append(IoBuf::from(b"hello"));
         assert_eq!(iobufs.copy_to_bytes(5).as_ref(), b"hello");
 
+        // Boundary-aligned reads should return exact chunk payloads in-order.
         let mut boundary = IoBufs::from(IoBuf::from(b"hello"));
         boundary.append(IoBuf::from(b"world"));
         assert_eq!(boundary.copy_to_bytes(5).as_ref(), b"hello");
@@ -2090,6 +2094,7 @@ mod tests {
         let b2 = Bytes::from_static(b" ");
         let b3 = Bytes::from_static(b"world");
 
+        // Buf parity for remaining/chunk/advance should match `Bytes::chain`.
         let mut chain = b1.clone().chain(b2.clone()).chain(b3.clone());
         let mut iobufs = IoBufs::from(IoBuf::from(b1.clone()));
         iobufs.append(IoBuf::from(b2.clone()));
@@ -2436,10 +2441,12 @@ mod tests {
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
+        // First read spans chunks and leaves unread suffix.
         let first = bufs.copy_to_bytes(7);
         assert_eq!(&first[..], b"hello w");
         assert_eq!(bufs.remaining(), 4);
 
+        // Second read drains the remainder.
         let rest = bufs.copy_to_bytes(4);
         assert_eq!(&rest[..], b"orld");
         assert_eq!(bufs.remaining(), 0);
@@ -2518,8 +2525,6 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_matches_bytesmut_chain() {
-        use bytes::BytesMut;
-
         // Create three BytesMut with capacity
         let mut bm1 = BytesMut::with_capacity(5);
         let mut bm2 = BytesMut::with_capacity(6);
@@ -2784,6 +2789,7 @@ mod tests {
 
     #[test]
     fn test_iobufmut_additional_conversion_and_trait_paths() {
+        // Basic mutable operations should keep readable bytes consistent.
         let mut buf = IoBufMut::from(vec![1u8, 2, 3, 4]);
         assert!(!buf.is_empty());
         buf.truncate(2);
@@ -2792,12 +2798,14 @@ mod tests {
         assert!(buf.is_empty());
         buf.put_slice(b"xyz");
 
+        // Equality should work across slice, array, and byte-string forms.
         let expected: &[u8] = b"xyz";
         assert!(PartialEq::<[u8]>::eq(&buf, expected));
         assert!(buf == b"xyz"[..]);
         assert!(buf == [b'x', b'y', b'z']);
         assert!(buf == b"xyz");
 
+        // Conversions from common owned/shared containers preserve contents.
         let from_vec = IoBufMut::from(vec![7u8, 8]);
         assert_eq!(from_vec.as_ref(), &[7u8, 8]);
 
@@ -2816,6 +2824,7 @@ mod tests {
     fn test_iobufs_additional_shape_and_conversion_paths() {
         let pool = test_pool();
 
+        // Constructor coverage for mutable/immutable/slice-backed inputs.
         let from_mut = IoBufs::from(IoBufMut::from(b"m"));
         assert_eq!(from_mut.chunk(), b"m");
         let from_bytes = IoBufs::from(Bytes::from_static(b"b"));
@@ -2828,10 +2837,12 @@ mod tests {
         let from_static = IoBufs::from(static_slice);
         assert_eq!(from_static.chunk(), b"slice");
 
+        // Canonicalizing an already-empty buffer remains a single empty chunk.
         let mut single_empty = IoBufs::default();
         single_empty.canonicalize();
         assert!(single_empty.is_single());
 
+        // Triple path: prepend/append can promote into chunked while preserving order.
         let mut triple = IoBufs::from(vec![
             IoBuf::from(b"a".to_vec()),
             IoBuf::from(b"b".to_vec()),
@@ -2843,6 +2854,7 @@ mod tests {
         triple.append(IoBuf::from(vec![b'2']));
         assert_eq!(triple.copy_to_bytes(triple.remaining()).as_ref(), b"10abc2");
 
+        // Appending to an existing triple keeps byte order stable.
         let mut triple_append = IoBufs::from(vec![
             IoBuf::from(b"x".to_vec()),
             IoBuf::from(b"y".to_vec()),
@@ -2851,6 +2863,7 @@ mod tests {
         triple_append.append(IoBuf::from(vec![b'w']));
         assert_eq!(triple_append.coalesce(), b"xyzw");
 
+        // coalesce_with_pool on a triple should preserve contents.
         let triple_pool = IoBufs::from(vec![
             IoBuf::from(b"a".to_vec()),
             IoBuf::from(b"b".to_vec()),
@@ -2858,6 +2871,7 @@ mod tests {
         ]);
         assert_eq!(triple_pool.coalesce_with_pool(&pool), b"abc");
 
+        // coalesce_with_pool on 4+ chunks should read only remaining bytes.
         let mut chunked_pool = IoBufs::from(vec![
             IoBuf::from(b"a".to_vec()),
             IoBuf::from(b"b".to_vec()),
@@ -2868,6 +2882,7 @@ mod tests {
         chunked_pool.advance(1);
         assert_eq!(chunked_pool.coalesce_with_pool(&pool), b"bcd");
 
+        // Non-canonical Pair/Triple/Chunked shapes should still expose the first readable chunk.
         let pair_second = IoBufs {
             inner: IoBufsInner::Pair([IoBuf::default(), IoBuf::from(vec![1u8])]),
         };
@@ -2902,6 +2917,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_additional_shape_and_conversion_paths() {
+        // `as_single` accessors should work only for single-shape containers.
         let mut single = IoBufsMut::from(IoBufMut::from(b"x"));
         assert!(single.as_single().is_some());
         assert!(single.as_single_mut().is_some());
@@ -2911,11 +2927,13 @@ mod tests {
         let pair = IoBufsMut::from(vec![IoBufMut::from(b"a"), IoBufMut::from(b"b")]);
         assert!(pair.as_single().is_none());
 
+        // Constructor coverage for raw vec and BytesMut sources.
         let from_vec = IoBufsMut::from(vec![1u8, 2u8]);
         assert_eq!(from_vec.chunk(), &[1u8, 2]);
         let from_bytesmut = IoBufsMut::from(BytesMut::from(&b"cd"[..]));
         assert_eq!(from_bytesmut.chunk(), b"cd");
 
+        // Chunked write path: set_len + copy_from_slice + freeze round-trip.
         let mut chunked = IoBufsMut::from(vec![
             IoBufMut::with_capacity(1),
             IoBufMut::with_capacity(1),
@@ -2935,6 +2953,7 @@ mod tests {
     fn test_iobufsmut_coalesce_multi_shape_paths() {
         let pool = test_pool();
 
+        // Pair: plain coalesce and pool-backed coalesce-with-extra.
         let pair = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
         assert_eq!(pair.coalesce(), b"abcd");
         let pair = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
@@ -2942,6 +2961,7 @@ mod tests {
         assert_eq!(pair_extra, b"abcd");
         assert!(pair_extra.capacity() >= 7);
 
+        // Triple: both coalesce paths should preserve payload and requested spare capacity.
         let triple = IoBufsMut::from(vec![
             IoBufMut::from(b"a"),
             IoBufMut::from(b"b"),
@@ -2957,6 +2977,7 @@ mod tests {
         assert_eq!(triple_extra, b"abc");
         assert!(triple_extra.capacity() >= 5);
 
+        // Chunked (4+): same expectations as pair/triple for content + capacity.
         let chunked = IoBufsMut::from(vec![
             IoBufMut::from(b"1"),
             IoBufMut::from(b"2"),
@@ -2986,6 +3007,7 @@ mod tests {
         }
         let pool = test_pool();
 
+        // `chunk()` should skip empty front buffers across all shapes.
         let pair_second = IoBufsMut {
             inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::from(b"b")]),
         };
@@ -3024,6 +3046,7 @@ mod tests {
         };
         assert_eq!(chunked_empty.chunk(), b"");
 
+        // `chunk_mut()` should skip non-writable fronts and return first writable chunk.
         let mut pair_chunk_mut = IoBufsMut {
             inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::with_capacity(2)]),
         };
@@ -3071,12 +3094,14 @@ mod tests {
 
     #[test]
     fn test_iobuf_internal_chunk_helpers() {
+        // `copy_to_bytes_chunked` should drop leading empties on zero-length reads.
         let mut empty_with_leading = VecDeque::from([IoBuf::default()]);
         let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut empty_with_leading, 0, "x");
         assert!(bytes.is_empty());
         assert!(!needs_canonicalize);
         assert!(empty_with_leading.is_empty());
 
+        // Fast path: front chunk can fully satisfy the request.
         let mut fast = VecDeque::from([
             IoBuf::from(b"ab".to_vec()),
             IoBuf::from(b"cd".to_vec()),
@@ -3088,6 +3113,7 @@ mod tests {
         assert!(needs_canonicalize);
         assert_eq!(fast.front().expect("front exists").as_ref(), b"cd");
 
+        // Slow path: request spans multiple chunks.
         let mut slow = VecDeque::from([
             IoBuf::from(b"a".to_vec()),
             IoBuf::from(b"bc".to_vec()),
@@ -3098,6 +3124,7 @@ mod tests {
         assert_eq!(bytes.as_ref(), b"abc");
         assert!(needs_canonicalize);
 
+        // `advance_chunked_front` should skip empties and drain in linear order.
         let mut advance_chunked = VecDeque::from([
             IoBuf::default(),
             IoBuf::from(b"abc".to_vec()),
@@ -3111,6 +3138,7 @@ mod tests {
         advance_chunked_front(&mut advance_chunked, 2);
         assert!(advance_chunked.is_empty());
 
+        // `advance_small_chunks` signals canonicalization when front chunks are exhausted.
         let mut small = [IoBuf::default(), IoBuf::from(b"abc".to_vec())];
         let needs_canonicalize = advance_small_chunks(&mut small, 2);
         assert!(needs_canonicalize);
@@ -3127,6 +3155,7 @@ mod tests {
         assert_eq!(small_exact[1].remaining(), 0);
         assert_eq!(small_exact[2].remaining(), 0);
 
+        // `advance_mut_in_chunks` returns whether the request fully fit in writable chunks.
         let mut writable = [IoBufMut::with_capacity(2), IoBufMut::with_capacity(1)];
         let mut remaining = 3usize;
         // SAFETY: We do not read from advanced bytes in this test.
@@ -3144,6 +3173,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_advance_mut_success_paths() {
+        // Pair path.
         let mut pair = IoBufsMut {
             inner: IoBufsMutInner::Pair([IoBufMut::with_capacity(2), IoBufMut::with_capacity(2)]),
         };
@@ -3151,6 +3181,7 @@ mod tests {
         unsafe { pair.advance_mut(3) };
         assert_eq!(pair.remaining(), 3);
 
+        // Triple path.
         let mut triple = IoBufsMut {
             inner: IoBufsMutInner::Triple([
                 IoBufMut::with_capacity(1),
@@ -3162,6 +3193,7 @@ mod tests {
         unsafe { triple.advance_mut(2) };
         assert_eq!(triple.remaining(), 2);
 
+        // Chunked wrapped-VecDeque path.
         let mut wrapped = VecDeque::with_capacity(5);
         wrapped.push_back(IoBufMut::with_capacity(1));
         wrapped.push_back(IoBufMut::with_capacity(1));
