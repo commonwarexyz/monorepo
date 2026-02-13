@@ -15,7 +15,7 @@ stability_mod!(ALPHA, pub mod simulated);
 
 stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
-    use commonware_runtime::{IoBuf, IoBufMut};
+    use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
         channel::mpsc,
         ordered::{Map, Set},
@@ -79,7 +79,7 @@ stability_scope!(BETA {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
     }
@@ -147,7 +147,7 @@ stability_scope!(BETA {
         /// that the caller can act upon.
         fn send(
             self,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> impl Future<Output = Result<Vec<Self::PublicKey>, Self::Error>> + Send;
     }
@@ -186,7 +186,7 @@ stability_scope!(BETA {
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> impl Future<
             Output = Result<Vec<Self::PublicKey>, <Self::Checked<'_> as CheckedSender>::Error>,

@@ -15,7 +15,9 @@ use commonware_cryptography::{
     Committable, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, Metrics, Runner};
+use commonware_runtime::{
+    deterministic, Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Metrics, Runner,
+};
 use commonware_utils::channel::{mpsc, oneshot};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -228,7 +230,7 @@ impl CheckedSender for MockCheckedSender {
 
     async fn send(
         self,
-        _message: impl Into<IoBufMut> + Send,
+        _message: impl Into<IoBufs> + Send,
         _priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         Ok(vec![])

@@ -361,7 +361,7 @@ where
             let cert = self
                 .strategy
                 .mutate_certificate_bytes(&mut self.context, &msg);
-            let _ = sender.send(Recipients::All, &cert[..], true).await;
+            let _ = sender.send(Recipients::All, cert, true).await;
         }
     }
 

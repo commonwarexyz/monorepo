@@ -11,11 +11,12 @@ use crate::authenticated::{
     relay::Relay,
     Mailbox,
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, Handle, IoBuf, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter,
+    Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -27,7 +28,7 @@ use rand_core::CryptoRngCore;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::debug;
 
-pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -47,7 +48,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
         let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -90,12 +91,13 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
 
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send_payload<Si: Sink>(
+        pool: &BufferPool,
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
-        let msg = payload.encode();
+        let msg = payload.encode_with_pool(pool);
         sender.send(msg).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
@@ -106,7 +108,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
         metric: metrics::Message,
-        payload: IoBuf,
+        payload: IoBufs,
     ) -> Result<(), Error> {
         sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
@@ -130,9 +132,11 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
+        let pool = self.context.network_buffer_pool().clone();
 
         // Send greeting first before any other messages
         Self::send_payload(
+            &pool,
             &mut conn_sender,
             &self.sent_messages,
             metrics::Message::new_greeting(&peer),
@@ -177,6 +181,7 @@ impl<E: Spawner + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             };
                             Self::send_payload(
+                                &pool,
                                 &mut conn_sender,
                                 &self.sent_messages,
                                 metric,
@@ -396,7 +401,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_runtime::{deterministic, mocks, Runner, Spawner};
+    use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{bitmap::BitMap, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
@@ -439,9 +444,10 @@ mod tests {
         }
     }
 
-    fn create_channels() -> Channels<PublicKey> {
+    fn create_channels(context: &impl BufferPooler) -> Channels<PublicKey> {
         let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-        let messenger = router::Messenger::new(router_mailbox);
+        let messenger =
+            router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
         Channels::new(messenger, MAX_MESSAGE_SIZE)
     }
 
@@ -514,7 +520,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels();
+            let channels = create_channels(&context);
 
             // Send a non-greeting message first (BitVec)
             let bit_vec = types::Payload::<PublicKey>::BitVec(types::BitVec {
@@ -613,7 +619,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels();
+            let channels = create_channels(&context);
 
             // Send first greeting (valid)
             let first_greeting = types::Payload::<PublicKey>::Greeting(greeting.clone());
@@ -718,7 +724,7 @@ mod tests {
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
             // Create empty channels
-            let channels = create_channels();
+            let channels = create_channels(&context);
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
@@ -840,7 +846,8 @@ mod tests {
 
             // Create channels with a very small backlog (1) to force drops
             let (router_mailbox, _router_receiver) = Mailbox::<router::Message<PublicKey>>::new(10);
-            let messenger = router::Messenger::new(router_mailbox);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
             let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
             let channel_id = 0u64;
             let (_sender, _receiver) = channels.register(
