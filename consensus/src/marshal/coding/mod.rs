@@ -1116,10 +1116,10 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
-        // Request::Block deliver (actor.rs:657-684) validates only block.digest() != digest,
-        // not the full coding commitment. When a peer provides a CodedBlock with the same
-        // inner block digest but different coding config, the actor accepts and stores it.
-        // The stored block's commitment then differs from the finalization's commitment.
+        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // a coded block with matching inner digest but a different coding commitment.
+        // If a finalization for this digest is already cached, marshal must reject
+        // the block unless V::commitment(block) matches the finalization payload.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), Some(1));
@@ -1202,44 +1202,27 @@ mod tests {
                 CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
 
             // Report finalization to v0. v0 doesn't have the block:
-            //   - find_block_by_commitment(commitment_a) returns None (no block with C_A)
-            //   - resolver.fetch(Request::Block(digest)) is called
-            //   - v1 responds with coded_block_b (has same digest)
-            //   - Deliver handler checks block.digest() == digest (passes)
-            //   - Block is stored with commitment_b
+            //   - it fetches Request::Block(digest)
+            //   - v1 responds with coded_block_b (same digest, wrong commitment)
+            //   - deliver path must reject because cached finalization expects commitment_a
             CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
 
             // Wait for the fetch cycle to complete.
             context.sleep(Duration::from_secs(5)).await;
 
-            // The block should be stored at height 1.
+            // The mismatched block must not be stored.
             let stored = v0_mailbox.get_block(Height::new(1)).await;
-            assert!(stored.is_some(), "v0 should have the block at height 1");
-
-            let stored = stored.unwrap();
-            let stored_commitment = stored.commitment();
-
-            // The bug: the stored block has commitment_b (from v1's coding config),
-            // but the finalization references commitment_a. The deliver handler only
-            // validated the inner digest, not the full coding commitment.
-            assert_eq!(
-                stored_commitment, commitment_b,
-                "stored block should have v1's commitment (wrong coding config)"
-            );
-            assert_ne!(
-                stored_commitment, commitment_a,
-                "stored block's commitment differs from finalization's commitment"
+            assert!(
+                stored.is_none(),
+                "v0 should reject backfilled block with mismatched commitment"
             );
 
-            // The finalization at height 1 references commitment_a, but the block
-            // stored at height 1 computes to commitment_b. This inconsistency means
-            // buffer.finalized(commitment_b) was called instead of buffer.finalized(commitment_a),
-            // causing the shard engine to prune by the wrong commitment.
+            // Without the block, finalization should not be persisted by height yet.
             let stored_finalization = v0_mailbox.get_finalization(Height::new(1)).await;
-            assert!(stored_finalization.is_some());
-            let fin_commitment = stored_finalization.unwrap().proposal.payload;
-            assert_eq!(fin_commitment, commitment_a);
-            assert_ne!(fin_commitment, stored_commitment);
+            assert!(
+                stored_finalization.is_none(),
+                "finalization should not be archived until matching block is available"
+            );
         })
     }
 }
