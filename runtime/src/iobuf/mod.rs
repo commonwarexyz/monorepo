@@ -1167,14 +1167,10 @@ pub struct IoBufsMut {
 
 /// Internal mutable representation.
 ///
-/// - Representation is canonical and minimal for currently readable data:
-///   - `Single` is the only representation for empty data and one-chunk data.
-///   - `Chunked` is used only when four or more readable chunks remain.
-/// - Construction from user-provided chunks keeps only chunks with
-///   non-zero capacity.
-/// - Post-read/advance canonicalization removes fully-drained chunks from
-///   multi-chunk variants and collapses to `Single` when zero or one readable
-///   chunks remain.
+/// - Construction from caller-provided writable chunks keeps chunks with
+///   non-zero capacity, even when `remaining() == 0`.
+/// - Read-canonicalization paths remove drained chunks (`remaining() == 0`)
+///   and collapse shape as readable chunk count shrinks.
 #[derive(Debug)]
 enum IoBufsMutInner {
     /// Single buffer (common case, no allocation).
@@ -1471,11 +1467,11 @@ impl IoBufsMut {
         }
     }
 
-    /// Sets the length of the buffer(s) to `len`, distributing across chunks.
+    /// Sets the length of the buffer(s) to `len`, distributing across chunks
+    /// while preserving the current chunk layout.
     ///
-    /// After setting lengths, representation is canonicalized, so fully-drained
-    /// chunks are removed and the shape may collapse (for example, multi-chunk
-    /// to `Single` when `len == 0`).
+    /// This is useful for APIs that must fill caller-provided buffer structure
+    /// in place (for example `Blob::read_at_buf`).
     ///
     /// # Safety
     ///
@@ -1497,7 +1493,6 @@ impl IoBufsMut {
             buf.set_len(to_set);
             remaining -= to_set;
         });
-        self.canonicalize();
     }
 
     /// Copy data from a slice into the buffers.
@@ -3069,7 +3064,7 @@ mod tests {
             bufs.advance(7);
             assert_eq!(bufs.remaining(), 0);
 
-            // Uneven capacities [3, 20, 2], set 18 -> [3, 15] after canonicalization.
+            // Uneven capacities [3, 20, 2], set 18 -> [3, 15, 0].
             let mut bufs = IoBufsMut::from(vec![
                 IoBufMut::with_capacity(3),
                 IoBufMut::with_capacity(20),
@@ -3092,12 +3087,12 @@ mod tests {
             bufs.advance(4);
             assert_eq!(bufs.remaining(), 0);
 
-            // Zero length on chunked canonicalizes to a single empty buffer.
+            // Zero length preserves caller-provided layout.
             let mut bufs =
                 IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
             bufs.set_len(0);
-            assert!(bufs.is_single());
             assert_eq!(bufs.len(), 0);
+            assert_eq!(bufs.chunk(), b"");
         }
     }
 

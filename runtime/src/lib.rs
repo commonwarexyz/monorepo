@@ -694,7 +694,9 @@ stability_scope!(BETA {
         ///
         /// # Contract
         ///
-        /// - The output `IoBufsMut` is the same as the input, with `len` bytes filled from offset
+        /// - The returned buffers reuse caller-provided storage, with exactly `len`
+        ///   bytes filled from `offset`.
+        /// - Caller-provided chunk layout is preserved.
         ///
         /// # Panics
         ///

@@ -833,6 +833,26 @@ pub(crate) mod tests {
         assert_eq!(output.chunk(), b" world");
         output.advance(6);
         assert_eq!(output.remaining(), 0);
+
+        // when requested len only fills the first chunk, read_at_buf
+        // should still preserve caller-provided multi-chunk layout.
+        let buf1 = IoBufMut::zeroed(2);
+        let buf2 = IoBufMut::zeroed(2);
+        let ptr1 = buf1.as_ref().as_ptr();
+        let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
+        assert!(!input_bufs.is_single(), "Should be multi-chunk");
+
+        let output = blob.read_at_buf(0, 2, input_bufs).await.unwrap();
+        assert!(
+            !output.is_single(),
+            "Multi-chunk input should remain multi-chunk when len only uses first chunk"
+        );
+        assert_eq!(
+            output.chunk().as_ptr(),
+            ptr1,
+            "First chunk must be the same buffer"
+        );
+        assert_eq!(output.chunk(), b"he");
     }
 
     /// Test that read_at_buf panics when buffer capacity < len.
