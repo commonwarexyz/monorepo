@@ -75,17 +75,6 @@ const BLOCK_BYTES: usize = (u64::BITS as usize) / (u8::BITS as usize);
 /// Even for low-entropy input like `[0 0 0 0]`, output still changes because
 /// `ctr` is mixed into every block before finalization.
 ///
-/// ```text
-///                    +---------------------------+
-/// bytes + counter -> | wrapping window (u64)    | -> word
-///                    +---------------------------+
-///                                   |
-///                                   v
-///                    +---------------------------+
-///                    | mix(word ^ ctr ^ DOMAIN) | -> block u64
-///                    +---------------------------+
-/// ```
-///
 /// `fill_bytes` serves output from cached block bytes so callers get a stable
 /// byte stream regardless of whether they request randomness as `next_u64`,
 /// `next_u32`, or arbitrary byte slices.
