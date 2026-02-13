@@ -1739,6 +1739,10 @@ fn advance_small_chunks<B: Buf>(chunks: &mut [B], mut cnt: usize) -> bool {
 /// region has been initialized according to `BufMut`'s contract.
 #[inline]
 unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usize) -> bool {
+    if *remaining == 0 {
+        return true;
+    }
+
     for buf in chunks.iter_mut() {
         let avail = buf.chunk_mut().len();
         if avail == 0 {
@@ -3208,6 +3212,57 @@ mod tests {
         unsafe { chunked.advance_mut(4) };
         assert_eq!(chunked.remaining(), 4);
         assert!(chunked.remaining_mut() > 0);
+    }
+
+    #[test]
+    fn test_iobufsmut_advance_mut_zero_noop_when_full() {
+        fn full_chunk(pool: &BufferPool) -> IoBufMut {
+            // Pooled buffers have bounded class capacity (unlike growable Bytes),
+            // so force len == capacity to make remaining_mut() == 0.
+            let mut buf = pool.alloc(1);
+            let cap = buf.capacity();
+            // SAFETY: We never read from this buffer in this test.
+            unsafe { buf.set_len(cap) };
+            buf
+        }
+
+        let pool = test_pool();
+
+        // Pair path: fully-written chunks should allow advance_mut(0) as a no-op.
+        let mut pair = IoBufsMut::from(vec![full_chunk(&pool), full_chunk(&pool)]);
+        assert!(matches!(pair.inner, IoBufsMutInner::Pair(_)));
+        assert_eq!(pair.remaining_mut(), 0);
+        let before = pair.remaining();
+        // SAFETY: Advancing by 0 does not expose uninitialized bytes.
+        unsafe { pair.advance_mut(0) };
+        assert_eq!(pair.remaining(), before);
+
+        // Triple path: same no-op behavior.
+        let mut triple = IoBufsMut::from(vec![
+            full_chunk(&pool),
+            full_chunk(&pool),
+            full_chunk(&pool),
+        ]);
+        assert!(matches!(triple.inner, IoBufsMutInner::Triple(_)));
+        assert_eq!(triple.remaining_mut(), 0);
+        let before = triple.remaining();
+        // SAFETY: Advancing by 0 does not expose uninitialized bytes.
+        unsafe { triple.advance_mut(0) };
+        assert_eq!(triple.remaining(), before);
+
+        // Chunked path: 4+ fully-written chunks should also no-op.
+        let mut chunked = IoBufsMut::from(vec![
+            full_chunk(&pool),
+            full_chunk(&pool),
+            full_chunk(&pool),
+            full_chunk(&pool),
+        ]);
+        assert!(matches!(chunked.inner, IoBufsMutInner::Chunked(_)));
+        assert_eq!(chunked.remaining_mut(), 0);
+        let before = chunked.remaining();
+        // SAFETY: Advancing by 0 does not expose uninitialized bytes.
+        unsafe { chunked.advance_mut(0) };
+        assert_eq!(chunked.remaining(), before);
     }
 
     #[test]
