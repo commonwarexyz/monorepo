@@ -614,6 +614,35 @@ impl BufferPool {
         class_index
     }
 
+    /// Attempts to allocate a pooled buffer.
+    ///
+    /// Unlike [`Self::alloc`], this method does not fall back to untracked
+    /// allocation.
+    ///
+    /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
+    ///
+    /// # Initialization
+    ///
+    /// The returned buffer contains **uninitialized memory**. Do not read from
+    /// it until data has been written.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
+    /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
+    pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
+        let class_index = self
+            .class_index_or_record_oversized(capacity)
+            .ok_or(PoolError::Oversized)?;
+
+        let buffer = self
+            .inner
+            .try_alloc(class_index)
+            .ok_or(PoolError::Exhausted)?;
+        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
+        Ok(IoBufMut::from_pooled(pooled))
+    }
+
     /// Allocates a buffer with capacity for at least `capacity` bytes.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
@@ -656,36 +685,6 @@ impl BufferPool {
         buf
     }
 
-    /// Allocates a zero-initialized buffer with readable length `len`.
-    ///
-    /// The returned buffer has `len() == len` and `capacity() >= len`.
-    ///
-    /// If the pool can provide a buffer (len within limits and pool not
-    /// exhausted), returns a pooled buffer that will be returned to the pool
-    /// when dropped. Otherwise, falls back to an untracked aligned heap
-    /// allocation that is deallocated when dropped.
-    ///
-    /// Use this for read APIs that require an initialized `&mut [u8]`.
-    /// This avoids `unsafe set_len` at callsites.
-    ///
-    /// Use [`Self::try_alloc_zeroed`] if you need pooled-only behavior.
-    ///
-    /// # Initialization
-    ///
-    /// Bytes in `0..len` are initialized to zero. Bytes in `len..capacity`
-    /// may be uninitialized.
-    pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
-        self.try_alloc_zeroed(len).unwrap_or_else(|_| {
-            // Pool exhausted or oversized: allocate untracked zeroed memory.
-            let size = len.max(self.inner.config.min_size.get());
-            let buffer = AlignedBuffer::new_zeroed(size, self.inner.config.alignment.get());
-            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()));
-            // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
-            unsafe { buf.set_len(len) };
-            buf
-        })
-    }
-
     /// Attempts to allocate a zero-initialized pooled buffer.
     ///
     /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
@@ -725,33 +724,34 @@ impl BufferPool {
         Ok(buf)
     }
 
-    /// Attempts to allocate a pooled buffer.
+    /// Allocates a zero-initialized buffer with readable length `len`.
     ///
-    /// Unlike [`Self::alloc`], this method does not fall back to untracked
-    /// allocation.
+    /// The returned buffer has `len() == len` and `capacity() >= len`.
     ///
-    /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
+    /// If the pool can provide a buffer (len within limits and pool not
+    /// exhausted), returns a pooled buffer that will be returned to the pool
+    /// when dropped. Otherwise, falls back to an untracked aligned heap
+    /// allocation that is deallocated when dropped.
+    ///
+    /// Use this for read APIs that require an initialized `&mut [u8]`.
+    /// This avoids `unsafe set_len` at callsites.
+    ///
+    /// Use [`Self::try_alloc_zeroed`] if you need pooled-only behavior.
     ///
     /// # Initialization
     ///
-    /// The returned buffer contains **uninitialized memory**. Do not read from
-    /// it until data has been written.
-    ///
-    /// # Errors
-    ///
-    /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
-    /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
-    pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
-        let class_index = self
-            .class_index_or_record_oversized(capacity)
-            .ok_or(PoolError::Oversized)?;
-
-        let buffer = self
-            .inner
-            .try_alloc(class_index)
-            .ok_or(PoolError::Exhausted)?;
-        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
-        Ok(IoBufMut::from_pooled(pooled))
+    /// Bytes in `0..len` are initialized to zero. Bytes in `len..capacity`
+    /// may be uninitialized.
+    pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
+        self.try_alloc_zeroed(len).unwrap_or_else(|_| {
+            // Pool exhausted or oversized: allocate untracked zeroed memory.
+            let size = len.max(self.inner.config.min_size.get());
+            let buffer = AlignedBuffer::new_zeroed(size, self.inner.config.alignment.get());
+            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()));
+            // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
+            unsafe { buf.set_len(len) };
+            buf
+        })
     }
 
     /// Returns the pool configuration.
