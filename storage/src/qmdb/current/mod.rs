@@ -499,15 +499,15 @@ pub mod tests {
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
         FixedConfig {
-            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
-            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_journal_partition: format!("{partition_prefix}-journal-partition"),
+            mmr_metadata_partition: format!("{partition_prefix}-metadata-partition"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("{partition_prefix}_partition_prefix"),
+            log_journal_partition: format!("{partition_prefix}-partition-prefix"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             grafted_mmr_metadata_partition: format!(
-                "{partition_prefix}_grafted_mmr_metadata_partition"
+                "{partition_prefix}-grafted-mmr-metadata-partition"
             ),
             translator: T::default(),
             thread_pool: None,
@@ -521,17 +521,17 @@ pub mod tests {
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
-            mmr_journal_partition: format!("{partition_prefix}_journal_partition"),
-            mmr_metadata_partition: format!("{partition_prefix}_metadata_partition"),
+            mmr_journal_partition: format!("{partition_prefix}-journal-partition"),
+            mmr_metadata_partition: format!("{partition_prefix}-metadata-partition"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("{partition_prefix}_partition_prefix"),
+            log_partition: format!("{partition_prefix}-partition-prefix"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: (),
             grafted_mmr_metadata_partition: format!(
-                "{partition_prefix}_grafted_mmr_metadata_partition"
+                "{partition_prefix}-grafted-mmr-metadata-partition"
             ),
             translator: T::default(),
             thread_pool: None,
@@ -626,7 +626,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
         let state1 = executor.start(|mut context| async move {
-            let partition = "build_random".to_string();
+            let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
             let db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
             let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
@@ -651,7 +651,7 @@ pub mod tests {
         // Run again to verify determinism
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|mut context| async move {
-            let partition = "build_random".to_string();
+            let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
             let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
@@ -692,7 +692,7 @@ pub mod tests {
         // Box the future to prevent stack overflow when monomorphized across DB variants.
         executor.start(|mut context| {
             Box::pin(async move {
-                let partition = "build_random_fail_commit".to_string();
+                let partition = "build-random-fail-commit".to_string();
                 let rng_seed = context.next_u64();
                 let db: C = open_db(context.with_label("first"), partition.clone()).await;
                 let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
@@ -737,7 +737,7 @@ pub mod tests {
 
                 // To confirm the second committed hash is correct we'll re-build the DB in a new
                 // partition, but without any failures. They should have the exact same state.
-                let fresh_partition = "build_random_fail_commit_fresh".to_string();
+                let fresh_partition = "build-random-fail-commit-fresh".to_string();
                 let db: C = open_db(context.with_label("fresh"), fresh_partition.clone()).await;
                 let db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db.into_mutable())
                     .await
@@ -779,11 +779,11 @@ pub mod tests {
             // Create two databases that are identical other than how they are pruned.
             let mut db_no_pruning: C = open_db_clone(
                 context.with_label("no_pruning"),
-                "no_pruning_test".to_string(),
+                "no-pruning-test".to_string(),
             )
             .await;
             let mut db_pruning: C =
-                open_db(context.with_label("pruning"), "pruning_test".to_string()).await;
+                open_db(context.with_label("pruning"), "pruning-test".to_string()).await;
 
             let mut db_no_pruning_mut = db_no_pruning.into_mutable();
             let mut db_pruning_mut = db_pruning.into_mutable();
@@ -858,7 +858,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
         executor.start(|mut context| async move {
-            let partition = "sync_bitmap_pruning".to_string();
+            let partition = "sync-bitmap-pruning".to_string();
             let rng_seed = context.next_u64();
             let db: C = open_db_clone(context.with_label("first"), partition.clone()).await;
 
@@ -938,7 +938,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
-            let mut db = open_db_clone(context.with_label("first"), "build_big".to_string())
+            let mut db = open_db_clone(context.with_label("first"), "build-big".to_string())
                 .await
                 .into_mutable();
 
@@ -993,7 +993,7 @@ pub mod tests {
             drop(db);
 
             // Reopen the db and verify it has exactly the same state.
-            let db: C = open_db(context.with_label("second"), "build_big".to_string()).await;
+            let db: C = open_db(context.with_label("second"), "build-big".to_string()).await;
             assert_eq!(root, db.root().await);
             assert_eq!(
                 db.bounds().await.end,

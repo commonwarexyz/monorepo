@@ -193,11 +193,11 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("journal_{seed}"),
-            mmr_metadata_partition: format!("metadata_{seed}"),
+            mmr_journal_partition: format!("journal-{seed}"),
+            mmr_metadata_partition: format!("metadata-{seed}"),
             mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{seed}"),
+            log_partition: format!("log-journal-{seed}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
@@ -229,7 +229,7 @@ pub(crate) mod test {
 
     /// Return a Digest-valued variable database for generic tests.
     async fn open_digest_db(context: Context) -> DigestAnyTest {
-        let cfg = variable_db_config("digest_partition", &context);
+        let cfg = variable_db_config("digest-partition", &context);
         DigestAnyTest::init(context, cfg).await.unwrap()
     }
 
@@ -583,11 +583,11 @@ pub(crate) mod test {
 
     fn partitioned_config(suffix: &str, pooler: &impl BufferPooler) -> PartitionedVarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("pv_journal_{suffix}"),
-            mmr_metadata_partition: format!("pv_metadata_{suffix}"),
+            mmr_journal_partition: format!("pv-journal-{suffix}"),
+            mmr_metadata_partition: format!("pv-metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("pv_log_journal_{suffix}"),
+            log_partition: format!("pv-log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
@@ -611,12 +611,12 @@ pub(crate) mod test {
 
     #[inline]
     async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        let cfg = partitioned_config("partition_p1", &context);
+        let cfg = partitioned_config("partition-p1", &context);
         PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
-        let cfg = variable_db_config("unordered_partitioned_var_p1", &context);
+        let cfg = variable_db_config("unordered-partitioned-var-p1", &context);
         PartitionedAnyTestDigestP1::init(context, cfg)
             .await
             .unwrap()

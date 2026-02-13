@@ -45,11 +45,11 @@ fn fuzz(data: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config::<EightCap> {
-            mmr_journal_partition: "test_qmdb_mmr_journal".into(),
+            mmr_journal_partition: "test-qmdb-mmr-journal".into(),
             mmr_items_per_blob: NZU64!(500000),
             mmr_write_buffer: NZUsize!(1024),
-            mmr_metadata_partition: "test_qmdb_mmr_metadata".into(),
-            log_journal_partition: "test_qmdb_log_journal".into(),
+            mmr_metadata_partition: "test-qmdb-mmr-metadata".into(),
+            log_journal_partition: "test-qmdb-log-journal".into(),
             log_items_per_blob: NZU64!(500000),
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,

@@ -598,12 +598,12 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
 
     async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        let cfg = fixed_db_config("unordered_partitioned_p1", &context);
+        let cfg = fixed_db_config("unordered-partitioned-p1", &context);
         PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        let cfg = fixed_db_config("unordered_partitioned_p2", &context);
+        let cfg = fixed_db_config("unordered-partitioned-p2", &context);
         PartitionedAnyTestP2::init(context, cfg).await.unwrap()
     }
 

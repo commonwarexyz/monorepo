@@ -579,8 +579,8 @@ mod tests {
     /// Create MMR configuration for tests.
     fn mmr_config(suffix: &str, pooler: &impl BufferPooler) -> MmrConfig {
         MmrConfig {
-            journal_partition: format!("mmr_journal_{suffix}"),
-            metadata_partition: format!("mmr_metadata_{suffix}"),
+            journal_partition: format!("mmr-journal-{suffix}"),
+            metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
@@ -591,7 +591,7 @@ mod tests {
     /// Create journal configuration for tests.
     fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
         JConfig {
-            partition: format!("journal_{suffix}"),
+            partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -694,7 +694,7 @@ mod tests {
     fn test_new_creates_empty_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let journal = create_empty_journal(context, "new_empty").await;
+            let journal = create_empty_journal(context, "new-empty").await;
 
             let bounds = journal.reader().await.bounds();
             assert_eq!(bounds.end, 0);
@@ -708,7 +708,7 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, mut hasher) = create_components(context, "align_empty").await;
+            let (mmr, journal, mut hasher) = create_components(context, "align-empty").await;
 
             let mmr = Journal::align(mmr.into_dirty(), &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
@@ -724,7 +724,7 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, mut hasher) = create_components(context, "mmr_ahead").await;
+            let (mmr, journal, mut hasher) = create_components(context, "mmr-ahead").await;
 
             // Add 20 operations to both MMR and journal
             let mut mmr = mmr.into_dirty();
@@ -757,7 +757,7 @@ mod tests {
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mmr, journal, mut hasher) = create_components(context, "journal_ahead").await;
+            let (mmr, journal, mut hasher) = create_components(context, "journal-ahead").await;
 
             // Add 20 operations to journal only
             for i in 0..20 {
@@ -820,7 +820,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_match"),
-                    journal_config("rewind_match", &context),
+                    journal_config("rewind-match", &context),
                 )
                 .await
                 .unwrap();
@@ -851,7 +851,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_multiple"),
-                    journal_config("rewind_multiple", &context),
+                    journal_config("rewind-multiple", &context),
                 )
                 .await
                 .unwrap();
@@ -885,7 +885,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_no_match"),
-                    journal_config("rewind_no_match", &context),
+                    journal_config("rewind-no-match", &context),
                 )
                 .await
                 .unwrap();
@@ -905,7 +905,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_with_pruning"),
-                    journal_config("rewind_with_pruning", &context),
+                    journal_config("rewind-with-pruning", &context),
                 )
                 .await
                 .unwrap();
@@ -945,7 +945,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_no_match_pruned"),
-                    journal_config("rewind_no_match_pruned", &context),
+                    journal_config("rewind-no-match-pruned", &context),
                 )
                 .await
                 .unwrap();
@@ -983,7 +983,7 @@ mod tests {
             {
                 let mut journal = ContiguousJournal::init(
                     context.with_label("rewind_empty"),
-                    journal_config("rewind_empty", &context),
+                    journal_config("rewind-empty", &context),
                 )
                 .await
                 .unwrap();
