@@ -193,6 +193,13 @@ fn fuzz(input: FuzzInput) {
                     }
                     CurrentOperation::Commit => {
                         let Ok((durable_db, _)) = current.commit(None).await else {
+                            // A failed commit may have partially persisted
+                            // pending operations.
+                            // Remove affected keys from committed since their
+                            // recovered value is unknown.
+                            for key in pending.keys() {
+                                committed.remove(key);
+                            }
                             break;
                         };
                         // Data is durable. Merge pending into committed.
