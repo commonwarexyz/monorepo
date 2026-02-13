@@ -526,6 +526,24 @@ impl<I: Clone + Ord, F: FieldNTT> Interpolator<I, F> {
     }
 }
 
+#[cfg(feature = "test_strategies")]
+/// Generate non-empty polynomial strategies from coefficient strategies.
+///
+/// This is useful for crates that need polynomial property tests without
+/// re-implementing `Poly` generation logic.
+pub fn poly_strategy<K: core::fmt::Debug + 'static>(
+    coeff: impl proptest::strategy::Strategy<Value = K> + Clone + 'static,
+    size: impl Into<proptest::sample::SizeRange>,
+) -> proptest::prelude::BoxedStrategy<Poly<K>> {
+    use proptest::strategy::Strategy as _;
+
+    let size = size.into();
+    let nonempty_size = if size.start() == 0 { size + 1 } else { size };
+    proptest::collection::vec(coeff, nonempty_size)
+        .prop_map(Poly::from_iter_unchecked)
+        .boxed()
+}
+
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;

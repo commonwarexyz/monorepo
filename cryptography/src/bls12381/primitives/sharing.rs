@@ -352,6 +352,31 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use commonware_math::poly;
+    use commonware_utils::ordered::Map;
+    use proptest::{prelude::*, proptest};
+
+    fn mode_strategy() -> impl Strategy<Value = Mode> {
+        prop_oneof![Just(Mode::NonZeroCounter), Just(Mode::RootsOfUnity)]
+    }
+
+    fn subset_case_strategy(
+    ) -> impl Strategy<Value = (Mode, NonZeroU32, Set<Participant>, Poly<Scalar>)> {
+        (mode_strategy(), 1u32..=64u32)
+            .prop_flat_map(|(mode, total)| {
+                let total_usize = total as usize;
+                let total_nz = NonZeroU32::new(total).expect("range is non-zero");
+                prop::collection::btree_set(0u32..total, 1..=total_usize).prop_flat_map(
+                    move |subset| {
+                        let subset = Set::from_iter_dedup(subset.into_iter().map(Participant::new));
+                        let max_required = subset.len();
+                        let poly = poly::poly_strategy(any::<Scalar>(), 1..=max_required);
+                        (Just((mode, total_nz, subset)), poly)
+                    },
+                )
+            })
+            .prop_map(|((mode, total, subset), poly)| (mode, total, subset, poly))
+    }
 
     #[test]
     fn test_roots_of_unity_interpolator_large_total_returns_none() {
@@ -363,6 +388,52 @@ mod tests {
             interpolator.is_none(),
             "domain > u32::MAX should be rejected instead of panicking"
         );
+    }
+
+    proptest! {
+        #[test]
+        fn test_all_scalars_matches_scalar(
+            mode in mode_strategy(),
+            total in 1u32..=512u32,
+            seed in any::<u16>(),
+        ) {
+            let total = NonZeroU32::new(total).expect("range is non-zero");
+            let index = u32::from(seed) % total.get();
+            let participant = Participant::new(index);
+
+            let scalars = mode.all_scalars(total);
+            prop_assert_eq!(
+                scalars[usize::from(participant)].clone(),
+                mode.scalar(total, participant).expect("index is in range")
+            );
+        }
+
+        #[test]
+        fn test_subset_interpolation_recovers_constant(
+            (mode, total, subset, poly) in subset_case_strategy(),
+        ) {
+            let all_shares = Map::from_iter_dedup((0..total.get()).map(|i| {
+                let participant = Participant::new(i);
+                let scalar = mode.scalar(total, participant).expect("in range");
+                let share = poly.eval(&scalar);
+                (participant, share)
+            }));
+
+            let subset_evals = Map::from_iter_dedup(
+                subset
+                    .iter()
+                    .map(|participant| (*participant, all_shares.get_value(participant).expect("participant exists").clone()))
+            );
+
+            let interpolator = mode
+                .interpolator(total, &subset, |participant| Some(*participant))
+                .expect("subset indices are valid");
+            let recovered = interpolator
+                .interpolate(&subset_evals, &Sequential)
+                .expect("subset should match interpolator domain");
+
+            prop_assert_eq!(recovered, poly.constant().clone());
+        }
     }
 }
 
