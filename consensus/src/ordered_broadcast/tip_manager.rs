@@ -2,14 +2,12 @@ use super::types::Node;
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
 use std::collections::{hash_map::Entry, HashMap};
 
-/// Manages the highest-height chunk for each sequencer.
+/// Manages the highest-height node for each sequencer.
 #[derive(Default, Debug)]
 pub struct TipManager<C: PublicKey, S: Scheme, D: Digest> {
-    // The highest-height chunk for each sequencer.
-    // The chunk must have the certificate of its parent.
-    // Existence of the chunk implies:
-    // - The existence of the sequencer's entire chunk chain (from height zero)
-    // - That the chunk has been acked by this validator.
+    // The highest-height node for each sequencer.
+    // TipManager itself only enforces monotonic heights per sequencer and payload consistency
+    // at a given height; certificates and local acknowledgements are maintained elsewhere.
     tips: HashMap<C, Node<C, S, D>>,
 }
 
