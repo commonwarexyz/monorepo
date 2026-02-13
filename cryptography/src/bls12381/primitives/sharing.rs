@@ -352,6 +352,9 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use commonware_invariants::minifuzz;
+    use commonware_utils::ordered::Map;
+    use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_roots_of_unity_interpolator_large_total_returns_none() {
@@ -363,6 +366,83 @@ mod tests {
             interpolator.is_none(),
             "domain > u32::MAX should be rejected instead of panicking"
         );
+    }
+
+    #[test]
+    fn test_all_scalars_matches_scalar() {
+        minifuzz::test(|u| {
+            let mode = match u.int_in_range(0u8..=1)? {
+                0 => Mode::NonZeroCounter,
+                1 => Mode::RootsOfUnity,
+                _ => unreachable!("range is 0..=1"),
+            };
+            let total = NonZeroU32::new(u.int_in_range(1u32..=512u32)?).expect("range is non-zero");
+            let index = u.int_in_range(0u32..=total.get() - 1)?;
+            let participant = Participant::new(index);
+
+            let scalars = mode.all_scalars(total);
+            assert_eq!(
+                scalars[usize::from(participant)].clone(),
+                mode.scalar(total, participant).expect("index is in range")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_subset_interpolation_recovers_constant() {
+        minifuzz::test(|u| {
+            let mode = match u.int_in_range(0u8..=1)? {
+                0 => Mode::NonZeroCounter,
+                1 => Mode::RootsOfUnity,
+                _ => unreachable!("range is 0..=1"),
+            };
+            let total = NonZeroU32::new(u.int_in_range(1u32..=64u32)?).expect("range is non-zero");
+
+            let mut subset_vec = Vec::new();
+            for i in 0..total.get() {
+                if u.arbitrary::<bool>()? {
+                    subset_vec.push(Participant::new(i));
+                }
+            }
+            if subset_vec.is_empty() {
+                let i = u.int_in_range(0u32..=total.get() - 1)?;
+                subset_vec.push(Participant::new(i));
+            }
+            let subset = Set::from_iter_dedup(subset_vec);
+
+            let max_degree = u32::try_from(subset.len() - 1).expect("subset len fits in u32");
+            let degree = u.int_in_range(0u32..=max_degree)?;
+            let seed: u64 = u.arbitrary()?;
+            let poly: Poly<Scalar> = Poly::new(&mut StdRng::seed_from_u64(seed), degree);
+
+            let all_shares = Map::from_iter_dedup((0..total.get()).map(|i| {
+                let participant = Participant::new(i);
+                let scalar = mode.scalar(total, participant).expect("in range");
+                let share = poly.eval(&scalar);
+                (participant, share)
+            }));
+
+            let subset_evals = Map::from_iter_dedup(subset.iter().map(|participant| {
+                (
+                    *participant,
+                    all_shares
+                        .get_value(participant)
+                        .expect("participant exists")
+                        .clone(),
+                )
+            }));
+
+            let interpolator = mode
+                .interpolator(total, &subset, |participant| Some(*participant))
+                .expect("subset indices are valid");
+            let recovered = interpolator
+                .interpolate(&subset_evals, &Sequential)
+                .expect("subset should match interpolator domain");
+
+            assert_eq!(recovered, poly.constant().clone());
+            Ok(())
+        });
     }
 }
 
