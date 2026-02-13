@@ -126,13 +126,13 @@ commonware_macros::stability_scope!(ALPHA {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
         /// A shard of data, to be received by a participant.
-        type Shard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        type Shard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// A shard shared with other participants, to aid them in reconstruction.
         ///
         /// In most cases, this will be the same as `Shard`, but some schemes might
         /// have extra information in `Shard` that may not be necessary to reconstruct
         /// the data.
-        type ReShard: Clone + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
+        type ReShard: Clone + Debug + Eq + Codec<Cfg = CodecConfig> + Send + Sync + 'static;
         /// Data which can assist in checking shards.
         type CheckingData: Clone + Send;
         /// A shard that has been checked for inclusion in the commitment.
@@ -218,167 +218,116 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
-    use std::cmp::Reverse;
 
-    const MAX_DATA_BYTES: usize = 1 << 31;
+    const MAX_SHARD_SIZE: usize = 1 << 31;
 
-    fn general_test<S: Scheme>(
-        name: &str,
-        data: &[u8],
-        min_shards: u16,
-        total_shards: u16,
-        indices: &[u16],
-    ) {
-        // If the indices reference some larger shard, use that as the total.
-        let total_shards = indices
-            .iter()
-            .map(|&x| x + 1)
-            .max()
-            .map_or(total_shards, |x| x.max(total_shards));
-        assert!(min_shards >= 1, "min_shards must be at least 1");
-        assert!(
-            indices.len() >= min_shards as usize,
-            "you need to supply at least {min_shards} indices"
-        );
-        assert!(
-            total_shards >= min_shards,
-            "total_shards ({total_shards}) must be >= min_shards ({min_shards})"
-        );
-
-        let config = Config {
-            minimum_shards: min_shards,
-            extra_shards: total_shards - min_shards,
-        };
+    fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
+        // Encode data into shards.
+        let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
         let read_cfg = CodecConfig {
-            maximum_shard_size: MAX_DATA_BYTES,
+            maximum_shard_size: MAX_SHARD_SIZE,
         };
-        let (commitment, shards) = S::encode(&config, data, &Sequential).unwrap();
-        // Pick out the packets we want, in reverse order.
-        let ((_, _, checking_data, my_checked_shard, _), other_packets) = {
-            let mut out = shards
-                .into_iter()
-                .enumerate()
-                .filter_map(|(i, shard)| {
-                    let shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-                    let i = i as u16;
-                    let pos_of_i = indices.iter().position(|&x| x == i)?;
-                    let (x0, x1, x2) = S::reshard(&config, &commitment, i, shard).unwrap();
-                    Some((pos_of_i, i, x0, x1, x2))
-                })
-                .collect::<Vec<_>>();
-            out.sort_by_key(|&(pos_of_i, _, _, _, _)| Reverse(pos_of_i));
-            let first = out.pop().unwrap();
-            (first, out)
-        };
-        let checked_shards = {
-            let mut others = other_packets
-                .into_iter()
-                .map(|(_, i, _, _, reshard)| {
-                    let reshard = S::ReShard::read_cfg(&mut reshard.encode(), &read_cfg).unwrap();
-                    S::check(&config, &commitment, &checking_data, i, reshard).unwrap()
-                })
-                .collect::<Vec<_>>();
-            others.push(my_checked_shard);
-            others
-        };
+
+        for (i, shard) in shards.iter().enumerate() {
+            // Shard codec roundtrip.
+            let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
+            assert_eq!(decoded_shard, *shard);
+
+            // ReShard codec roundtrip.
+            let (_, _, reshard) = S::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
+            let decoded_reshard = S::ReShard::read_cfg(&mut reshard.encode(), &read_cfg).unwrap();
+            assert_eq!(decoded_reshard, reshard);
+        }
+
+        // Collect selected shards for decoding. The first selected shard
+        // goes through `reshard`, the rest go through `check`.
+        let mut checked_shards = Vec::new();
+        let mut checking_data = None;
+        for (i, shard) in shards.into_iter().enumerate() {
+            if !selected.contains(&(i as u16)) {
+                continue;
+            }
+            let (cd, checked, reshard) = S::reshard(config, &commitment, i as u16, shard).unwrap();
+            if let Some(cd) = &checking_data {
+                let checked = S::check(config, &commitment, cd, i as u16, reshard).unwrap();
+                checked_shards.push(checked);
+            } else {
+                checking_data = Some(cd);
+                checked_shards.push(checked);
+            }
+        }
+
+        // Decode from the selected shards and verify data integrity.
         let decoded = S::decode(
-            &config,
+            config,
             &commitment,
-            checking_data,
+            checking_data.unwrap(),
             &checked_shards,
             &Sequential,
         )
         .unwrap();
-        assert_eq!(&decoded, data, "{name} failed");
+        assert_eq!(decoded, data);
     }
 
-    fn test_basic<S: Scheme>() {
-        general_test::<S>("test_basic", b"Hello, Reed-Solomon!", 4, 7, &[0, 1, 2, 3]);
+    fn roundtrip_strategy(
+        min_extra: u16,
+    ) -> impl proptest::strategy::Strategy<Value = (Config, Vec<u8>, Vec<u16>)> {
+        use proptest::prelude::*;
+
+        (1u16..=16, min_extra..=16).prop_flat_map(|(min_shards, extra_shards)| {
+            let total = min_shards + extra_shards;
+            let all_indices: Vec<u16> = (0..total).collect();
+            let indices = (min_shards as usize..=total as usize)
+                .prop_flat_map(move |n| proptest::sample::subsequence(all_indices.clone(), n));
+            let data = prop::collection::vec(any::<u8>(), 0..=4096);
+            (
+                Just(Config {
+                    minimum_shards: min_shards,
+                    extra_shards,
+                }),
+                data,
+                indices,
+            )
+        })
     }
 
-    fn test_moderate<S: Scheme>() {
-        general_test::<S>(
-            "test_moderate",
-            b"Testing with more pieces than minimum",
-            4,
-            10,
-            &[0, 1, 2, 8, 9],
-        );
-    }
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
-    fn test_odd_shard_len<S: Scheme>() {
-        general_test::<S>("test_odd_shard_len", b"?", 2, 3, &[0, 1]);
-    }
+        #[test]
+        fn proptest_roundtrip_reed_solomon(
+            (config, data, selected) in roundtrip_strategy(1)
+        ) {
+            roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+        }
 
-    fn test_recovery<S: Scheme>() {
-        general_test::<S>(
-            "test_recovery",
-            b"Testing recovery pieces",
-            3,
-            8,
-            &[5, 6, 7],
-        );
-    }
+        #[test]
+        fn proptest_roundtrip_no_coding(
+            (config, data, selected) in roundtrip_strategy(0)
+        ) {
+            roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+        }
 
-    fn test_empty_data<S: Scheme>() {
-        general_test::<S>(
-            "test_empty_data",
-            b"",
-            30,
-            100,
-            (0..30u16).collect::<Vec<_>>().as_slice(),
-        );
-    }
-
-    fn test_large_data<S: Scheme>() {
-        general_test::<S>(
-            "test_large_data",
-            vec![42u8; 1000].as_slice(),
-            3,
-            4,
-            &[0, 1, 2],
-        );
-    }
-
-    fn test_no_data_two_shards<S: Scheme>() {
-        general_test::<S>("test_no_data_one_shard", b"", 1, 2, &[0]);
+        #[test]
+        fn proptest_roundtrip_zoda(
+            (config, data, selected) in roundtrip_strategy(0)
+        ) {
+            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+        }
     }
 
     // This exercises an edge case in ZODA, but is also useful for other schemes.
-    fn test_2_pow_16_25_total_shards<S: Scheme>() {
-        general_test::<S>(
-            "test_2_pow_16_25_total_shards",
-            vec![0x67; 1 << 16].as_slice(),
-            8,
-            25,
-            &(0..8).collect::<Vec<_>>(),
-        );
-    }
-
-    fn test_suite<S: Scheme>() {
-        test_basic::<S>();
-        test_moderate::<S>();
-        test_odd_shard_len::<S>();
-        test_recovery::<S>();
-        test_empty_data::<S>();
-        test_large_data::<S>();
-        test_no_data_two_shards::<S>();
-        test_2_pow_16_25_total_shards::<S>();
-    }
-
     #[test]
-    fn test_suite_reed_solomon() {
-        test_suite::<ReedSolomon<Sha256>>();
-    }
-
-    #[test]
-    fn test_suite_no_coding() {
-        test_suite::<NoCoding<Sha256>>();
-    }
-
-    #[test]
-    fn test_suite_zoda() {
-        test_suite::<Zoda<Sha256>>();
+    fn roundtrip_2_pow_16_25_total_shards() {
+        let config = Config {
+            minimum_shards: 8,
+            extra_shards: 17,
+        };
+        let data = vec![0x67; 1 << 16];
+        let selected: Vec<u16> = (0..8).collect();
+        roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+        roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+        roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
     }
 
     #[cfg(feature = "arbitrary")]

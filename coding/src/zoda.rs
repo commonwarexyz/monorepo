@@ -789,11 +789,9 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodecConfig, Config};
-    use bytes::BytesMut;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+    use crate::Config;
+    use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
-    use proptest::{prelude::*, strategy::Strategy as _};
 
     const STRATEGY: Sequential = Sequential;
 
@@ -817,88 +815,6 @@ mod tests {
             provided >= required,
             "security invariant violated: provided {provided} < required {required}"
         );
-    }
-
-    fn roundtrip(config: &Config, data: &[u8], selected: &[u16]) {
-        // Encode data into shards.
-        let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
-        let mut checked_shards = Vec::new();
-        let mut checking_data = None;
-
-        for (i, shard) in shards.iter().enumerate() {
-            // Shard codec roundtrip with tight bounds.
-            let cfg = CodecConfig {
-                maximum_shard_size: shard.encode_size(),
-            };
-            let mut buf = BytesMut::new();
-            shard.write(&mut buf);
-            let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
-            assert_eq!(decoded_shard, *shard);
-
-            // ReShard codec roundtrip with tight bounds.
-            let (_, _, reshard) =
-                Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
-            let cfg = CodecConfig {
-                maximum_shard_size: reshard.encode_size(),
-            };
-            let mut buf = BytesMut::new();
-            reshard.write(&mut buf);
-            let decoded_reshard =
-                ReShard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
-            assert_eq!(decoded_reshard, reshard);
-
-            // Collect selected shards for decoding.
-            if selected.contains(&(i as u16)) {
-                let (cd, checked, _reshard) =
-                    Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
-                checked_shards.push(checked);
-                if checking_data.is_none() {
-                    checking_data = Some(cd);
-                }
-            }
-        }
-
-        // Decode from the selected shards and verify data integrity.
-        let decoded = Zoda::<Sha256>::decode(
-            config,
-            &commitment,
-            checking_data.unwrap(),
-            &checked_shards,
-            &STRATEGY,
-        )
-        .unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    fn roundtrip_strategy() -> impl proptest::strategy::Strategy<Value = (Config, Vec<u8>, Vec<u16>)>
-    {
-        (1u16..=8, 0u16..=8).prop_flat_map(|(min_shards, extra_shards)| {
-            let total = min_shards + extra_shards;
-            let indices = proptest::sample::subsequence(
-                (0..total).collect::<Vec<u16>>(),
-                min_shards as usize,
-            );
-            let data = prop::collection::vec(any::<u8>(), 0..=1024);
-            (
-                Just(Config {
-                    minimum_shards: min_shards,
-                    extra_shards,
-                }),
-                data,
-                indices,
-            )
-        })
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-
-        #[test]
-        fn proptest_roundtrip(
-            (config, data, selected) in roundtrip_strategy()
-        ) {
-            roundtrip(&config, &data, &selected);
-        }
     }
 
     #[test]
@@ -931,6 +847,7 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Shard<Sha256Digest>>,
