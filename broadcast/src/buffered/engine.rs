@@ -29,11 +29,8 @@ struct Waiter<M> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Metrics,
-    P: PublicKey,
-    M: Digestible + Codec,
-> {
+pub struct Engine<E: BufferPooler + Clock + Spawner + Metrics, P: PublicKey, M: Digestible + Codec>
+{
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -89,11 +86,9 @@ pub struct Engine<
     metrics: metrics::Metrics,
 }
 
-impl<
-        E: BufferPooler + Clock + Spawner + Metrics,
-        P: PublicKey,
-        M: Digestible + Codec,
-    > Engine<E, P, M> {
+impl<E: BufferPooler + Clock + Spawner + Metrics, P: PublicKey, M: Digestible + Codec>
+    Engine<E, P, M>
+{
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
     pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {

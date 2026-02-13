@@ -177,7 +177,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -275,7 +276,7 @@ where
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
 pub struct Engine<E, S, X, C, H, B, P, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
@@ -340,7 +341,7 @@ where
 
 impl<E, S, X, C, H, B, P, T> Engine<E, S, X, C, H, B, P, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
@@ -389,7 +390,10 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let mut sender = WrappedSender::<_, Shard<C, H>>::new(sender);
+        let mut sender = WrappedSender::<_, Shard<C, H>>::new(
+            self.context.network_buffer_pool().clone(),
+            sender,
+        );
         let (receiver_service, mut receiver): (_, mpsc::Receiver<(P, Shard<C, H>)>) =
             WrappedBackgroundReceiver::new(
                 self.context.with_label("shard_ingress"),
