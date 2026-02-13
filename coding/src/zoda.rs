@@ -827,6 +827,7 @@ mod tests {
         let mut checking_data = None;
 
         for (i, shard) in shards.iter().enumerate() {
+            // Shard codec roundtrip with tight bounds.
             let cfg = CodecConfig {
                 maximum_shard_size: shard.encode_size(),
             };
@@ -835,9 +836,9 @@ mod tests {
             let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
             assert_eq!(decoded_shard, *shard);
 
+            // ReShard codec roundtrip with tight bounds.
             let (_, _, reshard) =
                 Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
-
             let cfg = CodecConfig {
                 maximum_shard_size: reshard.encode_size(),
             };
@@ -847,6 +848,7 @@ mod tests {
                 ReShard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
             assert_eq!(decoded_reshard, reshard);
 
+            // Collect the first n checked shards for decoding.
             if i < n {
                 let (cd, checked, _reshard) =
                     Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
@@ -857,6 +859,7 @@ mod tests {
             }
         }
 
+        // Decode from the minimum number of shards and verify data integrity.
         let decoded = Zoda::<Sha256>::decode(
             config,
             &commitment,
