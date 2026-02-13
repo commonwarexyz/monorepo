@@ -820,9 +820,7 @@ mod tests {
     }
 
     fn roundtrip(config: &Config, data: &[u8]) {
-        // Encode data into shards and verify every shard survives a codec
-        // roundtrip (Shard and ReShard) with tight maximum_shard_size bounds,
-        // then decode from the minimum number of shards.
+        // Encode data into shards.
         let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
         let n = config.minimum_shards as usize;
         let mut checked_shards = Vec::new();
