@@ -134,7 +134,7 @@ async fn test_sync<
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {
-        let actual_root = synced.root();
+        let actual_root = synced.root().await;
         assert_eq!(
             actual_root, expected_root,
             "Synced root must match target root"
@@ -218,7 +218,7 @@ fn fuzz(mut input: FuzzInput) {
                     let clean_db = durable_db.into_merkleized();
 
                     let target = sync::Target {
-                        root: clean_db.root(),
+                        root: clean_db.root().await,
                         range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
                     };
 

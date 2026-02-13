@@ -152,7 +152,7 @@ where
             };
 
         let database: any::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root();
+        let got_root = database.root().await;
         info!(
             sync_iteration = iteration,
             root = %got_root,
@@ -212,7 +212,7 @@ where
             };
 
         let database: immutable::Database<_> = sync::sync(sync_config).await?;
-        let got_root = database.root();
+        let got_root = database.root().await;
         info!(
             sync_iteration = iteration,
             root = %got_root,

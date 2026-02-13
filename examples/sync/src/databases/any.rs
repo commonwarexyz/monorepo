@@ -112,8 +112,8 @@ where
         panic!("operations should end with a commit");
     }
 
-    fn root(&self) -> Key {
-        self.root()
+    async fn root(&self) -> Key {
+        self.root().await
     }
 
     async fn size(&self) -> Location {
