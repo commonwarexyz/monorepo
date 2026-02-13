@@ -801,6 +801,17 @@ impl PooledBuf {
             Err(inner) => Err(Self { inner, offset, len }),
         }
     }
+
+    /// Converts this pooled view into `Bytes` without copying.
+    ///
+    /// Empty views return detached `Bytes::new()` so pooled memory is not
+    /// retained by an empty owner.
+    pub(crate) fn into_bytes(self) -> Bytes {
+        if self.len == 0 {
+            return Bytes::new();
+        }
+        Bytes::from_owner(self)
+    }
 }
 
 impl AsRef<[u8]> for PooledBuf {
@@ -841,7 +852,7 @@ impl Buf for PooledBuf {
             len,
         };
         self.advance(len);
-        Bytes::from_owner(slice)
+        slice.into_bytes()
     }
 }
 
@@ -994,23 +1005,39 @@ impl PooledBufMut {
         }
     }
 
-    /// Freezes the buffer into an immutable `IoBuf`.
-    ///
-    /// Only the readable portion (`cursor..len`) is included in the result.
-    /// The underlying buffer will be returned to the pool when all references
-    /// to the `IoBuf` (including slices) are dropped.
-    pub fn freeze(self) -> IoBuf {
+    /// Convert into an immutable pooled view over the current readable window.
+    fn into_pooled(self) -> PooledBuf {
         // Wrap self in ManuallyDrop first to prevent Drop from running
         // if any subsequent code panics.
         let mut me = ManuallyDrop::new(self);
         // SAFETY: me is wrapped in ManuallyDrop so its Drop impl won't run.
         // ManuallyDrop::take moves the inner value out, leaving the wrapper empty.
         let inner = unsafe { ManuallyDrop::take(&mut me.inner) };
-        IoBuf::from_pooled(PooledBuf {
+        PooledBuf {
             inner: Arc::new(inner),
             offset: me.cursor,
             len: me.len - me.cursor,
-        })
+        }
+    }
+
+    /// Freezes the buffer into an immutable `IoBuf`.
+    ///
+    /// Only the readable portion (`cursor..len`) is included in the result.
+    /// The underlying buffer will be returned to the pool when all references
+    /// to the `IoBuf` (including slices) are dropped.
+    pub fn freeze(self) -> IoBuf {
+        IoBuf::from_pooled(self.into_pooled())
+    }
+
+    /// Converts the current readable window into `Bytes` without copying.
+    ///
+    /// Empty buffers return detached `Bytes::new()` so pooled memory is not
+    /// retained by an empty owner.
+    pub(crate) fn into_bytes(self) -> Bytes {
+        if self.is_empty() {
+            return Bytes::new();
+        }
+        Bytes::from_owner(self.into_pooled())
     }
 }
 
@@ -1638,6 +1665,81 @@ mod tests {
         assert_eq!(get_allocated(&pool, page), 1);
 
         drop(full);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_iobufmut_copy_to_bytes_zero_len_on_pooled_buffer() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0x42u8; 100]);
+
+        let extracted = buf.copy_to_bytes(0);
+        assert!(extracted.is_empty());
+        assert_eq!(buf.len(), 100);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(buf);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+
+        drop(extracted);
+    }
+
+    #[test]
+    fn test_iobufmut_copy_to_bytes_full_drain_releases_pool_from_source() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0xAB; 100]);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        let extracted = buf.copy_to_bytes(100);
+        assert_eq!(&extracted[..], &[0xAB; 100]);
+        assert_eq!(buf.remaining(), 0);
+
+        // Drained source should be detached and not pin the pooled allocation.
+        drop(buf);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(extracted);
+        assert_eq!(get_allocated(&pool, page), 0);
+        assert_eq!(get_available(&pool, page), 1);
+    }
+
+    #[test]
+    fn test_iobufmut_copy_to_bytes_partial_then_full_drain_releases_pool_from_source() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0xCD; 100]);
+
+        let partial = buf.copy_to_bytes(30);
+        assert_eq!(&partial[..], &[0xCD; 30]);
+        assert_eq!(buf.remaining(), 70);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        let rest = buf.copy_to_bytes(70);
+        assert_eq!(&rest[..], &[0xCD; 70]);
+        assert_eq!(buf.remaining(), 0);
+
+        // Source should be detached after full drain.
+        drop(buf);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        // Partial copy was by-value; only `rest` should keep pooled ownership.
+        drop(partial);
+        assert_eq!(get_allocated(&pool, page), 1);
+
+        drop(rest);
         assert_eq!(get_allocated(&pool, page), 0);
         assert_eq!(get_available(&pool, page), 1);
     }

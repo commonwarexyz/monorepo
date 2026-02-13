@@ -231,7 +231,7 @@ impl Buf for IoBuf {
                 if len != 0 && len == p.remaining() {
                     let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
                     match inner {
-                        IoBufInner::Pooled(p) => Bytes::from_owner(p),
+                        IoBufInner::Pooled(p) => p.into_bytes(),
                         IoBufInner::Bytes(_) => unreachable!(),
                     }
                 } else {
@@ -564,6 +564,28 @@ impl Buf for IoBufMut {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.advance(cnt),
             IoBufMutInner::Pooled(b) => b.advance(cnt),
+        }
+    }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        match &mut self.inner {
+            IoBufMutInner::Bytes(b) => b.copy_to_bytes(len),
+            IoBufMutInner::Pooled(p) => {
+                // Full non-empty drain: transfer ownership so the drained source no
+                // longer retains the pooled allocation. Keep len == 0 on the normal
+                // path to avoid creating an empty Bytes that still pins pool memory.
+                if len != 0 && len == p.remaining() {
+                    let inner =
+                        std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
+                    match inner {
+                        IoBufMutInner::Pooled(p) => p.into_bytes(),
+                        IoBufMutInner::Bytes(_) => unreachable!(),
+                    }
+                } else {
+                    p.copy_to_bytes(len)
+                }
+            }
         }
     }
 }
