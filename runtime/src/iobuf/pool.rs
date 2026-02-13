@@ -806,7 +806,7 @@ impl PooledBuf {
     ///
     /// Empty views return detached `Bytes::new()` so pooled memory is not
     /// retained by an empty owner.
-    pub(crate) fn into_bytes(self) -> Bytes {
+    pub fn into_bytes(self) -> Bytes {
         if self.len == 0 {
             return Bytes::new();
         }
@@ -1033,7 +1033,7 @@ impl PooledBufMut {
     ///
     /// Empty buffers return detached `Bytes::new()` so pooled memory is not
     /// retained by an empty owner.
-    pub(crate) fn into_bytes(self) -> Bytes {
+    pub fn into_bytes(self) -> Bytes {
         if self.is_empty() {
             return Bytes::new();
         }
