@@ -8,6 +8,8 @@ use core::{
     ops::{Index, IndexMut},
 };
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 /// Determines the size of polynomials we compute naively in [`EvaluationColumn::vanishing`].
 ///
