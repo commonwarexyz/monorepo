@@ -264,6 +264,9 @@ mod test {
             }
         }
 
+        // Shuffle the checked shards to verify decode is order-independent.
+        checked_shards.reverse();
+
         // Decode from the selected shards and verify data integrity.
         let decoded = S::decode(
             config,
@@ -294,31 +297,6 @@ mod test {
         })
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-
-        #[test]
-        fn proptest_roundtrip_reed_solomon(
-            (config, data, selected) in roundtrip_strategy(1)
-        ) {
-            roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
-        }
-
-        #[test]
-        fn proptest_roundtrip_no_coding(
-            (config, data, selected) in roundtrip_strategy(0)
-        ) {
-            roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
-        }
-
-        #[test]
-        fn proptest_roundtrip_zoda(
-            (config, data, selected) in roundtrip_strategy(0)
-        ) {
-            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
-        }
-    }
-
     #[test]
     fn roundtrip_empty_data() {
         let config = Config {
@@ -345,6 +323,32 @@ mod test {
         roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
         roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
         roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        // Reed-Solomon requires extra_shards >= 1 (i.e., total > min).
+        #[test]
+        fn proptest_roundtrip_reed_solomon(
+            (config, data, selected) in roundtrip_strategy(1)
+        ) {
+            roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+        }
+
+        #[test]
+        fn proptest_roundtrip_no_coding(
+            (config, data, selected) in roundtrip_strategy(0)
+        ) {
+            roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+        }
+
+        #[test]
+        fn proptest_roundtrip_zoda(
+            (config, data, selected) in roundtrip_strategy(0)
+        ) {
+            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+        }
     }
 
     #[cfg(feature = "arbitrary")]
