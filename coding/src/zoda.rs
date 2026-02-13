@@ -828,29 +828,46 @@ mod tests {
 
         for (i, shard) in shards.iter().enumerate() {
             let shard_size = shard.encode_size();
+
+            // Decoding must succeed with maximum_shard_size = encode_size().
             let cfg = CodecConfig {
                 maximum_shard_size: shard_size,
             };
-
             let mut buf = BytesMut::new();
             shard.write(&mut buf);
-            let mut bytes = buf.freeze();
-            let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut bytes, &cfg).unwrap();
+            let bytes = buf.freeze();
+            let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &cfg).unwrap();
             assert_eq!(decoded_shard, *shard);
+
+            // Decoding must fail when maximum_shard_size is too small.
+            if shard_size > 0 {
+                let small_cfg = CodecConfig {
+                    maximum_shard_size: 0,
+                };
+                assert!(Shard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &small_cfg).is_err());
+            }
 
             let (_, _, reshard) =
                 Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
 
             let reshard_size = reshard.encode_size();
+
             let cfg = CodecConfig {
                 maximum_shard_size: reshard_size,
             };
-
             let mut buf = BytesMut::new();
             reshard.write(&mut buf);
-            let mut bytes = buf.freeze();
-            let decoded_reshard = ReShard::<Sha256Digest>::read_cfg(&mut bytes, &cfg).unwrap();
+            let bytes = buf.freeze();
+            let decoded_reshard =
+                ReShard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &cfg).unwrap();
             assert_eq!(decoded_reshard, reshard);
+
+            if reshard_size > 0 {
+                let small_cfg = CodecConfig {
+                    maximum_shard_size: 0,
+                };
+                assert!(ReShard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &small_cfg).is_err());
+            }
         }
     }
 
