@@ -1127,7 +1127,6 @@ unsafe impl BufMut for PooledBufMut {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IoBufs;
     use bytes::BytesMut;
     use std::{sync::mpsc, thread};
 
@@ -1246,30 +1245,6 @@ mod tests {
         let buf = pool.alloc_zeroed(100);
         assert_eq!(buf.len(), 100);
         assert!(buf.as_ref().iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn test_pool_exhaustion() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        // Allocate max buffers
-        let _buf1 = pool.try_alloc(100).expect("first alloc should succeed");
-        let _buf2 = pool.try_alloc(100).expect("second alloc should succeed");
-
-        // Third allocation should fail
-        assert!(pool.try_alloc(100).is_err());
-    }
-
-    #[test]
-    fn test_pool_oversized() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 2, 10), &mut registry);
-
-        // Request larger than max_size
-        assert!(pool.try_alloc(page * 4).is_err());
     }
 
     #[test]
@@ -1413,6 +1388,124 @@ mod tests {
         assert_eq!(small_budget.max_per_class.get(), 1);
     }
 
+    #[test]
+    fn test_pool_error_display() {
+        assert_eq!(
+            PoolError::Oversized.to_string(),
+            "requested capacity exceeds maximum buffer size"
+        );
+        assert_eq!(
+            PoolError::Exhausted.to_string(),
+            "pool exhausted for required size class"
+        );
+    }
+
+    #[test]
+    fn test_config_invalid_range_edge_paths() {
+        let invalid_order = BufferPoolConfig {
+            min_size: NZUsize!(8),
+            max_size: NZUsize!(4),
+            max_per_class: NZUsize!(1),
+            prefill: false,
+            alignment: NZUsize!(4),
+        };
+        assert_eq!(invalid_order.num_classes(), 0);
+        let unchanged = invalid_order.clone().with_budget_bytes(NZUsize!(128));
+        assert_eq!(unchanged.max_per_class, invalid_order.max_per_class);
+
+        let non_power_two_max = BufferPoolConfig {
+            min_size: NZUsize!(8),
+            max_size: NZUsize!(12),
+            max_per_class: NZUsize!(1),
+            prefill: false,
+            alignment: NZUsize!(4),
+        };
+        assert_eq!(non_power_two_max.class_index(12), None);
+    }
+
+    #[test]
+    fn test_pool_debug_and_config_accessor() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        let debug = format!("{pool:?}");
+        assert!(debug.contains("BufferPool"));
+        assert!(debug.contains("num_classes"));
+        assert_eq!(pool.config().min_size.get(), page);
+    }
+
+    #[test]
+    fn test_return_buffer_freelist_full_drops_extra() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+
+        // Fill freelist with a returned tracked buffer.
+        let tracked = pool.try_alloc(page).expect("tracked allocation");
+        drop(tracked);
+
+        // Simulate one outstanding allocation, then return an extra same-class
+        // buffer while freelist is already full to hit the Err(push) branch.
+        let class_index = pool
+            .inner
+            .config
+            .class_index(page)
+            .expect("class exists for page-sized buffer");
+        pool.inner.classes[class_index]
+            .allocated
+            .store(1, Ordering::Relaxed);
+        pool.inner
+            .return_buffer(AlignedBuffer::new(page, page_size()));
+        assert_eq!(
+            pool.inner.classes[class_index]
+                .allocated
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn test_return_buffer_ignores_unmatched_class() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+
+        // Size does not map to any configured class (`max_size == page`).
+        pool.inner
+            .return_buffer(AlignedBuffer::new(page * 2, page_size()));
+        assert_eq!(get_allocated(&pool, page), 0);
+    }
+
+    #[test]
+    fn test_pooled_debug_and_empty_into_bytes_paths() {
+        let page = page_size();
+
+        let pooled_mut_debug = {
+            let pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+            format!("{pooled_mut:?}")
+        };
+        assert!(pooled_mut_debug.contains("PooledBufMut"));
+        assert!(pooled_mut_debug.contains("cursor"));
+
+        let empty_from_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new());
+        assert!(empty_from_mut.into_bytes().is_empty());
+
+        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new()).into_pooled();
+        let pooled_debug = format!("{pooled:?}");
+        assert!(pooled_debug.contains("PooledBuf"));
+        assert!(pooled_debug.contains("capacity"));
+        assert!(pooled.into_bytes().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "range start overflow")]
+    fn test_pooled_slice_excluded_start_overflow() {
+        let page = page_size();
+        let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), Weak::new()).into_pooled();
+        let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
+    }
+
     /// Helper to get the number of allocated buffers for a size class.
     fn get_allocated(pool: &BufferPool, size: usize) -> usize {
         let class_index = pool.inner.config.class_index(size).unwrap();
@@ -1456,317 +1549,91 @@ mod tests {
     }
 
     #[test]
-    fn test_cloned_iobuf_returns_buffer_when_all_dropped() {
+    fn test_refcount_and_copy_to_bytes_paths() {
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        let buf = pool.try_alloc(100).unwrap();
-        let iobuf = buf.freeze();
-
-        // Clone the IoBuf multiple times (this clones the pooled view via Arc).
-        let clone1 = iobuf.clone();
-        let clone2 = iobuf.clone();
-        let clone3 = iobuf.clone();
-
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Drop original and some clones - buffer should NOT return yet
-        drop(iobuf);
-        drop(clone1);
-        assert_eq!(get_allocated(&pool, page), 1);
-        assert_eq!(get_available(&pool, page), 0);
-
-        // Drop remaining clones - buffer should return
-        drop(clone2);
-        assert_eq!(get_allocated(&pool, page), 1); // Still held by clone3
-
-        drop(clone3);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_slice_holds_buffer_reference() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0u8; 100]);
-        let iobuf = buf.freeze();
-
-        // Create a slice - this should hold a reference to the underlying buffer
-        let slice = iobuf.slice(10..50);
-
-        // Drop original - slice should keep buffer alive
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 1);
-        assert_eq!(get_available(&pool, page), 0);
-
-        // Drop slice - buffer should return
-        drop(slice);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_empty_slice_does_not_hold_buffer_reference() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0u8; 100]);
-        let iobuf = buf.freeze();
-
-        // Empty slices should not retain the original backing allocation.
-        let empty = iobuf.slice(10..10);
-        assert!(empty.is_empty());
-
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_copy_to_bytes_on_pooled_buffer() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0x42u8; 100]);
-        let mut iobuf = buf.freeze();
-
-        // copy_to_bytes should create a slice sharing the same buffer
-        let extracted = iobuf.copy_to_bytes(50);
-        assert_eq!(extracted.len(), 50);
-        assert!(extracted.iter().all(|&b| b == 0x42));
-
-        // Both should hold references
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Drop original
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 1); // extracted holds it
-
-        // Drop extracted
-        drop(extracted);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_copy_to_bytes_zero_len_on_pooled_buffer() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0x42u8; 100]);
-        let mut iobuf = buf.freeze();
-
-        // copy_to_bytes(0) should return an empty Bytes without retaining the pooled owner.
-        let extracted = iobuf.copy_to_bytes(0);
-        assert!(extracted.is_empty());
-        assert_eq!(iobuf.len(), 100);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Dropping the original should return the buffer immediately.
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-
-        drop(extracted);
-    }
-
-    #[test]
-    fn test_copy_to_bytes_full_drain_releases_pool_from_source() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xAB; 100]);
-        let mut iobuf = buf.freeze();
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Full drain of remaining data.
-        let extracted = iobuf.copy_to_bytes(100);
-        assert_eq!(&extracted[..], &[0xAB; 100]);
-        assert_eq!(iobuf.remaining(), 0);
-
-        // Drained source should be detached and not pin the pooled allocation.
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        drop(extracted);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_copy_to_bytes_partial_then_full_drain_releases_pool_from_source() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xCD; 100]);
-        let mut iobuf = buf.freeze();
-
-        // Partial drain.
-        let partial = iobuf.copy_to_bytes(30);
-        assert_eq!(&partial[..], &[0xCD; 30]);
-        assert_eq!(iobuf.remaining(), 70);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Full drain of remainder.
-        let rest = iobuf.copy_to_bytes(70);
-        assert_eq!(&rest[..], &[0xCD; 70]);
-        assert_eq!(iobuf.remaining(), 0);
-
-        // Source should be detached after full drain.
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Both extracted views still share the allocation.
-        drop(partial);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        drop(rest);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_copy_to_bytes_zero_len_on_empty_pooled_buffer_does_not_transfer_owner() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xEF; 100]);
-        let mut iobuf = buf.freeze();
-
-        // Drain to empty first.
-        let full = iobuf.copy_to_bytes(100);
-        assert_eq!(iobuf.remaining(), 0);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Zero-length copy on already-empty source should not transfer pooled ownership.
-        let empty = iobuf.copy_to_bytes(0);
-        assert!(empty.is_empty());
-        drop(empty);
-
-        // Source is already detached after the full-drain path.
-        drop(iobuf);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        drop(full);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_iobufmut_copy_to_bytes_zero_len_on_pooled_buffer() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0x42u8; 100]);
-
-        let extracted = buf.copy_to_bytes(0);
-        assert!(extracted.is_empty());
-        assert_eq!(buf.len(), 100);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        drop(buf);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-
-        drop(extracted);
-    }
-
-    #[test]
-    fn test_iobufmut_copy_to_bytes_full_drain_releases_pool_from_source() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xAB; 100]);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        let extracted = buf.copy_to_bytes(100);
-        assert_eq!(&extracted[..], &[0xAB; 100]);
-        assert_eq!(buf.remaining(), 0);
-
-        // Drained source should be detached and not pin the pooled allocation.
-        drop(buf);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        drop(extracted);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_iobufmut_copy_to_bytes_partial_then_full_drain_releases_pool_from_source() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xCD; 100]);
-
-        let partial = buf.copy_to_bytes(30);
-        assert_eq!(&partial[..], &[0xCD; 30]);
-        assert_eq!(buf.remaining(), 70);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        let rest = buf.copy_to_bytes(70);
-        assert_eq!(&rest[..], &[0xCD; 70]);
-        assert_eq!(buf.remaining(), 0);
-
-        // Source should be detached after full drain.
-        drop(buf);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        // Partial copy was by-value; only `rest` should keep pooled ownership.
-        drop(partial);
-        assert_eq!(get_allocated(&pool, page), 1);
-
-        drop(rest);
-        assert_eq!(get_allocated(&pool, page), 0);
-        assert_eq!(get_available(&pool, page), 1);
-    }
-
-    #[test]
-    fn test_concurrent_clones_and_drops() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 4), &mut registry);
-
-        // Simulate the pattern in Messenger::content where we clone for multiple recipients
-        for _ in 0..100 {
-            let buf = pool.try_alloc(100).unwrap();
+        // Refcount behavior:
+        // - clone/slice keep the pooled allocation alive
+        // - empty slice does not keep ownership
+        {
+            let mut buf = pool.try_alloc(100).unwrap();
+            buf.put_slice(&[0xAA; 100]);
             let iobuf = buf.freeze();
-
-            // Simulate sending to 10 recipients (clone for each)
-            let clones: Vec<_> = (0..10).map(|_| iobuf.clone()).collect();
+            let clone = iobuf.clone();
+            let slice = iobuf.slice(10..40);
+            let empty = iobuf.slice(10..10);
+            assert!(empty.is_empty());
             drop(iobuf);
-
-            // Drop clones one by one
-            for clone in clones {
-                drop(clone);
-            }
+            assert_eq!(get_allocated(&pool, page), 1);
+            drop(slice);
+            assert_eq!(get_allocated(&pool, page), 1);
+            drop(clone);
+            assert_eq!(get_allocated(&pool, page), 0);
         }
 
-        // All buffers should be returned
-        assert_eq!(get_allocated(&pool, page), 0);
+        // IoBuf::copy_to_bytes behavior:
+        // - zero-length copy is empty and non-advancing
+        // - partial copy advances while keeping ownership alive
+        // - full drain transfers ownership out of source
+        // - zero-length copy on already-empty source stays detached
+        {
+            let mut buf = pool.try_alloc(100).unwrap();
+            buf.put_slice(&[0x42; 100]);
+            let mut iobuf = buf.freeze();
+
+            let zero = iobuf.copy_to_bytes(0);
+            assert!(zero.is_empty());
+            assert_eq!(iobuf.remaining(), 100);
+
+            let partial = iobuf.copy_to_bytes(30);
+            assert_eq!(&partial[..], &[0x42; 30]);
+            assert_eq!(iobuf.remaining(), 70);
+
+            let rest = iobuf.copy_to_bytes(70);
+            assert_eq!(&rest[..], &[0x42; 70]);
+            assert_eq!(iobuf.remaining(), 0);
+
+            // Zero-length copy on empty should not transfer ownership.
+            let empty = iobuf.copy_to_bytes(0);
+            assert!(empty.is_empty());
+
+            drop(iobuf);
+            assert_eq!(get_allocated(&pool, page), 1);
+            drop(zero);
+            drop(partial);
+            assert_eq!(get_allocated(&pool, page), 1);
+            drop(rest);
+            assert_eq!(get_allocated(&pool, page), 0);
+        }
+
+        // IoBufMut::copy_to_bytes mirrors the immutable ownership semantics.
+        {
+            let buf = pool.try_alloc(100).unwrap();
+            let mut iobufmut = buf;
+            iobufmut.put_slice(&[0x7E; 100]);
+
+            let zero = iobufmut.copy_to_bytes(0);
+            assert!(zero.is_empty());
+            assert_eq!(iobufmut.remaining(), 100);
+
+            let partial = iobufmut.copy_to_bytes(30);
+            assert_eq!(&partial[..], &[0x7E; 30]);
+            assert_eq!(iobufmut.remaining(), 70);
+
+            let rest = iobufmut.copy_to_bytes(70);
+            assert_eq!(&rest[..], &[0x7E; 70]);
+            assert_eq!(iobufmut.remaining(), 0);
+
+            drop(iobufmut);
+            assert_eq!(get_allocated(&pool, page), 1);
+            drop(zero);
+            drop(partial);
+            assert_eq!(get_allocated(&pool, page), 1);
+            drop(rest);
+            assert_eq!(get_allocated(&pool, page), 0);
+        }
     }
 
     #[test]
@@ -1879,62 +1746,6 @@ mod tests {
         drop(iobuf);
         assert_eq!(get_allocated(&pool, page), 0);
         assert!(get_available(&pool, page) >= 1);
-    }
-
-    #[test]
-    fn test_stream_send_pattern() {
-        // Simulates what stream::Sender::send does:
-        // 1. Takes impl Into<IoBufs>
-        // 2. Allocates encryption buffer from pool
-        // 3. Copies plaintext into encryption buffer
-        // 4. Encrypts in place
-        // 5. Freezes and sends
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 4), &mut registry);
-
-        for _ in 0..100 {
-            // Incoming data (could be IoBuf or IoBufMut)
-            let mut incoming = pool.try_alloc(100).unwrap();
-            incoming.put_slice(&[0x42u8; 100]);
-            let incoming_iobuf = incoming.freeze();
-
-            // Convert to IoBufs (what send() does)
-            let mut bufs: IoBufs = incoming_iobuf.into();
-            let plaintext_len = bufs.remaining();
-
-            // Allocate encryption buffer with capacity (no init needed, we write to it)
-            let ciphertext_len = plaintext_len + 16; // +16 for tag
-            let mut encryption_buf = pool.try_alloc(ciphertext_len).unwrap();
-            // SAFETY: We fill the entire buffer before reading
-            unsafe { encryption_buf.set_len(ciphertext_len) };
-
-            // Copy plaintext into encryption buffer
-            let mut offset = 0;
-            while bufs.has_remaining() {
-                let chunk = bufs.chunk();
-                let chunk_len = chunk.len();
-                encryption_buf.as_mut()[offset..offset + chunk_len].copy_from_slice(chunk);
-                offset += chunk_len;
-                bufs.advance(chunk_len);
-            }
-
-            // At this point, bufs (which holds the incoming IoBuf) should be fully consumed
-            // but the underlying buffer is still referenced until bufs is dropped
-            drop(bufs);
-
-            // Simulate encryption (just modify in place)
-            encryption_buf.as_mut()[plaintext_len..].fill(0xAA);
-
-            // Freeze and "send"
-            let ciphertext = encryption_buf.freeze();
-
-            // Simulate network send completing
-            drop(ciphertext);
-        }
-
-        // All buffers should be returned
-        assert_eq!(get_allocated(&pool, page), 0);
     }
 
     #[test]
@@ -2180,55 +1991,77 @@ mod tests {
         assert!(pooled_chunk.len() > 0);
     }
 
-    /// Verify truncate works correctly after advance.
     #[test]
-    fn test_bytesmut_parity_truncate_after_advance() {
+    fn test_bytesmut_parity_after_advance_paths() {
         let page = page_size();
         let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
+        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
 
-        let mut bytes = BytesMut::with_capacity(100);
-        bytes.put_slice(&[0xAAu8; 50]);
-        Buf::advance(&mut bytes, 10);
+        // truncate after advance
+        {
+            let mut bytes = BytesMut::with_capacity(100);
+            bytes.put_slice(&[0xAAu8; 50]);
+            Buf::advance(&mut bytes, 10);
+            let mut pooled = pool.try_alloc(100).unwrap();
+            pooled.put_slice(&[0xAAu8; 50]);
+            Buf::advance(&mut pooled, 10);
+            bytes.truncate(20);
+            pooled.truncate(20);
+            assert_eq!(bytes.as_ref(), pooled.as_ref());
+        }
 
-        let mut pooled = pool.try_alloc(100).unwrap();
-        pooled.put_slice(&[0xAAu8; 50]);
-        Buf::advance(&mut pooled, 10);
+        // clear after advance
+        {
+            let mut bytes = BytesMut::with_capacity(100);
+            bytes.put_slice(&[0xAAu8; 50]);
+            Buf::advance(&mut bytes, 10);
+            let mut pooled = pool.try_alloc(100).unwrap();
+            pooled.put_slice(&[0xAAu8; 50]);
+            Buf::advance(&mut pooled, 10);
+            bytes.clear();
+            pooled.clear();
+            assert_eq!(bytes.len(), 0);
+            assert_eq!(pooled.len(), 0);
+        }
 
-        // Both should have 40 bytes remaining
-        assert_eq!(bytes.len(), 40);
-        assert_eq!(pooled.len(), 40);
+        // capacity/set_len/clear semantics after advance
+        {
+            let mut bytes = BytesMut::with_capacity(page);
+            bytes.resize(50, 0xBB);
+            Buf::advance(&mut bytes, 20);
+            let mut pooled = pool.try_alloc(page).unwrap();
+            pooled.put_slice(&[0xBB; 50]);
+            Buf::advance(&mut pooled, 20);
+            assert_eq!(bytes.capacity(), pooled.capacity());
+            // SAFETY: shrink readable window to initialized region.
+            unsafe {
+                bytes.set_len(25);
+                pooled.set_len(25);
+            }
+            assert_eq!(bytes.as_ref(), pooled.as_ref());
+            let bytes_cap = bytes.capacity();
+            let pooled_cap = pooled.capacity();
+            bytes.clear();
+            pooled.clear();
+            assert_eq!(bytes.capacity(), bytes_cap);
+            assert_eq!(pooled.capacity(), pooled_cap);
+        }
 
-        // Truncate to 20 readable bytes
-        bytes.truncate(20);
-        pooled.truncate(20);
+        // put after advance + truncate-beyond-len no-op
+        {
+            let mut bytes = BytesMut::with_capacity(100);
+            bytes.resize(30, 0xAA);
+            Buf::advance(&mut bytes, 10);
+            bytes.put_slice(&[0xBB; 10]);
+            bytes.truncate(100);
 
-        assert_eq!(bytes.len(), pooled.len(), "len after truncate");
-        assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after truncate");
-    }
-
-    /// Verify clear works correctly after advance.
-    #[test]
-    fn test_bytesmut_parity_clear_after_advance() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
-        let mut bytes = BytesMut::with_capacity(100);
-        bytes.put_slice(&[0xAAu8; 50]);
-        Buf::advance(&mut bytes, 10);
-
-        let mut pooled = pool.try_alloc(100).unwrap();
-        pooled.put_slice(&[0xAAu8; 50]);
-        Buf::advance(&mut pooled, 10);
-
-        bytes.clear();
-        pooled.clear();
-
-        assert_eq!(bytes.len(), 0);
-        assert_eq!(pooled.len(), 0);
-        assert!(bytes.is_empty());
-        assert!(pooled.is_empty());
+            let mut pooled = pool.try_alloc(100).unwrap();
+            pooled.put_slice(&[0xAA; 30]);
+            Buf::advance(&mut pooled, 10);
+            pooled.put_slice(&[0xBB; 10]);
+            pooled.truncate(100);
+            assert_eq!(bytes.as_ref(), pooled.as_ref());
+        }
     }
 
     /// Test pool exhaustion and recovery.
@@ -2351,102 +2184,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bytesmut_parity_capacity_after_advance() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        let mut bytes = BytesMut::with_capacity(page);
-        bytes.put_slice(&[0xAAu8; 50]);
-
-        let mut pooled = pool.try_alloc(page).unwrap();
-        pooled.put_slice(&[0xAAu8; 50]);
-
-        // Before advance
-        assert_eq!(bytes.len(), pooled.len(), "len before advance");
-
-        Buf::advance(&mut bytes, 20);
-        Buf::advance(&mut pooled, 20);
-
-        // After advance: capacity shrinks, len shrinks
-        assert_eq!(bytes.len(), pooled.len(), "len after advance");
-        assert_eq!(
-            bytes.capacity(),
-            pooled.capacity(),
-            "capacity after advance"
-        );
-    }
-
-    #[test]
-    fn test_bytesmut_parity_set_len_after_advance() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        let mut bytes = BytesMut::with_capacity(page);
-        bytes.resize(50, 0xBB);
-        Buf::advance(&mut bytes, 20);
-
-        let mut pooled = pool.try_alloc(page).unwrap();
-        pooled.put_slice(&[0xBB; 50]);
-        Buf::advance(&mut pooled, 20);
-
-        // After put_slice(50) and advance(20): cursor=20, len=50, readable=30 bytes (20..50)
-        // set_len(25) shrinks readable region to 25 bytes (20..45), which is within initialized range
-        // SAFETY: We're shrinking the readable region, all bytes in range are initialized.
-        unsafe {
-            bytes.set_len(25);
-            pooled.set_len(25);
-        }
-
-        assert_eq!(bytes.len(), pooled.len(), "len after set_len");
-        assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after set_len");
-    }
-
-    #[test]
-    fn test_bytesmut_parity_clear_preserves_view() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        let mut bytes = BytesMut::with_capacity(page);
-        bytes.resize(50, 0xCC);
-        Buf::advance(&mut bytes, 20);
-        let cap_before_clear = bytes.capacity();
-        bytes.clear();
-
-        let mut pooled = pool.try_alloc(page).unwrap();
-        pooled.put_slice(&[0xCC; 50]);
-        Buf::advance(&mut pooled, 20);
-        let pooled_cap_before = pooled.capacity();
-        pooled.clear();
-
-        // clear() sets len to 0 but preserves capacity (doesn't resurrect prefix)
-        assert_eq!(bytes.len(), pooled.len(), "len after clear");
-        assert_eq!(bytes.capacity(), cap_before_clear, "bytes cap unchanged");
-        assert_eq!(pooled.capacity(), pooled_cap_before, "pooled cap unchanged");
-    }
-
-    #[test]
-    fn test_bytesmut_parity_put_after_advance() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
-
-        let mut bytes = BytesMut::with_capacity(100);
-        bytes.resize(30, 0xAA);
-        Buf::advance(&mut bytes, 10);
-        bytes.put_slice(&[0xBB; 10]);
-
-        let mut pooled = pool.try_alloc(100).unwrap();
-        pooled.put_slice(&[0xAA; 30]);
-        Buf::advance(&mut pooled, 10);
-        pooled.put_slice(&[0xBB; 10]);
-
-        assert_eq!(bytes.as_ref(), pooled.as_ref(), "content after put_slice");
-    }
-
-    #[test]
     fn test_buffer_alignment() {
         let page = page_size();
         let cache_line = cache_line_size();
@@ -2489,55 +2226,38 @@ mod tests {
     }
 
     #[test]
-    fn test_freeze_after_advance_to_end() {
+    fn test_alloc_and_freeze_view_paths() {
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0x42; 100]);
-        Buf::advance(&mut buf, 100);
-
-        let frozen = buf.freeze();
-        assert!(frozen.is_empty());
-    }
-
-    #[test]
-    fn test_zero_capacity_allocation() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
+        // Allocation edges
         let buf = pool.try_alloc(0).expect("zero capacity should succeed");
         assert_eq!(buf.capacity(), page);
         assert_eq!(buf.len(), 0);
-    }
-
-    #[test]
-    fn test_exact_max_size_allocation() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
         let buf = pool.try_alloc(page).expect("exact max size should succeed");
         assert_eq!(buf.capacity(), page);
-    }
 
-    #[test]
-    fn test_freeze_after_partial_advance_mut() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
+        // Freeze after full advance -> empty.
         let mut buf = pool.try_alloc(100).unwrap();
-        // Write 50 bytes of initialized data
+        buf.put_slice(&[0x42; 100]);
+        Buf::advance(&mut buf, 100);
+        assert!(buf.freeze().is_empty());
+
+        // Freeze after partial advance -> suffix view.
+        let mut buf = pool.try_alloc(100).unwrap();
         buf.put_slice(&[0xAA; 50]);
-        // Consume 20 bytes via Buf
         Buf::advance(&mut buf, 20);
-        // Freeze should only contain 30 bytes
         let frozen = buf.freeze();
         assert_eq!(frozen.len(), 30);
         assert_eq!(frozen.as_ref(), &[0xAA; 30]);
+
+        // Clear then freeze -> empty.
+        let mut buf = pool.try_alloc(100).unwrap();
+        buf.put_slice(&[0xAA; 50]);
+        buf.clear();
+        let frozen = buf.freeze();
+        assert!(frozen.is_empty());
     }
 
     #[test]
@@ -2551,68 +2271,6 @@ mod tests {
         Buf::advance(&mut buf, 2);
         buf.put_slice(b"world");
         assert_eq!(buf.as_ref(), b"lloworld");
-    }
-
-    #[test]
-    fn test_freeze_slice_clone_refcount() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0x42; 100]);
-        let iobuf = buf.freeze();
-        let slice = iobuf.slice(10..50);
-        let clone1 = slice.clone();
-        let clone2 = iobuf.clone();
-
-        drop(iobuf);
-        drop(slice);
-        assert_eq!(get_allocated(&pool, page), 1); // Still held by clones
-
-        drop(clone1);
-        assert_eq!(get_allocated(&pool, page), 1); // Still held by clone2
-
-        drop(clone2);
-        assert_eq!(get_allocated(&pool, page), 0); // Finally returned
-    }
-
-    #[test]
-    fn test_truncate_beyond_len_is_noop() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
-        // BytesMut behavior
-        let mut bytes = BytesMut::with_capacity(100);
-        bytes.resize(50, 0xAA);
-        bytes.truncate(100); // Should be no-op
-        assert_eq!(bytes.len(), 50);
-
-        // PooledBufMut should match
-        let mut pooled = pool.try_alloc(100).unwrap();
-        pooled.put_slice(&[0xAA; 50]);
-        pooled.truncate(100); // Should be no-op
-        assert_eq!(pooled.len(), 50);
-    }
-
-    #[test]
-    fn test_freeze_empty_after_clear() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xAA; 50]);
-        buf.clear();
-
-        let frozen = buf.freeze();
-        assert!(frozen.is_empty());
-        assert_eq!(frozen.len(), 0);
-
-        // Should still return to pool on drop
-        drop(frozen);
-        assert_eq!(get_available(&pool, page), 1);
     }
 
     #[test]

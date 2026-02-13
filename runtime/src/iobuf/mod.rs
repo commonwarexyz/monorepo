@@ -1740,7 +1740,10 @@ fn advance_small_chunks<B: Buf>(chunks: &mut [B], mut cnt: usize) -> bool {
 #[inline]
 unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usize) -> bool {
     for buf in chunks.iter_mut() {
-        let avail = buf.remaining_mut();
+        let avail = buf.chunk_mut().len();
+        if avail == 0 {
+            continue;
+        }
         if *remaining <= avail {
             // SAFETY: Upheld by this function's safety contract.
             unsafe { buf.advance_mut(*remaining) };
@@ -1758,58 +1761,68 @@ unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usi
 mod tests {
     use super::*;
 
+    fn test_pool() -> BufferPool {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Reduce max_per_class to avoid slow atomics under miri.
+                let pool_config = BufferPoolConfig {
+                    max_per_class: commonware_utils::NZUsize!(32),
+                    ..BufferPoolConfig::for_network()
+                };
+            } else {
+                let pool_config = BufferPoolConfig::for_network();
+            }
+        }
+        let mut registry = prometheus_client::registry::Registry::default();
+        BufferPool::new(pool_config, &mut registry)
+    }
+
     #[test]
-    fn test_iobuf_clone_doesnt_copy() {
+    fn test_iobuf_core_behaviors() {
+        // Clone stays zero-copy for immutable buffers.
         let buf1 = IoBuf::from(vec![1u8; 1000]);
         let buf2 = buf1.clone();
         assert_eq!(buf1.as_ref().as_ptr(), buf2.as_ref().as_ptr());
-    }
 
-    #[test]
-    fn test_iobuf_copy_from_slice() {
+        // copy_from_slice creates an owned immutable buffer.
         let data = vec![1u8, 2, 3, 4, 5];
-        let buf = IoBuf::copy_from_slice(&data);
-        assert_eq!(buf, [1, 2, 3, 4, 5]);
-        assert_eq!(buf.len(), 5);
-
-        drop(data);
-        assert_eq!(buf, [1, 2, 3, 4, 5]);
-
+        let copied = IoBuf::copy_from_slice(&data);
+        assert_eq!(copied, [1, 2, 3, 4, 5]);
+        assert_eq!(copied.len(), 5);
         let empty = IoBuf::copy_from_slice(&[]);
         assert!(empty.is_empty());
-    }
 
-    #[test]
-    fn test_iobuf_buf_trait() {
-        let mut buf = IoBuf::from(b"hello");
-        assert_eq!(buf.remaining(), 5);
-        buf.advance(2);
-        assert_eq!(buf.chunk(), b"llo");
-    }
+        // Equality works against both arrays and slices.
+        let eq = IoBuf::from(b"hello");
+        assert_eq!(eq, *b"hello");
+        assert_eq!(eq, b"hello");
+        assert_ne!(eq, *b"world");
+        assert_ne!(eq, b"world");
+        assert_eq!(IoBuf::from(b"hello"), IoBuf::from(b"hello"));
+        assert_ne!(IoBuf::from(b"hello"), IoBuf::from(b"world"));
 
-    #[test]
-    fn test_iobuf_empty() {
-        let buf = IoBuf::from(Vec::new());
-        assert!(buf.is_empty());
-        assert_eq!(buf.len(), 0);
-    }
+        // Buf trait operations keep `len()` and `remaining()` in sync.
+        let mut buf = IoBuf::from(b"hello world");
+        assert_eq!(buf.len(), buf.remaining());
+        assert_eq!(buf.as_ref(), buf.chunk());
+        assert_eq!(buf.remaining(), 11);
+        buf.advance(6);
+        assert_eq!(buf.chunk(), b"world");
+        assert_eq!(buf.len(), buf.remaining());
 
-    #[test]
-    fn test_iobuf_equality() {
-        let buf1 = IoBuf::from(b"hello");
-        let buf2 = IoBuf::from(b"hello");
-        let buf3 = IoBuf::from(b"world");
-        assert_eq!(buf1, buf2);
-        assert_ne!(buf1, buf3);
-    }
+        // copy_to_bytes drains in-order and advances the source.
+        let first = buf.copy_to_bytes(2);
+        assert_eq!(&first[..], b"wo");
+        let rest = buf.copy_to_bytes(3);
+        assert_eq!(&rest[..], b"rld");
+        assert_eq!(buf.remaining(), 0);
 
-    #[test]
-    fn test_iobuf_equality_with_slice() {
-        let buf = IoBuf::from(b"hello");
-        assert_eq!(buf, *b"hello");
-        assert_eq!(buf, b"hello");
-        assert_ne!(buf, *b"world");
-        assert_ne!(buf, b"world");
+        // Slicing remains zero-copy and supports all common range forms.
+        let src = IoBuf::from(b"hello world");
+        assert_eq!(src.slice(..5), b"hello");
+        assert_eq!(src.slice(6..), b"world");
+        assert_eq!(src.slice(3..8), b"lo wo");
+        assert!(src.slice(5..5).is_empty());
     }
 
     #[test]
@@ -1836,36 +1849,6 @@ mod tests {
     }
 
     #[test]
-    fn test_iobuf_copy_to_bytes() {
-        let mut buf = IoBuf::from(b"hello world");
-        let first = buf.copy_to_bytes(5);
-        assert_eq!(&first[..], b"hello");
-        assert_eq!(buf.remaining(), 6);
-        let rest = buf.copy_to_bytes(6);
-        assert_eq!(&rest[..], b" world");
-        assert_eq!(buf.remaining(), 0);
-    }
-
-    #[test]
-    fn test_iobuf_slice() {
-        let buf = IoBuf::from(b"hello world");
-
-        let slice = buf.slice(..5);
-        assert_eq!(slice, b"hello");
-
-        let slice = buf.slice(6..);
-        assert_eq!(slice, b"world");
-
-        let slice = buf.slice(3..8);
-        assert_eq!(slice, b"lo wo");
-
-        let slice = buf.slice(5..5);
-        assert!(slice.is_empty());
-
-        assert_eq!(buf, b"hello world");
-    }
-
-    #[test]
     #[should_panic(expected = "cannot advance")]
     fn test_iobuf_advance_past_end() {
         let mut buf = IoBuf::from(b"hello");
@@ -1873,127 +1856,53 @@ mod tests {
     }
 
     #[test]
-    fn test_iobuf_mut_build_and_freeze() {
+    fn test_iobufmut_core_behaviors() {
+        // Build mutable buffers incrementally and freeze to immutable.
         let mut buf = IoBufMut::with_capacity(100);
-        buf.put_slice(b"hello");
-        assert_eq!(buf, b"hello");
-
-        buf.put_slice(b" world");
-        assert_eq!(buf, b"hello world");
-
-        let frozen = buf.freeze();
-        assert_eq!(frozen, b"hello world");
-    }
-
-    #[test]
-    fn test_iobuf_mut_capacity() {
-        let buf = IoBufMut::with_capacity(100);
         assert!(buf.capacity() >= 100);
         assert_eq!(buf.len(), 0);
-    }
+        buf.put_slice(b"hello");
+        buf.put_slice(b" world");
+        assert_eq!(buf, b"hello world");
+        assert_eq!(buf.freeze(), b"hello world");
 
-    #[test]
-    fn test_iobuf_mut_set_len() {
-        let mut buf = IoBufMut::zeroed(10);
-        assert_eq!(buf.len(), 10);
-
-        // Test shrinking via set_len
-        // SAFETY: Shrinking to 5 bytes, all of which are initialized (zeros from zeroed()).
-        unsafe {
-            buf.set_len(5);
-        }
-        assert_eq!(buf.len(), 5);
-        assert_eq!(buf, &[0u8; 5]);
-
-        // Modify the content and verify
-        buf.as_mut()[..5].copy_from_slice(&[0xAB; 5]);
-        assert_eq!(buf, &[0xAB; 5]);
-    }
-
-    #[test]
-    fn test_iobuf_mut_zeroed() {
-        let mut buf = IoBufMut::zeroed(10);
-        assert_eq!(buf.len(), 10);
-        assert!(buf.capacity() >= 10);
-        assert_eq!(buf, &[0u8; 10]);
-
-        // Can write into it via as_mut
-        buf.as_mut()[..5].copy_from_slice(b"hello");
-        assert_eq!(&buf.as_ref()[..5], b"hello");
-        assert_eq!(&buf.as_ref()[5..], &[0u8; 5]);
-
-        // Freeze and convert to Vec
-        let frozen = buf.freeze();
-        assert_eq!(frozen.len(), 10);
+        // `zeroed` creates readable initialized bytes; `set_len` can shrink safely.
+        let mut zeroed = IoBufMut::zeroed(10);
+        assert_eq!(zeroed, &[0u8; 10]);
+        // SAFETY: shrinking readable length to initialized region.
+        unsafe { zeroed.set_len(5) };
+        assert_eq!(zeroed, &[0u8; 5]);
+        zeroed.as_mut()[..5].copy_from_slice(b"hello");
+        assert_eq!(&zeroed.as_ref()[..5], b"hello");
+        let frozen = zeroed.freeze();
         let vec: Vec<u8> = frozen.into();
         assert_eq!(&vec[..5], b"hello");
-        assert_eq!(&vec[5..], &[0u8; 5]);
+
+        // Exercise pooled branch behavior for `is_empty`.
+        let pool = test_pool();
+        let mut pooled = pool.alloc(8);
+        assert!(pooled.is_empty());
+        pooled.put_slice(b"x");
+        assert!(!pooled.is_empty());
     }
 
     #[test]
-    fn test_iobuf_len_equals_remaining_after_advance() {
-        let mut buf = IoBuf::from(b"hello world");
+    fn test_iobufs_shapes_and_read_paths() {
+        // Empty construction normalizes to an empty single chunk.
+        let empty = IoBufs::from(Vec::<u8>::new());
+        assert!(empty.is_empty());
+        assert!(empty.is_single());
 
-        // Before advance
-        assert_eq!(buf.len(), buf.remaining());
-        assert_eq!(buf.as_ref(), buf.chunk());
+        // Single-buffer read path.
+        let mut single = IoBufs::from(b"hello world");
+        assert!(single.is_single());
+        assert_eq!(single.chunk(), b"hello world");
+        single.advance(6);
+        assert_eq!(single.chunk(), b"world");
+        assert_eq!(single.copy_to_bytes(5).as_ref(), b"world");
+        assert_eq!(single.remaining(), 0);
 
-        // After advance
-        buf.advance(6);
-        assert_eq!(buf.len(), buf.remaining());
-        assert_eq!(buf.as_ref(), buf.chunk());
-        assert_eq!(buf.len(), 5);
-    }
-
-    #[test]
-    fn test_iobufs_empty() {
-        let bufs = IoBufs::from(Vec::<u8>::new());
-        assert!(bufs.is_empty());
-        assert_eq!(bufs.len(), 0);
-
-        let bufs = IoBufs::from(Vec::<IoBuf>::new());
-        assert!(bufs.is_empty());
-        assert_eq!(bufs.len(), 0);
-    }
-
-    #[test]
-    fn test_iobufs_single_buffer() {
-        let mut bufs = IoBufs::from(b"hello world");
-        assert!(bufs.is_single());
-
-        assert_eq!(bufs.remaining(), 11);
-        assert_eq!(bufs.chunk(), b"hello world");
-
-        bufs.advance(6);
-        assert_eq!(bufs.remaining(), 5);
-        assert_eq!(bufs.chunk(), b"world");
-
-        let bytes = bufs.copy_to_bytes(5);
-        assert_eq!(&bytes[..], b"world");
-        assert_eq!(bufs.remaining(), 0);
-    }
-
-    #[test]
-    fn test_iobufs_is_single() {
-        let bufs = IoBufs::from(b"hello");
-        assert!(bufs.is_single());
-
-        let mut bufs = IoBufs::from(b"world");
-        assert!(bufs.is_single());
-        bufs.prepend(IoBuf::from(b"hello "));
-        assert!(!bufs.is_single());
-
-        let mut bufs = IoBufs::from(b"hello");
-        assert!(bufs.is_single());
-        bufs.append(IoBuf::from(b" world"));
-        assert!(!bufs.is_single());
-
-        let bufs = IoBufs::default();
-        assert!(bufs.is_single());
-    }
-
-    #[test]
-    fn test_iobufs_fast_path_shapes() {
+        // Fast-path shapes (Pair/Triple/Chunked).
         let mut pair = IoBufs::from(IoBuf::from(b"a"));
         pair.append(IoBuf::from(b"b"));
         assert!(matches!(pair.inner, IoBufsInner::Pair(_)));
@@ -2008,14 +1917,12 @@ mod tests {
         chunked.append(IoBuf::from(b"c"));
         chunked.append(IoBuf::from(b"d"));
         assert!(matches!(chunked.inner, IoBufsInner::Chunked(_)));
-    }
 
-    #[test]
-    fn test_iobufs_prepend_and_append() {
-        let mut bufs = IoBufs::from(b"middle");
-        bufs.prepend(IoBuf::from(b"start "));
-        bufs.append(IoBuf::from(b" end"));
-        assert_eq!(bufs.coalesce(), b"start middle end");
+        // prepend + append preserve ordering.
+        let mut joined = IoBufs::from(b"middle");
+        joined.prepend(IoBuf::from(b"start "));
+        joined.append(IoBuf::from(b" end"));
+        assert_eq!(joined.coalesce(), b"start middle end");
     }
 
     #[test]
@@ -2033,19 +1940,7 @@ mod tests {
 
     #[test]
     fn test_iobufs_coalesce_with_pool() {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under miri
-                let pool_config = BufferPoolConfig {
-                    max_per_class: commonware_utils::NZUsize!(32),
-                    ..BufferPoolConfig::for_network()
-                };
-            } else {
-                let pool_config = BufferPoolConfig::for_network();
-            }
-        }
-        let mut registry = prometheus_client::registry::Registry::default();
-        let pool = BufferPool::new(pool_config, &mut registry);
+        let pool = test_pool();
 
         // Single buffer: zero-copy (same pointer)
         let buf = IoBuf::from(vec![1u8, 2, 3, 4, 5]);
@@ -2079,48 +1974,45 @@ mod tests {
         let bufs = IoBufs::default();
         let coalesced = bufs.coalesce_with_pool(&pool);
         assert!(coalesced.is_empty());
+
+        // 4+ buffers: exercise chunked coalesce-with-pool path.
+        let bufs = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+            IoBuf::from(b"gh"),
+        ]);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"abcdefgh");
+        assert!(coalesced.is_pooled());
     }
 
     #[test]
-    fn test_iobufs_with_empty_buffers() {
+    fn test_iobufs_empty_chunks_and_copy_to_bytes_paths() {
+        // Empty chunks are skipped while reading across multiple chunks.
         let mut bufs = IoBufs::default();
         bufs.append(IoBuf::from(b"hello"));
         bufs.append(IoBuf::default());
         bufs.append(IoBuf::from(b" "));
         bufs.append(IoBuf::default());
         bufs.append(IoBuf::from(b"world"));
-
         assert_eq!(bufs.len(), 11);
         assert_eq!(bufs.chunk(), b"hello");
-
         bufs.advance(5);
         assert_eq!(bufs.chunk(), b" ");
-
         bufs.advance(1);
         assert_eq!(bufs.chunk(), b"world");
 
-        assert_eq!(bufs.coalesce(), b"world");
-    }
+        // Single-buffer copy_to_bytes path.
+        let mut single = IoBufs::from(b"hello world");
+        assert_eq!(single.copy_to_bytes(5).as_ref(), b"hello");
+        assert_eq!(single.remaining(), 6);
 
-    #[test]
-    fn test_iobufs_copy_to_bytes_single_buffer() {
-        let mut bufs = IoBufs::from(b"hello world");
-        let first = bufs.copy_to_bytes(5);
-        assert_eq!(&first[..], b"hello");
-        assert_eq!(bufs.remaining(), 6);
-    }
-
-    #[test]
-    fn test_iobufs_copy_to_bytes_multiple_buffers() {
-        let mut bufs = IoBufs::from(b"hello");
-        bufs.prepend(IoBuf::from(b"say "));
-
-        let first = bufs.copy_to_bytes(7);
-        assert_eq!(&first[..], b"say hel");
-        assert_eq!(bufs.remaining(), 2);
-
-        let rest = bufs.copy_to_bytes(2);
-        assert_eq!(&rest[..], b"lo");
+        // Multi-buffer copy_to_bytes path across boundaries.
+        let mut multi = IoBufs::from(b"hello");
+        multi.prepend(IoBuf::from(b"say "));
+        assert_eq!(multi.copy_to_bytes(7).as_ref(), b"say hel");
+        assert_eq!(multi.copy_to_bytes(2).as_ref(), b"lo");
     }
 
     #[test]
@@ -2165,23 +2057,15 @@ mod tests {
 
     #[test]
     fn test_iobufs_copy_to_bytes_edge_cases() {
-        // Empty first buffer
         let mut iobufs = IoBufs::from(IoBuf::from(b""));
         iobufs.append(IoBuf::from(b"hello"));
-        let bytes = iobufs.copy_to_bytes(5);
-        assert_eq!(&bytes[..], b"hello");
+        assert_eq!(iobufs.copy_to_bytes(5).as_ref(), b"hello");
 
-        // Exact buffer boundary
-        let mut iobufs = IoBufs::from(IoBuf::from(b"hello"));
-        iobufs.append(IoBuf::from(b"world"));
-
-        let bytes = iobufs.copy_to_bytes(5);
-        assert_eq!(&bytes[..], b"hello");
-        assert_eq!(iobufs.remaining(), 5);
-
-        let bytes = iobufs.copy_to_bytes(5);
-        assert_eq!(&bytes[..], b"world");
-        assert_eq!(iobufs.remaining(), 0);
+        let mut boundary = IoBufs::from(IoBuf::from(b"hello"));
+        boundary.append(IoBuf::from(b"world"));
+        assert_eq!(boundary.copy_to_bytes(5).as_ref(), b"hello");
+        assert_eq!(boundary.copy_to_bytes(5).as_ref(), b"world");
+        assert_eq!(boundary.remaining(), 0);
     }
 
     #[test]
@@ -2238,34 +2122,6 @@ mod tests {
         );
         assert_eq!(chain.remaining(), 0);
         assert_eq!(iobufs.remaining(), 0);
-    }
-
-    #[test]
-    fn test_iobufsmut_single() {
-        let buf = IoBufMut::from(b"hello".as_ref());
-        let bufs = IoBufsMut::from(buf);
-        assert!(bufs.is_single());
-        assert_eq!(bufs.len(), 5);
-        assert_eq!(bufs.chunk(), b"hello");
-    }
-
-    #[test]
-    fn test_iobufsmut_chunked() {
-        let buf1 = IoBufMut::from(b"hello");
-        let buf2 = IoBufMut::from(b" world");
-        let bufs = IoBufsMut::from(vec![buf1, buf2]);
-        assert!(!bufs.is_single());
-        assert_eq!(bufs.len(), 11);
-        assert_eq!(bufs.chunk(), b"hello");
-    }
-
-    #[test]
-    fn test_iobufsmut_freeze_single() {
-        let buf = IoBufMut::from(b"hello");
-        let bufs = IoBufsMut::from(buf);
-        let frozen = bufs.freeze();
-        assert!(frozen.is_single());
-        assert_eq!(frozen.chunk(), b"hello");
     }
 
     #[test]
@@ -2418,39 +2274,6 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufmut_len_equals_remaining_after_advance() {
-        let mut buf = IoBufMut::from(b"hello world");
-
-        // Before advance
-        assert_eq!(buf.len(), buf.remaining());
-        assert_eq!(buf.as_ref(), buf.chunk());
-
-        // After partial advance
-        buf.advance(6);
-        assert_eq!(buf.len(), buf.remaining());
-        assert_eq!(buf.as_ref(), buf.chunk());
-        assert_eq!(buf.len(), 5);
-        assert_eq!(buf.as_ref(), b"world");
-
-        // After advancing to end
-        buf.advance(5);
-        assert_eq!(buf.len(), buf.remaining());
-        assert_eq!(buf.as_ref(), buf.chunk());
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[test]
-    fn test_iobufsmut_buf_trait_single() {
-        let mut bufs = IoBufsMut::from(IoBufMut::from(b"hello world"));
-        assert_eq!(bufs.remaining(), 11);
-        assert_eq!(bufs.chunk(), b"hello world");
-
-        bufs.advance(6);
-        assert_eq!(bufs.remaining(), 5);
-        assert_eq!(bufs.chunk(), b"world");
-    }
-
-    #[test]
     fn test_iobufsmut_buf_trait_chunked() {
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" ");
@@ -2478,19 +2301,6 @@ mod tests {
         // Advance to end
         bufs.advance(5);
         assert_eq!(bufs.remaining(), 0);
-    }
-
-    #[test]
-    fn test_iobufsmut_advance_across_multiple_buffers() {
-        let buf1 = IoBufMut::from(b"ab");
-        let buf2 = IoBufMut::from(b"cd");
-        let buf3 = IoBufMut::from(b"ef");
-        let mut bufs = IoBufsMut::from(vec![buf1, buf2, buf3]);
-
-        // Advance across two buffers at once
-        bufs.advance(5);
-        assert_eq!(bufs.remaining(), 1);
-        assert_eq!(bufs.chunk(), b"f");
     }
 
     #[test]
@@ -2644,16 +2454,22 @@ mod tests {
             IoBufMut::from(b"gh"),
         ]);
 
+        // Exercise chunked advance path before copy_to_bytes.
+        bufs.advance(1);
+        assert_eq!(bufs.chunk(), b"b");
+        bufs.advance(1);
+        assert_eq!(bufs.chunk(), b"cd");
+
         // Chunked fast-path: first chunk alone satisfies request.
         let first = bufs.copy_to_bytes(1);
-        assert_eq!(&first[..], b"a");
+        assert_eq!(&first[..], b"c");
 
         // Chunked slow-path: request crosses chunk boundaries.
         let second = bufs.copy_to_bytes(4);
-        assert_eq!(&second[..], b"bcde");
+        assert_eq!(&second[..], b"defg");
 
-        let rest = bufs.copy_to_bytes(3);
-        assert_eq!(&rest[..], b"fgh");
+        let rest = bufs.copy_to_bytes(1);
+        assert_eq!(&rest[..], b"h");
         assert_eq!(bufs.remaining(), 0);
     }
 
@@ -2852,27 +2668,6 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufsmut_len_equals_remaining_after_advance() {
-        let buf1 = IoBufMut::from(b"hello");
-        let buf2 = IoBufMut::from(b" world");
-        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
-
-        // Before advance
-        assert_eq!(bufs.len(), bufs.remaining());
-        assert_eq!(bufs.len(), 11);
-
-        // After partial advance (within first buffer)
-        bufs.advance(3);
-        assert_eq!(bufs.len(), bufs.remaining());
-        assert_eq!(bufs.len(), 8);
-
-        // After advance past first buffer
-        bufs.advance(4);
-        assert_eq!(bufs.len(), bufs.remaining());
-        assert_eq!(bufs.len(), 4);
-    }
-
-    #[test]
     fn test_iobufsmut_freeze_after_advance() {
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
@@ -2920,19 +2715,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce_with_pool() {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under miri
-                let pool_config = BufferPoolConfig {
-                    max_per_class: commonware_utils::NZUsize!(32),
-                    ..BufferPoolConfig::for_network()
-                };
-            } else {
-                let pool_config = BufferPoolConfig::for_network();
-            }
-        }
-        let mut registry = prometheus_client::registry::Registry::default();
-        let pool = BufferPool::new(pool_config, &mut registry);
+        let pool = test_pool();
 
         // Single buffer: zero-copy (same pointer)
         let mut buf = IoBufMut::from(b"hello");
@@ -2964,6 +2747,474 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
         assert_eq!(coalesced, b"hello");
         assert!(coalesced.capacity() >= 105);
+    }
+
+    #[test]
+    fn test_iobuf_additional_conversion_and_trait_paths() {
+        let pool = test_pool();
+
+        let mut pooled_mut = pool.alloc(4);
+        pooled_mut.put_slice(b"data");
+        let pooled = pooled_mut.freeze();
+        assert!(!pooled.as_ptr().is_null());
+
+        let unique = IoBuf::from(Bytes::from(vec![1u8, 2, 3]));
+        let unique_mut = unique.try_into_mut().expect("unique bytes should convert");
+        assert_eq!(unique_mut.as_ref(), &[1u8, 2, 3]);
+
+        let shared = IoBuf::from(Bytes::from(vec![4u8, 5, 6]));
+        let _shared_clone = shared.clone();
+        assert!(shared.try_into_mut().is_err());
+
+        let expected: &[u8] = &[9u8, 8];
+        let eq_buf = IoBuf::from(vec![9u8, 8]);
+        assert!(PartialEq::<[u8]>::eq(&eq_buf, expected));
+
+        let static_slice: &'static [u8] = b"static";
+        assert_eq!(IoBuf::from(static_slice), b"static");
+
+        let mut pooled_mut = pool.alloc(3);
+        pooled_mut.put_slice(b"xyz");
+        let pooled = pooled_mut.freeze();
+        let vec_out: Vec<u8> = pooled.clone().into();
+        let bytes_out: Bytes = pooled.into();
+        assert_eq!(vec_out, b"xyz");
+        assert_eq!(bytes_out.as_ref(), b"xyz");
+    }
+
+    #[test]
+    fn test_iobufmut_additional_conversion_and_trait_paths() {
+        let mut buf = IoBufMut::from(vec![1u8, 2, 3, 4]);
+        assert!(!buf.is_empty());
+        buf.truncate(2);
+        assert_eq!(buf.as_ref(), &[1u8, 2]);
+        buf.clear();
+        assert!(buf.is_empty());
+        buf.put_slice(b"xyz");
+
+        let expected: &[u8] = b"xyz";
+        assert!(PartialEq::<[u8]>::eq(&buf, expected));
+        assert!(buf == b"xyz"[..]);
+        assert!(buf == [b'x', b'y', b'z']);
+        assert!(buf == b"xyz");
+
+        let from_vec = IoBufMut::from(vec![7u8, 8]);
+        assert_eq!(from_vec.as_ref(), &[7u8, 8]);
+
+        let from_bytesmut = IoBufMut::from(BytesMut::from(&b"hi"[..]));
+        assert_eq!(from_bytesmut.as_ref(), b"hi");
+
+        let from_bytes = IoBufMut::from(Bytes::from_static(b"ok"));
+        assert_eq!(from_bytes.as_ref(), b"ok");
+
+        // `Bytes::from_static` cannot be converted to mutable without copy.
+        let from_iobuf = IoBufMut::from(IoBuf::from(Bytes::from_static(b"io")));
+        assert_eq!(from_iobuf.as_ref(), b"io");
+    }
+
+    #[test]
+    fn test_iobufs_additional_shape_and_conversion_paths() {
+        let pool = test_pool();
+
+        let from_mut = IoBufs::from(IoBufMut::from(b"m"));
+        assert_eq!(from_mut.chunk(), b"m");
+        let from_bytes = IoBufs::from(Bytes::from_static(b"b"));
+        assert_eq!(from_bytes.chunk(), b"b");
+        let from_bytesmut = IoBufs::from(BytesMut::from(&b"bm"[..]));
+        assert_eq!(from_bytesmut.chunk(), b"bm");
+        let from_vec = IoBufs::from(vec![1u8, 2u8]);
+        assert_eq!(from_vec.chunk(), &[1u8, 2]);
+        let static_slice: &'static [u8] = b"slice";
+        let from_static = IoBufs::from(static_slice);
+        assert_eq!(from_static.chunk(), b"slice");
+
+        let mut single_empty = IoBufs::default();
+        single_empty.canonicalize();
+        assert!(single_empty.is_single());
+
+        let mut triple = IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"b".to_vec()),
+            IoBuf::from(b"c".to_vec()),
+        ]);
+        assert!(triple.as_single().is_none());
+        triple.prepend(IoBuf::from(vec![b'0']));
+        triple.prepend(IoBuf::from(vec![b'1']));
+        triple.append(IoBuf::from(vec![b'2']));
+        assert_eq!(triple.copy_to_bytes(triple.remaining()).as_ref(), b"10abc2");
+
+        let mut triple_append = IoBufs::from(vec![
+            IoBuf::from(b"x".to_vec()),
+            IoBuf::from(b"y".to_vec()),
+            IoBuf::from(b"z".to_vec()),
+        ]);
+        triple_append.append(IoBuf::from(vec![b'w']));
+        assert_eq!(triple_append.coalesce(), b"xyzw");
+
+        let triple_pool = IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"b".to_vec()),
+            IoBuf::from(b"c".to_vec()),
+        ]);
+        assert_eq!(triple_pool.coalesce_with_pool(&pool), b"abc");
+
+        let mut chunked_pool = IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"b".to_vec()),
+            IoBuf::from(b"c".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+        ]);
+        assert_eq!(chunked_pool.remaining(), 4);
+        chunked_pool.advance(1);
+        assert_eq!(chunked_pool.coalesce_with_pool(&pool), b"bcd");
+
+        let pair_second = IoBufs {
+            inner: IoBufsInner::Pair([IoBuf::default(), IoBuf::from(vec![1u8])]),
+        };
+        assert_eq!(pair_second.chunk(), &[1u8]);
+        let pair_empty = IoBufs {
+            inner: IoBufsInner::Pair([IoBuf::default(), IoBuf::default()]),
+        };
+        assert_eq!(pair_empty.chunk(), b"");
+
+        let triple_third = IoBufs {
+            inner: IoBufsInner::Triple([
+                IoBuf::default(),
+                IoBuf::default(),
+                IoBuf::from(vec![3u8]),
+            ]),
+        };
+        assert_eq!(triple_third.chunk(), &[3u8]);
+        let triple_empty = IoBufs {
+            inner: IoBufsInner::Triple([IoBuf::default(), IoBuf::default(), IoBuf::default()]),
+        };
+        assert_eq!(triple_empty.chunk(), b"");
+
+        let chunked_second = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([IoBuf::default(), IoBuf::from(vec![9u8])])),
+        };
+        assert_eq!(chunked_second.chunk(), &[9u8]);
+        let chunked_empty = IoBufs {
+            inner: IoBufsInner::Chunked(VecDeque::from([IoBuf::default()])),
+        };
+        assert_eq!(chunked_empty.chunk(), b"");
+    }
+
+    #[test]
+    fn test_iobufsmut_additional_shape_and_conversion_paths() {
+        let mut single = IoBufsMut::from(IoBufMut::from(b"x"));
+        assert!(single.as_single().is_some());
+        assert!(single.as_single_mut().is_some());
+        single.canonicalize();
+        assert!(single.is_single());
+
+        let pair = IoBufsMut::from(vec![IoBufMut::from(b"a"), IoBufMut::from(b"b")]);
+        assert!(pair.as_single().is_none());
+
+        let from_vec = IoBufsMut::from(vec![1u8, 2u8]);
+        assert_eq!(from_vec.chunk(), &[1u8, 2]);
+        let from_bytesmut = IoBufsMut::from(BytesMut::from(&b"cd"[..]));
+        assert_eq!(from_bytesmut.chunk(), b"cd");
+
+        let mut chunked = IoBufsMut::from(vec![
+            IoBufMut::with_capacity(1),
+            IoBufMut::with_capacity(1),
+            IoBufMut::with_capacity(1),
+            IoBufMut::with_capacity(1),
+        ]);
+        // SAFETY: We only write/read initialized bytes after `copy_from_slice`.
+        unsafe { chunked.set_len(4) };
+        chunked.copy_from_slice(b"wxyz");
+        assert_eq!(chunked.capacity(), 4);
+        assert_eq!(chunked.remaining(), 4);
+        let frozen = chunked.freeze();
+        assert_eq!(frozen.coalesce(), b"wxyz");
+    }
+
+    #[test]
+    fn test_iobufsmut_coalesce_multi_shape_paths() {
+        let pool = test_pool();
+
+        let pair = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
+        assert_eq!(pair.coalesce(), b"abcd");
+        let pair = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
+        let pair_extra = pair.coalesce_with_pool_extra(&pool, 3);
+        assert_eq!(pair_extra, b"abcd");
+        assert!(pair_extra.capacity() >= 7);
+
+        let triple = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+        ]);
+        assert_eq!(triple.coalesce(), b"abc");
+        let triple = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+        ]);
+        let triple_extra = triple.coalesce_with_pool_extra(&pool, 2);
+        assert_eq!(triple_extra, b"abc");
+        assert!(triple_extra.capacity() >= 5);
+
+        let chunked = IoBufsMut::from(vec![
+            IoBufMut::from(b"1"),
+            IoBufMut::from(b"2"),
+            IoBufMut::from(b"3"),
+            IoBufMut::from(b"4"),
+        ]);
+        assert_eq!(chunked.coalesce(), b"1234");
+        let chunked = IoBufsMut::from(vec![
+            IoBufMut::from(b"1"),
+            IoBufMut::from(b"2"),
+            IoBufMut::from(b"3"),
+            IoBufMut::from(b"4"),
+        ]);
+        let chunked_extra = chunked.coalesce_with_pool_extra(&pool, 5);
+        assert_eq!(chunked_extra, b"1234");
+        assert!(chunked_extra.capacity() >= 9);
+    }
+
+    #[test]
+    fn test_iobufsmut_noncanonical_chunk_and_chunk_mut_paths() {
+        fn no_spare_capacity_buf(pool: &BufferPool) -> IoBufMut {
+            let mut buf = pool.alloc(1);
+            let cap = buf.capacity();
+            // SAFETY: We never read from this buffer in this helper.
+            unsafe { buf.set_len(cap) };
+            buf
+        }
+        let pool = test_pool();
+
+        let pair_second = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::from(b"b")]),
+        };
+        assert_eq!(pair_second.chunk(), b"b");
+        let pair_empty = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::default()]),
+        };
+        assert_eq!(pair_empty.chunk(), b"");
+
+        let triple_third = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::default(),
+                IoBufMut::default(),
+                IoBufMut::from(b"c"),
+            ]),
+        };
+        assert_eq!(triple_third.chunk(), b"c");
+        let triple_empty = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::default(),
+                IoBufMut::default(),
+                IoBufMut::default(),
+            ]),
+        };
+        assert_eq!(triple_empty.chunk(), b"");
+
+        let chunked_second = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([
+                IoBufMut::default(),
+                IoBufMut::from(b"d"),
+            ])),
+        };
+        assert_eq!(chunked_second.chunk(), b"d");
+        let chunked_empty = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([IoBufMut::default()])),
+        };
+        assert_eq!(chunked_empty.chunk(), b"");
+
+        let mut pair_chunk_mut = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::with_capacity(2)]),
+        };
+        assert!(pair_chunk_mut.chunk_mut().len() >= 2);
+
+        let mut pair_chunk_mut_empty = IoBufsMut {
+            inner: IoBufsMutInner::Pair([
+                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(&pool),
+            ]),
+        };
+        assert_eq!(pair_chunk_mut_empty.chunk_mut().len(), 0);
+
+        let mut triple_chunk_mut = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::default(),
+                IoBufMut::default(),
+                IoBufMut::with_capacity(3),
+            ]),
+        };
+        assert!(triple_chunk_mut.chunk_mut().len() >= 3);
+
+        let mut triple_chunk_mut_empty = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(&pool),
+            ]),
+        };
+        assert_eq!(triple_chunk_mut_empty.chunk_mut().len(), 0);
+
+        let mut chunked_chunk_mut = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([
+                IoBufMut::default(),
+                IoBufMut::with_capacity(4),
+            ])),
+        };
+        assert!(chunked_chunk_mut.chunk_mut().len() >= 4);
+
+        let mut chunked_chunk_mut_empty = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([no_spare_capacity_buf(&pool)])),
+        };
+        assert_eq!(chunked_chunk_mut_empty.chunk_mut().len(), 0);
+    }
+
+    #[test]
+    fn test_iobuf_internal_chunk_helpers() {
+        let mut empty_with_leading = VecDeque::from([IoBuf::default()]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut empty_with_leading, 0, "x");
+        assert!(bytes.is_empty());
+        assert!(!needs_canonicalize);
+        assert!(empty_with_leading.is_empty());
+
+        let mut fast = VecDeque::from([
+            IoBuf::from(b"ab".to_vec()),
+            IoBuf::from(b"cd".to_vec()),
+            IoBuf::from(b"ef".to_vec()),
+            IoBuf::from(b"gh".to_vec()),
+        ]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut fast, 2, "x");
+        assert_eq!(bytes.as_ref(), b"ab");
+        assert!(needs_canonicalize);
+        assert_eq!(fast.front().expect("front exists").as_ref(), b"cd");
+
+        let mut slow = VecDeque::from([
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"bc".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+            IoBuf::from(b"e".to_vec()),
+        ]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut slow, 3, "x");
+        assert_eq!(bytes.as_ref(), b"abc");
+        assert!(needs_canonicalize);
+
+        let mut advance_chunked = VecDeque::from([
+            IoBuf::default(),
+            IoBuf::from(b"abc".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+        ]);
+        advance_chunked_front(&mut advance_chunked, 2);
+        assert_eq!(
+            advance_chunked.front().expect("front exists").as_ref(),
+            b"c"
+        );
+        advance_chunked_front(&mut advance_chunked, 2);
+        assert!(advance_chunked.is_empty());
+
+        let mut small = [IoBuf::default(), IoBuf::from(b"abc".to_vec())];
+        let needs_canonicalize = advance_small_chunks(&mut small, 2);
+        assert!(needs_canonicalize);
+        assert_eq!(small[1].as_ref(), b"c");
+
+        let mut small_exact = [
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"b".to_vec()),
+            IoBuf::from(b"c".to_vec()),
+        ];
+        let needs_canonicalize = advance_small_chunks(&mut small_exact, 3);
+        assert!(needs_canonicalize);
+        assert_eq!(small_exact[0].remaining(), 0);
+        assert_eq!(small_exact[1].remaining(), 0);
+        assert_eq!(small_exact[2].remaining(), 0);
+
+        let mut writable = [IoBufMut::with_capacity(2), IoBufMut::with_capacity(1)];
+        let mut remaining = 3usize;
+        // SAFETY: We do not read from advanced bytes in this test.
+        let all_advanced = unsafe { advance_mut_in_chunks(&mut writable, &mut remaining) };
+        assert!(all_advanced);
+        assert_eq!(remaining, 0);
+
+        let mut writable_short = [IoBufMut::with_capacity(1), IoBufMut::with_capacity(1)];
+        let mut remaining = 3usize;
+        // SAFETY: We do not read from advanced bytes in this test.
+        let all_advanced = unsafe { advance_mut_in_chunks(&mut writable_short, &mut remaining) };
+        assert!(!all_advanced);
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn test_iobufsmut_advance_mut_success_paths() {
+        let mut pair = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::with_capacity(2), IoBufMut::with_capacity(2)]),
+        };
+        // SAFETY: We only verify cursor movement (`remaining`) and do not read bytes.
+        unsafe { pair.advance_mut(3) };
+        assert_eq!(pair.remaining(), 3);
+
+        let mut triple = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+            ]),
+        };
+        // SAFETY: We only verify cursor movement (`remaining`) and do not read bytes.
+        unsafe { triple.advance_mut(2) };
+        assert_eq!(triple.remaining(), 2);
+
+        let mut wrapped = VecDeque::with_capacity(5);
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        let _ = wrapped.pop_front();
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        let mut chunked = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(wrapped),
+        };
+        // SAFETY: We only verify cursor movement (`remaining`) and do not read bytes.
+        unsafe { chunked.advance_mut(4) };
+        assert_eq!(chunked.remaining(), 4);
+        assert!(chunked.remaining_mut() > 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufsmut_advance_mut_past_end_pair() {
+        let mut pair = IoBufsMut {
+            inner: IoBufsMutInner::Pair([IoBufMut::with_capacity(1), IoBufMut::with_capacity(1)]),
+        };
+        // SAFETY: Intentional panic path coverage.
+        unsafe { pair.advance_mut(3) };
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufsmut_advance_mut_past_end_triple() {
+        let mut triple = IoBufsMut {
+            inner: IoBufsMutInner::Triple([
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+            ]),
+        };
+        // SAFETY: Intentional panic path coverage.
+        unsafe { triple.advance_mut(4) };
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobufsmut_advance_mut_past_end_chunked() {
+        let mut chunked = IoBufsMut {
+            inner: IoBufsMutInner::Chunked(VecDeque::from([
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+                IoBufMut::with_capacity(1),
+            ])),
+        };
+        // SAFETY: Intentional panic path coverage.
+        unsafe { chunked.advance_mut(5) };
     }
 
     #[test]
