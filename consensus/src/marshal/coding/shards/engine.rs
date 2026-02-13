@@ -177,8 +177,9 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
-    Metrics, Spawner,
+    spawn_cell,
+    telemetry::metrics::{histogram::HistogramExt, status::GaugeExt},
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     bitmap::BitMap,
@@ -191,7 +192,6 @@ use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
     sync::Arc,
-    time::Instant,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -543,7 +543,7 @@ where
             .expect("checking data must be present");
 
         // Attempt to reconstruct the encoded blob
-        let start = Instant::now();
+        let start = self.context.current();
         let blob = C::decode(
             &commitment.config(),
             &commitment.root(),
@@ -554,7 +554,7 @@ where
         .map_err(Error::Coding)?;
         self.metrics
             .erasure_decode_duration
-            .observe(start.elapsed().as_secs_f64());
+            .observe_between(start, self.context.current());
 
         // Attempt to decode the block from the encoded blob
         let (inner, config): (B, CodingConfig) =

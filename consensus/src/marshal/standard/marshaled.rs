@@ -91,15 +91,15 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::metrics::histogram::HistogramExt, Clock, Metrics, Spawner};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::{
     future::{Either, Ready},
     lock::Mutex,
 };
-use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
@@ -146,7 +146,7 @@ where
     last_built: Arc<Mutex<Option<(Round, B)>>>,
     verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
 
-    build_duration: Gauge,
+    build_duration: Histogram,
 }
 
 impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
@@ -164,10 +164,11 @@ where
 {
     /// Creates a new [`Marshaled`] wrapper.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
-        let build_duration = Gauge::default();
+        let build_duration =
+            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
         context.register(
             "build_duration",
-            "Time taken for the application to build a new block, in milliseconds",
+            "Histogram of time taken for the application to build a new block, in seconds",
             build_duration.clone(),
         );
 
@@ -415,7 +416,7 @@ where
                     ancestor_stream,
                 );
 
-                let start = Instant::now();
+                let start = runtime_context.current();
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -433,7 +434,7 @@ where
                         }
                     },
                 };
-                let _ = build_duration.try_set(start.elapsed().as_millis());
+                build_duration.observe_between(start, runtime_context.current());
 
                 let digest = built_block.digest();
                 {

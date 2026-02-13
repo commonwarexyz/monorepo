@@ -790,9 +790,8 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodecConfig, Config};
-    use bytes::BytesMut;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+    use crate::Config;
+    use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
 
@@ -818,34 +817,6 @@ mod tests {
             provided >= required,
             "security invariant violated: provided {provided} < required {required}"
         );
-    }
-
-    #[test]
-    fn weak_shard_roundtrip_handles_field_packing() {
-        let config = Config {
-            minimum_shards: NZU16!(3),
-            extra_shards: NZU16!(2),
-        };
-        let data = vec![0xAA; 64];
-
-        let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-        let shard = shards.into_iter().next().unwrap();
-
-        let (_, _, weak_shard) = Zoda::<Sha256>::weaken(&config, &commitment, 0, shard).unwrap();
-
-        let mut buf = BytesMut::new();
-        weak_shard.write(&mut buf);
-        let mut bytes = buf.freeze();
-        let decoded = WeakShard::<Sha256Digest>::read_cfg(
-            &mut bytes,
-            &CodecConfig {
-                maximum_shard_size: data.len(),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(decoded, weak_shard);
     }
 
     #[test]

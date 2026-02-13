@@ -103,7 +103,9 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_parallel::Strategy;
-use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    telemetry::metrics::histogram::HistogramExt, Clock, Metrics, Spawner, Storage,
+};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     NZU16,
@@ -112,12 +114,9 @@ use futures::{
     future::{try_join, Either, Ready},
     lock::Mutex,
 };
-use prometheus_client::metrics::{gauge::Gauge, histogram::Histogram};
+use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
-use std::{
-    sync::{Arc, OnceLock},
-    time::Instant,
-};
+use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
 
 /// The [`CodingConfig`] used for genesis blocks. These blocks are never broadcasted in
@@ -181,9 +180,9 @@ where
     verification_tasks: VerificationTasks<Commitment>,
     cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C>)>>,
 
-    build_duration: Gauge,
-    verify_duration: Gauge,
-    proposal_parent_fetch_duration: Gauge,
+    build_duration: Histogram,
+    verify_duration: Histogram,
+    proposal_parent_fetch_duration: Histogram,
     erasure_encode_duration: Histogram,
 }
 
@@ -217,22 +216,25 @@ where
             epocher,
         } = cfg;
 
-        let build_duration = Gauge::default();
+        let build_duration =
+            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
         context.register(
             "build_duration",
-            "Time taken for the application to build a new block, in milliseconds",
+            "Histogram of time taken for the application to build a new block, in seconds",
             build_duration.clone(),
         );
-        let verify_duration = Gauge::default();
+        let verify_duration =
+            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
         context.register(
             "verify_duration",
-            "Time taken for the application to verify a block, in milliseconds",
+            "Histogram of time taken for the application to verify a block, in seconds",
             verify_duration.clone(),
         );
-        let proposal_parent_fetch_duration = Gauge::default();
+        let proposal_parent_fetch_duration =
+            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
         context.register(
             "parent_fetch_duration",
-            "Time taken to fetch a parent block in the proposal process, in milliseconds",
+            "Histogram of time taken to fetch a parent block in proposal, in seconds",
             proposal_parent_fetch_duration.clone(),
         );
         let erasure_encode_duration =
@@ -448,7 +450,7 @@ where
                 );
 
                 // If consensus drops the receiver, we can stop work early.
-                let start = Instant::now();
+                let start = runtime_context.current();
                 let application_valid = select! {
                     _ = tx.closed() => {
                         debug!(
@@ -459,7 +461,7 @@ where
                     },
                     is_valid = validity_request => is_valid,
                 };
-                let _ = verify_duration.try_set(start.elapsed().as_millis());
+                verify_duration.observe_between(start, runtime_context.current());
                 if application_valid {
                     marshal.verified(round, block).await;
                 }
@@ -568,7 +570,7 @@ where
                 )
                 .await;
 
-                let start = Instant::now();
+                let start = runtime_context.current();
                 let parent = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -586,7 +588,7 @@ where
                         }
                     },
                 };
-                let _ = proposal_parent_fetch_duration.try_set(start.elapsed().as_millis());
+                proposal_parent_fetch_duration.observe_between(start, runtime_context.current());
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out
@@ -620,7 +622,7 @@ where
                     ancestor_stream,
                 );
 
-                let start = Instant::now();
+                let start = runtime_context.current();
                 let built_block = select! {
                     _ = tx.closed() => {
                         debug!(reason = "consensus dropped receiver", "skipping proposal");
@@ -638,11 +640,11 @@ where
                         }
                     },
                 };
-                let _ = build_duration.try_set(start.elapsed().as_millis());
+                build_duration.observe_between(start, runtime_context.current());
 
-                let start = Instant::now();
+                let start = runtime_context.current();
                 let coded_block = CodedBlock::<B, C>::new(built_block, coding_config, &strategy);
-                erasure_encode_duration.observe(start.elapsed().as_secs_f64());
+                erasure_encode_duration.observe_between(start, runtime_context.current());
 
                 let commitment = coded_block.commitment();
                 {
