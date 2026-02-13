@@ -820,8 +820,11 @@ mod tests {
         );
     }
 
-    fn codec_roundtrip(config: &Config, data: &[u8]) {
+    fn roundtrip(config: &Config, data: &[u8]) {
         let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
+        let n = config.minimum_shards as usize;
+        let mut checked_shards = Vec::new();
+        let mut checking_data = None;
 
         for (i, shard) in shards.iter().enumerate() {
             let cfg = CodecConfig {
@@ -843,22 +846,14 @@ mod tests {
             let decoded_reshard =
                 ReShard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
             assert_eq!(decoded_reshard, reshard);
-        }
-    }
 
-    fn full_roundtrip(config: &Config, data: &[u8]) {
-        let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
-
-        let n = config.minimum_shards as usize;
-        let mut checked_shards = Vec::new();
-        let mut checking_data = None;
-
-        for (i, shard) in shards.into_iter().enumerate().take(n) {
-            let (cd, checked, _reshard) =
-                Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard).unwrap();
-            checked_shards.push(checked);
-            if checking_data.is_none() {
-                checking_data = Some(cd);
+            if i < n {
+                let (cd, checked, _reshard) =
+                    Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
+                checked_shards.push(checked);
+                if checking_data.is_none() {
+                    checking_data = Some(cd);
+                }
             }
         }
 
@@ -888,13 +883,8 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
         #[test]
-        fn proptest_codec_roundtrip(config in config_strategy(), data in data_strategy()) {
-            codec_roundtrip(&config, &data);
-        }
-
-        #[test]
-        fn proptest_full_roundtrip(config in config_strategy(), data in data_strategy()) {
-            full_roundtrip(&config, &data);
+        fn proptest_roundtrip(config in config_strategy(), data in data_strategy()) {
+            roundtrip(&config, &data);
         }
     }
 
