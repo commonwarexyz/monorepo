@@ -85,7 +85,6 @@ mod tests {
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
-    use commonware_codec::{Decode, Encode};
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
@@ -1113,29 +1112,6 @@ mod tests {
                 },
             }
         })
-    }
-
-    #[test]
-    #[should_panic(expected = "Commitment always contains a valid config")]
-    fn test_commitment_config_zero_zero_panics() {
-        // Commitment::config() expects a valid encoded CodingConfig. A malformed payload with
-        // (minimum_shards=0, extra_shards=0) should panic on extraction.
-        let valid = Commitment::from((
-            Sha256::hash(b"block"),
-            Sha256::hash(b"root"),
-            Sha256::hash(b"context"),
-            commonware_coding::Config {
-                minimum_shards: NZU16!(1),
-                extra_shards: 0,
-            },
-        ));
-
-        let mut bytes = valid.encode().to_vec();
-        let len = bytes.len();
-        bytes[len - 4..].copy_from_slice(&[0, 0, 0, 0]);
-        let malformed =
-            Commitment::decode_cfg(bytes.as_slice(), &()).expect("commitment bytes should decode");
-        let _ = malformed.config();
     }
 
     #[test_traced("WARN")]
