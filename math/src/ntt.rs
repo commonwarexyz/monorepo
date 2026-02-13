@@ -1492,6 +1492,37 @@ mod test {
         ));
     }
 
+    fn assert_vanishing_points_correct(points: &VanishingPoints) {
+        let expected_degree = (1 << points.lg_size()) - points.count_non_vanishing();
+        let (at_zero, evaluations) = EvaluationColumn::<F>::vanishing(points);
+        if points.count_non_vanishing() == 0 {
+            // EvaluationColumn::vanishing assumes at least one non-vanishing point.
+            // We still invoke it so callers can exercise internal branch coverage.
+            return;
+        }
+        let polynomial = evaluations.interpolate();
+        assert_eq!(
+            polynomial.degree(),
+            expected_degree as usize,
+            "expected v to have degree {expected_degree}"
+        );
+        assert_eq!(
+            at_zero, polynomial.coefficients[0],
+            "at_zero should be the 0th coefficient"
+        );
+        let w = F::root_of_unity(points.lg_size() as u8).unwrap();
+        let mut w_i = F::one();
+        for (i, point_is_non_vanishing) in points.iter_bits_in_order().enumerate() {
+            let value = polynomial.evaluate_one(w_i);
+            if point_is_non_vanishing {
+                assert_ne!(value, F::zero(), "expected non-zero at i={i}");
+            } else {
+                assert_eq!(value, F::zero(), "expected zero at i={i}");
+            }
+            w_i = w_i * w;
+        }
+    }
+
     #[test]
     fn test_recovery_000() {
         let present = {
@@ -1500,6 +1531,34 @@ mod test {
             out
         };
         fuzz::RecoverySetup::new(1, 1, 1, vec![F::one()], present).test()
+    }
+
+    #[test]
+    fn test_vanishing_polynomial_all_two_chunk_combinations() {
+        fn fill_half(points: &mut VanishingPoints, half: usize, values: [bool; 2]) {
+            let chunk_size = 1usize << LG_VANISHING_BASE;
+            let start = half * chunk_size;
+            let lg_size = points.lg_size();
+            for i in 0..chunk_size {
+                let value = values[i % 2];
+                let raw_index = (start + i) as u64;
+                points.set(reverse_bits(lg_size, raw_index), value);
+            }
+        }
+
+        let lg_size = LG_VANISHING_BASE + 1;
+        // (0,0) => Everywhere, (0,1) => Somewhere, (1,1) => Nowhere.
+        let states = [[false, false], [false, true], [true, true]];
+        for left in states {
+            for right in states {
+                let mut points = VanishingPoints::new(lg_size);
+                // VanishingPoints stores roots in reverse bit order. Writing raw halves
+                // directly makes chunk 0/1 align exactly with the implementation's chunks.
+                fill_half(&mut points, 0, left);
+                fill_half(&mut points, 1, right);
+                assert_vanishing_points_correct(&points);
+            }
+        }
     }
 
     #[cfg(feature = "arbitrary")]
