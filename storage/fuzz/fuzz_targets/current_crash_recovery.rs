@@ -16,7 +16,7 @@ use commonware_runtime::{
 use commonware_storage::{
     mmr::Location,
     qmdb::{
-        current::{unordered::fixed::Db as Current, FixedConfig},
+        current::{unordered::variable::Db as Current, VariableConfig},
         store::LogStore as _,
     },
     translator::TwoCap,
@@ -97,15 +97,17 @@ fn make_config(
     mmr_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
-) -> FixedConfig<TwoCap> {
-    FixedConfig {
+) -> VariableConfig<TwoCap, ()> {
+    VariableConfig {
         mmr_journal_partition: format!("crash_mmr_journal_{suffix}"),
         mmr_metadata_partition: format!("crash_mmr_metadata_{suffix}"),
         mmr_items_per_blob: NZU64!(mmr_items_per_blob),
         mmr_write_buffer: write_buffer,
-        log_journal_partition: format!("crash_log_journal_{suffix}"),
+        log_partition: format!("crash_log_{suffix}"),
         log_items_per_blob: NZU64!(log_items_per_blob),
         log_write_buffer: write_buffer,
+        log_compression: None,
+        log_codec_config: (),
         grafted_mmr_metadata_partition: format!("crash_grafted_mmr_metadata_{suffix}"),
         translator: TwoCap,
         page_cache: CacheRef::from_pooler(ctx, page_size, page_cache_size),
