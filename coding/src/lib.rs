@@ -319,6 +319,19 @@ mod test {
         }
     }
 
+    #[test]
+    fn roundtrip_empty_data() {
+        let config = Config {
+            minimum_shards: 30,
+            extra_shards: 70,
+        };
+        let selected: Vec<u16> = (0..30).collect();
+
+        roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+        roundtrip::<NoCoding<Sha256>>(&config, b"", &selected);
+        roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+    }
+
     // This exercises an edge case in ZODA, but is also useful for other schemes.
     #[test]
     fn roundtrip_2_pow_16_25_total_shards() {
@@ -328,6 +341,7 @@ mod test {
         };
         let data = vec![0x67; 1 << 16];
         let selected: Vec<u16> = (0..8).collect();
+
         roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
         roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
         roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
