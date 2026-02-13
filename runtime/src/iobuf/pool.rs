@@ -449,8 +449,8 @@ impl SizeClass {
     }
 }
 
-/// Internal allocation result for pooled class allocations.
-struct ClassAllocation {
+/// Internal allocation result for pooled allocations.
+struct Allocation {
     buffer: AlignedBuffer,
     is_new: bool,
 }
@@ -469,7 +469,7 @@ impl BufferPoolInner {
             .map(|allocation| allocation.buffer)
     }
 
-    fn try_alloc_internal(&self, class_index: usize, zero_new: bool) -> Option<ClassAllocation> {
+    fn try_alloc_internal(&self, class_index: usize, zero_new: bool) -> Option<Allocation> {
         let class = &self.classes[class_index];
         let label = SizeClassLabel {
             size_class: class.size as u64,
@@ -482,7 +482,7 @@ impl BufferPoolInner {
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
                 self.metrics.available.get_or_create(&label).dec();
-                Some(ClassAllocation {
+                Some(Allocation {
                     buffer,
                     is_new: false,
                 })
@@ -497,7 +497,7 @@ impl BufferPoolInner {
                 } else {
                     AlignedBuffer::new(class.size, class.alignment)
                 };
-                Some(ClassAllocation {
+                Some(Allocation {
                     buffer,
                     is_new: true,
                 })
