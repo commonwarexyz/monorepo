@@ -1705,7 +1705,13 @@ impl Buf for IoBufsMut {
                 .expect("cannot advance past end of buffer");
             let avail = front.remaining();
             if avail == 0 {
-                panic!("cannot advance past end of buffer");
+                // Leading writable-but-empty chunks can appear after construction
+                // from capacity-only buffers. Drop empty readable chunks and retry.
+                self.canonicalize();
+                if self.remaining() == 0 {
+                    panic!("cannot advance past end of buffer");
+                }
+                continue;
             }
             if cnt < avail {
                 front.advance(cnt);
@@ -2672,6 +2678,17 @@ mod tests {
         // Empty buffer should be skipped
         assert_eq!(bufs.chunk(), b" world");
         assert_eq!(bufs.remaining(), 6);
+    }
+
+    #[test]
+    fn test_iobufsmut_advance_skips_leading_writable_empty_chunk() {
+        let empty_writable = IoBufMut::with_capacity(4);
+        let payload = IoBufMut::from(b"xy");
+        let mut bufs = IoBufsMut::from(vec![empty_writable, payload]);
+
+        bufs.advance(1);
+        assert_eq!(bufs.chunk(), b"y");
+        assert_eq!(bufs.remaining(), 1);
     }
 
     #[test]
