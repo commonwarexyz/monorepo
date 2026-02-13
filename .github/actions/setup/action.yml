@@ -20,10 +20,14 @@ runs:
     - name: Normalize cache key
       id: cache-key
       shell: bash
+      env:
+        ADDITIONAL_CACHE_KEY: ${{ inputs.additional-cache-key }}
       run: |
-        key="${{ inputs.additional-cache-key }}"
+        key="${ADDITIONAL_CACHE_KEY}"
         key="${key// /-}"
         key="${key//\//-}"
+        key="${key//$'\n'/}"
+        key="${key//$'\r'/}"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
