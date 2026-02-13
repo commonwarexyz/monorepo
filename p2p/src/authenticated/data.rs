@@ -54,12 +54,7 @@ pub struct EncodedData {
 impl EncodedData {
     /// Encode `Payload::Data` bytes in-place as:
     /// `prefix || channel || message_len || message`.
-    pub fn encode_with_prefix(
-        pool: &BufferPool,
-        prefix: u8,
-        channel: Channel,
-        mut message: IoBufs,
-    ) -> Self {
+    pub fn new(pool: &BufferPool, prefix: u8, channel: Channel, mut message: IoBufs) -> Self {
         let payload_len = message.len();
         let header_len =
             prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
@@ -121,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encoded_data_encode_with_prefix_matches_data_encode() {
+    fn test_encoded_data_new_matches_data_encode() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut message = IoBufs::from(IoBuf::from(b"hello "));
@@ -136,8 +131,7 @@ mod tests {
             let mut expected = IoBufs::from(data.encode());
             expected.prepend(IoBuf::from(vec![7]));
 
-            let encoded =
-                EncodedData::encode_with_prefix(context.network_buffer_pool(), 7, 12345, message);
+            let encoded = EncodedData::new(context.network_buffer_pool(), 7, 12345, message);
             assert_eq!(encoded.channel, 12345);
             assert_eq!(encoded.payload.coalesce(), expected.coalesce());
         });

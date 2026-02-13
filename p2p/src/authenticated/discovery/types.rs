@@ -84,7 +84,7 @@ pub enum Payload<C: PublicKey> {
 impl<C: PublicKey> Payload<C> {
     /// Encode `Payload::Data` bytes for transmission using pooled header allocation.
     pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
-        EncodedData::encode_with_prefix(pool, DATA_PREFIX, channel, message)
+        EncodedData::new(pool, DATA_PREFIX, channel, message)
     }
 }
 
