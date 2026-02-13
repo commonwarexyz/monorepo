@@ -322,7 +322,7 @@ mod topology {
 use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Shard<D: Digest> {
     data_bytes: usize,
     root: D,
@@ -606,8 +606,7 @@ pub enum Error {
     FailedToCreateInclusionProof(BmtError),
 }
 
-// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
-const NAMESPACE: &[u8] = b"commonware-zoda";
+const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
 #[derive(Clone, Copy)]
 pub struct Zoda<H> {
@@ -794,6 +793,11 @@ mod tests {
     use bytes::BytesMut;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
+    use proptest::{
+        prelude::{any, prop, ProptestConfig},
+        proptest,
+        strategy::Strategy as PropStrategy,
+    };
 
     const STRATEGY: Sequential = Sequential;
 
@@ -819,32 +823,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reshard_roundtrip_handles_field_packing() {
-        let config = Config {
-            minimum_shards: 3,
-            extra_shards: 2,
-        };
-        let data = vec![0xAA; 64];
+    fn codec_roundtrip(config: &Config, data: &[u8]) {
+        let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
 
-        let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-        let shard = shards.into_iter().next().unwrap();
+        for (i, shard) in shards.iter().enumerate() {
+            let shard_size = shard.encode_size();
+            let cfg = CodecConfig {
+                maximum_shard_size: shard_size,
+            };
 
-        let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
+            let mut buf = BytesMut::new();
+            shard.write(&mut buf);
+            let mut bytes = buf.freeze();
+            let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut bytes, &cfg).unwrap();
+            assert_eq!(decoded_shard, *shard);
 
-        let mut buf = BytesMut::new();
-        reshard.write(&mut buf);
-        let mut bytes = buf.freeze();
-        let decoded = ReShard::<Sha256Digest>::read_cfg(
-            &mut bytes,
-            &CodecConfig {
-                maximum_shard_size: data.len(),
-            },
+            let (_, _, reshard) =
+                Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
+
+            let reshard_size = reshard.encode_size();
+            let cfg = CodecConfig {
+                maximum_shard_size: reshard_size,
+            };
+
+            let mut buf = BytesMut::new();
+            reshard.write(&mut buf);
+            let mut bytes = buf.freeze();
+            let decoded_reshard = ReShard::<Sha256Digest>::read_cfg(&mut bytes, &cfg).unwrap();
+            assert_eq!(decoded_reshard, reshard);
+        }
+    }
+
+    fn full_roundtrip(config: &Config, data: &[u8]) {
+        let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
+
+        let n = config.minimum_shards as usize;
+        let mut checked_shards = Vec::new();
+        let mut checking_data = None;
+
+        for (i, shard) in shards.into_iter().enumerate().take(n) {
+            let (cd, checked, _reshard) =
+                Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard).unwrap();
+            checked_shards.push(checked);
+            if checking_data.is_none() {
+                checking_data = Some(cd);
+            }
+        }
+
+        let decoded = Zoda::<Sha256>::decode(
+            config,
+            &commitment,
+            checking_data.unwrap(),
+            &checked_shards,
+            &STRATEGY,
         )
         .unwrap();
+        assert_eq!(decoded, data);
+    }
 
-        assert_eq!(decoded, reshard);
+    fn config_strategy() -> impl PropStrategy<Value = Config> {
+        (1u16..=8, 0u16..=8).prop_map(|(min_shards, extra_shards)| Config {
+            minimum_shards: min_shards,
+            extra_shards,
+        })
+    }
+
+    fn data_strategy() -> impl PropStrategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 0..=1024)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn proptest_codec_roundtrip(config in config_strategy(), data in data_strategy()) {
+            codec_roundtrip(&config, &data);
+        }
+
+        #[test]
+        fn proptest_full_roundtrip(config in config_strategy(), data in data_strategy()) {
+            full_roundtrip(&config, &data);
+        }
     }
 
     #[test]
