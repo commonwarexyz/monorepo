@@ -53,18 +53,18 @@ pub struct EncodedData {
 
 impl EncodedData {
     /// Encode `Payload::Data` bytes in-place as:
-    /// `data_prefix || channel || message_len || message`.
+    /// `msg_prefix || channel || message_len || message`.
     pub fn encode_with_prefix(
         pool: &BufferPool,
         channel: Channel,
         mut message: IoBufs,
-        data_prefix: u8,
+        msg_prefix: u8,
     ) -> Self {
         let payload_len = message.len();
         let header_len =
-            data_prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
+            msg_prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
         let mut header = pool.alloc(header_len);
-        data_prefix.write(&mut header);
+        msg_prefix.write(&mut header);
         UInt(channel).write(&mut header);
         payload_len.write(&mut header);
         debug_assert_eq!(header.len(), header_len, "data header size mismatch");

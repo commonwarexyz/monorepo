@@ -87,6 +87,7 @@ impl<P: PublicKey> Messenger<P> {
         message: IoBufs,
         priority: bool,
     ) -> Vec<P> {
+        // Build Data and encode Payload::Data once for all recipients
         let encoded = types::Payload::<P>::encode_data(&self.pool, channel, message);
 
         self.sender
