@@ -83,7 +83,7 @@ impl Read for Message {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
-    use commonware_runtime::{deterministic, BufferPooler as _, IoBuf, IoBufs, Runner as _};
+    use commonware_runtime::IoBuf;
 
     #[test]
     fn test_max_payload_overhead() {
@@ -127,27 +127,6 @@ mod tests {
 
         let result = Message::decode_cfg(encoded, &4);
         assert!(matches!(result, Err(Error::InvalidLength(5))));
-    }
-
-    #[test]
-    fn test_encode_data_matches_message_data_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let channel = 12345;
-            let mut message = IoBufs::from(IoBuf::from(b"Hello, "));
-            message.append(IoBuf::from(b"world"));
-            message.append(IoBuf::from(b"!"));
-
-            let expected = Message::Data(Data {
-                channel,
-                message: message.clone().coalesce(),
-            })
-            .encode();
-            let encoded = Message::encode_data(context.network_buffer_pool(), channel, message);
-
-            assert_eq!(encoded.channel, channel);
-            assert_eq!(encoded.payload.coalesce().as_ref(), expected.as_ref());
-        });
     }
 
     #[cfg(feature = "arbitrary")]
