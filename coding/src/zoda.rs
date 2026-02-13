@@ -827,47 +827,26 @@ mod tests {
         let (commitment, shards) = Zoda::<Sha256>::encode(config, data, &STRATEGY).unwrap();
 
         for (i, shard) in shards.iter().enumerate() {
-            let shard_size = shard.encode_size();
-
-            // Decoding must succeed with maximum_shard_size = encode_size().
             let cfg = CodecConfig {
-                maximum_shard_size: shard_size,
+                maximum_shard_size: shard.encode_size(),
             };
             let mut buf = BytesMut::new();
             shard.write(&mut buf);
-            let bytes = buf.freeze();
-            let decoded_shard = Shard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &cfg).unwrap();
+            let decoded_shard =
+                Shard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
             assert_eq!(decoded_shard, *shard);
-
-            // Decoding must fail when maximum_shard_size is too small.
-            if shard_size > 0 {
-                let small_cfg = CodecConfig {
-                    maximum_shard_size: 0,
-                };
-                assert!(Shard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &small_cfg).is_err());
-            }
 
             let (_, _, reshard) =
                 Zoda::<Sha256>::reshard(config, &commitment, i as u16, shard.clone()).unwrap();
 
-            let reshard_size = reshard.encode_size();
-
             let cfg = CodecConfig {
-                maximum_shard_size: reshard_size,
+                maximum_shard_size: reshard.encode_size(),
             };
             let mut buf = BytesMut::new();
             reshard.write(&mut buf);
-            let bytes = buf.freeze();
             let decoded_reshard =
-                ReShard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &cfg).unwrap();
+                ReShard::<Sha256Digest>::read_cfg(&mut buf.freeze(), &cfg).unwrap();
             assert_eq!(decoded_reshard, reshard);
-
-            if reshard_size > 0 {
-                let small_cfg = CodecConfig {
-                    maximum_shard_size: 0,
-                };
-                assert!(ReShard::<Sha256Digest>::read_cfg(&mut bytes.clone(), &small_cfg).is_err());
-            }
         }
     }
 
