@@ -338,21 +338,31 @@ mod tests {
     }
 
     #[test]
-    fn test_next_u64_uses_counter_mixed_blocks() {
-        let bytes = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    fn test_next_u64_includes_counter_in_mix_input() {
+        // Use a constant source window so any change between blocks comes from
+        // counter mixing, not from different window bytes.
+        let bytes = vec![0xAA; BLOCK_BYTES];
         let mut rng = FuzzRng::new(bytes.clone());
 
         let mut source = [0u8; BLOCK_BYTES];
         source.copy_from_slice(&bytes[..BLOCK_BYTES]);
         let word = u64::from_le_bytes(source);
-        let mut expected = word ^ FUZZ_RNG_MIX_DOMAIN;
-        expected ^= expected >> 30;
-        expected = expected.wrapping_mul(0xbf58476d1ce4e5b9);
-        expected ^= expected >> 27;
-        expected = expected.wrapping_mul(0x94d049bb133111eb);
-        expected ^= expected >> 31;
 
-        assert_eq!(rng.next_u64(), expected);
+        let mix = |mut x: u64| {
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x94d049bb133111eb);
+            x ^= x >> 31;
+            x
+        };
+
+        #[allow(clippy::identity_op)]
+        let expected0 = mix(word ^ 0 ^ FUZZ_RNG_MIX_DOMAIN);
+        let expected1 = mix(word ^ 1 ^ FUZZ_RNG_MIX_DOMAIN);
+
+        assert_eq!(rng.next_u64(), expected0);
+        assert_eq!(rng.next_u64(), expected1);
     }
 
     mod conformance {
