@@ -1,6 +1,6 @@
 use crate::algebra::{Additive, FieldNTT, Ring};
-use alloc::vec;
-use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::{vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::BitMap;
 use core::{
@@ -8,6 +8,8 @@ use core::{
     ops::{Index, IndexMut},
 };
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 /// Determines the size of polynomials we compute naively in [`EvaluationColumn::vanishing`].
 ///
