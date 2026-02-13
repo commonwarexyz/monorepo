@@ -483,6 +483,8 @@ impl<F: FieldNTT> EvaluationColumn<F> {
             for (i, chunk) in out.chunks_exact_mut(1 << next_lg_chunk_size).enumerate() {
                 let (left, right) = chunk.split_at_mut(1 << lg_chunk_size);
                 let (vanishes_l, vanishes_r) = (vanishes[2 * i], vanishes[2 * i + 1]);
+                // We keep track of whether or not the polynomial resulting from
+                // the merge is evaluated or not.
                 let mut evaluated = false;
                 vanishes[i] = match (vanishes_l, vanishes_r) {
                     (Nowhere, Nowhere) => {
