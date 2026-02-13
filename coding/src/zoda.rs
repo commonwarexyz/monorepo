@@ -793,8 +793,7 @@ mod tests {
     use bytes::BytesMut;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
-    use proptest::prelude::*;
-    use proptest::strategy::Strategy as _;
+    use proptest::{prelude::*, strategy::Strategy as _};
 
     const STRATEGY: Sequential = Sequential;
 
