@@ -1419,7 +1419,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::Encode;
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
+    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon, Zoda};
     use commonware_cryptography::{
         certificate::Subject,
         ed25519::{PrivateKey, PublicKey},
@@ -1434,7 +1434,7 @@ mod tests {
     use commonware_utils::{
         channel::oneshot::error::TryRecvError, ordered::Set, NZUsize, Participant,
     };
-    use std::{future::Future, num::NonZeroU32, time::Duration};
+    use std::{future::Future, marker::PhantomData, num::NonZeroU32, time::Duration};
 
     #[derive(Clone, Debug)]
     pub struct TestSubject {
@@ -1514,8 +1514,7 @@ mod tests {
     type O = Oracle<P, deterministic::Context>;
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
-    type ShardEngine = Engine<deterministic::Context, Prov, X, C, H, B, P, Sequential>;
-    type ShardMailbox = Mailbox<B, C, P>;
+    type ShardEngine<S> = Engine<deterministic::Context, Prov, X, S, H, B, P, Sequential>;
 
     async fn assert_blocked(oracle: &O, blocker: &P, blocked: &P) {
         let blocked_peers = oracle.blocked().await.unwrap();
@@ -1526,38 +1525,41 @@ mod tests {
     }
 
     /// A participant in the test network with its engine mailbox and blocker.
-    struct Peer {
+    struct Peer<S: CodingScheme = C> {
         /// The peer's public key.
         public_key: PublicKey,
         /// The peer's index in the participant set.
         index: Participant,
         /// The mailbox for sending messages to the peer's shard engine.
-        mailbox: ShardMailbox,
+        mailbox: Mailbox<B, S, P>,
         /// Raw network sender for injecting messages (e.g., byzantine behavior).
         sender: NetworkSender,
     }
 
     /// Test fixture for setting up multiple participants with shard engines.
-    struct Fixture {
+    struct Fixture<S: CodingScheme = C> {
         /// Number of peers in the test network.
         num_peers: usize,
         /// Network link configuration.
         link: Link,
+        /// Marker for the coding scheme type parameter.
+        _marker: PhantomData<S>,
     }
 
-    impl Default for Fixture {
+    impl<S: CodingScheme> Default for Fixture<S> {
         fn default() -> Self {
             Self {
                 num_peers: 4,
                 link: DEFAULT_LINK,
+                _marker: PhantomData,
             }
         }
     }
 
-    impl Fixture {
+    impl<S: CodingScheme> Fixture<S> {
         pub fn start<F: Future<Output = ()>>(
             self,
-            f: impl FnOnce(Self, deterministic::Context, O, Vec<Peer>, CodingConfig) -> F,
+            f: impl FnOnce(Self, deterministic::Context, O, Vec<Peer<S>>, CodingConfig) -> F,
         ) {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
@@ -1696,6 +1698,51 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_e2e_broadcast_and_reconstruction_zoda() {
+        let fixture = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(|config, context, _, mut peers, coding_config| async move {
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, Zoda<H>>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            let leader = peers[0].public_key.clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            peers[0].mailbox.proposed(round, coded_block.clone()).await;
+
+            // Inform all peers of the leader so strong shards are processed.
+            for peer in peers[1..].iter_mut() {
+                peer.mailbox
+                    .discovered(commitment, leader.clone(), round)
+                    .await;
+            }
+            context.sleep(config.link.latency).await;
+
+            for peer in peers.iter_mut() {
+                peer.mailbox
+                    .subscribe_shard(commitment)
+                    .await
+                    .await
+                    .expect("shard subscription should complete");
+            }
+            context.sleep(config.link.latency).await;
+
+            for peer in peers.iter_mut() {
+                let reconstructed = peer
+                    .mailbox
+                    .get(commitment)
+                    .await
+                    .expect("block should be reconstructed");
+                assert_eq!(reconstructed.commitment(), commitment);
+                assert_eq!(reconstructed.height(), coded_block.height());
+            }
+        });
+    }
+
+    #[test_traced]
     fn test_block_subscriptions() {
         let fixture = Fixture {
             num_peers: 10,
@@ -1746,10 +1793,7 @@ mod tests {
 
     #[test_traced]
     fn test_shard_subscription_rejects_invalid_shard() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 // peers[0] = byzantine
@@ -1816,10 +1860,7 @@ mod tests {
 
     #[test_traced]
     fn test_durable_prunes_reconstructed_blocks() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, coding_config| async move {
             // Create 3 blocks at heights 1, 2, 3.
             let block1 = CodedBlock::<B, C>::new(
@@ -1887,10 +1928,7 @@ mod tests {
 
     #[test_traced]
     fn test_duplicate_leader_strong_shard_ignored() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -1947,10 +1985,7 @@ mod tests {
 
     #[test_traced]
     fn test_equivocating_leader_strong_shard_blocks_peer() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2007,10 +2042,7 @@ mod tests {
     #[test_traced]
     fn test_non_leader_strong_shard_blocked() {
         // Test that a non-leader sending a strong shard is blocked.
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2050,10 +2082,7 @@ mod tests {
     fn test_buffered_non_leader_blocked_on_leader_arrival() {
         // Test that when a non-leader's strong shard is buffered (leader unknown)
         // and then the leader arrives, the non-leader is blocked.
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2100,10 +2129,7 @@ mod tests {
 
     #[test_traced]
     fn test_conflicting_external_proposed_ignored() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2178,10 +2204,7 @@ mod tests {
 
     #[test_traced]
     fn test_non_participant_external_proposed_ignored() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2251,10 +2274,7 @@ mod tests {
 
     #[test_traced]
     fn test_shard_from_non_participant_blocks_peer() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2307,10 +2327,7 @@ mod tests {
 
     #[test_traced]
     fn test_buffered_shard_from_non_participant_blocks_peer() {
-        let fixture = Fixture {
-            ..Default::default()
-        };
-
+        let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
@@ -2365,7 +2382,7 @@ mod tests {
     #[test_traced]
     fn test_duplicate_weak_shard_ignored() {
         // Use 10 peers so minimum_shards=4, giving us time to send duplicate before reconstruction.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -2448,7 +2465,7 @@ mod tests {
     #[test_traced]
     fn test_equivocating_weak_shard_blocks_peer() {
         // Use 10 peers so minimum_shards=4, giving us time to send equivocating shard.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -2534,7 +2551,7 @@ mod tests {
     #[test_traced]
     fn test_reconstruction_states_pruned_at_or_below_reconstructed_view() {
         // Use 10 peers so minimum_shards=4.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -2655,7 +2672,7 @@ mod tests {
         //
         // With 10 peers: minimum_shards = (10-1)/3 + 1 = 4
         // We send 3 pending weak shards + 1 strong shard = 4 shards -> reconstruction.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -2752,7 +2769,7 @@ mod tests {
     fn test_pre_leader_shards_buffered_until_external_proposed() {
         // Test that shards received before leader announcement do not progress
         // reconstruction until Discovered is delivered.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -2843,7 +2860,7 @@ mod tests {
     fn test_post_leader_shards_processed_immediately() {
         // Test that shards arriving after leader announcement are processed
         // without waiting for any extra trigger.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -2924,7 +2941,7 @@ mod tests {
     #[test_traced]
     fn test_invalid_shard_codec_blocks_peer() {
         // Test that receiving an invalid shard (codec failure) blocks the sender.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 4,
             ..Default::default()
         };
@@ -2954,7 +2971,7 @@ mod tests {
     fn test_duplicate_buffered_strong_shard_does_not_block_before_leader() {
         // Test that duplicate strong shards before leader announcement are
         // buffered and do not immediately block the sender.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             ..Default::default()
         };
 
@@ -3011,7 +3028,7 @@ mod tests {
     fn test_invalid_strong_shard_crypto_blocks_leader() {
         // Test that a strong shard failing cryptographic verification (C::weaken)
         // results in the leader being blocked.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             ..Default::default()
         };
 
@@ -3060,7 +3077,7 @@ mod tests {
     fn test_weak_shard_index_mismatch_blocks_peer() {
         // Test that a weak shard whose shard index doesn't match the sender's
         // participant index results in blocking the sender.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -3121,7 +3138,7 @@ mod tests {
     fn test_invalid_weak_shard_crypto_blocks_peer() {
         // Test that a weak shard failing cryptographic verification (C::check)
         // results in blocking the sender once batch validation fires at quorum.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -3207,7 +3224,7 @@ mod tests {
         // Contribute exactly 4 shards first (1 strong + 3 weak), with one weak invalid:
         // quorum is reached, but checked_shards stays at 3 after batch validation.
         // Then send one more valid weak shard to meet reconstruction threshold.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -3319,7 +3336,7 @@ mod tests {
     fn test_invalid_pending_weak_shard_blocked_on_drain() {
         // Test that a weak shard buffered in pending_weak_shards (before checking data) is
         // blocked when batch validation runs at quorum and C::check fails.
-        let fixture = Fixture {
+        let fixture: Fixture<C> = Fixture {
             num_peers: 10,
             ..Default::default()
         };
@@ -3470,7 +3487,7 @@ mod tests {
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
-            let config = Config {
+            let config: Config<_, _, _, C, _, _, _> = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
                 shard_codec_cfg: CodecConfig {

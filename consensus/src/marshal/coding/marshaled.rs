@@ -106,7 +106,7 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
     extra_shards: 0,
 };
 
-type TasksMap<B> = HashMap<(Round, <B as Digestible>::Digest), oneshot::Receiver<bool>>;
+type TasksMap = HashMap<(Round, CodingCommitment), oneshot::Receiver<bool>>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -159,7 +159,7 @@ where
     strategy: S,
     #[allow(clippy::type_complexity)]
     last_built: Arc<Mutex<Option<(Round, CodedBlock<B, C>)>>>,
-    verification_tasks: Arc<Mutex<TasksMap<B>>>,
+    verification_tasks: Arc<Mutex<TasksMap>>,
     cached_genesis: Arc<OnceLock<(CodingCommitment, CodedBlock<B, C>)>>,
 
     build_duration: Gauge,
@@ -706,7 +706,6 @@ where
             let mut marshal = self.marshal.clone();
             let epocher = self.epocher.clone();
             let round = context.round;
-            let block_digest: B::Digest = payload.block_digest();
             let verification_tasks = Arc::clone(&self.verification_tasks);
 
             // Register a verification task synchronously before spawning work so
@@ -715,7 +714,7 @@ where
             verification_tasks
                 .lock()
                 .await
-                .insert((round, block_digest), task_rx);
+                .insert((round, payload), task_rx);
 
             let (mut tx, rx) = oneshot::channel();
             self.context
@@ -787,11 +786,10 @@ where
         // shard validity checks and network latency for collecting votes.
         let round = context.round;
         let task = self.deferred_verify(context, payload, None).await;
-        let block_digest: B::Digest = payload.block_digest();
         self.verification_tasks
             .lock()
             .await
-            .insert((round, block_digest), task);
+            .insert((round, payload), task);
 
         match scheme.me() {
             Some(_) => {
@@ -833,11 +831,9 @@ where
     ES: Epocher,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        let block_digest: B::Digest = payload.block_digest();
-
         // First, check for an in-progress verification task from `verify()`.
         let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, block_digest));
+        let task = tasks_guard.remove(&(round, payload));
         drop(tasks_guard);
         if let Some(task) = task {
             return task;
