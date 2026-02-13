@@ -119,6 +119,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         }
         let rate_limits = Arc::new(rate_limits);
         let pool = self.context.network_buffer_pool().clone();
+
         // Use half the ping frequency for rate limiting to allow for timing
         // jitter at message boundaries.
         let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
