@@ -17,7 +17,12 @@ use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge}
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey> {
+pub struct Actor<
+    E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+    Si: Sink,
+    St: Stream,
+    C: PublicKey,
+> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
@@ -32,8 +37,12 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, Si
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, Si: Sink, St: Stream, C: PublicKey>
-    Actor<E, Si, St, C>
+impl<
+        E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+        Si: Sink,
+        St: Stream,
+        C: PublicKey,
+    > Actor<E, Si, St, C>
 {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
         let connections = Gauge::default();

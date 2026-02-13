@@ -9,8 +9,8 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota,
-    RateLimiter, Sink, Spawner, Stream,
+    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter,
+    Sink, Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{

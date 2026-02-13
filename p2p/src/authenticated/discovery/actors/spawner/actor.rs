@@ -22,7 +22,12 @@ use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey> {
+pub struct Actor<
+    E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+    O: Sink,
+    I: Stream,
+    C: PublicKey,
+> {
     context: ContextCell<E>,
 
     mailbox_size: usize,
@@ -40,8 +45,12 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, O:
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, O: Sink, I: Stream, C: PublicKey>
-    Actor<E, O, I, C>
+impl<
+        E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics,
+        O: Sink,
+        I: Stream,
+        C: PublicKey,
+    > Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
