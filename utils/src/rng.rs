@@ -17,78 +17,177 @@ pub fn test_rng_seeded(seed: u64) -> StdRng {
     StdRng::seed_from_u64(seed)
 }
 
-/// FNV-1a hash for deterministic seed generation.
+/// Domain-separation constant for the mixing step. This ensures the mixed stream
+/// is not derived from `word ^ ctr` alone and helps avoid accidental fixed points
+/// when fuzz input has low structure (for example empty or repeated bytes).
+const FUZZ_RNG_MIX_DOMAIN: u64 = 0x9e3779b97f4a7c15;
+/// Width of each source window in bytes.
 ///
-/// Uses FNV-1a instead of `DefaultHasher` because `DefaultHasher` is not
-/// guaranteed to be stable across Rust versions.
-fn fnv1a_hash(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
+/// This is derived from `u64` so the loaded window maps directly to one output
+/// block before mixing.
+const BLOCK_BYTES: usize = (u64::BITS as usize) / (u8::BITS as usize);
 
-    let mut hash = FNV_OFFSET;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
-/// An RNG that reads from a byte buffer, falling back to a seeded RNG when exhausted.
+/// An RNG that expands a fuzzer byte slice into an infinite deterministic stream.
 ///
-/// This is useful for fuzzing where you want the fuzzer to control randomness
-/// through byte mutations. The raw bytes are consumed sequentially, and when
-/// exhausted, a fallback RNG (seeded from a hash of the buffer) provides additional
-/// randomness deterministically.
-pub struct BytesRng {
+/// # Design
+///
+/// `FuzzRng` maps a fuzzer-controlled byte slice to output blocks.
+///
+/// For each block counter `ctr`, it:
+/// 1. Reads a wrapping `u64`-wide window from the input bytes.
+/// 2. Xors in `ctr` and a domain constant.
+/// 3. Applies a SplitMix64-style finalizer.
+///
+/// ```text
+/// input bytes (len = N):
+///   [b0 b1 b2 ... b(N-1)]
+///
+/// block ctr = i:
+///   word_i bytes = [b(i+0)%N, b(i+1)%N, ... b(i+7)%N]
+///   word_i       = little-endian u64 of those bytes
+///   out_i        = mix64(word_i ^ i ^ DOMAIN)
+/// ```
+///
+/// # Why this mapping
+///
+/// Hashing the full input once and then seeding a PRNG makes tiny input changes
+/// look globally unrelated. This adapter avoids that by using a sliding window
+/// keyed by the block counter.
+///
+/// ```text
+/// byte k affects anchors:
+///   i in [k-(BLOCK_BYTES-1), ..., k] (mod N)
+/// ```
+///
+/// # Worked Example
+///
+/// With `N = 4`, input bytes repeat inside each block:
+///
+/// ```text
+/// input: [a b c d]
+///
+/// ctr=0: word bytes [a b c d a b c d]
+/// ctr=1: word bytes [b c d a b c d a]
+/// ctr=2: word bytes [c d a b c d a b]
+/// ...
+/// ```
+///
+/// Even for low-entropy input like `[0 0 0 0]`, output still changes because
+/// `ctr` is mixed into every block before finalization.
+///
+/// ```text
+///                    +---------------------------+
+/// bytes + counter -> | wrapping window (u64)    | -> word
+///                    +---------------------------+
+///                                   |
+///                                   v
+///                    +---------------------------+
+///                    | mix(word ^ ctr ^ DOMAIN) | -> block u64
+///                    +---------------------------+
+/// ```
+///
+/// `fill_bytes` serves output from cached block bytes so callers get a stable
+/// byte stream regardless of whether they request randomness as `next_u64`,
+/// `next_u32`, or arbitrary byte slices.
+pub struct FuzzRng {
     bytes: Vec<u8>,
-    offset: usize,
-    fallback: StdRng,
+    ctr: u64,
+    cache: [u8; BLOCK_BYTES],
+    cache_pos: usize,
 }
 
-impl BytesRng {
-    /// Creates a new `BytesRng` from a byte buffer.
-    ///
-    /// All bytes are consumed sequentially as output. When exhausted, a fallback
-    /// RNG (seeded from a hash of the entire buffer) provides additional randomness.
+impl FuzzRng {
+    /// Creates a new `FuzzRng` from a byte buffer.
     pub fn new(bytes: Vec<u8>) -> Self {
-        let fallback = StdRng::seed_from_u64(fnv1a_hash(&bytes));
         Self {
             bytes,
-            offset: 0,
-            fallback,
+            ctr: 0,
+            cache: [0u8; BLOCK_BYTES],
+            cache_pos: BLOCK_BYTES,
         }
     }
 
-    /// Returns the number of raw bytes remaining before fallback.
-    pub const fn remaining(&self) -> usize {
-        self.bytes.len().saturating_sub(self.offset)
+    /// Generates the next mixed `u64` block from the fuzz input.
+    ///
+    /// Conceptually:
+    /// 1. Build `word` from a wrapping `BLOCK_BYTES` window anchored at `ctr`.
+    /// 2. Compute `mixed = mix64(word ^ ctr ^ FUZZ_RNG_MIX_DOMAIN)`.
+    /// 3. Increment `ctr`.
+    ///
+    /// This keeps the output deterministic while preserving local mutation
+    /// influence: one input-byte mutation only affects nearby anchor counters.
+    #[inline]
+    fn next_block_u64(&mut self) -> u64 {
+        // Build a wrapping u64-width source word anchored at this block counter.
+        // A single fuzz-byte mutation only impacts nearby anchors.
+        let mut bytes = [0u8; BLOCK_BYTES];
+        if !self.bytes.is_empty() {
+            let len = self.bytes.len() as u64;
+            for i in 0..BLOCK_BYTES {
+                bytes[i] = self.bytes[(self.ctr.wrapping_add(i as u64) % len) as usize];
+            }
+        }
+        let word = u64::from_le_bytes(bytes);
+
+        // Mix the structured word into a high-quality output block without
+        // hashing the entire seed into an avalanche-style global state.
+        let mut out = word ^ self.ctr ^ FUZZ_RNG_MIX_DOMAIN;
+        out ^= out >> 30;
+        out = out.wrapping_mul(0xbf58476d1ce4e5b9);
+        out ^= out >> 27;
+        out = out.wrapping_mul(0x94d049bb133111eb);
+        out ^= out >> 31;
+
+        self.ctr = self.ctr.wrapping_add(1);
+        out
     }
 
-    /// Returns the total number of bytes consumed from the raw buffer.
-    pub fn consumed(&self) -> usize {
-        self.offset.min(self.bytes.len())
+    /// Returns a uniformly distributed value in `[0, upper)`.
+    ///
+    /// This uses Lemire-style multiplication reduction and avoids modulo bias.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `upper == 0`.
+    pub fn gen_range(&mut self, upper: u64) -> u64 {
+        assert_ne!(upper, 0, "upper must be non-zero");
+        let x = self.next_u64();
+        ((x as u128 * upper as u128) >> 64) as u64
     }
 }
 
-impl RngCore for BytesRng {
+impl RngCore for FuzzRng {
     fn next_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
         self.fill_bytes(&mut buf);
-        u32::from_be_bytes(buf)
+        u32::from_le_bytes(buf)
     }
 
     fn next_u64(&mut self) -> u64 {
-        let mut buf = [0u8; 8];
+        let mut buf = [0u8; BLOCK_BYTES];
         self.fill_bytes(&mut buf);
-        u64::from_be_bytes(buf)
+        u64::from_le_bytes(buf)
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        let from_buffer = dest.len().min(self.bytes.len().saturating_sub(self.offset));
-        dest[..from_buffer].copy_from_slice(&self.bytes[self.offset..self.offset + from_buffer]);
-        self.offset += from_buffer;
-        if from_buffer < dest.len() {
-            self.fallback.fill_bytes(&mut dest[from_buffer..]);
+        let mut written = 0;
+        while written < dest.len() {
+            if self.cache_pos == self.cache.len() {
+                // Cache block bytes so outputs are stable regardless of whether
+                // callers pull randomness as bytes or words:
+                //
+                // next_u64() stream bytes == fill_bytes() stream bytes.
+                self.cache = self.next_block_u64().to_le_bytes();
+                self.cache_pos = 0;
+            }
+
+            let available = self.cache.len() - self.cache_pos;
+            let need = dest.len() - written;
+            let take = available.min(need);
+            dest[written..written + take]
+                .copy_from_slice(&self.cache[self.cache_pos..self.cache_pos + take]);
+            self.cache_pos += take;
+            written += take;
         }
     }
 
@@ -98,160 +197,242 @@ impl RngCore for BytesRng {
     }
 }
 
-impl CryptoRng for BytesRng {}
+impl CryptoRng for FuzzRng {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_empty_bytes() {
-        let mut rng = BytesRng::new(vec![]);
-        assert_eq!(rng.remaining(), 0);
-        assert_eq!(rng.consumed(), 0);
+    fn test_empty_bytes_not_constant() {
+        let mut rng = FuzzRng::new(vec![]);
 
-        // Should use fallback immediately
-        let v1 = rng.next_u64();
-        let v2 = rng.next_u64();
-        assert_ne!(v1, v2); // Fallback should produce different values
+        let values: Vec<_> = (0..BLOCK_BYTES).map(|_| rng.next_u64()).collect();
+        assert!(values.windows(2).any(|w| w[0] != w[1]));
     }
 
     #[test]
-    fn test_consumes_bytes_in_order() {
-        let bytes = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        let mut rng = BytesRng::new(bytes);
+    fn test_empty_bytes_deterministic() {
+        let mut rng1 = FuzzRng::new(vec![]);
+        let mut rng2 = FuzzRng::new(vec![]);
 
-        assert_eq!(rng.remaining(), 8);
-        assert_eq!(rng.consumed(), 0);
-
-        let mut buf = [0u8; 4];
-        rng.fill_bytes(&mut buf);
-        assert_eq!(buf, [1, 2, 3, 4]);
-        assert_eq!(rng.remaining(), 4);
-        assert_eq!(rng.consumed(), 4);
-
-        rng.fill_bytes(&mut buf);
-        assert_eq!(buf, [5, 6, 7, 8]);
-        assert_eq!(rng.remaining(), 0);
-        assert_eq!(rng.consumed(), 8);
+        for _ in 0..256 {
+            assert_eq!(rng1.next_u64(), rng2.next_u64());
+        }
     }
 
     #[test]
-    fn test_fallback_after_exhaustion() {
-        let bytes = vec![1, 2, 3, 4];
-        let mut rng = BytesRng::new(bytes.clone());
-
-        // Consume all bytes
-        let mut buf = [0u8; 4];
-        rng.fill_bytes(&mut buf);
-        assert_eq!(buf, [1, 2, 3, 4]);
-
-        // Now should use fallback
-        rng.fill_bytes(&mut buf);
-        let first_fallback = buf;
-
-        // Create another RNG with same bytes - fallback should be deterministic
-        let mut rng2 = BytesRng::new(bytes);
-        let mut buf2 = [0u8; 4];
-        rng2.fill_bytes(&mut buf2); // Skip raw bytes
-        rng2.fill_bytes(&mut buf2); // Get fallback
-
-        assert_eq!(first_fallback, buf2);
-    }
-
-    #[test]
-    fn test_fallback_seed_from_hash() {
-        // Different buffers should have different fallbacks
-        let bytes1 = vec![1, 2, 3, 4];
-        let bytes2 = vec![1, 2, 3, 5];
-
-        let mut rng1 = BytesRng::new(bytes1);
-        let mut rng2 = BytesRng::new(bytes2);
-
-        // Exhaust both
-        let mut buf = [0u8; 4];
-        rng1.fill_bytes(&mut buf);
-        rng2.fill_bytes(&mut buf);
-
-        // Fallback values should differ (different input hashes)
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
-    }
-
-    #[test]
-    fn test_short_buffer_fallback_seed() {
-        // Buffer shorter than 8 bytes
-        let bytes = vec![1, 2, 3];
-        let mut rng = BytesRng::new(bytes);
-
-        // Exhaust buffer
-        let mut buf = [0u8; 3];
-        rng.fill_bytes(&mut buf);
-        assert_eq!(buf, [1, 2, 3]);
-
-        // Should still work with fallback
-        let v = rng.next_u64();
-        assert_ne!(v, 0); // Just verify it produces something
+    fn test_all_zero_bytes_not_constant() {
+        let bytes = vec![0; BLOCK_BYTES];
+        let mut rng = FuzzRng::new(bytes);
+        let values: Vec<_> = (0..BLOCK_BYTES).map(|_| rng.next_u64()).collect();
+        assert!(values.windows(2).any(|w| w[0] != w[1]));
     }
 
     #[test]
     fn test_deterministic_with_same_input() {
         let bytes = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-        let mut rng1 = BytesRng::new(bytes.clone());
-        let mut rng2 = BytesRng::new(bytes);
+        let mut rng1 = FuzzRng::new(bytes.clone());
+        let mut rng2 = FuzzRng::new(bytes);
 
-        // Both should produce identical sequences
-        for _ in 0..100 {
+        for _ in 0..1000 {
             assert_eq!(rng1.next_u64(), rng2.next_u64());
         }
     }
 
     #[test]
-    fn test_next_u32() {
-        let bytes = vec![0x01, 0x02, 0x03, 0x04];
-        let mut rng = BytesRng::new(bytes);
-
-        let v = rng.next_u32();
-        assert_eq!(v, u32::from_be_bytes([0x01, 0x02, 0x03, 0x04]));
+    fn test_short_input_wraparound() {
+        for len in 1..=3 {
+            let bytes = vec![0xAB; len];
+            let mut rng1 = FuzzRng::new(bytes.clone());
+            let mut rng2 = FuzzRng::new(bytes);
+            let out1: Vec<_> = (0..32).map(|_| rng1.next_u64()).collect();
+            let out2: Vec<_> = (0..32).map(|_| rng2.next_u64()).collect();
+            assert_eq!(out1, out2);
+            assert!(out1.windows(2).any(|w| w[0] != w[1]));
+        }
     }
 
     #[test]
-    fn test_next_u64() {
-        let bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
-        let mut rng = BytesRng::new(bytes);
+    fn test_small_mutation_locality() {
+        let mut base = vec![0u8; 64];
+        for (i, byte) in base.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let mut mutated = base.clone();
+        let mutated_pos = 20usize;
+        mutated[mutated_pos] ^= 0x01;
 
-        let v = rng.next_u64();
-        assert_eq!(
-            v,
-            u64::from_be_bytes([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
-        );
+        let mut rng_a = FuzzRng::new(base);
+        let mut rng_b = FuzzRng::new(mutated);
+
+        let draws = 40usize;
+        let mut diff_indices = Vec::new();
+        for i in 0..draws {
+            if rng_a.next_u64() != rng_b.next_u64() {
+                diff_indices.push(i);
+            }
+        }
+
+        let expected: Vec<usize> = ((mutated_pos - 7)..=mutated_pos).collect();
+        assert_eq!(diff_indices, expected);
+    }
+
+    #[test]
+    fn test_small_mutation_locality_wraparound() {
+        let mut base = vec![0u8; 64];
+        for (i, byte) in base.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let mut mutated = base.clone();
+        let mutated_pos = 2usize;
+        mutated[mutated_pos] ^= 0x01;
+
+        let mut rng_a = FuzzRng::new(base);
+        let mut rng_b = FuzzRng::new(mutated);
+
+        let draws = 64usize;
+        let mut diff_indices = Vec::new();
+        for i in 0..draws {
+            if rng_a.next_u64() != rng_b.next_u64() {
+                diff_indices.push(i);
+            }
+        }
+
+        assert_eq!(diff_indices, vec![0, 1, 2, 59, 60, 61, 62, 63]);
+    }
+
+    #[test]
+    fn test_fill_bytes_shape_stability() {
+        let bytes: Vec<u8> = (0..32u8).collect();
+
+        let mut from_u64_rng = FuzzRng::new(bytes.clone());
+        let mut from_u64 = Vec::with_capacity(128);
+        for _ in 0..16 {
+            from_u64.extend_from_slice(&from_u64_rng.next_u64().to_le_bytes());
+        }
+
+        let mut from_fill_rng = FuzzRng::new(bytes);
+        let mut from_fill = vec![0u8; from_u64.len()];
+        let chunk_sizes = [3usize, 1, 7, 2, 11, 5, 13, 17];
+        let mut offset = 0;
+        let mut idx = 0;
+        while offset < from_fill.len() {
+            let chunk = chunk_sizes[idx % chunk_sizes.len()].min(from_fill.len() - offset);
+            from_fill_rng.fill_bytes(&mut from_fill[offset..offset + chunk]);
+            offset += chunk;
+            idx += 1;
+        }
+        assert_eq!(from_u64, from_fill);
+    }
+
+    #[test]
+    fn test_next_u32_consistency_with_fill_bytes() {
+        let bytes: Vec<u8> = (0..16u8).collect();
+
+        let mut from_u32_rng = FuzzRng::new(bytes.clone());
+        let mut from_u32 = Vec::with_capacity(64);
+        for _ in 0..16 {
+            from_u32.extend_from_slice(&from_u32_rng.next_u32().to_le_bytes());
+        }
+
+        let mut from_fill_rng = FuzzRng::new(bytes);
+        let mut from_fill = vec![0u8; from_u32.len()];
+        from_fill_rng.fill_bytes(&mut from_fill);
+        assert_eq!(from_u32, from_fill);
+    }
+
+    #[test]
+    fn test_try_fill_bytes_consistency_with_fill_bytes() {
+        let bytes: Vec<u8> = (0..16u8).collect();
+
+        let mut fill_rng = FuzzRng::new(bytes.clone());
+        let mut try_fill_rng = FuzzRng::new(bytes);
+
+        let mut fill_out = vec![0u8; 257];
+        fill_rng.fill_bytes(&mut fill_out);
+
+        let mut try_out = vec![0u8; 257];
+        try_fill_rng
+            .try_fill_bytes(&mut try_out)
+            .expect("try_fill_bytes should never fail");
+
+        assert_eq!(fill_out, try_out);
+    }
+
+    #[test]
+    fn test_next_u64_uses_counter_mixed_blocks() {
+        let bytes = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let mut rng = FuzzRng::new(bytes.clone());
+
+        let mut source = [0u8; BLOCK_BYTES];
+        source.copy_from_slice(&bytes[..BLOCK_BYTES]);
+        let word = u64::from_le_bytes(source);
+        let mut expected = word ^ FUZZ_RNG_MIX_DOMAIN;
+        expected ^= expected >> 30;
+        expected = expected.wrapping_mul(0xbf58476d1ce4e5b9);
+        expected ^= expected >> 27;
+        expected = expected.wrapping_mul(0x94d049bb133111eb);
+        expected ^= expected >> 31;
+
+        assert_eq!(rng.next_u64(), expected);
+    }
+
+    #[test]
+    fn test_gen_range_bounds() {
+        let mut rng = FuzzRng::new((0..32u8).collect());
+        for upper in [1u64, 2, 3, 10, 255, 1024, u32::MAX as u64, u64::MAX] {
+            for _ in 0..256 {
+                let value = rng.gen_range(upper);
+                assert!(value < upper);
+            }
+        }
+    }
+
+    #[test]
+    fn test_gen_range_deterministic() {
+        let bytes: Vec<u8> = (0..32u8).collect();
+        let mut a = FuzzRng::new(bytes.clone());
+        let mut b = FuzzRng::new(bytes);
+        for _ in 0..512 {
+            assert_eq!(a.gen_range(97), b.gen_range(97));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "upper must be non-zero")]
+    fn test_gen_range_zero_panics() {
+        let mut rng = FuzzRng::new(vec![1, 2, 3]);
+        let _ = rng.gen_range(0);
     }
 
     mod conformance {
         use super::*;
         use commonware_conformance::Conformance;
 
-        /// Conformance wrapper for BytesRng that tests output stability.
+        /// Conformance wrapper for FuzzRng that tests output stability.
         ///
-        /// This ensures that the FNV-1a hash and fallback RNG behavior
-        /// remain stable across versions.
-        struct BytesRngConformance;
+        /// This ensures that counter-mixed expansion behavior
+        /// remains stable across versions.
+        struct FuzzRngConformance;
 
-        impl Conformance for BytesRngConformance {
+        impl Conformance for FuzzRngConformance {
             async fn commit(seed: u64) -> Vec<u8> {
-                let mut rng = BytesRng::new(seed.to_be_bytes().to_vec());
+                let mut rng = FuzzRng::new(seed.to_be_bytes().to_vec());
+                const CONFORMANCE_BLOCKS: usize = 32;
 
-                // Generate enough output to exercise both raw bytes and fallback
-                let mut output = Vec::with_capacity(64);
-                for _ in 0..8 {
-                    output.extend_from_slice(&rng.next_u64().to_be_bytes());
+                // Generate enough output to exercise wrapping and mixing.
+                let mut output = Vec::with_capacity(CONFORMANCE_BLOCKS * BLOCK_BYTES);
+                for _ in 0..CONFORMANCE_BLOCKS {
+                    output.extend_from_slice(&rng.next_u64().to_le_bytes());
                 }
                 output
             }
         }
 
         commonware_conformance::conformance_tests! {
-            BytesRngConformance => 1024,
+            FuzzRngConformance => 1024,
         }
     }
 }
