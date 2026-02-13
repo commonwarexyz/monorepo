@@ -115,8 +115,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
-        // TODO(#1833): Metrics should use the post-start context
-        let metrics = metrics::Metrics::init(context.clone());
+        let metrics = metrics::Metrics::default();
 
         let result = Self {
             context: ContextCell::new(context),
@@ -145,6 +144,9 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+        // Register metrics with the post-start context
+        self.metrics.register(self.context.as_ref());
+
         let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
 
         select_loop! {
