@@ -130,6 +130,7 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
+        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
         let status = &mut self.status;
         let dirty_chunks = &mut self.state.dirty_chunks;
         self.any
@@ -137,7 +138,10 @@ where
                 status.push(append);
                 if let Some(loc) = loc {
                     status.set_bit(*loc, false);
-                    dirty_chunks.insert(BitMap::<N>::to_chunk_index(*loc));
+                    let chunk = BitMap::<N>::to_chunk_index(*loc);
+                    if chunk < old_grafted_leaves {
+                        dirty_chunks.insert(chunk);
+                    }
                 }
             })
             .await

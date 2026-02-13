@@ -72,8 +72,10 @@ impl<D: Digest> State<D> for Merkleized<D> {
 
 /// Unmerkleized state: the database has pending changes not yet merkleized.
 pub struct Unmerkleized {
-    /// Bitmap chunks modified since the last merkleization. Each entry is an absolute chunk index
-    /// (accounting for pruning). May contain the index of the last, partial chunk.
+    /// Bitmap chunks modified since the last merkleization. Only contains chunks that were
+    /// complete at last merkleization (index < old_grafted_leaves). Chunks completed or created
+    /// since then are covered by the `old_grafted_leaves..new_grafted_leaves` range in
+    /// `into_merkleized`.
     pub(super) dirty_chunks: HashSet<usize>,
 }
 
@@ -377,14 +379,10 @@ where
         let new_grafted_leaves = status.complete_chunks();
 
         // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
+        // dirty_chunks is guaranteed to only contain indices < old_grafted_leaves, so no
+        // filtering or deduplication is needed.
         let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
-            .chain(
-                state
-                    .dirty_chunks
-                    .iter()
-                    .copied()
-                    .filter(|&c| c < old_grafted_leaves),
-            )
+            .chain(state.dirty_chunks.iter().copied())
             .map(|chunk_idx| (chunk_idx, *status.get_chunk(chunk_idx)));
         let grafted_leaves = compute_grafted_leaves::<H, N>(
             &mut any.log.hasher,
@@ -493,21 +491,25 @@ where
         metadata: Option<V::Value>,
     ) -> Result<Range<Location>, Error> {
         let start_loc = self.any.last_commit_loc + 1;
+        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
 
         // Inactivate the current commit operation.
         self.status.set_bit(*self.any.last_commit_loc, false);
-        self.state
-            .dirty_chunks
-            .insert(BitMap::<N>::to_chunk_index(*self.any.last_commit_loc));
+        let chunk = BitMap::<N>::to_chunk_index(*self.any.last_commit_loc);
+        if chunk < old_grafted_leaves {
+            self.state.dirty_chunks.insert(chunk);
+        }
 
         // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
         // previous commit becoming inactive.
         let dirty_chunks = &mut self.state.dirty_chunks;
         let inactivity_floor_loc = self
             .any
-            .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, new_loc| {
-                dirty_chunks.insert(BitMap::<N>::to_chunk_index(*old_loc));
-                dirty_chunks.insert(BitMap::<N>::to_chunk_index(*new_loc));
+            .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, _new_loc| {
+                let chunk = BitMap::<N>::to_chunk_index(*old_loc);
+                if chunk < old_grafted_leaves {
+                    dirty_chunks.insert(chunk);
+                }
             })
             .await?;
 
