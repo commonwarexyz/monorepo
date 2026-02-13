@@ -652,20 +652,119 @@ impl From<IoBuf> for IoBufMut {
 
 /// Container for one or more immutable buffers.
 #[derive(Debug)]
-pub enum IoBufs {
-    /// Single buffer (common case, no VecDeque allocation).
+pub struct IoBufs {
+    inner: IoBufsInner,
+}
+
+/// Internal immutable representation.
+///
+/// - Representation is canonical and minimal for readable data:
+///   - `Single` is the only representation for empty data and one-chunk data.
+///   - `Chunked` is used only when four or more readable chunks remain.
+/// - `Pair`, `Triple`, and `Chunked` never store empty chunks.
+#[derive(Debug)]
+enum IoBufsInner {
+    /// Single buffer (fast path).
     Single(IoBuf),
-    /// Multiple buffers.
+    /// Two buffers (fast path).
+    Pair([IoBuf; 2]),
+    /// Three buffers (fast path).
+    Triple([IoBuf; 3]),
+    /// Four or more buffers.
     Chunked(VecDeque<IoBuf>),
 }
 
 impl Default for IoBufs {
     fn default() -> Self {
-        Self::Single(IoBuf::default())
+        Self {
+            inner: IoBufsInner::Single(IoBuf::default()),
+        }
     }
 }
 
 impl IoBufs {
+    /// Build canonical immutable chunk storage from readable chunks.
+    ///
+    /// Empty chunks are removed before representation selection.
+    fn from_chunks_iter(chunks: impl IntoIterator<Item = IoBuf>) -> Self {
+        let mut iter = chunks.into_iter().filter(|buf| !buf.is_empty());
+        let first = match iter.next() {
+            Some(first) => first,
+            None => return Self::default(),
+        };
+        let second = match iter.next() {
+            Some(second) => second,
+            None => {
+                return Self {
+                    inner: IoBufsInner::Single(first),
+                };
+            }
+        };
+        let third = match iter.next() {
+            Some(third) => third,
+            None => {
+                return Self {
+                    inner: IoBufsInner::Pair([first, second]),
+                };
+            }
+        };
+        let fourth = match iter.next() {
+            Some(fourth) => fourth,
+            None => {
+                return Self {
+                    inner: IoBufsInner::Triple([first, second, third]),
+                };
+            }
+        };
+
+        let mut bufs = VecDeque::with_capacity(4);
+        bufs.push_back(first);
+        bufs.push_back(second);
+        bufs.push_back(third);
+        bufs.push_back(fourth);
+        bufs.extend(iter);
+
+        Self {
+            inner: IoBufsInner::Chunked(bufs),
+        }
+    }
+
+    /// Re-establish canonical immutable representation invariants.
+    fn canonicalize(&mut self) {
+        let inner = std::mem::replace(&mut self.inner, IoBufsInner::Single(IoBuf::default()));
+        self.inner = match inner {
+            IoBufsInner::Single(buf) => {
+                if buf.is_empty() {
+                    IoBufsInner::Single(IoBuf::default())
+                } else {
+                    IoBufsInner::Single(buf)
+                }
+            }
+            IoBufsInner::Pair([a, b]) => Self::from_chunks_iter([a, b]).inner,
+            IoBufsInner::Triple([a, b, c]) => Self::from_chunks_iter([a, b, c]).inner,
+            IoBufsInner::Chunked(bufs) => Self::from_chunks_iter(bufs).inner,
+        };
+    }
+
+    fn first_chunk_mut(&mut self) -> Option<&mut IoBuf> {
+        match &mut self.inner {
+            IoBufsInner::Single(buf) => Some(buf),
+            IoBufsInner::Pair(pair) => Some(&mut pair[0]),
+            IoBufsInner::Triple(triple) => Some(&mut triple[0]),
+            IoBufsInner::Chunked(bufs) => bufs.front_mut(),
+        }
+    }
+
+    /// Returns a reference to the single contiguous buffer, if present.
+    ///
+    /// Returns `Some` only when all remaining data is in one contiguous buffer.
+    pub const fn as_single(&self) -> Option<&IoBuf> {
+        match &self.inner {
+            IoBufsInner::Single(buf) => Some(buf),
+            _ => None,
+        }
+    }
+
     /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
@@ -683,45 +782,61 @@ impl IoBufs {
     /// When true, `chunk()` returns all remaining bytes.
     #[inline]
     pub const fn is_single(&self) -> bool {
-        matches!(self, Self::Single(_))
+        matches!(self.inner, IoBufsInner::Single(_))
     }
 
     /// Prepend a buffer to the front.
+    ///
+    /// Empty input buffers are ignored.
     pub fn prepend(&mut self, buf: IoBuf) {
         if buf.is_empty() {
             return;
         }
-        match std::mem::take(self) {
-            Self::Single(existing) if existing.is_empty() => {
-                *self = Self::Single(buf);
+        let inner = std::mem::replace(&mut self.inner, IoBufsInner::Single(IoBuf::default()));
+        self.inner = match inner {
+            IoBufsInner::Single(existing) if existing.is_empty() => IoBufsInner::Single(buf),
+            IoBufsInner::Single(existing) => IoBufsInner::Pair([buf, existing]),
+            IoBufsInner::Pair([a, b]) => IoBufsInner::Triple([buf, a, b]),
+            IoBufsInner::Triple([a, b, c]) => {
+                let mut bufs = VecDeque::with_capacity(4);
+                bufs.push_back(buf);
+                bufs.push_back(a);
+                bufs.push_back(b);
+                bufs.push_back(c);
+                IoBufsInner::Chunked(bufs)
             }
-            Self::Single(existing) => {
-                *self = Self::Chunked(VecDeque::from([buf, existing]));
-            }
-            Self::Chunked(mut bufs) => {
+            IoBufsInner::Chunked(mut bufs) => {
                 bufs.push_front(buf);
-                *self = Self::Chunked(bufs);
+                IoBufsInner::Chunked(bufs)
             }
-        }
+        };
     }
 
     /// Append a buffer to the back.
+    ///
+    /// Empty input buffers are ignored.
     pub fn append(&mut self, buf: IoBuf) {
         if buf.is_empty() {
             return;
         }
-        match std::mem::take(self) {
-            Self::Single(existing) if existing.is_empty() => {
-                *self = Self::Single(buf);
-            }
-            Self::Single(existing) => {
-                *self = Self::Chunked(VecDeque::from([existing, buf]));
-            }
-            Self::Chunked(mut bufs) => {
+        let inner = std::mem::replace(&mut self.inner, IoBufsInner::Single(IoBuf::default()));
+        self.inner = match inner {
+            IoBufsInner::Single(existing) if existing.is_empty() => IoBufsInner::Single(buf),
+            IoBufsInner::Single(existing) => IoBufsInner::Pair([existing, buf]),
+            IoBufsInner::Pair([a, b]) => IoBufsInner::Triple([a, b, buf]),
+            IoBufsInner::Triple([a, b, c]) => {
+                let mut bufs = VecDeque::with_capacity(4);
+                bufs.push_back(a);
+                bufs.push_back(b);
+                bufs.push_back(c);
                 bufs.push_back(buf);
-                *self = Self::Chunked(bufs);
+                IoBufsInner::Chunked(bufs)
             }
-        }
+            IoBufsInner::Chunked(mut bufs) => {
+                bufs.push_back(buf);
+                IoBufsInner::Chunked(bufs)
+            }
+        };
     }
 
     /// Coalesce all remaining bytes into a single contiguous `IoBuf`.
@@ -729,9 +844,9 @@ impl IoBufs {
     /// Zero-copy if only one buffer. Copies if multiple buffers.
     #[inline]
     pub fn coalesce(mut self) -> IoBuf {
-        match self {
-            Self::Single(buf) => buf,
-            Self::Chunked(_) => self.copy_to_bytes(self.remaining()).into(),
+        match self.inner {
+            IoBufsInner::Single(buf) => buf,
+            _ => self.copy_to_bytes(self.remaining()).into(),
         }
     }
 
@@ -740,9 +855,27 @@ impl IoBufs {
     ///
     /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
     pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBuf {
-        match self {
-            Self::Single(buf) => buf,
-            Self::Chunked(bufs) => {
+        match self.inner {
+            IoBufsInner::Single(buf) => buf,
+            IoBufsInner::Pair([a, b]) => {
+                let total_len = a.remaining().saturating_add(b.remaining());
+                let mut result = pool.alloc(total_len);
+                result.put_slice(a.as_ref());
+                result.put_slice(b.as_ref());
+                result.freeze()
+            }
+            IoBufsInner::Triple([a, b, c]) => {
+                let total_len = a
+                    .remaining()
+                    .saturating_add(b.remaining())
+                    .saturating_add(c.remaining());
+                let mut result = pool.alloc(total_len);
+                result.put_slice(a.as_ref());
+                result.put_slice(b.as_ref());
+                result.put_slice(c.as_ref());
+                result.freeze()
+            }
+            IoBufsInner::Chunked(bufs) => {
                 let total_len: usize = bufs
                     .iter()
                     .map(|b| b.remaining())
@@ -755,13 +888,145 @@ impl IoBufs {
             }
         }
     }
+
+    /// Drain `len` readable bytes from a two-chunk representation.
+    ///
+    /// Returns the drained bytes plus a flag indicating whether the caller
+    /// should canonicalize (for example when a chunk became empty).
+    fn copy_to_bytes_pair(pair: &mut [IoBuf; 2], len: usize) -> (Bytes, bool) {
+        let total = pair[0].remaining().saturating_add(pair[1].remaining());
+        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
+
+        // Fast path: the first chunk alone satisfies the request, so we keep
+        // zero-copy semantics from `IoBuf::copy_to_bytes`.
+        if pair[0].remaining() >= len {
+            let bytes = pair[0].copy_to_bytes(len);
+            // If chunk 0 was fully drained, we need to collapse Pair -> Single.
+            let needs_canonicalize = pair[0].remaining() == 0;
+            (bytes, needs_canonicalize)
+        } else {
+            // Slow path: read across both chunks, advancing in place so caller
+            // observes consumed bytes.
+            let mut out = BytesMut::with_capacity(len);
+            let mut remaining = len;
+            for buf in pair.iter_mut() {
+                if remaining == 0 {
+                    break;
+                }
+                let to_copy = remaining.min(buf.remaining());
+                out.extend_from_slice(&buf.chunk()[..to_copy]);
+                buf.advance(to_copy);
+                remaining -= to_copy;
+            }
+            // Any exhausted chunk means we should remove empties and re-shape.
+            let needs_canonicalize = pair.iter().any(|buf| buf.remaining() == 0);
+            (out.freeze(), needs_canonicalize)
+        }
+    }
+
+    /// Drain `len` readable bytes from a three-chunk representation.
+    ///
+    /// Returns the drained bytes plus a flag indicating whether the caller
+    /// should canonicalize (for example when a chunk became empty).
+    fn copy_to_bytes_triple(triple: &mut [IoBuf; 3], len: usize) -> (Bytes, bool) {
+        let total = triple[0]
+            .remaining()
+            .saturating_add(triple[1].remaining())
+            .saturating_add(triple[2].remaining());
+        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
+
+        // Fast path: same idea as Pair, but for the 3-chunk layout.
+        if triple[0].remaining() >= len {
+            let bytes = triple[0].copy_to_bytes(len);
+            // If chunk 0 was fully drained, Triple can collapse after cleanup.
+            let needs_canonicalize = triple[0].remaining() == 0;
+            (bytes, needs_canonicalize)
+        } else {
+            // Slow path: copy across chunk boundaries while advancing sources.
+            let mut out = BytesMut::with_capacity(len);
+            let mut remaining = len;
+            for buf in triple.iter_mut() {
+                if remaining == 0 {
+                    break;
+                }
+                let to_copy = remaining.min(buf.remaining());
+                out.extend_from_slice(&buf.chunk()[..to_copy]);
+                buf.advance(to_copy);
+                remaining -= to_copy;
+            }
+            // Any exhausted chunk means representation likely needs to shrink.
+            let needs_canonicalize = triple.iter().any(|buf| buf.remaining() == 0);
+            (out.freeze(), needs_canonicalize)
+        }
+    }
+
+    /// Drain `len` readable bytes from a deque-backed multi-chunk representation.
+    ///
+    /// Returns the drained bytes plus a flag indicating whether the caller
+    /// should canonicalize (for example when the deque shrank to <= 3 chunks).
+    fn copy_to_bytes_chunked(bufs: &mut VecDeque<IoBuf>, len: usize) -> (Bytes, bool) {
+        // Defensive cleanup: remove empty front chunks before doing any work.
+        while bufs.front().is_some_and(|buf| buf.remaining() == 0) {
+            bufs.pop_front();
+        }
+
+        if bufs.front().is_none() {
+            assert_eq!(len, 0, "IoBufs::copy_to_bytes: not enough data");
+            return (Bytes::new(), false);
+        }
+
+        // Fast path: front chunk alone satisfies the request.
+        if bufs.front().is_some_and(|front| front.remaining() >= len) {
+            let front = bufs.front_mut().expect("front checked above");
+            let bytes = front.copy_to_bytes(len);
+            if front.remaining() == 0 {
+                // Preserve invariant: do not keep drained chunks in deque.
+                bufs.pop_front();
+            }
+            // If size shrank into fast-path range, rebuild as Pair/Triple/Single.
+            let needs_canonicalize = bufs.len() <= 3;
+            return (bytes, needs_canonicalize);
+        }
+
+        let total = bufs
+            .iter()
+            .map(|buf| buf.remaining())
+            .fold(0, usize::saturating_add);
+        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
+
+        // Multi-chunk path: consume from the front until we produce exactly `len`.
+        let mut out = BytesMut::with_capacity(len);
+        let mut remaining = len;
+        while remaining > 0 {
+            let front = bufs
+                .front_mut()
+                .expect("remaining > 0 implies non-empty bufs");
+            let to_copy = remaining.min(front.remaining());
+            out.extend_from_slice(&front.chunk()[..to_copy]);
+            front.advance(to_copy);
+            if front.remaining() == 0 {
+                // Keep deque normalized as chunks are fully consumed.
+                bufs.pop_front();
+            }
+            remaining -= to_copy;
+        }
+
+        // Shrink back into specialized representations when possible.
+        let needs_canonicalize = bufs.len() <= 3;
+        (out.freeze(), needs_canonicalize)
+    }
 }
 
 impl Buf for IoBufs {
     fn remaining(&self) -> usize {
-        match self {
-            Self::Single(buf) => buf.remaining(),
-            Self::Chunked(bufs) => bufs
+        match &self.inner {
+            IoBufsInner::Single(buf) => buf.remaining(),
+            IoBufsInner::Pair([a, b]) => a.remaining().saturating_add(b.remaining()),
+            IoBufsInner::Triple([a, b, c]) => a
+                .remaining()
+                .saturating_add(b.remaining())
+                .saturating_add(c.remaining()),
+            IoBufsInner::Chunked(bufs) => bufs
                 .iter()
                 .map(|b| b.remaining())
                 .fold(0, usize::saturating_add),
@@ -769,9 +1034,29 @@ impl Buf for IoBufs {
     }
 
     fn chunk(&self) -> &[u8] {
-        match self {
-            Self::Single(buf) => buf.chunk(),
-            Self::Chunked(bufs) => {
+        match &self.inner {
+            IoBufsInner::Single(buf) => buf.chunk(),
+            IoBufsInner::Pair([a, b]) => {
+                if a.remaining() > 0 {
+                    a.chunk()
+                } else if b.remaining() > 0 {
+                    b.chunk()
+                } else {
+                    &[]
+                }
+            }
+            IoBufsInner::Triple([a, b, c]) => {
+                if a.remaining() > 0 {
+                    a.chunk()
+                } else if b.remaining() > 0 {
+                    b.chunk()
+                } else if c.remaining() > 0 {
+                    c.chunk()
+                } else {
+                    &[]
+                }
+            }
+            IoBufsInner::Chunked(bufs) => {
                 for buf in bufs.iter() {
                     if buf.remaining() > 0 {
                         return buf.chunk();
@@ -783,79 +1068,58 @@ impl Buf for IoBufs {
     }
 
     fn advance(&mut self, mut cnt: usize) {
-        let bufs = match self {
-            Self::Single(buf) => return buf.advance(cnt),
-            Self::Chunked(bufs) => bufs,
-        };
+        match &mut self.inner {
+            IoBufsInner::Single(buf) => return buf.advance(cnt),
+            IoBufsInner::Pair(_) | IoBufsInner::Triple(_) | IoBufsInner::Chunked(_) => {}
+        }
 
         while cnt > 0 {
-            let front = bufs.front_mut().expect("cannot advance past end of buffer");
+            let front = self
+                .first_chunk_mut()
+                .expect("cannot advance past end of buffer");
             let avail = front.remaining();
-            if cnt >= avail {
-                bufs.pop_front();
-                cnt -= avail;
-            } else {
+            if avail == 0 {
+                panic!("cannot advance past end of buffer");
+            }
+            if cnt < avail {
                 front.advance(cnt);
                 return;
             }
+            front.advance(avail);
+            cnt -= avail;
+            self.canonicalize();
         }
     }
 
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        let bufs = match self {
-            Self::Single(buf) => return buf.copy_to_bytes(len),
-            Self::Chunked(bufs) => bufs,
+        let (result, needs_canonicalize) = match &mut self.inner {
+            IoBufsInner::Single(buf) => return buf.copy_to_bytes(len),
+            IoBufsInner::Pair(pair) => Self::copy_to_bytes_pair(pair, len),
+            IoBufsInner::Triple(triple) => Self::copy_to_bytes_triple(triple, len),
+            IoBufsInner::Chunked(bufs) => Self::copy_to_bytes_chunked(bufs, len),
         };
 
-        // Remove exhausted buffers from front
-        while bufs.front().is_some_and(|b| b.remaining() == 0) {
-            bufs.pop_front();
+        if needs_canonicalize {
+            self.canonicalize();
         }
 
-        // If the first buffer has all the data we need, use its optimized copy_to_bytes
-        if let Some(front) = bufs.front_mut() {
-            if front.remaining() >= len {
-                return front.copy_to_bytes(len);
-            }
-        }
-
-        // Otherwise, copy from multiple buffers
-        let total: usize = bufs
-            .iter()
-            .map(|b| b.remaining())
-            .fold(0, usize::saturating_add);
-
-        assert!(total >= len, "IoBufs::copy_to_bytes: not enough data");
-
-        let mut result = BytesMut::with_capacity(len);
-        let mut remaining = len;
-        while remaining > 0 {
-            let front = bufs
-                .front_mut()
-                .expect("remaining > 0 implies non-empty bufs");
-            let avail = front.remaining();
-            let to_copy = remaining.min(avail);
-            result.extend_from_slice(&front.chunk()[..to_copy]);
-            front.advance(to_copy);
-            if front.remaining() == 0 {
-                bufs.pop_front();
-            }
-            remaining -= to_copy;
-        }
-
-        result.freeze()
+        result
     }
 }
 
 impl From<IoBuf> for IoBufs {
     fn from(buf: IoBuf) -> Self {
-        Self::Single(buf)
+        Self {
+            inner: IoBufsInner::Single(buf),
+        }
     }
 }
 
 impl From<IoBufMut> for IoBufs {
     fn from(buf: IoBufMut) -> Self {
-        Self::Single(buf.freeze())
+        Self {
+            inner: IoBufsInner::Single(buf.freeze()),
+        }
     }
 }
 
@@ -877,6 +1141,12 @@ impl From<Vec<u8>> for IoBufs {
     }
 }
 
+impl From<Vec<IoBuf>> for IoBufs {
+    fn from(bufs: Vec<IoBuf>) -> Self {
+        Self::from_chunks_iter(bufs)
+    }
+}
+
 impl<const N: usize> From<&'static [u8; N]> for IoBufs {
     fn from(array: &'static [u8; N]) -> Self {
         Self::from(IoBuf::from(array))
@@ -891,20 +1161,181 @@ impl From<&'static [u8]> for IoBufs {
 
 /// Container for one or more mutable buffers.
 #[derive(Debug)]
-pub enum IoBufsMut {
-    /// Single buffer (common case, no VecDeque allocation).
+pub struct IoBufsMut {
+    inner: IoBufsMutInner,
+}
+
+/// Internal mutable representation.
+///
+/// - Representation is canonical and minimal for currently readable data:
+///   - `Single` is the only representation for empty data and one-chunk data.
+///   - `Chunked` is used only when four or more readable chunks remain.
+/// - Construction from user-provided chunks keeps only chunks with
+///   non-zero capacity.
+/// - Post-read/advance canonicalization removes fully-drained chunks from
+///   multi-chunk variants and collapses to `Single` when zero or one readable
+///   chunks remain.
+#[derive(Debug)]
+enum IoBufsMutInner {
+    /// Single buffer (common case, no allocation).
     Single(IoBufMut),
-    /// Multiple buffers for vectored reads.
+    /// Two buffers (fast path, no VecDeque allocation).
+    Pair([IoBufMut; 2]),
+    /// Three buffers (fast path, no VecDeque allocation).
+    Triple([IoBufMut; 3]),
+    /// Four or more buffers.
     Chunked(VecDeque<IoBufMut>),
 }
 
 impl Default for IoBufsMut {
     fn default() -> Self {
-        Self::Single(IoBufMut::default())
+        Self {
+            inner: IoBufsMutInner::Single(IoBufMut::default()),
+        }
     }
 }
 
 impl IoBufsMut {
+    /// Build canonical mutable chunk storage from pre-filtered chunks.
+    ///
+    /// This function assumes filtering has already been applied by the caller.
+    fn from_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
+        let mut iter = chunks.into_iter();
+        let first = match iter.next() {
+            Some(first) => first,
+            None => return Self::default(),
+        };
+        let second = match iter.next() {
+            Some(second) => second,
+            None => {
+                return Self {
+                    inner: IoBufsMutInner::Single(first),
+                };
+            }
+        };
+        let third = match iter.next() {
+            Some(third) => third,
+            None => {
+                return Self {
+                    inner: IoBufsMutInner::Pair([first, second]),
+                };
+            }
+        };
+        let fourth = match iter.next() {
+            Some(fourth) => fourth,
+            None => {
+                return Self {
+                    inner: IoBufsMutInner::Triple([first, second, third]),
+                };
+            }
+        };
+
+        let mut bufs = VecDeque::with_capacity(4);
+        bufs.push_back(first);
+        bufs.push_back(second);
+        bufs.push_back(third);
+        bufs.push_back(fourth);
+        bufs.extend(iter);
+        Self {
+            inner: IoBufsMutInner::Chunked(bufs),
+        }
+    }
+
+    /// Build canonical mutable chunk storage from writable chunks.
+    ///
+    /// Chunks with zero capacity are removed.
+    fn from_writable_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
+        // Keep chunks that can hold data (including len == 0 writable buffers).
+        Self::from_chunks_iter(chunks.into_iter().filter(|buf| buf.capacity() > 0))
+    }
+
+    /// Build canonical mutable chunk storage from readable chunks.
+    ///
+    /// Chunks with no remaining readable bytes are removed.
+    fn from_readable_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
+        Self::from_chunks_iter(chunks.into_iter().filter(|buf| buf.remaining() > 0))
+    }
+
+    /// Re-establish canonical mutable representation invariants.
+    fn canonicalize(&mut self) {
+        let inner = std::mem::replace(&mut self.inner, IoBufsMutInner::Single(IoBufMut::default()));
+        self.inner = match inner {
+            IoBufsMutInner::Single(buf) => IoBufsMutInner::Single(buf),
+            IoBufsMutInner::Pair([a, b]) => Self::from_readable_chunks_iter([a, b]).inner,
+            IoBufsMutInner::Triple([a, b, c]) => Self::from_readable_chunks_iter([a, b, c]).inner,
+            IoBufsMutInner::Chunked(bufs) => Self::from_readable_chunks_iter(bufs).inner,
+        };
+    }
+
+    fn first_chunk_mut(&mut self) -> Option<&mut IoBufMut> {
+        match &mut self.inner {
+            IoBufsMutInner::Single(buf) => Some(buf),
+            IoBufsMutInner::Pair(pair) => Some(&mut pair[0]),
+            IoBufsMutInner::Triple(triple) => Some(&mut triple[0]),
+            IoBufsMutInner::Chunked(bufs) => bufs.front_mut(),
+        }
+    }
+
+    #[inline]
+    fn for_each_chunk_mut(&mut self, mut f: impl FnMut(&mut IoBufMut)) {
+        match &mut self.inner {
+            IoBufsMutInner::Single(buf) => f(buf),
+            IoBufsMutInner::Pair(pair) => {
+                for buf in pair.iter_mut() {
+                    f(buf);
+                }
+            }
+            IoBufsMutInner::Triple(triple) => {
+                for buf in triple.iter_mut() {
+                    f(buf);
+                }
+            }
+            IoBufsMutInner::Chunked(bufs) => {
+                for buf in bufs.iter_mut() {
+                    f(buf);
+                }
+            }
+        }
+    }
+
+    /// Advance writable cursors across `chunks` by up to `*remaining` bytes.
+    ///
+    /// Returns `true` when the full request has been satisfied.
+    #[inline]
+    unsafe fn advance_mut_in_chunks(chunks: &mut [IoBufMut], remaining: &mut usize) -> bool {
+        for buf in chunks.iter_mut() {
+            let avail = buf.remaining_mut();
+            if *remaining <= avail {
+                buf.advance_mut(*remaining);
+                *remaining = 0;
+                return true;
+            }
+            buf.advance_mut(avail);
+            *remaining -= avail;
+        }
+        false
+    }
+
+    /// Returns a reference to the single contiguous buffer, if present.
+    ///
+    /// Returns `Some` only when all remaining data is in one contiguous buffer.
+    pub const fn as_single(&self) -> Option<&IoBufMut> {
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => Some(buf),
+            _ => None,
+        }
+    }
+
+    /// Returns a mutable reference to the single contiguous buffer, if present.
+    ///
+    /// Returns `Some` only when all remaining data is in one contiguous buffer.
+    pub const fn as_single_mut(&mut self) -> Option<&mut IoBufMut> {
+        match &mut self.inner {
+            IoBufsMutInner::Single(buf) => Some(buf),
+            _ => None,
+        }
+    }
+
     /// Number of bytes remaining across all buffers.
     #[inline]
     pub fn len(&self) -> usize {
@@ -922,26 +1353,19 @@ impl IoBufsMut {
     /// When true, `chunk()` returns all remaining bytes.
     #[inline]
     pub const fn is_single(&self) -> bool {
-        matches!(self, Self::Single(_))
+        matches!(self.inner, IoBufsMutInner::Single(_))
     }
 
     /// Freeze into immutable `IoBufs`.
     pub fn freeze(self) -> IoBufs {
-        match self {
-            Self::Single(buf) => IoBufs::Single(buf.freeze()),
-            Self::Chunked(bufs) => {
-                let mut frozen: VecDeque<IoBuf> = bufs
-                    .into_iter()
-                    .map(|b| b.freeze())
-                    .filter(|b| !b.is_empty())
-                    .collect();
-                if frozen.len() == 1 {
-                    IoBufs::Single(frozen.pop_front().unwrap())
-                } else if frozen.is_empty() {
-                    IoBufs::Single(IoBuf::default())
-                } else {
-                    IoBufs::Chunked(frozen)
-                }
+        match self.inner {
+            IoBufsMutInner::Single(buf) => IoBufs::from(buf.freeze()),
+            IoBufsMutInner::Pair([a, b]) => IoBufs::from_chunks_iter([a.freeze(), b.freeze()]),
+            IoBufsMutInner::Triple([a, b, c]) => {
+                IoBufs::from_chunks_iter([a.freeze(), b.freeze(), c.freeze()])
+            }
+            IoBufsMutInner::Chunked(bufs) => {
+                IoBufs::from_chunks_iter(bufs.into_iter().map(IoBufMut::freeze))
             }
         }
     }
@@ -950,9 +1374,24 @@ impl IoBufsMut {
     where
         F: FnOnce(usize) -> IoBufMut,
     {
-        match self {
-            Self::Single(buf) => buf,
-            Self::Chunked(bufs) => {
+        match self.inner {
+            IoBufsMutInner::Single(buf) => buf,
+            IoBufsMutInner::Pair([a, b]) => {
+                let total_len = a.len().saturating_add(b.len());
+                let mut result = allocate(total_len);
+                result.put_slice(a.as_ref());
+                result.put_slice(b.as_ref());
+                result
+            }
+            IoBufsMutInner::Triple([a, b, c]) => {
+                let total_len = a.len().saturating_add(b.len()).saturating_add(c.len());
+                let mut result = allocate(total_len);
+                result.put_slice(a.as_ref());
+                result.put_slice(b.as_ref());
+                result.put_slice(c.as_ref());
+                result
+            }
+            IoBufsMutInner::Chunked(bufs) => {
                 let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
                 let mut result = allocate(total_len);
                 for buf in bufs {
@@ -983,14 +1422,29 @@ impl IoBufsMut {
     ///
     /// Zero-copy if single buffer with sufficient spare capacity.
     pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
-        match self {
-            Self::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
-            Self::Single(buf) => {
+        match self.inner {
+            IoBufsMutInner::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
+            IoBufsMutInner::Single(buf) => {
                 let mut result = pool.alloc(buf.len() + extra);
                 result.put_slice(buf.as_ref());
                 result
             }
-            Self::Chunked(bufs) => {
+            IoBufsMutInner::Pair([a, b]) => {
+                let total = a.len().saturating_add(b.len());
+                let mut result = pool.alloc(total + extra);
+                result.put_slice(a.as_ref());
+                result.put_slice(b.as_ref());
+                result
+            }
+            IoBufsMutInner::Triple([a, b, c]) => {
+                let total = a.len().saturating_add(b.len()).saturating_add(c.len());
+                let mut result = pool.alloc(total + extra);
+                result.put_slice(a.as_ref());
+                result.put_slice(b.as_ref());
+                result.put_slice(c.as_ref());
+                result
+            }
+            IoBufsMutInner::Chunked(bufs) => {
                 let total: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
                 let mut result = pool.alloc(total + extra);
                 for buf in bufs {
@@ -1003,9 +1457,14 @@ impl IoBufsMut {
 
     /// Returns the total capacity across all buffers.
     pub fn capacity(&self) -> usize {
-        match self {
-            Self::Single(buf) => buf.capacity(),
-            Self::Chunked(bufs) => bufs
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.capacity(),
+            IoBufsMutInner::Pair([a, b]) => a.capacity().saturating_add(b.capacity()),
+            IoBufsMutInner::Triple([a, b, c]) => a
+                .capacity()
+                .saturating_add(b.capacity())
+                .saturating_add(c.capacity()),
+            IoBufsMutInner::Chunked(bufs) => bufs
                 .iter()
                 .map(|b| b.capacity())
                 .fold(0, usize::saturating_add),
@@ -1013,6 +1472,10 @@ impl IoBufsMut {
     }
 
     /// Sets the length of the buffer(s) to `len`, distributing across chunks.
+    ///
+    /// After setting lengths, representation is canonicalized, so fully-drained
+    /// chunks are removed and the shape may collapse (for example, multi-chunk
+    /// to `Single` when `len == 0`).
     ///
     /// # Safety
     ///
@@ -1022,23 +1485,19 @@ impl IoBufsMut {
     ///
     /// Panics if `len` exceeds total capacity.
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
+        let capacity = self.capacity();
         assert!(
-            len <= self.capacity(),
-            "set_len({len}) exceeds capacity({})",
-            self.capacity()
+            len <= capacity,
+            "set_len({len}) exceeds capacity({capacity})"
         );
-        match self {
-            Self::Single(buf) => buf.set_len(len),
-            Self::Chunked(bufs) => {
-                let mut remaining = len;
-                for buf in bufs.iter_mut() {
-                    let cap = buf.capacity();
-                    let to_set = remaining.min(cap);
-                    buf.set_len(to_set);
-                    remaining -= to_set;
-                }
-            }
-        }
+        let mut remaining = len;
+        self.for_each_chunk_mut(|buf| {
+            let cap = buf.capacity();
+            let to_set = remaining.min(cap);
+            buf.set_len(to_set);
+            remaining -= to_set;
+        });
+        self.canonicalize();
     }
 
     /// Copy data from a slice into the buffers.
@@ -1050,25 +1509,150 @@ impl IoBufsMut {
             self.len(),
             "source slice length must match buffer length"
         );
-        match self {
-            Self::Single(buf) => buf.as_mut().copy_from_slice(src),
-            Self::Chunked(bufs) => {
-                let mut offset = 0;
-                for buf in bufs.iter_mut() {
-                    let len = buf.len();
-                    buf.as_mut().copy_from_slice(&src[offset..offset + len]);
-                    offset += len;
+        let mut offset = 0;
+        self.for_each_chunk_mut(|buf| {
+            let len = buf.len();
+            buf.as_mut().copy_from_slice(&src[offset..offset + len]);
+            offset += len;
+        });
+    }
+
+    /// Drain `len` readable bytes from a two-chunk representation.
+    ///
+    /// Returns the drained bytes plus a flag indicating whether the caller
+    /// should canonicalize (for example when a chunk became empty).
+    fn copy_to_bytes_pair(pair: &mut [IoBufMut; 2], len: usize) -> (Bytes, bool) {
+        let total = pair[0].remaining().saturating_add(pair[1].remaining());
+        assert!(total >= len, "IoBufsMut::copy_to_bytes: not enough data");
+
+        // Fast path: first chunk alone satisfies the request.
+        if pair[0].remaining() >= len {
+            let bytes = pair[0].copy_to_bytes(len);
+            // If chunk 0 was fully drained, Pair can collapse after cleanup.
+            let needs_canonicalize = pair[0].remaining() == 0;
+            (bytes, needs_canonicalize)
+        } else {
+            // Slow path: copy across both chunks while advancing sources.
+            let mut out = BytesMut::with_capacity(len);
+            let mut remaining = len;
+            for buf in pair.iter_mut() {
+                if remaining == 0 {
+                    break;
                 }
+                let to_copy = remaining.min(buf.remaining());
+                out.extend_from_slice(&buf.chunk()[..to_copy]);
+                buf.advance(to_copy);
+                remaining -= to_copy;
             }
+            // Any exhausted chunk means representation likely needs to shrink.
+            let needs_canonicalize = pair.iter().any(|buf| buf.remaining() == 0);
+            (out.freeze(), needs_canonicalize)
         }
+    }
+
+    /// Drain `len` readable bytes from a three-chunk representation.
+    ///
+    /// Returns the drained bytes plus a flag indicating whether the caller
+    /// should canonicalize (for example when a chunk became empty).
+    fn copy_to_bytes_triple(triple: &mut [IoBufMut; 3], len: usize) -> (Bytes, bool) {
+        let total = triple[0]
+            .remaining()
+            .saturating_add(triple[1].remaining())
+            .saturating_add(triple[2].remaining());
+        assert!(total >= len, "IoBufsMut::copy_to_bytes: not enough data");
+
+        // Fast path: same idea as Pair, but for the 3-chunk layout.
+        if triple[0].remaining() >= len {
+            let bytes = triple[0].copy_to_bytes(len);
+            // If chunk 0 was fully drained, Triple can collapse after cleanup.
+            let needs_canonicalize = triple[0].remaining() == 0;
+            (bytes, needs_canonicalize)
+        } else {
+            // Slow path: copy across chunk boundaries while advancing sources.
+            let mut out = BytesMut::with_capacity(len);
+            let mut remaining = len;
+            for buf in triple.iter_mut() {
+                if remaining == 0 {
+                    break;
+                }
+                let to_copy = remaining.min(buf.remaining());
+                out.extend_from_slice(&buf.chunk()[..to_copy]);
+                buf.advance(to_copy);
+                remaining -= to_copy;
+            }
+            // Any exhausted chunk means representation likely needs to shrink.
+            let needs_canonicalize = triple.iter().any(|buf| buf.remaining() == 0);
+            (out.freeze(), needs_canonicalize)
+        }
+    }
+
+    /// Drain `len` readable bytes from a deque-backed multi-chunk representation.
+    ///
+    /// Returns the drained bytes plus a flag indicating whether the caller
+    /// should canonicalize (for example when the deque shrank to <= 3 chunks).
+    fn copy_to_bytes_chunked(bufs: &mut VecDeque<IoBufMut>, len: usize) -> (Bytes, bool) {
+        // Defensive cleanup: remove empty front chunks before doing any work.
+        while bufs.front().is_some_and(|buf| buf.remaining() == 0) {
+            bufs.pop_front();
+        }
+
+        if bufs.front().is_none() {
+            assert_eq!(len, 0, "IoBufsMut::copy_to_bytes: not enough data");
+            return (Bytes::new(), false);
+        }
+
+        // Fast path: front chunk alone satisfies the request.
+        if bufs.front().is_some_and(|front| front.remaining() >= len) {
+            let front = bufs.front_mut().expect("front checked above");
+            let bytes = front.copy_to_bytes(len);
+            if front.remaining() == 0 {
+                // Preserve invariant: do not keep drained chunks in deque.
+                bufs.pop_front();
+            }
+            // If size shrank into fast-path range, rebuild as Pair/Triple/Single.
+            let needs_canonicalize = bufs.len() <= 3;
+            return (bytes, needs_canonicalize);
+        }
+
+        let total = bufs
+            .iter()
+            .map(|buf| buf.remaining())
+            .fold(0, usize::saturating_add);
+        assert!(total >= len, "IoBufsMut::copy_to_bytes: not enough data");
+
+        // Multi-chunk path: consume from the front until we produce exactly `len`.
+        let mut out = BytesMut::with_capacity(len);
+        let mut remaining = len;
+        while remaining > 0 {
+            let front = bufs
+                .front_mut()
+                .expect("remaining > 0 implies non-empty bufs");
+            let to_copy = remaining.min(front.remaining());
+            out.extend_from_slice(&front.chunk()[..to_copy]);
+            front.advance(to_copy);
+            if front.remaining() == 0 {
+                // Keep deque normalized as chunks are fully consumed.
+                bufs.pop_front();
+            }
+            remaining -= to_copy;
+        }
+
+        // Shrink back into specialized representations when possible.
+        let needs_canonicalize = bufs.len() <= 3;
+        (out.freeze(), needs_canonicalize)
     }
 }
 
 impl Buf for IoBufsMut {
     fn remaining(&self) -> usize {
-        match self {
-            Self::Single(buf) => buf.remaining(),
-            Self::Chunked(bufs) => bufs
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.remaining(),
+            IoBufsMutInner::Pair([a, b]) => a.remaining().saturating_add(b.remaining()),
+            IoBufsMutInner::Triple([a, b, c]) => a
+                .remaining()
+                .saturating_add(b.remaining())
+                .saturating_add(c.remaining()),
+            IoBufsMutInner::Chunked(bufs) => bufs
                 .iter()
                 .map(|b| b.remaining())
                 .fold(0, usize::saturating_add),
@@ -1076,9 +1660,29 @@ impl Buf for IoBufsMut {
     }
 
     fn chunk(&self) -> &[u8] {
-        match self {
-            Self::Single(buf) => buf.chunk(),
-            Self::Chunked(bufs) => {
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.chunk(),
+            IoBufsMutInner::Pair([a, b]) => {
+                if a.remaining() > 0 {
+                    a.chunk()
+                } else if b.remaining() > 0 {
+                    b.chunk()
+                } else {
+                    &[]
+                }
+            }
+            IoBufsMutInner::Triple([a, b, c]) => {
+                if a.remaining() > 0 {
+                    a.chunk()
+                } else if b.remaining() > 0 {
+                    b.chunk()
+                } else if c.remaining() > 0 {
+                    c.chunk()
+                } else {
+                    &[]
+                }
+            }
+            IoBufsMutInner::Chunked(bufs) => {
                 for buf in bufs.iter() {
                     if buf.remaining() > 0 {
                         return buf.chunk();
@@ -1090,22 +1694,42 @@ impl Buf for IoBufsMut {
     }
 
     fn advance(&mut self, mut cnt: usize) {
-        let bufs = match self {
-            Self::Single(buf) => return buf.advance(cnt),
-            Self::Chunked(bufs) => bufs,
-        };
+        match &mut self.inner {
+            IoBufsMutInner::Single(buf) => return buf.advance(cnt),
+            IoBufsMutInner::Pair(_) | IoBufsMutInner::Triple(_) | IoBufsMutInner::Chunked(_) => {}
+        }
 
         while cnt > 0 {
-            let front = bufs.front_mut().expect("cannot advance past end of buffer");
+            let front = self
+                .first_chunk_mut()
+                .expect("cannot advance past end of buffer");
             let avail = front.remaining();
-            if cnt >= avail {
-                bufs.pop_front();
-                cnt -= avail;
-            } else {
+            if avail == 0 {
+                panic!("cannot advance past end of buffer");
+            }
+            if cnt < avail {
                 front.advance(cnt);
                 return;
             }
+            front.advance(avail);
+            cnt -= avail;
+            self.canonicalize();
         }
+    }
+
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        let (result, needs_canonicalize) = match &mut self.inner {
+            IoBufsMutInner::Single(buf) => return buf.copy_to_bytes(len),
+            IoBufsMutInner::Pair(pair) => Self::copy_to_bytes_pair(pair, len),
+            IoBufsMutInner::Triple(triple) => Self::copy_to_bytes_triple(triple, len),
+            IoBufsMutInner::Chunked(bufs) => Self::copy_to_bytes_chunked(bufs, len),
+        };
+
+        if needs_canonicalize {
+            self.canonicalize();
+        }
+
+        result
     }
 }
 
@@ -1113,9 +1737,14 @@ impl Buf for IoBufsMut {
 unsafe impl BufMut for IoBufsMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
-        match self {
-            Self::Single(buf) => buf.remaining_mut(),
-            Self::Chunked(bufs) => bufs
+        match &self.inner {
+            IoBufsMutInner::Single(buf) => buf.remaining_mut(),
+            IoBufsMutInner::Pair([a, b]) => a.remaining_mut().saturating_add(b.remaining_mut()),
+            IoBufsMutInner::Triple([a, b, c]) => a
+                .remaining_mut()
+                .saturating_add(b.remaining_mut())
+                .saturating_add(c.remaining_mut()),
+            IoBufsMutInner::Chunked(bufs) => bufs
                 .iter()
                 .map(|b| b.remaining_mut())
                 .fold(0, usize::saturating_add),
@@ -1124,18 +1753,29 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        match self {
-            Self::Single(buf) => buf.advance_mut(cnt),
-            Self::Chunked(bufs) => {
+        match &mut self.inner {
+            IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
+            IoBufsMutInner::Pair(pair) => {
                 let mut remaining = cnt;
-                for buf in bufs.iter_mut() {
-                    let avail = buf.remaining_mut();
-                    if remaining <= avail {
-                        buf.advance_mut(remaining);
-                        return;
-                    }
-                    buf.advance_mut(avail);
-                    remaining -= avail;
+                if Self::advance_mut_in_chunks(pair, &mut remaining) {
+                    return;
+                }
+                panic!("cannot advance past end of buffer");
+            }
+            IoBufsMutInner::Triple(triple) => {
+                let mut remaining = cnt;
+                if Self::advance_mut_in_chunks(triple, &mut remaining) {
+                    return;
+                }
+                panic!("cannot advance past end of buffer");
+            }
+            IoBufsMutInner::Chunked(bufs) => {
+                let mut remaining = cnt;
+                let (first, second) = bufs.as_mut_slices();
+                if Self::advance_mut_in_chunks(first, &mut remaining)
+                    || Self::advance_mut_in_chunks(second, &mut remaining)
+                {
+                    return;
                 }
                 panic!("cannot advance past end of buffer");
             }
@@ -1144,9 +1784,29 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        match self {
-            Self::Single(buf) => buf.chunk_mut(),
-            Self::Chunked(bufs) => {
+        match &mut self.inner {
+            IoBufsMutInner::Single(buf) => buf.chunk_mut(),
+            IoBufsMutInner::Pair(pair) => {
+                if pair[0].remaining_mut() > 0 {
+                    pair[0].chunk_mut()
+                } else if pair[1].remaining_mut() > 0 {
+                    pair[1].chunk_mut()
+                } else {
+                    bytes::buf::UninitSlice::new(&mut [])
+                }
+            }
+            IoBufsMutInner::Triple(triple) => {
+                if triple[0].remaining_mut() > 0 {
+                    triple[0].chunk_mut()
+                } else if triple[1].remaining_mut() > 0 {
+                    triple[1].chunk_mut()
+                } else if triple[2].remaining_mut() > 0 {
+                    triple[2].chunk_mut()
+                } else {
+                    bytes::buf::UninitSlice::new(&mut [])
+                }
+            }
+            IoBufsMutInner::Chunked(bufs) => {
                 for buf in bufs.iter_mut() {
                     if buf.remaining_mut() > 0 {
                         return buf.chunk_mut();
@@ -1160,35 +1820,39 @@ unsafe impl BufMut for IoBufsMut {
 
 impl From<IoBufMut> for IoBufsMut {
     fn from(buf: IoBufMut) -> Self {
-        Self::Single(buf)
+        Self {
+            inner: IoBufsMutInner::Single(buf),
+        }
     }
 }
 
 impl From<Vec<u8>> for IoBufsMut {
     fn from(vec: Vec<u8>) -> Self {
-        Self::Single(IoBufMut::from(vec))
+        Self {
+            inner: IoBufsMutInner::Single(IoBufMut::from(vec)),
+        }
     }
 }
 
 impl From<BytesMut> for IoBufsMut {
     fn from(bytes: BytesMut) -> Self {
-        Self::Single(IoBufMut::from(bytes))
+        Self {
+            inner: IoBufsMutInner::Single(IoBufMut::from(bytes)),
+        }
     }
 }
 
 impl From<Vec<IoBufMut>> for IoBufsMut {
-    fn from(mut bufs: Vec<IoBufMut>) -> Self {
-        match bufs.len() {
-            0 => Self::default(),
-            1 => Self::Single(bufs.pop().unwrap()),
-            _ => Self::Chunked(bufs.into()),
-        }
+    fn from(bufs: Vec<IoBufMut>) -> Self {
+        Self::from_writable_chunks_iter(bufs)
     }
 }
 
 impl<const N: usize> From<[u8; N]> for IoBufsMut {
     fn from(array: [u8; N]) -> Self {
-        Self::Single(IoBufMut::from(array))
+        Self {
+            inner: IoBufsMutInner::Single(IoBufMut::from(array)),
+        }
     }
 }
 
@@ -1385,7 +2049,11 @@ mod tests {
 
     #[test]
     fn test_iobufs_empty() {
-        let bufs = IoBufs::from(Vec::new());
+        let bufs = IoBufs::from(Vec::<u8>::new());
+        assert!(bufs.is_empty());
+        assert_eq!(bufs.len(), 0);
+
+        let bufs = IoBufs::from(Vec::<IoBuf>::new());
         assert!(bufs.is_empty());
         assert_eq!(bufs.len(), 0);
     }
@@ -1424,6 +2092,24 @@ mod tests {
 
         let bufs = IoBufs::default();
         assert!(bufs.is_single());
+    }
+
+    #[test]
+    fn test_iobufs_fast_path_shapes() {
+        let mut pair = IoBufs::from(IoBuf::from(b"a"));
+        pair.append(IoBuf::from(b"b"));
+        assert!(matches!(pair.inner, IoBufsInner::Pair(_)));
+
+        let mut triple = IoBufs::from(IoBuf::from(b"a"));
+        triple.append(IoBuf::from(b"b"));
+        triple.append(IoBuf::from(b"c"));
+        assert!(matches!(triple.inner, IoBufsInner::Triple(_)));
+
+        let mut chunked = IoBufs::from(IoBuf::from(b"a"));
+        chunked.append(IoBuf::from(b"b"));
+        chunked.append(IoBuf::from(b"c"));
+        chunked.append(IoBuf::from(b"d"));
+        assert!(matches!(chunked.inner, IoBufsInner::Chunked(_)));
     }
 
     #[test]
@@ -1540,6 +2226,28 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufs_copy_to_bytes_chunked_four_plus() {
+        let mut bufs = IoBufs::from(vec![
+            IoBuf::from(b"ab"),
+            IoBuf::from(b"cd"),
+            IoBuf::from(b"ef"),
+            IoBuf::from(b"gh"),
+        ]);
+
+        // Chunked fast-path: first chunk alone satisfies request.
+        let first = bufs.copy_to_bytes(1);
+        assert_eq!(&first[..], b"a");
+
+        // Chunked slow-path: request crosses chunk boundaries.
+        let second = bufs.copy_to_bytes(4);
+        assert_eq!(&second[..], b"bcde");
+
+        let rest = bufs.copy_to_bytes(3);
+        assert_eq!(&rest[..], b"fgh");
+        assert_eq!(bufs.remaining(), 0);
+    }
+
+    #[test]
     fn test_iobufs_copy_to_bytes_edge_cases() {
         // Empty first buffer
         let mut iobufs = IoBufs::from(IoBuf::from(b""));
@@ -1646,36 +2354,30 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_freeze_chunked() {
-        // Multiple non-empty buffers stays Chunked
+        // Multiple non-empty buffers stay multi-chunk.
         let buf1 = IoBufMut::from(b"hello".as_ref());
         let buf2 = IoBufMut::from(b" world".as_ref());
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
-        let frozen = bufs.freeze();
+        let mut frozen = bufs.freeze();
         assert!(!frozen.is_single());
-        match frozen {
-            IoBufs::Chunked(ref chunks) => {
-                assert_eq!(chunks.len(), 2);
-                assert_eq!(chunks[0], b"hello");
-                assert_eq!(chunks[1], b" world");
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(frozen.chunk(), b"hello");
+        frozen.advance(5);
+        assert_eq!(frozen.chunk(), b" world");
+        frozen.advance(6);
+        assert_eq!(frozen.remaining(), 0);
 
-        // Empty buffers are filtered out
+        // Empty buffers are filtered out.
         let buf1 = IoBufMut::from(b"hello".as_ref());
         let empty = IoBufMut::default();
         let buf2 = IoBufMut::from(b" world".as_ref());
         let bufs = IoBufsMut::from(vec![buf1, empty, buf2]);
-        let frozen = bufs.freeze();
+        let mut frozen = bufs.freeze();
         assert!(!frozen.is_single());
-        match frozen {
-            IoBufs::Chunked(ref chunks) => {
-                assert_eq!(chunks.len(), 2);
-                assert_eq!(chunks[0], b"hello");
-                assert_eq!(chunks[1], b" world");
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(frozen.chunk(), b"hello");
+        frozen.advance(5);
+        assert_eq!(frozen.chunk(), b" world");
+        frozen.advance(6);
+        assert_eq!(frozen.remaining(), 0);
 
         // Collapses to Single when one non-empty buffer remains
         let empty1 = IoBufMut::default();
@@ -1717,11 +2419,48 @@ mod tests {
         assert!(bufs.is_single());
         assert_eq!(bufs.chunk(), b"test");
 
-        // Vec with multiple elements becomes Chunked
+        // Vec with multiple elements becomes multi-chunk.
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let bufs = IoBufsMut::from(vec![buf1, buf2]);
         assert!(!bufs.is_single());
+    }
+
+    #[test]
+    fn test_iobufsmut_from_vec_filters_empty_chunks() {
+        let mut bufs = IoBufsMut::from(vec![
+            IoBufMut::default(),
+            IoBufMut::from(b"hello"),
+            IoBufMut::default(),
+            IoBufMut::from(b" world"),
+            IoBufMut::default(),
+        ]);
+        assert_eq!(bufs.chunk(), b"hello");
+        bufs.advance(5);
+        assert_eq!(bufs.chunk(), b" world");
+        bufs.advance(6);
+        assert_eq!(bufs.remaining(), 0);
+    }
+
+    #[test]
+    fn test_iobufsmut_fast_path_shapes() {
+        let pair = IoBufsMut::from(vec![IoBufMut::from(b"a"), IoBufMut::from(b"b")]);
+        assert!(matches!(pair.inner, IoBufsMutInner::Pair(_)));
+
+        let triple = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+        ]);
+        assert!(matches!(triple.inner, IoBufsMutInner::Triple(_)));
+
+        let chunked = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+            IoBufMut::from(b"d"),
+        ]);
+        assert!(matches!(chunked.inner, IoBufsMutInner::Chunked(_)));
     }
 
     #[test]
@@ -1961,6 +2700,41 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufsmut_copy_to_bytes_chunked_four_plus() {
+        let mut bufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"ab"),
+            IoBufMut::from(b"cd"),
+            IoBufMut::from(b"ef"),
+            IoBufMut::from(b"gh"),
+        ]);
+
+        // Chunked fast-path: first chunk alone satisfies request.
+        let first = bufs.copy_to_bytes(1);
+        assert_eq!(&first[..], b"a");
+
+        // Chunked slow-path: request crosses chunk boundaries.
+        let second = bufs.copy_to_bytes(4);
+        assert_eq!(&second[..], b"bcde");
+
+        let rest = bufs.copy_to_bytes(3);
+        assert_eq!(&rest[..], b"fgh");
+        assert_eq!(bufs.remaining(), 0);
+    }
+
+    #[test]
+    fn test_iobufsmut_copy_to_bytes_canonicalizes_pair() {
+        let mut bufs = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
+        assert!(matches!(bufs.inner, IoBufsMutInner::Pair(_)));
+
+        let first = bufs.copy_to_bytes(2);
+        assert_eq!(&first[..], b"ab");
+
+        assert!(bufs.is_single());
+        assert_eq!(bufs.chunk(), b"cd");
+        assert_eq!(bufs.remaining(), 2);
+    }
+
+    #[test]
     fn test_iobufsmut_copy_from_slice_single() {
         let mut bufs = IoBufsMut::from(IoBufMut::zeroed(11));
         bufs.copy_from_slice(b"hello world");
@@ -1975,14 +2749,12 @@ mod tests {
 
         bufs.copy_from_slice(b"hello world");
 
-        // Verify each chunk was filled correctly
-        match &bufs {
-            IoBufsMut::Chunked(chunks) => {
-                assert_eq!(chunks[0], b"hello");
-                assert_eq!(chunks[1], b" world");
-            }
-            _ => panic!("expected Chunked variant"),
-        }
+        // Verify each chunk was filled correctly.
+        assert_eq!(bufs.chunk(), b"hello");
+        bufs.advance(5);
+        assert_eq!(bufs.chunk(), b" world");
+        bufs.advance(6);
+        assert_eq!(bufs.remaining(), 0);
     }
 
     #[test]
@@ -2274,46 +3046,40 @@ mod tests {
             ]);
             bufs.set_len(12);
             assert_eq!(bufs.len(), 12);
-            match &bufs {
-                IoBufsMut::Chunked(c) => {
-                    assert_eq!(c[0].len(), 5);
-                    assert_eq!(c[1].len(), 7);
-                }
-                _ => panic!("expected Chunked"),
-            }
+            assert_eq!(bufs.chunk().len(), 5);
+            bufs.advance(5);
+            assert_eq!(bufs.chunk().len(), 7);
+            bufs.advance(7);
+            assert_eq!(bufs.remaining(), 0);
 
-            // Uneven capacities [3, 20, 2], set 18 -> [3, 15, 0]
+            // Uneven capacities [3, 20, 2], set 18 -> [3, 15] after canonicalization.
             let mut bufs = IoBufsMut::from(vec![
                 IoBufMut::with_capacity(3),
                 IoBufMut::with_capacity(20),
                 IoBufMut::with_capacity(2),
             ]);
             bufs.set_len(18);
-            match &bufs {
-                IoBufsMut::Chunked(c) => {
-                    assert_eq!(c[0].len(), 3);
-                    assert_eq!(c[1].len(), 15);
-                    assert_eq!(c[2].len(), 0);
-                }
-                _ => panic!("expected Chunked"),
-            }
+            assert_eq!(bufs.chunk().len(), 3);
+            bufs.advance(3);
+            assert_eq!(bufs.chunk().len(), 15);
+            bufs.advance(15);
+            assert_eq!(bufs.remaining(), 0);
 
             // Exact total capacity [4, 4], set 8 -> [4, 4]
             let mut bufs =
                 IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
             bufs.set_len(8);
-            match &bufs {
-                IoBufsMut::Chunked(c) => {
-                    assert_eq!(c[0].len(), 4);
-                    assert_eq!(c[1].len(), 4);
-                }
-                _ => panic!("expected Chunked"),
-            }
+            assert_eq!(bufs.chunk().len(), 4);
+            bufs.advance(4);
+            assert_eq!(bufs.chunk().len(), 4);
+            bufs.advance(4);
+            assert_eq!(bufs.remaining(), 0);
 
-            // Zero length on chunked
+            // Zero length on chunked canonicalizes to a single empty buffer.
             let mut bufs =
                 IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
             bufs.set_len(0);
+            assert!(bufs.is_single());
             assert_eq!(bufs.len(), 0);
         }
     }

@@ -574,7 +574,7 @@ stability_scope!(BETA {
         /// If the sink returns an error, part of the message may still be delivered.
         fn send(
             &mut self,
-            buf: impl Into<IoBufs> + Send,
+            bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
@@ -698,12 +698,12 @@ stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// Panics if `len` exceeds the total capacity of `buf`.
+        /// Panics if `len` exceeds the total capacity of `bufs`.
         fn read_at_buf(
             &self,
             offset: u64,
             len: usize,
-            buf: impl Into<IoBufsMut> + Send,
+            bufs: impl Into<IoBufsMut> + Send,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
@@ -716,11 +716,11 @@ stability_scope!(BETA {
             len: usize,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `buf` to the blob at the given offset.
+        /// Write `bufs` to the blob at the given offset.
         fn write_at(
             &self,
             offset: u64,
-            buf: impl Into<IoBufs> + Send,
+            bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Resize the blob to the given length.
