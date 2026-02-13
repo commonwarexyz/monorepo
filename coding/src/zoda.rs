@@ -793,11 +793,8 @@ mod tests {
     use bytes::BytesMut;
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
-    use proptest::{
-        prelude::{any, prop, ProptestConfig},
-        proptest,
-        strategy::Strategy as PropStrategy,
-    };
+    use proptest::prelude::*;
+    use proptest::strategy::Strategy as _;
 
     const STRATEGY: Sequential = Sequential;
 
@@ -876,14 +873,14 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-    fn config_strategy() -> impl PropStrategy<Value = Config> {
+    fn config_strategy() -> impl proptest::strategy::Strategy<Value = Config> {
         (1u16..=8, 0u16..=8).prop_map(|(min_shards, extra_shards)| Config {
             minimum_shards: min_shards,
             extra_shards,
         })
     }
 
-    fn data_strategy() -> impl PropStrategy<Value = Vec<u8>> {
+    fn data_strategy() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
         prop::collection::vec(any::<u8>(), 0..=1024)
     }
 
