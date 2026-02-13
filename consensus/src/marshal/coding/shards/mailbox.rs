@@ -2,7 +2,7 @@
 
 use crate::{
     marshal::coding::types::CodedBlock,
-    types::{CodingCommitment, Round},
+    types::{coding::Commitment, Round},
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
@@ -26,10 +26,10 @@ where
         /// The round in which the block was proposed.
         round: Round,
     },
-    /// A notification from consensus that a [`CodingCommitment`] has been discovered.
+    /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
-        /// The [`CodingCommitment`] of the proposed block.
-        commitment: CodingCommitment,
+        /// The [`Commitment`] of the proposed block.
+        commitment: Commitment,
         /// The leader's public key.
         leader: P,
         /// The round in which the commitment was proposed.
@@ -37,8 +37,8 @@ where
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
-        /// The [`CodingCommitment`] of the block to get.
-        commitment: CodingCommitment,
+        /// The [`Commitment`] of the block to get.
+        commitment: Commitment,
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C>>>>,
     },
@@ -53,15 +53,15 @@ where
     /// the leader.
     SubscribeShard {
         /// The block's commitment.
-        commitment: CodingCommitment,
+        commitment: Commitment,
         /// The response channel.
         response: oneshot::Sender<()>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
-    /// by its [`CodingCommitment`].
+    /// by its [`Commitment`].
     SubscribeByCommitment {
         /// The block's digest.
-        commitment: CodingCommitment,
+        commitment: Commitment,
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
     },
@@ -75,8 +75,8 @@ where
     },
     /// A request to prune all caches at and below the given commitment.
     Prune {
-        /// The prune target's [`CodingCommitment`].
-        commitment: CodingCommitment,
+        /// The prune target's [`Commitment`].
+        commitment: Commitment,
     },
 }
 
@@ -110,8 +110,8 @@ where
         self.sender.send_lossy(msg).await;
     }
 
-    /// Inform the engine of an externally proposed [`CodingCommitment`].
-    pub async fn discovered(&mut self, commitment: CodingCommitment, leader: P, round: Round) {
+    /// Inform the engine of an externally proposed [`Commitment`].
+    pub async fn discovered(&mut self, commitment: Commitment, leader: P, round: Round) {
         let msg = Message::Discovered {
             commitment,
             leader,
@@ -120,8 +120,8 @@ where
         self.sender.send_lossy(msg).await;
     }
 
-    /// Request a reconstructed block by its [`CodingCommitment`].
-    pub async fn get(&mut self, commitment: CodingCommitment) -> Option<Arc<CodedBlock<B, C>>> {
+    /// Request a reconstructed block by its [`Commitment`].
+    pub async fn get(&mut self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C>>> {
         self.sender
             .request(|tx| Message::GetByCommitment {
                 commitment,
@@ -143,7 +143,7 @@ where
     }
 
     /// Subscribe to the receipt of our valid shard from the leader.
-    pub async fn subscribe_shard(&mut self, commitment: CodingCommitment) -> oneshot::Receiver<()> {
+    pub async fn subscribe_shard(&mut self, commitment: Commitment) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeShard {
             commitment,
@@ -153,10 +153,10 @@ where
         receiver
     }
 
-    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`CodingCommitment`].
+    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
     pub async fn subscribe(
         &mut self,
-        commitment: CodingCommitment,
+        commitment: Commitment,
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeByCommitment {
@@ -182,7 +182,7 @@ where
     }
 
     /// Request to prune all caches at and below the given commitment.
-    pub async fn prune(&mut self, commitment: CodingCommitment) {
+    pub async fn prune(&mut self, commitment: Commitment) {
         let msg = Message::Prune { commitment };
         self.sender.send_lossy(msg).await;
     }

@@ -1,7 +1,7 @@
 //! Types for erasure coding.
 
 use crate::{
-    types::{CodingCommitment, Height},
+    types::{coding::Commitment, Height},
     Block, CertifiableBlock, Heightable,
 };
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
@@ -108,7 +108,7 @@ where
 /// the configuration used to code the data.
 pub struct Shard<C: Scheme, H: Hasher> {
     /// The coding commitment
-    pub(crate) commitment: CodingCommitment,
+    pub(crate) commitment: Commitment,
     /// The index of this shard within the commitment.
     pub(crate) index: u16,
     /// An individual shard within the commitment.
@@ -118,11 +118,7 @@ pub struct Shard<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Shard<C, H> {
-    pub const fn new(
-        commitment: CodingCommitment,
-        index: u16,
-        inner: DistributionShard<C>,
-    ) -> Self {
+    pub const fn new(commitment: Commitment, index: u16, inner: DistributionShard<C>) -> Self {
         Self {
             commitment,
             index,
@@ -136,8 +132,8 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
         self.index
     }
 
-    /// Returns the [`CodingCommitment`] for this shard.
-    pub const fn commitment(&self) -> CodingCommitment {
+    /// Returns the [`Commitment`] for this shard.
+    pub const fn commitment(&self) -> Commitment {
         self.commitment
     }
 
@@ -167,7 +163,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
 
         let weak_shard = C::weaken(
             &self.commitment.config(),
-            &self.commitment.coding_digest(),
+            &self.commitment.root(),
             self.index,
             shard,
         )
@@ -202,7 +198,7 @@ impl<C: Scheme, H: Hasher> Deref for Shard<C, H> {
 }
 
 impl<C: Scheme, H: Hasher> Committable for Shard<C, H> {
-    type Commitment = CodingCommitment;
+    type Commitment = Commitment;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
@@ -230,7 +226,7 @@ impl<C: Scheme, H: Hasher> Read for Shard<C, H> {
         buf: &mut impl bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let commitment = CodingCommitment::read(buf)?;
+        let commitment = Commitment::read(buf)?;
         let index = u16::read(buf)?;
         let inner = DistributionShard::read_cfg(buf, cfg)?;
 
@@ -308,12 +304,12 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
         }
     }
 
-    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`CodingCommitment`].
-    pub fn new_trusted(inner: B, commitment: CodingCommitment) -> Self {
+    /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
+    pub fn new_trusted(inner: B, commitment: Commitment) -> Self {
         Self {
             inner,
             config: commitment.config(),
-            commitment: commitment.coding_digest(),
+            commitment: commitment.root(),
             shards: None,
         }
     }
@@ -384,10 +380,10 @@ impl<B: Block + Clone, C: Scheme> Clone for CodedBlock<B, C> {
 }
 
 impl<B: CertifiableBlock, C: Scheme> Committable for CodedBlock<B, C> {
-    type Commitment = CodingCommitment;
+    type Commitment = Commitment;
 
     fn commitment(&self) -> Self::Commitment {
-        CodingCommitment::from((
+        Commitment::from((
             self.digest(),
             self.commitment,
             context_hash(&self.inner.context()),
@@ -464,7 +460,7 @@ impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for CodedBlock<B, C> {
     }
 }
 
-/// Hashes a consensus context for inclusion in a [`CodingCommitment`].
+/// Hashes a consensus context for inclusion in a [`Commitment`].
 pub fn context_hash<C: EncodeSize + Write>(context: &C) -> Sha256Digest {
     let mut buf = Vec::with_capacity(context.encode_size());
     context.write(&mut buf);
@@ -482,7 +478,7 @@ impl<B: Block + PartialEq, C: Scheme> PartialEq for CodedBlock<B, C> {
 
 impl<B: Block + Eq, C: Scheme> Eq for CodedBlock<B, C> {}
 
-/// A [`CodedBlock`] paired with its [`CodingCommitment`] for efficient storage and retrieval.
+/// A [`CodedBlock`] paired with its [`Commitment`] for efficient storage and retrieval.
 ///
 /// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
 /// should never be sent over the network. Use [`CodedBlock`] for network transmission,
@@ -495,7 +491,7 @@ impl<B: Block + Eq, C: Scheme> Eq for CodedBlock<B, C> {}
 /// The [`Read`] implementation performs a light verification (block digest check)
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme> {
-    commitment: CodingCommitment,
+    commitment: Commitment,
     inner: B,
     _scheme: PhantomData<C>,
 }
@@ -545,7 +541,7 @@ impl<B: Block + Clone, C: Scheme> Clone for StoredCodedBlock<B, C> {
 }
 
 impl<B: Block, C: Scheme> Committable for StoredCodedBlock<B, C> {
-    type Commitment = CodingCommitment;
+    type Commitment = Commitment;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
@@ -581,11 +577,11 @@ impl<B: Block, C: Scheme> Read for StoredCodedBlock<B, C> {
         buf: &mut impl bytes::Buf,
         block_cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let commitment = CodingCommitment::read(buf)?;
+        let commitment = Commitment::read(buf)?;
         let inner = B::read_cfg(buf, block_cfg)?;
 
         // Light verification to detect storage corruption
-        if inner.digest() != commitment.block_digest::<B::Digest>() {
+        if inner.digest() != commitment.block::<B::Digest>() {
             return Err(commonware_codec::Error::Invalid(
                 "StoredCodedBlock",
                 "storage corruption: block digest mismatch",
@@ -690,7 +686,7 @@ mod test {
         let raw_shard = shards.first().cloned().unwrap();
 
         let commitment =
-            CodingCommitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
+            Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
         let shard = RShard::new(commitment, 0, DistributionShard::Strong(raw_shard.clone()));
         let encoded = shard.encode();
         let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();

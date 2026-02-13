@@ -21,7 +21,7 @@ use crate::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
-    types::{CodingCommitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
     Heightable, Reporter,
 };
 use commonware_broadcast::buffered;
@@ -66,8 +66,8 @@ pub type V = MinPk;
 pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
-// Coding variant type aliases (uses CodingCommitment in context)
-pub type CodingCtx = Context<CodingCommitment, K>;
+// Coding variant type aliases (uses Commitment in context)
+pub type CodingCtx = Context<Commitment, K>;
 pub type CodingB = Block<D, CodingCtx>;
 
 // Common test constants
@@ -632,9 +632,9 @@ pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::
     extra_shards: 0,
 };
 
-/// Create a genesis CodingCommitment (all zeros for digests, genesis config).
-pub fn genesis_commitment() -> CodingCommitment {
-    CodingCommitment::from((
+/// Create a genesis Commitment (all zeros for digests, genesis config).
+pub fn genesis_commitment() -> Commitment {
+    Commitment::from((
         D::EMPTY,
         D::EMPTY,
         Sha256Digest::EMPTY,
@@ -642,7 +642,7 @@ pub fn genesis_commitment() -> CodingCommitment {
     ))
 }
 
-/// Create a test block with a CodingCommitment-based context.
+/// Create a test block with a Commitment-based context.
 pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestamp: u64) -> CodingB {
     CodingB::new::<Sha256>(context, parent, height, timestamp)
 }
@@ -652,7 +652,7 @@ impl TestHarness for CodingHarness {
     type Variant = CodingVariant;
     type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>>;
     type ValidatorExtra = ShardsMailbox;
-    type Commitment = CodingCommitment;
+    type Commitment = Commitment;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -816,7 +816,7 @@ impl TestHarness for CodingHarness {
             .previous()
             .map(|h| View::new(h.get()))
             .unwrap_or(View::zero());
-        let parent_commitment = CodingCommitment::from((
+        let parent_commitment = Commitment::from((
             parent,
             parent,
             Sha256Digest::EMPTY,
@@ -832,7 +832,7 @@ impl TestHarness for CodingHarness {
         CodedBlock::new(raw, coding_config, &Sequential)
     }
 
-    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>>) -> CodingCommitment {
+    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>>) -> Commitment {
         block.commitment()
     }
 
@@ -862,10 +862,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<CodingCommitment>,
+        proposal: Proposal<Commitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, CodingCommitment> {
+    ) -> Finalization<S, Commitment> {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -875,10 +875,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_notarization(
-        proposal: Proposal<CodingCommitment>,
+        proposal: Proposal<Commitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, CodingCommitment> {
+    ) -> Notarization<S, Commitment> {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -889,14 +889,14 @@ impl TestHarness for CodingHarness {
 
     async fn report_finalization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, CodingCommitment>,
+        finalization: Finalization<S, Commitment>,
     ) {
         mailbox.report(Activity::Finalization(finalization)).await;
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, CodingCommitment>,
+        notarization: Notarization<S, Commitment>,
     ) {
         mailbox.report(Activity::Notarization(notarization)).await;
     }

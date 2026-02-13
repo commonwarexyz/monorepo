@@ -6,7 +6,7 @@ use crate::{
         },
         core::{BlockBuffer, Variant},
     },
-    types::{CodingCommitment, Round},
+    types::{coding::Commitment, Round},
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
@@ -27,7 +27,7 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
     type ApplicationBlock = B;
     type Block = CodedBlock<B, C>;
     type StoredBlock = StoredCodedBlock<B, C>;
-    type Commitment = CodingCommitment;
+    type Commitment = Commitment;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
         block.commitment()
@@ -36,7 +36,7 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
     fn commitment_to_application(
         commitment: Self::Commitment,
     ) -> <Self::Block as Digestible>::Digest {
-        commitment.block_digest()
+        commitment.block()
     }
 
     fn into_application_block(block: Self::Block) -> Self::ApplicationBlock {
@@ -59,10 +59,7 @@ where
         self.get_by_digest(digest).await
     }
 
-    async fn find_by_commitment(
-        &mut self,
-        commitment: CodingCommitment,
-    ) -> Option<Self::CachedBlock> {
+    async fn find_by_commitment(&mut self, commitment: Commitment) -> Option<Self::CachedBlock> {
         self.get(commitment).await
     }
 
@@ -75,12 +72,12 @@ where
 
     async fn subscribe_by_commitment(
         &mut self,
-        commitment: CodingCommitment,
+        commitment: Commitment,
     ) -> oneshot::Receiver<Self::CachedBlock> {
         self.subscribe(commitment).await
     }
 
-    async fn finalized(&mut self, commitment: CodingCommitment) {
+    async fn finalized(&mut self, commitment: Commitment) {
         self.prune(commitment).await;
     }
 

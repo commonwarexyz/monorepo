@@ -33,7 +33,7 @@ impl Shuffle {
 
 #[derive(Debug)]
 pub struct FuzzInput {
-    min: u16,
+    min: NonZeroU16,
     recovery: u16,
     to_use: u16,
     data: Vec<u8>,
@@ -42,11 +42,11 @@ pub struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        let min = u.int_in_range(1..=512)?;
-        let recovery = u.int_in_range(min..=512)?;
-        let to_use = u.int_in_range(min..=min + recovery)?;
+        let min = NonZeroU16::new(u.int_in_range(1..=512)?).unwrap();
+        let recovery = u.int_in_range(min.get()..=512)?;
+        let to_use = u.int_in_range(min.get()..=min.get() + recovery)?;
         let data = u.arbitrary::<Vec<u8>>()?;
-        let shuffle = Shuffle::arbitrary(u, (min + recovery) as usize)?;
+        let shuffle = Shuffle::arbitrary(u, (min.get() + recovery) as usize)?;
 
         Ok(FuzzInput {
             recovery,
@@ -68,11 +68,11 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     } = input;
 
     let config = Config {
-        minimum_shards: NonZeroU16::new(min.max(1)).unwrap(),
+        minimum_shards: min,
         extra_shards: recovery,
     };
     let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-    assert_eq!(shards.len(), (recovery + min) as usize);
+    assert_eq!(shards.len(), (recovery + min.get()) as usize);
     // We don't use enumerate to get u16s.
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
     shuffle.shuffle(&mut shards);

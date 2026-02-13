@@ -89,7 +89,7 @@
 //!
 //! # Reconstruction State Machine
 //!
-//! For each [`CodingCommitment`] with a known leader, participating nodes
+//! For each [`Commitment`] with a known leader, participating nodes
 //! maintain a [`ReconstructionState`]. Before leader announcement, shards are buffered in
 //! bounded per-peer queues:
 //!
@@ -161,7 +161,7 @@ use super::{
 };
 use crate::{
     marshal::coding::types::{CodedBlock, DistributionShard, Shard},
-    types::{CodingCommitment, Epoch, Round},
+    types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
 };
 use commonware_codec::{Decode, Error as CodecError, Read};
@@ -217,7 +217,7 @@ pub enum Error<C: CodingScheme> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BlockSubscriptionKey<D> {
-    Commitment(CodingCommitment),
+    Commitment(Commitment),
     Block(D),
 }
 
@@ -306,8 +306,8 @@ where
     /// The strategy used for parallel shard verification.
     strategy: T,
 
-    /// A map of [`CodingCommitment`]s to [`ReconstructionState`]s.
-    state: BTreeMap<CodingCommitment, ReconstructionState<P, C, H>>,
+    /// A map of [`Commitment`]s to [`ReconstructionState`]s.
+    state: BTreeMap<Commitment, ReconstructionState<P, C, H>>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
     pre_leader_buffers: BTreeMap<P, VecDeque<Shard<C, H>>>,
@@ -322,14 +322,14 @@ where
     ///
     /// These blocks are evicted after a durability signal from the marshal.
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
-    reconstructed_blocks: BTreeMap<CodingCommitment, Arc<CodedBlock<B, C>>>,
+    reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C>>>,
 
     /// Open subscriptions for the receipt of our valid shard corresponding
-    /// to the keyed [`CodingCommitment`] from the leader.
-    shard_subscriptions: BTreeMap<CodingCommitment, Vec<oneshot::Sender<()>>>,
+    /// to the keyed [`Commitment`] from the leader.
+    shard_subscriptions: BTreeMap<Commitment, Vec<oneshot::Sender<()>>>,
 
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
-    /// the keyed [`CodingCommitment`].
+    /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
         BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>>,
@@ -522,7 +522,7 @@ where
     /// - `Err(_)` if reconstruction was attempted but failed.
     async fn try_reconstruct(
         &mut self,
-        commitment: CodingCommitment,
+        commitment: Commitment,
     ) -> Result<Option<Arc<CodedBlock<B, C>>>, Error<C>> {
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(Arc::clone(block)));
@@ -542,7 +542,7 @@ where
         let start = Instant::now();
         let blob = C::decode(
             &commitment.config(),
-            &commitment.coding_digest(),
+            &commitment.root(),
             checking_data.clone(),
             state.checked_shards(),
             &self.strategy,
@@ -557,7 +557,7 @@ where
             Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
         // Verify the reconstructed block's digest matches the commitment's block digest.
-        if inner.digest() != commitment.block_digest() {
+        if inner.digest() != commitment.block() {
             return Err(Error::DigestMismatch);
         }
 
@@ -586,7 +586,7 @@ where
     async fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        commitment: CodingCommitment,
+        commitment: Commitment,
         leader: P,
         round: Round,
     ) {
@@ -638,7 +638,7 @@ where
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
-    async fn ingest_buffered_shards(&mut self, commitment: CodingCommitment) -> bool {
+    async fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let mut buffered_weak = Vec::new();
         let mut buffered_strong = Vec::new();
         for (peer, queue) in self.pre_leader_buffers.iter_mut() {
@@ -756,7 +756,7 @@ where
     async fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
-        commitment: CodingCommitment,
+        commitment: Commitment,
     ) {
         if let Some(weak_shard) = self
             .state
@@ -794,7 +794,7 @@ where
     /// Handles the registry of a shard subscription.
     async fn handle_shard_subscription(
         &mut self,
-        commitment: CodingCommitment,
+        commitment: Commitment,
         response: oneshot::Sender<()>,
     ) {
         // Answer immediately if we have our shard or the block has already
@@ -844,7 +844,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a valid shard.
-    async fn notify_shard_subscribers(&mut self, commitment: CodingCommitment) {
+    async fn notify_shard_subscribers(&mut self, commitment: Commitment) {
         if let Some(mut subscribers) = self.shard_subscriptions.remove(&commitment) {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(());
@@ -881,7 +881,7 @@ where
     /// Prunes all blocks in the reconstructed block cache that are older than the block
     /// with the given commitment. Also cleans up stale reconstruction state
     /// and subscriptions.
-    fn prune(&mut self, commitment: CodingCommitment) {
+    fn prune(&mut self, commitment: Commitment) {
         let Some(height) = self
             .reconstructed_blocks
             .get(&commitment)
@@ -983,7 +983,7 @@ struct StrongShard<C>
 where
     C: CodingScheme,
 {
-    commitment: CodingCommitment,
+    commitment: Commitment,
     index: u16,
     data: C::StrongShard,
 }
@@ -1039,12 +1039,9 @@ where
             data,
         } = shard;
         self.common.received_strong = Some(data.clone());
-        let Ok((checking_data, checked, weak_shard_data)) = C::weaken(
-            &commitment.config(),
-            &commitment.coding_digest(),
-            index,
-            data,
-        ) else {
+        let Ok((checking_data, checked, weak_shard_data)) =
+            C::weaken(&commitment.config(), &commitment.root(), index, data)
+        else {
             warn!(?sender, "invalid strong shard received, blocking peer");
             blocker.block(sender).await;
             return false;
@@ -1064,7 +1061,7 @@ where
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
     async fn try_transition(
         &mut self,
-        commitment: CodingCommitment,
+        commitment: Commitment,
         participants_len: u64,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
@@ -1082,7 +1079,7 @@ where
             strategy.map_partition_collect_vec(pending, |(peer, shard)| {
                 let checked = C::check(
                     &commitment.config(),
-                    &commitment.coding_digest(),
+                    &commitment.root(),
                     checking_data,
                     shard.index,
                     shard.data,

@@ -63,21 +63,15 @@
 //! in the event of a block that was proposed with invalid codec; Marshal will not be able to reconstruct
 //! the block, and therefore won't serve it.
 //!
-//! Consensus Chain
+//! ```text
 //!                                      ┌───────────────────────────────────────────────────┐
 //!                                      ▼                                                   │
 //! ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
-//! │   commitment: App A1│◀──│   commitment: App A2│◀──│   commitment: App A3│XXX│   commitment: App A4│
-//! └──────────┬──────────┘   └──────────┬──────────┘   └──────────┬──────────┘   └──────────┬──────────┘
-//!            │                         │                         │                         │
-//!            ▼                         ▼                         ▼                         ▼
-//! ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
-//! │ Application Block A1│◀──│ Application Block A2│◀──│ Application Block A3│XXX│ Application Block A4│
-//! └─────────────────────┘   └─────────────────────┘   │  (irrecoverable) X  │   └──────────┬──────────┘
-//!                                      ▲              └─────────────────────┘              │
-//!                                      │                                                   │
-//!                                      └───────────────────────────────────────────────────┘
-//! Application Chain
+//! │          B1         │◀──│          B2         │◀──│          B3         │XXX│          B4         │
+//! └─────────────────────┘   └─────────────────────┘   └──────────┬──────────┘   └─────────────────────┘
+//!                                                                │
+//!                                                          Failed Certify
+//! ```
 
 use crate::{
     marshal::{
@@ -90,7 +84,7 @@ use crate::{
         core, is_at_epoch_boundary, Update,
     },
     simplex::{scheme::Scheme, types::Context},
-    types::{CodingCommitment, Epoch, Epocher, Round},
+    types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
 };
@@ -127,7 +121,7 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
     extra_shards: 0,
 };
 
-type TasksMap = HashMap<(Round, CodingCommitment), oneshot::Receiver<bool>>;
+type TasksMap = HashMap<(Round, Commitment), oneshot::Receiver<bool>>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -135,7 +129,7 @@ pub struct MarshaledConfig<A, B, C, Z, S, ES>
 where
     B: CertifiableBlock,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -167,7 +161,7 @@ where
     A: Application<E>,
     B: CertifiableBlock,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -181,7 +175,7 @@ where
     #[allow(clippy::type_complexity)]
     last_built: Arc<Mutex<Option<(Round, CodedBlock<B, C>)>>>,
     verification_tasks: Arc<Mutex<TasksMap>>,
-    cached_genesis: Arc<OnceLock<(CodingCommitment, CodedBlock<B, C>)>>,
+    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C>)>>,
 
     build_duration: Gauge,
     verify_duration: Gauge,
@@ -196,11 +190,11 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -283,8 +277,8 @@ where
     /// extract its embedded context.
     async fn deferred_verify(
         &mut self,
-        context: Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
-        commitment: CodingCommitment,
+        context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C>>,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
@@ -416,7 +410,7 @@ where
                 }
 
                 // Ensure the block's embedded context matches the commitment's context hash.
-                let expected_context_hash = commitment.context_digest::<Sha256Digest>();
+                let expected_context_hash = commitment.context::<Sha256Digest>();
                 let got_context_hash = context_hash(&block.context());
                 if expected_context_hash != got_context_hash {
                     debug!(
@@ -483,15 +477,15 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
-    type Digest = CodingCommitment;
+    type Digest = Commitment;
     type Context = Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>;
 
     /// Returns the genesis digest for a given epoch.
@@ -534,7 +528,7 @@ where
     /// broadcasting.
     async fn propose(
         &mut self,
-        consensus_context: Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -784,7 +778,7 @@ where
         }
 
         let expected = context_hash(&context);
-        let got = payload.context_digest::<Sha256Digest>();
+        let got = payload.context::<Sha256Digest>();
         if expected != got {
             warn!(
                 round = %context.round,
@@ -843,11 +837,11 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -956,15 +950,15 @@ where
     A: Application<
         E,
         Block = B,
-        Context = Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
-    type Digest = CodingCommitment;
+    type Digest = Commitment;
 
     /// Broadcasts a previously built block to the network.
     ///
@@ -1003,11 +997,11 @@ where
     A: Application<
             E,
             Block = B,
-            Context = Context<CodingCommitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+            Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -1035,11 +1029,11 @@ where
 ///
 /// Returns an error if the marshal subscription is cancelled.
 async fn fetch_parent<E, S, A, B, C>(
-    parent_commitment: CodingCommitment,
+    parent_commitment: Commitment,
     parent_round: Option<Round>,
     application: &mut A,
     marshal: &mut core::Mailbox<S, Coding<B, C, S::PublicKey>>,
-    cached_genesis: Arc<OnceLock<(CodingCommitment, CodedBlock<B, C>)>>,
+    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C>)>>,
 ) -> Either<
     Ready<Result<CodedBlock<B, C>, oneshot::error::RecvError>>,
     oneshot::Receiver<CodedBlock<B, C>>,
@@ -1047,7 +1041,7 @@ async fn fetch_parent<E, S, A, B, C>(
 where
     E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
-    A: Application<E, Block = B, Context = Context<CodingCommitment, S::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
     B: CertifiableBlock,
     C: CodingScheme,
 {
@@ -1072,9 +1066,9 @@ where
     }
 }
 
-/// Constructs the [`CodingCommitment`] for the genesis block.
-fn genesis_coding_commitment<B: CertifiableBlock>(block: &B) -> CodingCommitment {
-    CodingCommitment::from((
+/// Constructs the [`Commitment`] for the genesis block.
+fn genesis_coding_commitment<B: CertifiableBlock>(block: &B) -> Commitment {
+    Commitment::from((
         block.digest(),
         block.digest(),
         context_hash(&block.context()),

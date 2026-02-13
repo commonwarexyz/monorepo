@@ -27,7 +27,7 @@
 //! # Data Flow
 //!
 //! 1. The application produces a block through [`Marshaled`], which encodes the payload and
-//!    obtains a [`crate::types::CodingCommitment`] describing the shard layout.
+//!    obtains a [`crate::types::coding::Commitment`] describing the shard layout.
 //! 2. The block is broadcast via [`shards::Engine`]; each participant receives exactly one shard
 //!    and reshares it to everyone else once it verifies the fragment.
 //! 3. The actor ingests notarizations/finalizations from `simplex`, pulls reconstructed blocks

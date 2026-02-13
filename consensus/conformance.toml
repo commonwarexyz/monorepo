@@ -150,7 +150,7 @@ hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 n_cases = 65536
 hash = "01cc3b0d41d0ef29f02de2729d51b1b31bb96f00c6390e56aadd0fb5117cc7b1"
 
-["commonware_consensus::types::tests::conformance::CodecConformance<CodingCommitment>"]
+["commonware_consensus::types::tests::conformance::CodecConformance<Commitment>"]
 n_cases = 65536
 hash = "3eed8260631e2685150ba3316a58da5229f7b6bc6dfb01a3c9c8da0f0aa779e8"
 
