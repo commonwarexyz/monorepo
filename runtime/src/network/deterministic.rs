@@ -10,6 +10,9 @@ use std::{
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+/// Range of auto-assigned ports used when binding with port 0.
+const AUTO_BIND_PORT_RANGE: Range<u16> = 1024..32768;
+
 /// Implementation of [crate::Sink] for a deterministic [Network].
 pub struct Sink {
     sender: mocks::Sink,
@@ -71,6 +74,7 @@ type Dialable = mpsc::UnboundedSender<(
 #[derive(Clone)]
 pub struct Network {
     ephemeral: Arc<Mutex<u16>>,
+    auto_bind: Arc<Mutex<u16>>,
     listeners: Arc<Mutex<HashMap<SocketAddr, Dialable>>>,
 }
 
@@ -78,6 +82,7 @@ impl Default for Network {
     fn default() -> Self {
         Self {
             ephemeral: Arc::new(Mutex::new(EPHEMERAL_PORT_RANGE.start)),
+            auto_bind: Arc::new(Mutex::new(AUTO_BIND_PORT_RANGE.start)),
             listeners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -87,6 +92,33 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        let mut listeners = self.listeners.lock().unwrap();
+
+        // If port is 0, assign the next available port from the auto-bind range.
+        // Retry on conflicts until we either find a free port or exhaust the range.
+        let socket = if socket.port() == 0 {
+            let mut next = self.auto_bind.lock().unwrap();
+            let attempts = usize::from(AUTO_BIND_PORT_RANGE.end - AUTO_BIND_PORT_RANGE.start);
+            let mut selected = None;
+            for _ in 0..attempts {
+                if !AUTO_BIND_PORT_RANGE.contains(&*next) {
+                    *next = AUTO_BIND_PORT_RANGE.start;
+                }
+
+                let port = *next;
+                *next = port.checked_add(1).unwrap_or(AUTO_BIND_PORT_RANGE.start);
+
+                let candidate = SocketAddr::new(socket.ip(), port);
+                if !listeners.contains_key(&candidate) {
+                    selected = Some(candidate);
+                    break;
+                }
+            }
+            selected.ok_or(Error::BindFailed)?
+        } else {
+            socket
+        };
+
         // If the IP is localhost, ensure the port is not in the ephemeral range
         // so that it can be used for binding in the dial method
         if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
@@ -96,7 +128,6 @@ impl crate::Network for Network {
         }
 
         // Ensure the port is not already bound
-        let mut listeners = self.listeners.lock().unwrap();
         if listeners.contains_key(&socket) {
             return Err(Error::BindFailed);
         }
@@ -147,8 +178,10 @@ impl crate::Network for Network {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Listener as _, Network as _};
     use crate::network::{deterministic as DeterministicNetwork, tests};
     use commonware_macros::test_group;
+    use std::net::SocketAddr;
 
     #[tokio::test]
     async fn test_trait() {
@@ -159,5 +192,42 @@ mod tests {
     #[tokio::test]
     async fn test_stress_trait() {
         tests::stress_test_network_trait(DeterministicNetwork::Network::default).await;
+    }
+
+    #[tokio::test]
+    async fn test_bind_zero_skips_occupied_auto_bind_ports() {
+        let network = DeterministicNetwork::Network::default();
+
+        network
+            .bind(SocketAddr::from((
+                [127, 0, 0, 1],
+                super::AUTO_BIND_PORT_RANGE.start,
+            )))
+            .await
+            .unwrap();
+
+        let listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        assert_eq!(
+            listener.local_addr().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], super::AUTO_BIND_PORT_RANGE.start + 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bind_zero_wraps_cursor_when_out_of_range() {
+        let network = DeterministicNetwork::Network::default();
+        *network.auto_bind.lock().unwrap() = super::AUTO_BIND_PORT_RANGE.end;
+
+        let listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        assert_eq!(
+            listener.local_addr().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], super::AUTO_BIND_PORT_RANGE.start))
+        );
     }
 }
