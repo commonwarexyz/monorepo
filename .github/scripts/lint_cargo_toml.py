@@ -6,10 +6,12 @@
 # ///
 """
 Usage:
-  ./sort_deps.py                # edits ./Cargo.toml in place
-  ./sort_deps.py path/to/Cargo.toml
+  ./lint_cargo_toml.py                         # edits ./Cargo.toml in place
+  ./lint_cargo_toml.py path/to/Cargo.toml
+  ./lint_cargo_toml.py --check path/to/Cargo.toml
 """
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -42,14 +44,31 @@ def normalize_blank_lines(s: str) -> str:
     s = re.sub(r"\n{2,}(\[)", r"\n\n\1", s)
     return s
 
-def main(path: Path):
-    text = path.read_text(encoding="utf-8")
+def format_toml(text: str) -> str:
     doc = parse(text)
     walk(doc)
     out = dumps(doc)
-    out = normalize_blank_lines(out)
+    return normalize_blank_lines(out)
+
+def main(path: Path, check: bool) -> int:
+    text = path.read_text(encoding="utf-8")
+    out = format_toml(text)
+    if check:
+        if text != out:
+            print(f"Cargo.toml formatting needed: {path}")
+            return 1
+        return 0
+
     path.write_text(out, encoding="utf-8")
+    return 0
 
 if __name__ == "__main__":
-    cargo_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("Cargo.toml")
-    main(cargo_path)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("cargo_path", nargs="?", default="Cargo.toml")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check formatting only; do not modify files.",
+    )
+    args = parser.parse_args()
+    sys.exit(main(Path(args.cargo_path), args.check))
