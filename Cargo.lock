@@ -1107,6 +1107,7 @@ dependencies = [
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
