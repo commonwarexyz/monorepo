@@ -667,26 +667,9 @@ where
                                     continue;
                                 }
 
-                                // If we already have a finalization for this digest, ensure
-                                // the delivered block matches the exact committed payload.
-                                let finalization = self.cache.get_finalization_for(digest).await;
-                                if let Some(finalization) = finalization.as_ref() {
-                                    let expected = finalization.proposal.payload;
-                                    let actual = V::commitment(&block);
-                                    if actual != expected {
-                                        warn!(
-                                            ?digest,
-                                            ?expected,
-                                            ?actual,
-                                            "rejecting block: digest matches but commitment mismatches cached finalization"
-                                        );
-                                        response.send_lossy(false);
-                                        continue;
-                                    }
-                                }
-
-                                // Persist the block, also persisting the finalization if we have it.
+                                // Persist the block, also persisting the finalization if we have it
                                 let height = block.height();
+                                let finalization = self.cache.get_finalization_for(digest).await;
                                 self.finalize(
                                     height,
                                     digest,
@@ -1097,13 +1080,8 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block.into_block());
         }
-        let block = self
-            .find_block_in_storage(V::commitment_to_application(commitment))
-            .await?;
-        if V::commitment(&block) != commitment {
-            return None;
-        }
-        Some(block)
+        self.find_block_in_storage(V::commitment_to_application(commitment))
+            .await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
