@@ -29,6 +29,10 @@ fix-fmt *args='':
 fix-toml-fmt:
     find . -name Cargo.toml -type f -print0 | xargs -0 -n1 ./.github/scripts/lint_cargo_toml.py
 
+# Check Cargo.toml formatting without keeping modifications
+check-toml-fmt:
+    find . -name Cargo.toml -type f -print0 | xargs -0 -n1 ./.github/scripts/lint_cargo_toml.py --check
+
 # Check the formatting of the workspace
 check-fmt:
     just fix-fmt --check
@@ -41,8 +45,8 @@ clippy *args='':
 fix-clippy *args='':
     cargo clippy --all-targets --fix --allow-dirty $@
 
-# Runs all lints (fmt, clippy, docs, features, benchmark names, and stability)
-lint: check-fmt clippy check-docs check-features check-benchmark-names check-stability
+# Runs all lints (fmt, clippy, docs, features, toml, benchmark names, and stability)
+lint: check-fmt check-toml-fmt clippy check-docs check-features check-benchmark-names check-stability
 
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
