@@ -1141,6 +1141,10 @@ where
                     cursor = block;
                 } else {
                     // Request the next missing block digest
+                    //
+                    // SAFETY: We can rely on the parent commitment from the embedded context of the block
+                    // because the block is provably a member of the finalized chain due to the end boundary
+                    // of the gap being finalized.
                     resolver
                         .fetch(Request::<V::Commitment>::Block(parent_commitment))
                         .await;
