@@ -59,15 +59,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_twin"
-path = "fuzz_targets/simplex_ed25519_twin.rs"
+name = "simplex_ed25519_shuffled_twin"
+path = "fuzz_targets/simplex_ed25519_shuffled_twin.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "simplex_bls12381_threshold_minpk_twin"
-path = "fuzz_targets/simplex_bls12381_threshold_minpk_twin.rs"
+name = "simplex_ed25519_adv"
+path = "fuzz_targets/simplex_ed25519_adv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_selected_minpk_twin"
+path = "fuzz_targets/simplex_bls12381_threshold_selected_minpk_twin.rs"
 test = false
 doc = false
 bench = false
@@ -89,13 +96,6 @@ bench = false
 [[bin]]
 name = "simplex_bls12381_multisig_minsig_twin"
 path = "fuzz_targets/simplex_bls12381_multisig_minsig_twin.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "simplex_secp256r1_twin"
-path = "fuzz_targets/simplex_secp256r1_twin.rs"
 test = false
 doc = false
 bench = false
@@ -131,6 +131,20 @@ bench = false
 [[bin]]
 name = "simplex_secp256r1"
 path = "fuzz_targets/simplex_secp256r1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_twin"
+path = "fuzz_targets/simplex_secp256r1_twin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_adv"
+path = "fuzz_targets/simplex_secp256r1_adv.rs"
 test = false
 doc = false
 bench = false
