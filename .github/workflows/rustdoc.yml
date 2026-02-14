@@ -1,0 +1,46 @@
+name: Deploy Rustdoc
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rustdoc-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Clear disk space
+        uses: ./.github/actions/disk
+
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          additional-cache-key: rustdoc
+
+      - name: Install just
+        uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
+        with:
+          tool: just@1.43.0
+
+      - name: Build documentation
+        run: just build-library-docs
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.1.4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy "${{ env.CARGO_TARGET_DIR || 'target' }}/doc" --project-name=commonware-rustdoc
