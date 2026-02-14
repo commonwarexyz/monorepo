@@ -1143,6 +1143,11 @@ impl<F: FieldNTT> EvaluationVector<F> {
 
     /// Attempt to recover the missing rows in this data.
     pub fn recover(mut self) -> PolynomialVector<F> {
+        let non_vanishing = self.active_rows.count_non_vanishing();
+        if non_vanishing == 0 || non_vanishing == self.data.rows as u64 {
+            return self.interpolate();
+        }
+
         // If we had all of the rows, we could simply call [Self::interpolate],
         // in order to recover the original polynomial. If we do this while missing some
         // rows, what we get is D(X) * V(X) where D is the original polynomial,
@@ -1530,6 +1535,13 @@ mod test {
             out
         };
         fuzz::RecoverySetup::new(1, 1, 1, vec![F::one()], present).test()
+    }
+
+    #[test]
+    fn test_recovery_empty_vector() {
+        let recovered = EvaluationVector::<F>::empty(4, 3).recover();
+        let expected = EvaluationVector::<F>::empty(4, 3).interpolate();
+        assert_eq!(recovered, expected);
     }
 
     #[test]
