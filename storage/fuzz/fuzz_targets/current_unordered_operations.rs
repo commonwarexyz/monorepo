@@ -52,6 +52,11 @@ enum CurrentOperation {
         max_ops: NonZeroU64,
         bad_chunks: Vec<[u8; 32]>,
     },
+    HistoricalRangeProof {
+        snapshot_idx: usize,
+        start_loc: u64,
+        max_ops: NonZeroU64,
+    },
 }
 
 const MAX_OPERATIONS: usize = 100;
@@ -108,6 +113,7 @@ fn fuzz(data: FuzzInput) {
         let mut all_keys = std::collections::HashSet::new();
         let mut uncommitted_ops = 0;
         let mut last_committed_op_count = Location::new(1).unwrap();
+        let mut historical_snapshots: Vec<(Location, Digest, Location)> = Vec::new();
 
         for op in &data.operations {
             match op {
@@ -166,6 +172,8 @@ fn fuzz(data: FuzzInput) {
                 CurrentOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized().await.expect("into_merkleized should not fail");
+                    let floor = clean_db.inactivity_floor_loc();
+                    historical_snapshots.push((clean_db.bounds().await.end, clean_db.root(), floor));
                     last_committed_op_count = clean_db.bounds().await.end;
                     uncommitted_ops = 0;
                     db = clean_db.into_mutable();
@@ -285,6 +293,60 @@ fn fuzz(data: FuzzInput) {
                         }
                         Err(e) => {
                             panic!("Unexpected error during key value proof generation: {e:?}");
+                        }
+                    }
+                    db = merkleized_db.into_mutable();
+                }
+
+                CurrentOperation::HistoricalRangeProof { snapshot_idx, start_loc, max_ops } => {
+                    if historical_snapshots.is_empty() {
+                        continue;
+                    }
+                    let (historical_size, historical_root, snapshot_floor) =
+                        historical_snapshots[snapshot_idx % historical_snapshots.len()];
+                    let merkleized_db = db.into_merkleized().await
+                        .expect("into_merkleized should not fail");
+
+                    // Constrain start_loc to the unpruned region. Two pruning
+                    // mechanisms set the lower bound:
+                    // 1. The snapshot's inactivity floor (bitmap chunks below it
+                    //    are pruned by into_merkleized).
+                    // 2. The current inactivity floor (ops MMR/journal are pruned
+                    //    to this point by explicit Prune operations).
+                    let min_start = core::cmp::max(*snapshot_floor, *merkleized_db.inactivity_floor_loc());
+                    let Some(range) = (*historical_size).checked_sub(min_start) else {
+                        db = merkleized_db.into_mutable();
+                        continue;
+                    };
+                    if range == 0 {
+                        db = merkleized_db.into_mutable();
+                        continue;
+                    }
+                    let start_loc = Location::new(min_start + start_loc % range).unwrap();
+
+                    match merkleized_db
+                        .historical_range_proof(&mut hasher, historical_size, start_loc, *max_ops)
+                        .await
+                    {
+                        Ok((proof, ops, chunks)) => {
+                            assert!(
+                                Current::<deterministic::Context, Key, Value, Sha256, TwoCap, 32>::verify_range_proof(
+                                    &mut hasher,
+                                    &proof,
+                                    start_loc,
+                                    &ops,
+                                    &chunks,
+                                    &historical_root
+                                ),
+                                "Historical range proof verification failed"
+                            );
+                        }
+                        Err(commonware_storage::qmdb::Error::NoBitmapCommit(_)) => {
+                            // Expected: a Prune operation discarded this snapshot's
+                            // bitmap commit.
+                        }
+                        Err(e) => {
+                            panic!("Unexpected error during historical range proof: {e:?}");
                         }
                     }
                     db = merkleized_db.into_mutable();
