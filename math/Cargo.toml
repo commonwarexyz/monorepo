@@ -18,7 +18,7 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
-	"dep:commonware-test",
+	"dep:commonware-invariants",
 	"std",
 ]
 default = [ "std" ]
@@ -38,13 +38,13 @@ bytes.workspace = true
 commonware-codec.workspace = true
 commonware-macros.workspace = true
 commonware-parallel.workspace = true
-commonware-test = { workspace = true, optional = true }
+commonware-invariants = { workspace = true, optional = true }
 commonware-utils.workspace = true
 rand_core.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
-commonware-test.workspace = true
+commonware-invariants.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 

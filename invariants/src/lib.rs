@@ -1,4 +1,4 @@
-//! Simplify testing and fuzzing of distributed systems.
+//! Define and exercise invariants in your code
 
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",

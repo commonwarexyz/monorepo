@@ -50,7 +50,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
-* [test](./test/README.md): Simplify testing and fuzzing of distributed systems.
+* [invariants](./invariants/README.md): Define and exercise invariants in your code
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 

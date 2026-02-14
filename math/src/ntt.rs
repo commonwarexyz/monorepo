@@ -1071,7 +1071,7 @@ pub mod fuzz {
 
     #[test]
     fn test_fuzz() {
-        use commonware_test::minifuzz;
+        use commonware_invariants::minifuzz;
         minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
