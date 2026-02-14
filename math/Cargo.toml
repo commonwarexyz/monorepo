@@ -36,9 +36,9 @@ fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 arbitrary = { workspace = true, optional = true }
 bytes.workspace = true
 commonware-codec.workspace = true
+commonware-invariants = { workspace = true, optional = true }
 commonware-macros.workspace = true
 commonware-parallel.workspace = true
-commonware-invariants = { workspace = true, optional = true }
 commonware-utils.workspace = true
 rand_core.workspace = true
 
