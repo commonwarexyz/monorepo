@@ -1,10 +1,9 @@
-//! Mock application used by `simplex` tests to produce and verify payloads,
+//! Mock application used by consensus tests to produce and verify payloads,
 //! simulating proposal/verification latency and broadcasting via a mock relay.
 
 use super::relay::Relay;
 use crate::{
-    simplex::types::Context,
-    types::{Epoch, Round},
+    types::{Context, Epoch, Round},
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
 use bytes::Bytes;

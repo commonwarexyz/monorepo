@@ -1,5 +1,7 @@
 //! Types used in [crate::simplex].
 
+// Re-export shared types for backward compatibility
+pub use crate::types::{Attributable, AttributableMap, Context};
 use crate::{
     simplex::scheme,
     types::{Epoch, Participant, Round, View},
@@ -9,156 +11,90 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{varint::UInt, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{
     certificate::{Attestation, Scheme},
-    Digest, PublicKey,
+    Digest,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::N3f1;
 use rand_core::CryptoRngCore;
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
-/// Context is a collection of metadata from consensus about a given payload.
-/// It provides information about the current epoch/view and the parent payload that new proposals are built on.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Context<D: Digest, P: PublicKey> {
-    /// Current round of consensus.
+/// Proposal represents a proposed block in the Simplex protocol.
+///
+/// It includes the round (epoch + view), the parent view, and the actual payload
+/// (typically a digest of the block data).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Proposal<D: Digest> {
+    /// The round in which this proposal is made.
     pub round: Round,
-    /// Leader of the current round.
-    pub leader: P,
-    /// Parent the payload is built on.
-    ///
-    /// If there is a gap between the current view and the parent view, the participant
-    /// must possess a nullification for each discarded view to safely vote on the proposed
-    /// payload (any view without a nullification may eventually be finalized and skipping
-    /// it would result in a fork).
-    pub parent: (View, D),
+    /// The view of the parent proposal that this one builds upon.
+    pub parent: View,
+    /// The actual payload/content of the proposal (typically a digest of the block data).
+    pub payload: D,
 }
 
-impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
+impl<D: Digest> Proposal<D> {
+    /// Creates a new proposal with the specified round, parent view, and payload.
+    pub const fn new(round: Round, parent: View, payload: D) -> Self {
+        Self {
+            round,
+            parent,
+            payload,
+        }
+    }
+}
+
+impl<D: Digest> Write for Proposal<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.round.write(writer);
+        self.parent.write(writer);
+        self.payload.write(writer);
+    }
+}
+
+impl<D: Digest> Read for Proposal<D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let round = Round::read(reader)?;
+        let parent = View::read(reader)?;
+        let payload = D::read(reader)?;
+        Ok(Self {
+            round,
+            parent,
+            payload,
+        })
+    }
+}
+
+impl<D: Digest> EncodeSize for Proposal<D> {
+    fn encode_size(&self) -> usize {
+        self.round.encode_size() + self.parent.encode_size() + self.payload.encode_size()
+    }
+}
+
+impl<D: Digest> Epochable for Proposal<D> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
     }
 }
 
-impl<D: Digest, P: PublicKey> Viewable for Context<D, P> {
+impl<D: Digest> Viewable for Proposal<D> {
     fn view(&self) -> View {
         self.round.view()
     }
 }
 
-impl<D: Digest, P: PublicKey> Write for Context<D, P> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.round.write(buf);
-        self.leader.write(buf);
-        self.parent.write(buf);
-    }
-}
-
-impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.leader.encode_size() + self.parent.encode_size()
-    }
-}
-
-impl<D: Digest, P: PublicKey> Read for Context<D, P> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let leader = P::read(reader)?;
-        let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
-
-        Ok(Self {
-            round,
-            leader,
-            parent,
-        })
-    }
-}
-
 #[cfg(feature = "arbitrary")]
-impl<D: Digest, P: PublicKey> arbitrary::Arbitrary<'_> for Context<D, P>
+impl<D: Digest> arbitrary::Arbitrary<'_> for Proposal<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    P: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             round: Round::arbitrary(u)?,
-            leader: P::arbitrary(u)?,
-            parent: (View::arbitrary(u)?, D::arbitrary(u)?),
+            parent: View::arbitrary(u)?,
+            payload: D::arbitrary(u)?,
         })
-    }
-}
-
-/// Attributable is a trait that provides access to the signer index.
-/// This is used to identify which participant signed a given message.
-pub trait Attributable {
-    /// Returns the index of the signer (validator) who produced this message.
-    fn signer(&self) -> Participant;
-}
-
-/// A map of [Attributable] items keyed by their signer index.
-///
-/// The key for each item is automatically inferred from [Attributable::signer()].
-/// Each signer can insert at most one item.
-pub struct AttributableMap<T: Attributable> {
-    data: Vec<Option<T>>,
-    added: usize,
-}
-
-impl<T: Attributable> AttributableMap<T> {
-    /// Creates a new [AttributableMap] with the given number of participants.
-    pub fn new(participants: usize) -> Self {
-        // `resize_with` avoids requiring `T: Clone` while pre-filling with `None`.
-        let mut data = Vec::with_capacity(participants);
-        data.resize_with(participants, || None);
-
-        Self { data, added: 0 }
-    }
-
-    /// Clears all existing items from the [AttributableMap].
-    pub fn clear(&mut self) {
-        self.data.fill_with(|| None);
-        self.added = 0;
-    }
-
-    /// Inserts an item into the map, using [Attributable::signer()] as the key,
-    /// if it has not been added yet.
-    ///
-    /// Returns `true` if the item was inserted, `false` if an item from this
-    /// signer already exists or if the signer index is out of bounds.
-    pub fn insert(&mut self, item: T) -> bool {
-        let index: usize = item.signer().into();
-        if index >= self.data.len() {
-            return false;
-        }
-        if self.data[index].is_some() {
-            return false;
-        }
-        self.data[index] = Some(item);
-        self.added += 1;
-        true
-    }
-
-    /// Returns the number of items in the [AttributableMap].
-    pub const fn len(&self) -> usize {
-        self.added
-    }
-
-    /// Returns `true` if the [AttributableMap] is empty.
-    pub const fn is_empty(&self) -> bool {
-        self.added == 0
-    }
-
-    /// Returns a reference to the item associated with the given signer, if present.
-    pub fn get(&self, signer: Participant) -> Option<&T> {
-        self.data.get(<usize>::from(signer))?.as_ref()
-    }
-
-    /// Returns an iterator over items in the map, ordered by signer index
-    /// ([Attributable::signer()]).
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.data.iter().filter_map(|o| o.as_ref())
     }
 }
 
@@ -721,87 +657,6 @@ where
             }
             _ => unreachable!(),
         }
-    }
-}
-
-/// Proposal represents a proposed block in the protocol.
-/// It includes the view number, the parent view, and the actual payload (typically a digest of block data).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Proposal<D: Digest> {
-    /// The round in which this proposal is made
-    pub round: Round,
-    /// The view of the parent proposal that this one builds upon
-    pub parent: View,
-    /// The actual payload/content of the proposal (typically a digest of the block data)
-    pub payload: D,
-}
-
-impl<D: Digest> Proposal<D> {
-    /// Creates a new proposal with the specified view, parent view, and payload.
-    pub const fn new(round: Round, parent: View, payload: D) -> Self {
-        Self {
-            round,
-            parent,
-            payload,
-        }
-    }
-}
-
-impl<D: Digest> Write for Proposal<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.round.write(writer);
-        self.parent.write(writer);
-        self.payload.write(writer)
-    }
-}
-
-impl<D: Digest> Read for Proposal<D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let round = Round::read(reader)?;
-        let parent = View::read(reader)?;
-        let payload = D::read(reader)?;
-        Ok(Self {
-            round,
-            parent,
-            payload,
-        })
-    }
-}
-
-impl<D: Digest> EncodeSize for Proposal<D> {
-    fn encode_size(&self) -> usize {
-        self.round.encode_size() + self.parent.encode_size() + self.payload.encode_size()
-    }
-}
-
-impl<D: Digest> Epochable for Proposal<D> {
-    fn epoch(&self) -> Epoch {
-        self.round.epoch()
-    }
-}
-
-impl<D: Digest> Viewable for Proposal<D> {
-    fn view(&self) -> View {
-        self.round.view()
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Proposal<D>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let round = Round::arbitrary(u)?;
-        let parent = View::arbitrary(u)?;
-        let payload = D::arbitrary(u)?;
-        Ok(Self {
-            round,
-            parent,
-            payload,
-        })
     }
 }
 

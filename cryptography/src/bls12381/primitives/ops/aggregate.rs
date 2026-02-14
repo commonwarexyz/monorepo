@@ -31,7 +31,7 @@ impl<V: Variant> PublicKey<V> {
     }
 
     /// Returns the inner public key value.
-    pub(crate) const fn inner(&self) -> &V::Public {
+    pub const fn inner(&self) -> &V::Public {
         &self.0
     }
 
@@ -82,8 +82,19 @@ impl<V: Variant> Signature<V> {
         Self(V::Signature::zero())
     }
 
+    /// Creates an aggregate signature from a raw signature value.
+    ///
+    /// # Warning
+    ///
+    /// This constructor does not verify that the signature is actually
+    /// an aggregate. Use only when you know the signature came from
+    /// aggregating multiple signatures.
+    pub const fn from_raw(signature: V::Signature) -> Self {
+        Self(signature)
+    }
+
     /// Returns the inner signature value.
-    pub(crate) const fn inner(&self) -> &V::Signature {
+    pub const fn inner(&self) -> &V::Signature {
         &self.0
     }
 

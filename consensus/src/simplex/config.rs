@@ -1,8 +1,6 @@
-use super::{
-    elector::Config as Elector,
-    types::{Activity, Context},
-};
+use super::types::{Activity, Context};
 use crate::{
+    elector::Config as Elector,
     types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -37,8 +35,8 @@ pub struct Config<
     /// Leader election configuration.
     ///
     /// Determines how leaders are selected for each view. Built-in options include
-    /// [`RoundRobin`](super::elector::RoundRobin) for deterministic rotation and
-    /// [`Random`](super::elector::Random) for unpredictable selection using BLS
+    /// [`RoundRobin`](crate::elector::RoundRobin) for deterministic rotation and
+    /// [`Random`](crate::elector::Random) for unpredictable selection using BLS
     /// threshold signatures.
     pub elector: L,
 

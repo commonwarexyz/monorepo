@@ -1,7 +1,7 @@
 use commonware_codec::Read;
-use commonware_consensus::simplex::{
+use commonware_consensus::{
     elector::{Config as ElectorConfig, RoundRobin},
-    scheme::{
+    simplex::scheme::{
         bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
         Scheme,
     },
