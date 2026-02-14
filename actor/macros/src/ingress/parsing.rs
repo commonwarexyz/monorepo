@@ -1,0 +1,228 @@
+use proc_macro2::Span;
+use syn::{
+    braced,
+    parse::{Parse, ParseStream},
+    Attribute, Generics, Ident, Result, Token, Type,
+};
+
+mod kw {
+    syn::custom_keyword!(tell);
+    syn::custom_keyword!(ask);
+    syn::custom_keyword!(subscribe);
+    syn::custom_keyword!(unbounded);
+    syn::custom_keyword!(read_write);
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MailboxKind {
+    Bounded,
+    Unbounded,
+}
+
+pub(crate) enum ItemKind {
+    Tell,
+    Ask {
+        response: Box<Type>,
+        read_write: bool,
+    },
+    /// Like `ask`, but the generated mailbox method returns the
+    /// `oneshot::Receiver` immediately instead of awaiting the response.
+    Subscribe {
+        response: Box<Type>,
+    },
+}
+
+pub(crate) struct Field {
+    pub(crate) attrs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) ty: Type,
+}
+
+pub(crate) struct Item {
+    pub(crate) attrs: Vec<Attribute>,
+    pub(crate) name: Ident,
+    pub(crate) fields: Vec<Field>,
+    pub(crate) expose_on_mailbox: bool,
+    pub(crate) kind: ItemKind,
+}
+
+impl Item {
+    pub(crate) const fn is_unit(&self) -> bool {
+        self.fields.is_empty()
+    }
+}
+
+pub(crate) struct IngressInput {
+    pub(crate) mailbox_kind: MailboxKind,
+    pub(crate) mailbox: Ident,
+    pub(crate) generics: Generics,
+    pub(crate) items: Vec<Item>,
+}
+
+impl Parse for Field {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let attrs = input.call(Attribute::parse_outer)?;
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let ty: Type = input.parse()?;
+        Ok(Self { attrs, name, ty })
+    }
+}
+
+fn parse_fields(input: ParseStream<'_>) -> Result<Vec<Field>> {
+    if !input.peek(syn::token::Brace) {
+        return Ok(Vec::new());
+    }
+
+    let content;
+    braced!(content in input);
+    Ok(content
+        .parse_terminated(Field::parse, Token![,])?
+        .into_iter()
+        .collect())
+}
+
+fn parse_item(input: ParseStream<'_>) -> Result<Item> {
+    let attrs = input.call(Attribute::parse_outer)?;
+    let expose_on_mailbox = if input.peek(Token![pub]) {
+        input.parse::<Token![pub]>()?;
+        true
+    } else {
+        false
+    };
+
+    let kind = if input.peek(kw::tell) {
+        input.parse::<kw::tell>()?;
+        ItemKind::Tell
+    } else if input.peek(kw::ask) {
+        input.parse::<kw::ask>()?;
+        let read_write = if input.peek(kw::read_write) {
+            input.parse::<kw::read_write>()?;
+            true
+        } else {
+            false
+        };
+        let name: Ident = input.parse()?;
+        let fields = parse_fields(input)?;
+        if let Some(field) = fields.iter().find(|f| f.name == "response") {
+            return Err(syn::Error::new(
+                field.name.span(),
+                "`response` is reserved for the implicit response channel in ask/subscribe items",
+            ));
+        }
+        input.parse::<Token![->]>()?;
+        let response: Type = input.parse()?;
+        input.parse::<Token![;]>()?;
+        let kind = ItemKind::Ask {
+            response: Box::new(response),
+            read_write,
+        };
+        return Ok(Item {
+            attrs,
+            name,
+            fields,
+            expose_on_mailbox,
+            kind,
+        });
+    } else if input.peek(kw::subscribe) {
+        input.parse::<kw::subscribe>()?;
+        let name: Ident = input.parse()?;
+        let fields = parse_fields(input)?;
+        if let Some(field) = fields.iter().find(|f| f.name == "response") {
+            return Err(syn::Error::new(
+                field.name.span(),
+                "`response` is reserved for the implicit response channel in ask/subscribe items",
+            ));
+        }
+        input.parse::<Token![->]>()?;
+        let response: Type = input.parse()?;
+        input.parse::<Token![;]>()?;
+        return Ok(Item {
+            attrs,
+            name,
+            fields,
+            expose_on_mailbox,
+            kind: ItemKind::Subscribe {
+                response: Box::new(response),
+            },
+        });
+    } else {
+        return Err(input.error("expected `tell`, `ask`, or `subscribe` item"));
+    };
+
+    let name: Ident = input.parse()?;
+    let fields = parse_fields(input)?;
+    input.parse::<Token![;]>()?;
+
+    Ok(Item {
+        attrs,
+        name,
+        fields,
+        expose_on_mailbox,
+        kind,
+    })
+}
+
+impl Parse for IngressInput {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mailbox_kind = if input.peek(kw::unbounded) {
+            input.parse::<kw::unbounded>()?;
+            MailboxKind::Unbounded
+        } else {
+            MailboxKind::Bounded
+        };
+
+        let has_header = !(input.peek(kw::tell)
+            || input.peek(kw::ask)
+            || input.peek(kw::subscribe)
+            || input.peek(Token![pub])
+            || input.peek(Token![#]));
+        let (mailbox, generics) = if has_header {
+            let mailbox: Ident = input.parse()?;
+            let generics = if input.peek(Token![<]) {
+                input.parse()?
+            } else {
+                Generics::default()
+            };
+            if input.peek(Token![where]) {
+                return Err(input.error("where clauses are not supported on ingress! generics; use inline bounds like `<P: Trait>` instead"));
+            }
+            input.parse::<Token![,]>()?;
+            (mailbox, generics)
+        } else {
+            (
+                Ident::new("Mailbox", Span::call_site()),
+                Generics::default(),
+            )
+        };
+
+        let mut items = Vec::new();
+        while !input.is_empty() {
+            items.push(parse_item(input)?);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for item in &items {
+            if !seen.insert(item.name.to_string()) {
+                return Err(syn::Error::new(
+                    item.name.span(),
+                    format!("duplicate item name `{}`", item.name),
+                ));
+            }
+        }
+
+        if items.is_empty() {
+            return Err(syn::Error::new(
+                mailbox.span(),
+                "ingress! requires at least one `tell`, `ask`, or `subscribe` item",
+            ));
+        }
+
+        Ok(Self {
+            mailbox_kind,
+            mailbox,
+            generics,
+            items,
+        })
+    }
+}
