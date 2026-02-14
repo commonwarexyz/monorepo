@@ -1679,9 +1679,9 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_invariants::minifuzz;
     use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_invariants::minifuzz;
     use commonware_utils::test_rng;
     use std::{
         collections::{BTreeSet, HashMap},
