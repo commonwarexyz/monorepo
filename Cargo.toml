@@ -18,7 +18,7 @@ members = [
     "runtime",
     "storage",
     "stream",
-    "test",
+    "invariants",
     "utils",
     "examples/bridge",
     "examples/chat",
@@ -104,7 +104,7 @@ commonware-resolver = { version = "2026.2.0", path = "resolver" }
 commonware-runtime = { version = "2026.2.0", path = "runtime" }
 commonware-storage = { version = "2026.2.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.2.0", path = "stream" }
-commonware-test = { version = "2026.2.0", path = "test" }
+commonware-invariants = { version = "2026.2.0", path = "invariants" }
 commonware-utils = { version = "2026.2.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 crc = "3.4.0"

@@ -1,14 +1,14 @@
 [package]
-name = "commonware-test"
+name = "commonware-invariants"
 edition.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
-description = "Simplify testing and fuzzing of distributed systems."
+description = "Define and exercise invariants in your code"
 readme = "README.md"
 homepage.workspace = true
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/test"
-documentation = "https://docs.rs/commonware-test"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/invariants"
+documentation = "https://docs.rs/commonware-invariants"
 
 [lints]
 workspace = true

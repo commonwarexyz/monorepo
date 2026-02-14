@@ -172,7 +172,7 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info
 
 ## Testing Strategy
 
-- Property: Core logic and invariant validation (use "minifuzz" from the test crate)
+- Property: Core logic and invariant validation (use "minifuzz" from the invariants crate)
 - Unit: Testing edge cases or particular scenarios.
 - Integration: Cross-primitive interaction
 - Fuzz: Extending property tests (cf. "Plan" pattern in dkg.rs or the math crate).
