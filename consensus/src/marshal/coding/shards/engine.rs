@@ -3541,4 +3541,148 @@ mod tests {
             );
         });
     }
+
+    #[test_traced]
+    fn test_failed_reconstruction_digest_mismatch_then_recovery() {
+        // Byzantine scenario: all shards pass coding verification (correct root) but the
+        // decoded blob has a different digest than what the commitment claims. This triggers
+        // Error::DigestMismatch in try_reconstruct. Verify that:
+        //   1. The failed commitment's state is cleaned up
+        //   2. Subscriptions for the failed commitment never resolve
+        //   3. A subsequent valid commitment reconstructs successfully
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _oracle, mut peers, coding_config| async move {
+                // Block 1: the "claimed" block (its digest goes in the fake commitment).
+                let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+
+                // Block 2: the actual data behind the shards.
+                let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let real_commitment2 = coded_block2.commitment();
+
+                // Build a fake commitment: block1's digest + block2's coding root/context/config.
+                // Shards from block2 will verify against block2's root (present in the fake
+                // commitment), but try_reconstruct will decode block2 and find its digest != D1.
+                let fake_commitment = Commitment::from((
+                    coded_block1.digest(),
+                    real_commitment2.root::<Sha256Digest>(),
+                    real_commitment2.context::<Sha256Digest>(),
+                    coding_config,
+                ));
+
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let leader = peers[0].public_key.clone();
+                let round = Round::new(Epoch::zero(), View::new(1));
+
+                // Discover the fake commitment.
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(fake_commitment, leader.clone(), round)
+                    .await;
+
+                // Open a block subscription before sending shards.
+                let mut block_sub = peers[receiver_idx].mailbox.subscribe(fake_commitment).await;
+
+                // Send the receiver's strong shard (from block2, with fake commitment).
+                let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
+                let mut strong_shard = coded_block2
+                    .shard::<H>(receiver_shard_idx)
+                    .expect("missing shard");
+                strong_shard.commitment = fake_commitment;
+                peers[0]
+                    .sender
+                    .send(
+                        Recipients::One(receiver_pk.clone()),
+                        strong_shard.encode(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+
+                // Send enough weak shards to reach minimum_shards (4 for 10 peers).
+                // Need 3 more weak shards after the strong shard.
+                for &idx in &[1usize, 2, 4] {
+                    let peer_shard_idx = peers[idx].index.get() as u16;
+                    let mut weak = coded_block2
+                        .shard::<H>(peer_shard_idx)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed");
+                    weak.commitment = fake_commitment;
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak.encode(), true)
+                        .await
+                        .expect("send failed");
+                }
+
+                context.sleep(config.link.latency * 2).await;
+
+                // Reconstruction should have failed with DigestMismatch.
+                // State for fake_commitment should be removed (engine.rs:792).
+                assert!(
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(fake_commitment)
+                        .await
+                        .is_none(),
+                    "block should not be available after DigestMismatch"
+                );
+
+                // Block subscription should not have resolved.
+                assert!(
+                    matches!(block_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "subscription should not resolve for failed reconstruction"
+                );
+
+                // Now verify the engine is not stuck: send valid shards for block1's real
+                // commitment and confirm reconstruction succeeds.
+                let real_commitment1 = coded_block1.commitment();
+                let round2 = Round::new(Epoch::zero(), View::new(2));
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(real_commitment1, leader.clone(), round2)
+                    .await;
+
+                let strong1 = coded_block1
+                    .shard::<H>(receiver_shard_idx)
+                    .expect("missing shard");
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), strong1.encode(), true)
+                    .await
+                    .expect("send failed");
+
+                for &idx in &[1usize, 2, 4] {
+                    let peer_shard_idx = peers[idx].index.get() as u16;
+                    let weak = coded_block1
+                        .shard::<H>(peer_shard_idx)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed");
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak.encode(), true)
+                        .await
+                        .expect("send failed");
+                }
+
+                context.sleep(config.link.latency * 2).await;
+
+                let reconstructed = peers[receiver_idx]
+                    .mailbox
+                    .get(real_commitment1)
+                    .await
+                    .expect("valid block should reconstruct after prior failure");
+                assert_eq!(reconstructed.commitment(), real_commitment1);
+            },
+        );
+    }
 }

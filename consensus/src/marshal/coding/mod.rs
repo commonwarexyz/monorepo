@@ -71,14 +71,15 @@ mod tests {
             mocks::{
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block, setup_network,
-                    CodingB, CodingCtx, CodingHarness, TestHarness, BLOCKS_PER_EPOCH, LINK,
-                    NAMESPACE, NUM_VALIDATORS, S, UNRELIABLE_LINK, V,
+                    setup_network_links, CodingB, CodingCtx, CodingHarness, TestHarness,
+                    BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK,
+                    V,
                 },
                 verifying::MockVerifyingApp,
             },
         },
-        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-        types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
+        types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
     use commonware_coding::ReedSolomon;
@@ -88,8 +89,10 @@ mod tests {
         Committable, Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_traced};
+    use commonware_p2p::Manager;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::NZU16;
     use std::time::Duration;
 
     #[test_traced("WARN")]
@@ -942,6 +945,207 @@ mod tests {
             assert!(
                 !certify_result.unwrap(),
                 "Byzantine block with mismatched parent commitment should be rejected"
+            );
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_certify_without_prior_verify_crash_recovery() {
+        // After a crash, consensus may call certify() without a prior verify().
+        // The certify path (marshaled.rs:842-936) should:
+        //   1. Find no in-progress verification task
+        //   2. Subscribe to the block from the shard engine
+        //   3. Use the block's embedded context for deferred_verify
+        //   4. Return Ok(true) for a valid block
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Create parent at height 1.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent = CodedBlock::new(parent.clone(), coding_config, &Sequential);
+            let parent_commitment = coded_parent.commitment();
+            shards.clone().proposed(parent_round, coded_parent).await;
+
+            // Create child at height 2.
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = CodingCtx {
+                round: child_round,
+                leader: me.clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let coded_child = CodedBlock::new(child, coding_config, &Sequential);
+            let child_commitment = coded_child.commitment();
+            shards.clone().proposed(child_round, coded_child).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Call certify directly without any prior verify (simulating crash recovery).
+            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.unwrap(),
+                        "certify without prior verify should succeed for valid block"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should complete within timeout");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_backfill_block_mismatched_commitment() {
+        // Regression: when backfilling by Request::Block(digest), a peer may return
+        // a coded block with matching inner digest but a different coding commitment.
+        // If a finalization for this digest is already cached, marshal must reject
+        // the block unless V::commitment(block) matches the finalization payload.
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), Some(1));
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let coding_config_a = coding_config_for_participants(NUM_VALIDATORS as u16);
+            // Same total shards (4) but different min/extra split produces a different
+            // coding root and config bytes, yielding a different commitment.
+            let coding_config_b = commonware_coding::Config {
+                minimum_shards: coding_config_a.minimum_shards.checked_add(1).unwrap(),
+                extra_shards: NZU16!(coding_config_a.extra_shards.get() - 1),
+            };
+
+            let v0_setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let v1_setup = CodingHarness::setup_validator(
+                context.with_label("validator_1"),
+                &mut oracle,
+                participants[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+
+            setup_network_links(&mut oracle, &participants[..2], LINK).await;
+            oracle
+                .manager()
+                .track(0, participants[..2].to_vec().try_into().unwrap())
+                .await;
+
+            let mut v0_mailbox = v0_setup.mailbox;
+            let mut v1_mailbox = v1_setup.mailbox;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let round1 = Round::new(Epoch::zero(), View::new(1));
+            let block1_ctx = CodingCtx {
+                round: round1,
+                leader: participants[0].clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let block1 = make_coding_block(block1_ctx, genesis.digest(), Height::new(1), 100);
+
+            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>> =
+                CodedBlock::new(block1.clone(), coding_config_a, &Sequential);
+            let commitment_a = coded_block_a.commitment();
+
+            let coded_block_b: CodedBlock<_, ReedSolomon<Sha256>> =
+                CodedBlock::new(block1.clone(), coding_config_b, &Sequential);
+            let commitment_b = coded_block_b.commitment();
+
+            assert_eq!(coded_block_a.digest(), coded_block_b.digest());
+            assert_ne!(commitment_a, commitment_b);
+
+            // Validator 1 proposes coded_block_b (same inner block, different coding).
+            // This stores it in v1's shard engine and actor cache.
+            v1_mailbox.proposed(round1, coded_block_b.clone()).await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Create finalization referencing commitment_a (the "correct" commitment).
+            let proposal: Proposal<Commitment> = Proposal {
+                round: round1,
+                parent: View::zero(),
+                payload: commitment_a,
+            };
+            let finalization = CodingHarness::make_finalization(proposal.clone(), &schemes, QUORUM);
+
+            // Report finalization to v0. v0 doesn't have the block:
+            //   - it fetches Request::Block(digest)
+            //   - v1 responds with coded_block_b (same digest, wrong commitment)
+            //   - deliver path must reject because cached finalization expects commitment_a
+            CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
+
+            // Wait for the fetch cycle to complete.
+            context.sleep(Duration::from_secs(5)).await;
+
+            // The mismatched block must not be stored.
+            let stored = v0_mailbox.get_block(Height::new(1)).await;
+            assert!(
+                stored.is_none(),
+                "v0 should reject backfilled block with mismatched commitment"
+            );
+
+            // Without the block, finalization should not be persisted by height yet.
+            let stored_finalization = v0_mailbox.get_finalization(Height::new(1)).await;
+            assert!(
+                stored_finalization.is_none(),
+                "finalization should not be archived until matching block is available"
             );
         })
     }
