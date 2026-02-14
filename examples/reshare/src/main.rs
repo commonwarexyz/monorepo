@@ -14,7 +14,7 @@ use commonware_runtime::{
     Metrics, Runner,
 };
 use commonware_utils::{hex, NZU64};
-use std::{future::Future, num::NonZeroU64, path::PathBuf, pin::Pin};
+use std::{num::NonZeroU64, path::PathBuf};
 use tracing::Level;
 
 mod application;
@@ -42,33 +42,28 @@ struct SaveFileOnUpdate {
 }
 
 impl SaveFileOnUpdate {
-    pub fn boxed(path: PathBuf) -> Box<Self> {
-        Box::new(Self { path })
+    pub const fn new(path: PathBuf) -> Self {
+        Self { path }
     }
 }
 
 impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
-    fn on_update(
-        &mut self,
-        update: Update<MinSig, PublicKey>,
-    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+    async fn on_update(&mut self, update: Update<MinSig, PublicKey>) -> PostUpdate {
         let config_path = self.path.clone();
-        Box::pin(async move {
-            match update {
-                Update::Failure { .. } => PostUpdate::Continue,
-                Update::Success { output, share, .. } => {
-                    let config_str =
-                        std::fs::read_to_string(&config_path).expect("failed to read config file");
-                    let config: ParticipantConfig = serde_json::from_str(&config_str)
-                        .expect("Failed to deserialize participant configuration");
-                    config.update_and_write(&config_path, |config| {
-                        config.output = Some(hex(output.encode().as_ref()));
-                        config.share = share;
-                    });
-                    PostUpdate::Stop
-                }
+        match update {
+            Update::Failure { .. } => PostUpdate::Continue,
+            Update::Success { output, share, .. } => {
+                let config_str =
+                    std::fs::read_to_string(&config_path).expect("failed to read config file");
+                let config: ParticipantConfig = serde_json::from_str(&config_str)
+                    .expect("Failed to deserialize participant configuration");
+                config.update_and_write(&config_path, |config| {
+                    config.output = Some(hex(output.encode().as_ref()));
+                    config.share = share;
+                });
+                PostUpdate::Stop
             }
-        })
+        }
     }
 }
 
@@ -172,18 +167,18 @@ fn main() {
             Subcommands::Setup(args) => setup::run(args),
             Subcommands::Dkg(args) => {
                 let config_path = args.config_path.clone();
-                validator::run::<EdScheme, RoundRobin>(
+                validator::run::<EdScheme, RoundRobin, _>(
                     context,
                     args,
-                    SaveFileOnUpdate::boxed(config_path),
+                    SaveFileOnUpdate::new(config_path),
                 )
                 .await;
             }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>, Random>(
+                validator::run::<ThresholdScheme<MinSig>, Random, _>(
                     context,
                     args,
-                    ContinueOnUpdate::boxed(),
+                    ContinueOnUpdate,
                 )
                 .await
             }
