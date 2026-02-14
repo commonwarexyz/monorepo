@@ -1681,7 +1681,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_test::minifuzz;
+    use commonware_invariants::minifuzz;
     use commonware_utils::test_rng;
     use std::{
         collections::{BTreeSet, HashMap},

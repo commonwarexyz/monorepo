@@ -337,7 +337,7 @@ pub mod test_suites {
     //! ```
     //! # use commonware_math::algebra::test_suites::*;
     //! # use commonware_math::fields::goldilocks::F;
-    //! commonware_test::minifuzz::test(|u| fuzz_field::<F>(u));
+    //! commonware_invariants::minifuzz::test(|u| fuzz_field::<F>(u));
     //! ```
     use super::*;
     use arbitrary::Unstructured;
@@ -638,7 +638,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         #[test]
         fn test_fuzz() {
-            commonware_test::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
+            commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
         }
     }
 });

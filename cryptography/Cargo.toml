@@ -59,7 +59,7 @@ anyhow.workspace = true
 arbitrary.workspace = true
 commonware-conformance.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }
-commonware-test.workspace = true
+commonware-invariants.workspace = true
 crc.workspace = true
 criterion.workspace = true
 rayon.workspace = true
