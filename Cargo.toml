@@ -26,6 +26,7 @@ members = [
     "examples/log",
     "examples/sync",
     "examples/reshare",
+    "examples/revm",
 
     # Fuzz builds
     "broadcast/fuzz",

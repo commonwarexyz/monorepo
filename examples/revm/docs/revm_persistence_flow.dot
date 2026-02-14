@@ -1,0 +1,52 @@
+digraph revm_persistence_flow {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    pad="0.2",
+    nodesep=0.5,
+    ranksep=0.6,
+    fontname="Helvetica",
+    fontsize=12
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="white",
+    color="#4B5563",
+    fontname="Helvetica",
+    fontsize=10
+  ];
+  edge [
+    color="#6B7280",
+    fontname="Helvetica",
+    fontsize=9,
+    arrowsize=0.7
+  ];
+
+  Start[label="persist_snapshot(digest)"];
+  BuildChain[label="walk parents until\npersisted digest\n(build missing chain)"];
+  Empty[shape=diamond, label="chain empty?"];
+  InFlight[shape=diamond, label="any digest\npersisting?"];
+  Mark[label="mark chain as\npersisting"];
+  Merge[label="merge change sets\n(oldest -> newest)"];
+  Commit[label="commit_changes(merged)"];
+  CommitOk[shape=diamond, label="commit ok?"];
+  MarkDone[label="mark chain\npersisted"];
+  Clear[label="clear persisting\n(on error)"];
+  Done[label="return bool\n(true if commit happened)"];
+
+  Start -> BuildChain -> Empty;
+  Empty -> Done [label="yes -> false"];
+  Empty -> InFlight [label="no"];
+  InFlight -> Done [label="yes -> false"];
+  InFlight -> Mark [label="no"];
+  Mark -> Merge -> Commit -> CommitOk;
+  CommitOk -> MarkDone [label="yes"];
+  CommitOk -> Clear [label="no"];
+  MarkDone -> Done;
+  Clear -> Done;
+
+  NoteIdem[shape=note, fillcolor="white", label="Idempotent: if already persisted\nor in-flight, no commit occurs"];
+  Done -> NoteIdem [style=dashed];
+}

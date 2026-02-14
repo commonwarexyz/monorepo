@@ -10,6 +10,9 @@ use std::{
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+/// Range of auto-assigned ports used when binding with port 0.
+const AUTO_BIND_PORT_RANGE: Range<u16> = 1024..32768;
+
 /// Implementation of [crate::Sink] for a deterministic [Network].
 pub struct Sink {
     sender: mocks::Sink,
@@ -71,6 +74,7 @@ type Dialable = mpsc::UnboundedSender<(
 #[derive(Clone)]
 pub struct Network {
     ephemeral: Arc<Mutex<u16>>,
+    auto_bind: Arc<Mutex<u16>>,
     listeners: Arc<Mutex<HashMap<SocketAddr, Dialable>>>,
 }
 
@@ -78,6 +82,7 @@ impl Default for Network {
     fn default() -> Self {
         Self {
             ephemeral: Arc::new(Mutex::new(EPHEMERAL_PORT_RANGE.start)),
+            auto_bind: Arc::new(Mutex::new(AUTO_BIND_PORT_RANGE.start)),
             listeners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -87,6 +92,19 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
+        // If port is 0, assign the next available port from the auto-bind range.
+        let socket = if socket.port() == 0 {
+            let mut next = self.auto_bind.lock().unwrap();
+            if !AUTO_BIND_PORT_RANGE.contains(&*next) {
+                return Err(Error::BindFailed);
+            }
+            let port = *next;
+            *next = next.checked_add(1).unwrap_or(AUTO_BIND_PORT_RANGE.end);
+            SocketAddr::new(socket.ip(), port)
+        } else {
+            socket
+        };
+
         // If the IP is localhost, ensure the port is not in the ephemeral range
         // so that it can be used for binding in the dial method
         if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
