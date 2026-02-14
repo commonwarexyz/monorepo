@@ -122,11 +122,33 @@ pub struct BitMap<const N: usize, S: State = Clean> {
     state: S,
 }
 
+impl<const N: usize, S: State> BitMap<N, S> {
+    /// Return the earliest (lowest) commit number, if any commits exist.
+    pub fn earliest_commit(&self) -> Option<u64> {
+        self.commits.keys().next().copied()
+    }
+
+    /// Return the latest (highest) commit number, if any commits exist.
+    pub fn latest_commit(&self) -> Option<u64> {
+        self.commits.keys().next_back().copied()
+    }
+}
+
 /// Type alias for a clean bitmap with no pending mutations.
 pub type CleanBitMap<const N: usize> = BitMap<N, Clean>;
 
 /// Type alias for a dirty bitmap with pending mutations.
 pub type DirtyBitMap<const N: usize> = BitMap<N, Dirty<N>>;
+
+impl<const N: usize> From<Prunable<N>> for CleanBitMap<N> {
+    fn from(prunable: Prunable<N>) -> Self {
+        Self {
+            current: prunable,
+            commits: BTreeMap::new(),
+            state: Clean,
+        }
+    }
+}
 
 impl<const N: usize> CleanBitMap<N> {
     /// Create a new empty historical bitmap.
@@ -273,16 +295,6 @@ impl<const N: usize> CleanBitMap<N> {
     /// Get an iterator over all commit numbers in ascending order.
     pub fn commits(&self) -> impl Iterator<Item = u64> + '_ {
         self.commits.keys().copied()
-    }
-
-    /// Get the latest commit number, if any commits exist.
-    pub fn latest_commit(&self) -> Option<u64> {
-        self.commits.keys().next_back().copied()
-    }
-
-    /// Get the earliest commit number, if any commits exist.
-    pub fn earliest_commit(&self) -> Option<u64> {
-        self.commits.keys().next().copied()
     }
 
     /// Get a reference to the current bitmap state.

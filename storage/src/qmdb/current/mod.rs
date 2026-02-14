@@ -129,6 +129,56 @@
 //! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
 //! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
 //! allowing the grafted tree to be rebuilt without the pruned chunks.
+//!
+//! ## Pruning and metadata persistence
+//!
+//! The grafted MMR and bitmap have separate pruning paths that work together:
+//!
+//! ### Bitmap pruning (in `into_merkleized`)
+//!
+//! During merkleization, bitmap chunks fully below the inactivity floor are pruned
+//! (`prune_to_bit`). All their bits are guaranteed to be 0 (inactive), so discarding
+//! them does not lose information. This advances `pruned_chunks` but does NOT advance
+//! the grafted MMR's in-memory pruning boundary.
+//!
+//! ### Metadata writes (in `sync` and `prune`)
+//!
+//! `sync_metadata()` persists two things to the metadata store:
+//! - The number of pruned bitmap chunks (`PRUNED_CHUNKS_PREFIX`).
+//! - The grafted MMR peak digests covering the pruned region (`NODE_PREFIX`).
+//!
+//! It is called by both `sync()` and `prune()`. The metadata store is cleared and
+//! rewritten each time (idempotent).
+//!
+//! ### Grafted MMR pruning (in `prune`)
+//!
+//! `prune()` executes in this order:
+//!
+//! 1. **`sync_metadata()`** -- persist peaks before the ops log is pruned. If the
+//!    process crashes after this step but before step 2, the metadata is ahead of
+//!    the log, which is safe: recovery will recompute from the un-pruned log and
+//!    the metadata simply records peaks that haven't been pruned yet. The reverse
+//!    order (prune first, write metadata second) would be unsafe: a pruned log
+//!    with stale metadata would lose peak digests permanently.
+//! 2. **`any.prune()`** -- prune the ops log.
+//! 3. **`status.prune_commits_before()`** -- discard historical bitmap commits
+//!    whose ops have been pruned (historical proofs below the prune point are
+//!    impossible).
+//! 4. **Advance the grafted MMR boundary** to the oldest surviving
+//!    historical commit's `pruned_chunks` B. After `prune_to_pos(B)`, the
+//!    grafted MMR retains nodes >= B plus the O(log B) peaks at B (pinned).
+//!    Any surviving commit has P >= B; its peaks either extend beyond B
+//!    (retained) or fall within [0, B) and are peaks of B too (pinned),
+//!    because MMR peaks share a common left-to-right prefix when P >= B.
+//!
+//! ### Recovery (`init_metadata` + `build_grafted_mmr`)
+//!
+//! On startup, `init_metadata` reads `pruned_chunks` and the pinned peak digests
+//! from the metadata store. `build_grafted_mmr` uses these together with the
+//! un-pruned bitmap chunks and the ops MMR to reconstruct the grafted MMR.
+//! Historical bitmap commits (reverse diffs) are in-memory only and are lost on
+//! restart, so `historical_range_proof` can only serve sizes committed since the
+//! current process started.
 
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -149,7 +199,10 @@ use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, Array};
+use commonware_utils::{
+    bitmap::{historical::CleanBitMap, Prunable as BitMap},
+    Array,
+};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -352,7 +405,7 @@ where
 
     Ok(db::Db {
         any,
-        status,
+        status: CleanBitMap::from(status),
         grafted_mmr,
         metadata,
         thread_pool,
@@ -439,7 +492,7 @@ where
 
     Ok(db::Db {
         any,
-        status,
+        status: CleanBitMap::from(status),
         grafted_mmr,
         metadata,
         thread_pool: pool,
@@ -1023,7 +1076,10 @@ pub mod tests {
     // Consolidated tests for all 12 Current QMDB variants
     // ============================================================
 
-    use crate::translator::OneCap;
+    use crate::{
+        mmr::{hasher::Hasher as _, Location, StandardHasher},
+        translator::OneCap,
+    };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
 
@@ -1122,6 +1178,708 @@ pub mod tests {
         }};
     }
 
+    // Runner macro for historical range proof tests. Receives (context, label, type, config)
+    // and runs the test body with the concrete DB type. This must be a macro (not a generic
+    // function) because `historical_range_proof` is an inherent method on `current::db::Db`,
+    // not part of any trait, and its return type contains `[u8; N]` (a const generic).
+    macro_rules! test_historical_proof {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+
+                // Phase 1: Write 50 keys, commit, merkleize.
+                let mut db = db.into_mutable();
+                for i in 0u8..50 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (db, _) = db.commit(None).await.unwrap();
+                let db = db.into_merkleized().await.unwrap();
+                let root1 = db.root();
+                let size1 = db.size().await;
+
+                // Phase 2: Write 50 more keys, commit, merkleize.
+                let mut db = db.into_mutable();
+                for i in 50u8..100 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (db, _) = db.commit(None).await.unwrap();
+                let db = db.into_merkleized().await.unwrap();
+                let root2 = db.root();
+                let size2 = db.size().await;
+
+                assert_ne!(root1, root2);
+                assert!(size2 > size1);
+
+                // Historical proof at size1 verifies against root1 but not root2.
+                let start = Location::new_unchecked(1);
+                let max_ops = NZU64!(4);
+                let (proof, ops, chunks) = db
+                    .historical_range_proof(hasher.inner(), size1, start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof.verify(hasher.inner(), start, &ops, &chunks, &root1));
+                assert!(!proof.verify(hasher.inner(), start, &ops, &chunks, &root2));
+
+                // Historical proof at size2 verifies against root2 but not root1.
+                let (proof2, ops2, chunks2) = db
+                    .historical_range_proof(hasher.inner(), size2, start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof2.verify(hasher.inner(), start, &ops2, &chunks2, &root2));
+                assert!(!proof2.verify(hasher.inner(), start, &ops2, &chunks2, &root1));
+
+                // Nonexistent historical size should error.
+                let bad_size = Location::new_unchecked(*size1 + 1);
+                assert!(db
+                    .historical_range_proof(hasher.inner(), bad_size, start, max_ops)
+                    .await
+                    .is_err());
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify that a historical proof at a partial chunk (size not aligned to 256)
+    // carries a partial_chunk_digest, and that it verifies against the correct root.
+    macro_rules! test_historical_proof_partial_chunk {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_pc");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+
+                // 50 keys produces well under 256 ops, so the chunk is incomplete.
+                let mut db = db.into_mutable();
+                for i in 0u8..50 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (db, _) = db.commit(None).await.unwrap();
+                let db = db.into_merkleized().await.unwrap();
+                let root1 = db.root();
+                let size1 = db.size().await;
+                assert!(*size1 % 256 != 0, "expected partial chunk");
+
+                // Second commit to confirm the first is historical.
+                let mut db = db.into_mutable();
+                for i in 50u8..100 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (db, _) = db.commit(None).await.unwrap();
+                let db = db.into_merkleized().await.unwrap();
+                let root2 = db.root();
+
+                let start = Location::new_unchecked(0);
+                let max_ops = NZU64!(10);
+                let (proof, ops, chunks) = db
+                    .historical_range_proof(hasher.inner(), size1, start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof.partial_chunk_digest.is_some());
+                assert!(proof.verify(hasher.inner(), start, &ops, &chunks, &root1));
+                assert!(!proof.verify(hasher.inner(), start, &ops, &chunks, &root2));
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify partial_chunk_digest is Some when size is not chunk-aligned and
+    // None when it is. Checks the property across multiple commits.
+    macro_rules! test_historical_proof_chunk_boundary {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_cb");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                // 4 commits of 100 unique keys each. At least one should cross
+                // a chunk boundary (256 ops), giving us both aligned and unaligned
+                // snapshots to check.
+                let mut snapshots = Vec::new();
+                for round in 0u16..4 {
+                    for j in 0u16..100 {
+                        let k = (round * 100 + j) as u8;
+                        db.write_batch([(Sha256::fill(k), Some(Sha256::fill(k.wrapping_add(50))))])
+                            .await
+                            .unwrap();
+                    }
+                    let (durable, _) = db.commit(None).await.unwrap();
+                    let merkleized = durable.into_merkleized().await.unwrap();
+                    let floor = merkleized.inactivity_floor_loc();
+                    snapshots.push((merkleized.size().await, merkleized.root(), floor));
+                    db = merkleized.into_mutable();
+                }
+
+                // Final commit to go back to Merkleized state.
+                db.write_batch([(Sha256::fill(255), Some(Sha256::fill(0)))])
+                    .await
+                    .unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+
+                // For each snapshot, verify partial_chunk_digest matches alignment
+                // and the proof verifies against the correct root.
+                for (size, root, floor) in &snapshots {
+                    let start = Location::new_unchecked(core::cmp::max(**floor, 1));
+                    let max_ops = NZU64!(4);
+                    let (proof, ops, chunks) = db
+                        .historical_range_proof(hasher.inner(), *size, start, max_ops)
+                        .await
+                        .unwrap();
+                    let aligned = **size % 256 == 0;
+                    assert_eq!(
+                        proof.partial_chunk_digest.is_none(),
+                        aligned,
+                        "partial_chunk_digest should be None iff size ({}) is chunk-aligned",
+                        **size
+                    );
+                    assert!(proof.verify(hasher.inner(), start, &ops, &chunks, root));
+                }
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // After 6 commits, verify each historical proof verifies only against its own root.
+    macro_rules! test_historical_proof_many_commits {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_mc");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                let mut snapshots = Vec::new();
+                for round in 0u8..6 {
+                    let base = round * 30;
+                    for j in 0u8..30 {
+                        let k = base.wrapping_add(j);
+                        db.write_batch([(
+                            Sha256::fill(k),
+                            Some(Sha256::fill(k.wrapping_add(100))),
+                        )])
+                        .await
+                        .unwrap();
+                    }
+                    let (durable, _) = db.commit(None).await.unwrap();
+                    let merkleized = durable.into_merkleized().await.unwrap();
+                    let floor = merkleized.inactivity_floor_loc();
+                    snapshots.push((merkleized.size().await, merkleized.root(), floor));
+                    db = merkleized.into_mutable();
+                }
+
+                // One more commit so we're back in Merkleized state.
+                db.write_batch([(Sha256::fill(255), Some(Sha256::fill(0)))])
+                    .await
+                    .unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+
+                // Verify each snapshot's proof against all roots. Start past
+                // the inactivity floor to avoid the bitmap's pruned region.
+                let max_ops = NZU64!(4);
+                for (i, (size_i, root_i, floor_i)) in snapshots.iter().enumerate() {
+                    let start = Location::new_unchecked(core::cmp::max(**floor_i, 1));
+                    let (proof, ops, chunks) = db
+                        .historical_range_proof(hasher.inner(), *size_i, start, max_ops)
+                        .await
+                        .unwrap();
+                    assert!(
+                        proof.verify(hasher.inner(), start, &ops, &chunks, root_i),
+                        "proof at snapshot {i} must verify against its own root"
+                    );
+                    for (j, (_, root_j, _)) in snapshots.iter().enumerate() {
+                        if i != j {
+                            assert!(
+                                !proof.verify(hasher.inner(), start, &ops, &chunks, root_j),
+                                "proof at snapshot {i} must NOT verify against snapshot {j}'s root"
+                            );
+                        }
+                    }
+                }
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify max_ops=1 produces a single-operation proof at various positions.
+    macro_rules! test_historical_proof_single_op {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_so");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                for i in 0u8..50 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let merkleized = durable.into_merkleized().await.unwrap();
+                let root = merkleized.root();
+                let size = merkleized.size().await;
+
+                // Second commit to make the first historical.
+                let mut db = merkleized.into_mutable();
+                db.write_batch([(Sha256::fill(200), Some(Sha256::fill(201)))])
+                    .await
+                    .unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+
+                let max_ops = NZU64!(1);
+                for offset in [0u64, 1, *size / 2, *size - 1] {
+                    let start = Location::new_unchecked(offset);
+                    let (proof, ops, chunks) = db
+                        .historical_range_proof(hasher.inner(), size, start, max_ops)
+                        .await
+                        .unwrap();
+                    assert_eq!(ops.len(), 1, "max_ops=1 should return exactly 1 op");
+                    assert!(proof.verify(hasher.inner(), start, &ops, &chunks, &root));
+                }
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify historical and current range proofs are equivalent at the latest
+    // merkleized state.
+    macro_rules! test_historical_proof_consistent_with_current {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_cons");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                for i in 0u8..50 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+                let root = db.root();
+                let size = db.size().await;
+
+                let start = Location::new_unchecked(0);
+                let max_ops = NZU64!(10);
+
+                // Current range proof.
+                let (current_proof, current_ops, current_chunks) = db
+                    .range_proof(hasher.inner(), start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(current_proof.verify(
+                    hasher.inner(),
+                    start,
+                    &current_ops,
+                    &current_chunks,
+                    &root
+                ));
+
+                // Historical range proof at current size should be equivalent.
+                let (hist_proof, hist_ops, hist_chunks) = db
+                    .historical_range_proof(hasher.inner(), size, start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(hist_proof.verify(hasher.inner(), start, &hist_ops, &hist_chunks, &root));
+
+                // Ops and chunks must be identical.
+                assert_eq!(current_ops, hist_ops);
+                assert_eq!(current_chunks, hist_chunks);
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify error cases: out-of-bounds start_loc, non-commit-point historical_size,
+    // and historical_size = 0.
+    macro_rules! test_historical_proof_error_cases {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_err");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                for i in 0u8..50 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+                let size = db.size().await;
+
+                // start_loc == historical_size is out of bounds.
+                assert!(matches!(
+                    db.historical_range_proof(hasher.inner(), size, size, NZU64!(1))
+                        .await,
+                    Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                ));
+
+                // start_loc > historical_size is out of bounds.
+                let beyond = Location::new_unchecked(*size + 1);
+                assert!(matches!(
+                    db.historical_range_proof(hasher.inner(), size, beyond, NZU64!(1))
+                        .await,
+                    Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                ));
+
+                // Non-commit-point historical_size returns NoBitmapCommit.
+                let bad_size = Location::new_unchecked(*size + 1);
+                let start = Location::new_unchecked(0);
+                assert!(matches!(
+                    db.historical_range_proof(hasher.inner(), bad_size, start, NZU64!(1))
+                        .await,
+                    Err(Error::NoBitmapCommit(_))
+                ));
+
+                // historical_size = 0 with start_loc = 0 fails (0 >= 0).
+                let zero = Location::new_unchecked(0);
+                assert!(matches!(
+                    db.historical_range_proof(hasher.inner(), zero, zero, NZU64!(1))
+                        .await,
+                    Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                ));
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify that a range proof spanning two bitmap chunks (crossing the 256-op
+    // boundary) returns chunks from both and verifies correctly.
+    macro_rules! test_historical_proof_range_across_chunks {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_rac");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                // Write keys across multiple commits until we pass 256 ops.
+                let mut last_size = Location::new_unchecked(0);
+                let mut last_root = None;
+                let mut i = 0u16;
+                while *last_size < 300 {
+                    for _ in 0..50 {
+                        let b = (i % 256) as u8;
+                        db.write_batch([(
+                            Sha256::fill(b),
+                            Some(Sha256::fill(b.wrapping_add(100))),
+                        )])
+                        .await
+                        .unwrap();
+                        i += 1;
+                    }
+                    let (durable, _) = db.commit(None).await.unwrap();
+                    let merkleized = durable.into_merkleized().await.unwrap();
+                    last_size = merkleized.size().await;
+                    last_root = Some(merkleized.root());
+                    db = merkleized.into_mutable();
+                }
+
+                // One more commit to make the target historical.
+                db.write_batch([(Sha256::fill(255), Some(Sha256::fill(0)))])
+                    .await
+                    .unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+
+                // Request a range spanning the chunk boundary at op 256.
+                let start = Location::new_unchecked(250);
+                let max_ops = NZU64!(12);
+                let (proof, ops, chunks) = db
+                    .historical_range_proof(hasher.inner(), last_size, start, max_ops)
+                    .await
+                    .unwrap();
+                assert_eq!(ops.len(), 12);
+                assert!(
+                    chunks.len() >= 2,
+                    "range [250, 262) should span at least 2 bitmap chunks"
+                );
+                assert!(proof.verify(hasher.inner(), start, &ops, &chunks, &last_root.unwrap()));
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // After updates and deletes, verify historical proofs at both the old and new
+    // commit sizes reflect the correct activity state.
+    macro_rules! test_historical_proof_updates_and_deletes {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_ud");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+
+                // Phase 1: 50 unique keys.
+                let mut db = db.into_mutable();
+                for i in 0u8..50 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 100)))])
+                        .await
+                        .unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let merkleized = durable.into_merkleized().await.unwrap();
+                let root1 = merkleized.root();
+                let size1 = merkleized.size().await;
+
+                // Phase 2: Update first 25 keys, delete next 10.
+                let mut db = merkleized.into_mutable();
+                for i in 0u8..25 {
+                    db.write_batch([(Sha256::fill(i), Some(Sha256::fill(i + 200)))])
+                        .await
+                        .unwrap();
+                }
+                for i in 25u8..35 {
+                    db.write_batch([(Sha256::fill(i), None)]).await.unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+                let root2 = db.root();
+                let size2 = db.size().await;
+
+                assert_ne!(root1, root2);
+
+                let start = Location::new_unchecked(0);
+                let max_ops = NZU64!(10);
+
+                // Historical proof at size1 reflects the pre-update state.
+                let (proof1, ops1, chunks1) = db
+                    .historical_range_proof(hasher.inner(), size1, start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof1.verify(hasher.inner(), start, &ops1, &chunks1, &root1));
+                assert!(!proof1.verify(hasher.inner(), start, &ops1, &chunks1, &root2));
+
+                // Historical proof at size2 reflects the post-update state.
+                let (proof2, ops2, chunks2) = db
+                    .historical_range_proof(hasher.inner(), size2, start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof2.verify(hasher.inner(), start, &ops2, &chunks2, &root2));
+                assert!(!proof2.verify(hasher.inner(), start, &ops2, &chunks2, &root1));
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // After pruning, historical proofs at surviving commit sizes still verify,
+    // while proofs at pruned sizes return NoBitmapCommit.
+    macro_rules! test_historical_proof_survives_pruning {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_sp");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                // 3 commits of 100 keys each.
+                let mut snapshots = Vec::new();
+                for round in 0u16..3 {
+                    for j in 0u16..100 {
+                        let k = (round * 100 + j) as u8;
+                        db.write_batch([(Sha256::fill(k), Some(Sha256::fill(k.wrapping_add(50))))])
+                            .await
+                            .unwrap();
+                    }
+                    let (durable, _) = db.commit(None).await.unwrap();
+                    let merkleized = durable.into_merkleized().await.unwrap();
+                    snapshots.push((merkleized.size().await, merkleized.root()));
+                    db = merkleized.into_mutable();
+                }
+
+                // Convert to merkleized for pruning.
+                let (durable, _) = db.commit(None).await.unwrap();
+                let mut db = durable.into_merkleized().await.unwrap();
+                let final_root = db.root();
+                let final_size = db.size().await;
+                snapshots.push((final_size, final_root));
+
+                // Prune to inactivity floor. After this, the ops MMR no longer
+                // serves locations below the floor.
+                let floor = db.inactivity_floor_loc();
+                assert!(*floor > 0, "floor must advance to exercise pruning");
+                db.prune(floor).await.unwrap();
+
+                // All proofs must start at or after the current floor since
+                // the ops MMR has been pruned to that point.
+                let safe_start = Location::new_unchecked(*floor);
+                let max_ops = NZU64!(4);
+
+                // Proofs at the latest snapshot should work.
+                let (proof, ops, chunks) = db
+                    .historical_range_proof(hasher.inner(), final_size, safe_start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof.verify(hasher.inner(), safe_start, &ops, &chunks, &final_root));
+
+                // The earliest snapshot may or may not survive pruning depending
+                // on how far the inactivity floor advances (variant-dependent).
+                let (size1, root1) = snapshots[0];
+                match db
+                    .historical_range_proof(hasher.inner(), size1, safe_start, max_ops)
+                    .await
+                {
+                    Ok((proof, ops, chunks)) => {
+                        assert!(proof.verify(hasher.inner(), safe_start, &ops, &chunks, &root1));
+                    }
+                    Err(Error::NoBitmapCommit(_)) => {
+                        // Expected: bitmap commit for this size was discarded by prune.
+                    }
+                    Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_))) => {
+                        // Expected: safe_start >= size1 (entire snapshot pruned).
+                        assert!(safe_start >= size1);
+                    }
+                    Err(e) => panic!("unexpected error for snapshot 0: {e}"),
+                }
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
+    // Verify historical proofs still work after enough pruning to advance
+    // the grafted MMR boundary (pinned nodes cover the pruned region).
+    macro_rules! test_historical_proof_prune_advances_grafted_boundary {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_pgb");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                // 5 rounds: write 100 keys (with updates to advance the inactivity
+                // floor), commit, merkleize, prune.
+                let mut snapshots = Vec::new();
+                for round in 0u8..5 {
+                    // Fresh keys for each round, plus update some from previous
+                    // rounds to deactivate old locations and advance the floor.
+                    let base = round * 50;
+                    for j in 0u8..50 {
+                        let k = base.wrapping_add(j);
+                        db.write_batch([(
+                            Sha256::fill(k),
+                            Some(Sha256::fill(k.wrapping_add(100))),
+                        )])
+                        .await
+                        .unwrap();
+                    }
+                    // Re-write keys from the previous round to deactivate old ops.
+                    if round > 0 {
+                        let prev_base = (round - 1) * 50;
+                        for j in 0u8..50 {
+                            let k = prev_base.wrapping_add(j);
+                            db.write_batch([(
+                                Sha256::fill(k),
+                                Some(Sha256::fill(k.wrapping_add(200))),
+                            )])
+                            .await
+                            .unwrap();
+                        }
+                    }
+
+                    let (durable, _) = db.commit(None).await.unwrap();
+                    let mut merkleized = durable.into_merkleized().await.unwrap();
+                    snapshots.push((merkleized.size().await, merkleized.root()));
+
+                    // Prune to inactivity floor.
+                    let floor = merkleized.inactivity_floor_loc();
+                    if *floor > 0 {
+                        merkleized.prune(floor).await.unwrap();
+                    }
+                    db = merkleized.into_mutable();
+                }
+
+                // Final commit to make the last snapshot historical.
+                db.write_batch([(Sha256::fill(255), Some(Sha256::fill(0)))])
+                    .await
+                    .unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                let db = durable.into_merkleized().await.unwrap();
+
+                // All proofs must start past the current inactivity floor since
+                // the ops MMR has been pruned up to that point. The floor must
+                // have advanced given the key re-writes in each round.
+                let current_floor = db.inactivity_floor_loc();
+                assert!(*current_floor > 0);
+                let safe_start = Location::new_unchecked(*current_floor);
+                let max_ops = NZU64!(8);
+
+                // Verify the most recent surviving snapshot's proof.
+                let (last_size, last_root) = snapshots.last().unwrap();
+                let (proof, ops, chunks) = db
+                    .historical_range_proof(hasher.inner(), *last_size, safe_start, max_ops)
+                    .await
+                    .unwrap();
+                assert!(proof.verify(hasher.inner(), safe_start, &ops, &chunks, last_root));
+
+                // Each earlier snapshot must either produce a valid proof or
+                // fail with a well-defined error.
+                for (size_i, root_i) in &snapshots[..snapshots.len() - 1] {
+                    match db
+                        .historical_range_proof(hasher.inner(), *size_i, safe_start, max_ops)
+                        .await
+                    {
+                        Ok((proof, ops, chunks)) => {
+                            assert!(proof.verify(
+                                hasher.inner(),
+                                safe_start,
+                                &ops,
+                                &chunks,
+                                root_i
+                            ));
+                        }
+                        Err(Error::NoBitmapCommit(_)) => {
+                            // Expected: bitmap commit for this size was discarded.
+                        }
+                        Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_))) => {
+                            // Expected: safe_start >= size (entire snapshot pruned).
+                            assert!(safe_start >= *size_i);
+                        }
+                        Err(e) => panic!("unexpected error for snapshot at size {size_i}: {e}"),
+                    }
+                }
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
     // Macro to run a test on DB variants.
     macro_rules! for_all_variants {
         (simple: $f:expr) => {{
@@ -1135,6 +1893,12 @@ pub mod tests {
         }};
         ($ctx:expr, $sfx:expr, with_db: $f:expr) => {{
             with_all_variants!(test_with_db!($ctx, $sfx, $f));
+        }};
+        ($ctx:expr, historical_proof) => {{
+            with_all_variants!(test_historical_proof!($ctx));
+        }};
+        ($ctx:expr, $macro_name:ident) => {{
+            with_all_variants!($macro_name!($ctx));
         }};
     }
 
@@ -1230,6 +1994,97 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_context| async move {
             for_all_variants!(unordered: unordered::tests::test_build_small_close_reopen);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_range_proofs() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, historical_proof);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_partial_chunk() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_partial_chunk);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_chunk_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_chunk_boundary);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_many_commits() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_many_commits);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_single_op() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_single_op);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_consistent_with_current() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_consistent_with_current);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_error_cases() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_error_cases);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_range_across_chunks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_range_across_chunks);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_updates_and_deletes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_updates_and_deletes);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_survives_pruning() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_survives_pruning);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_prune_advances_grafted_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(
+                context,
+                test_historical_proof_prune_advances_grafted_boundary
+            );
         });
     }
 }

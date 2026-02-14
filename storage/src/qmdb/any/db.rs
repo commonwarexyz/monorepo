@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, Array};
+use commonware_utils::{bitmap::historical::DirtyBitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
@@ -425,7 +425,7 @@ where
     /// for each moved operation.
     pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
         &mut self,
-        status: &mut BitMap<N>,
+        status: &mut DirtyBitMap<N>,
         on_move: &mut impl FnMut(Location, Location),
     ) -> Result<Location, Error> {
         let reader = self.log.reader().await;
