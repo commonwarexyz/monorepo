@@ -26,7 +26,7 @@ hash = "411897b896d677abc652d5380a8314f9197ae6570edadfb43faa2bf7a47fd975"
 n_cases = 65536
 hash = "256b883a8610279f0fc041b5499e85c583cb3375d92b88db4876cae23cf7e0d9"
 
-["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Request<B>>"]
+["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Request<D>>"]
 n_cases = 65536
 hash = "481cd68f2e6452c0dda512c75d74ddd2e19ac6c9fb19c642c1a152a0d830c1b2"
 
