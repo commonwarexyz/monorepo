@@ -96,8 +96,8 @@ fn mmr_config(
     write_buffer: NonZeroUsize,
 ) -> Config {
     Config {
-        journal_partition: format!("mmr_journal_{partition_suffix}"),
-        metadata_partition: format!("mmr_metadata_{partition_suffix}"),
+        journal_partition: format!("mmr-journal-{partition_suffix}"),
+        metadata_partition: format!("mmr-metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
@@ -276,7 +276,7 @@ fn fuzz(input: FuzzInput) {
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_suffix = format!("crash_recovery_{}", input.seed);
+    let partition_suffix = format!("crash-recovery-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations;
     let sync_failure_rate = input.sync_failure_rate;

@@ -967,7 +967,7 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        let cfg = fixed_db_config("fixed_bytes_partition", &context);
+        let cfg = fixed_db_config("fixed-bytes-partition", &context);
         FixedDb::init(context, cfg).await.unwrap()
     }
 
@@ -1209,7 +1209,7 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        let cfg = fixed_db_config("ordered_partitioned_p1", &context);
+        let cfg = fixed_db_config("ordered-partitioned-p1", &context);
         PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 

@@ -1012,7 +1012,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "offsets_loss_after_prune".to_string(),
+                partition: "offsets-loss-after-prune".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1068,7 +1068,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "data_loss_test".to_string(),
+                partition: "data-loss-test".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1237,10 +1237,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             run_contiguous_tests(move |test_name: String, idx: usize| {
-                let context = context.with_label(&format!("{test_name}_{idx}"));
+                let label = test_name.replace('-', "_");
+                let context = context.with_label(&format!("{label}_{idx}"));
                 async move {
                     let cfg = Config {
-                        partition: format!("generic_test_{test_name}"),
+                        partition: format!("generic-test-{test_name}"),
                         items_per_section: NZU64!(10),
                         compression: None,
                         codec_config: (),
@@ -1261,7 +1262,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "sequential_prunes".to_string(),
+                partition: "sequential-prunes".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1347,7 +1348,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "prune_all_reinit".to_string(),
+                partition: "prune-all-reinit".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1434,7 +1435,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_prune_crash".to_string(),
+                partition: "recovery-prune-crash".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1497,7 +1498,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_offsets_ahead".to_string(),
+                partition: "recovery-offsets-ahead".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1534,7 +1535,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
-                partition: "recovery_append_crash".to_string(),
+                partition: "recovery-append-crash".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1591,7 +1592,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
-                partition: "recovery_multiple_prunes".to_string(),
+                partition: "recovery-multiple-prunes".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1660,7 +1661,7 @@ mod tests {
         executor.start(|context| async move {
             // === Setup: Create Variable wrapper with data across multiple sections ===
             let cfg = Config {
-                partition: "recovery_rewind_crash".to_string(),
+                partition: "recovery-rewind-crash".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1721,7 +1722,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "recovery_empty_after_prune".to_string(),
+                partition: "recovery-empty-after-prune".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1791,7 +1792,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "concurrent_sync_recovery".to_string(),
+                partition: "concurrent-sync-recovery".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
@@ -1833,7 +1834,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_zero".to_string(),
+                partition: "init-at-size-zero".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1866,7 +1867,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_boundary".to_string(),
+                partition: "init-at-size-boundary".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1906,7 +1907,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_mid".to_string(),
+                partition: "init-at-size-mid".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1941,7 +1942,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_persist".to_string(),
+                partition: "init-at-size-persist".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -1995,7 +1996,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_persist_empty".to_string(),
+                partition: "init-at-size-persist-empty".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2040,7 +2041,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_mid_section".to_string(),
+                partition: "init-at-size-mid-section".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2096,7 +2097,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_multi_section".to_string(),
+                partition: "init-at-size-multi-section".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2149,7 +2150,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "align_journals_mid_section_pruning_boundary".to_string(),
+                partition: "align-journals-mid-section-pruning-boundary".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2215,7 +2216,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_crash_recovery".to_string(),
+                partition: "init-at-size-crash-recovery".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2263,7 +2264,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "prune_no_backwards".to_string(),
+                partition: "prune-no-backwards".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2298,7 +2299,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_large".to_string(),
+                partition: "init-at-size-large".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2330,7 +2331,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "init_at_size_prune".to_string(),
+                partition: "init-at-size-prune".to_string(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2376,7 +2377,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_fresh_start".into(),
+                partition: "test-fresh-start".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2415,7 +2416,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_overlap".into(),
+                partition: "test-overlap".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2484,7 +2485,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_invalid".into(),
+                partition: "test-invalid".into(),
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
@@ -2509,7 +2510,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_exact_match".to_string(),
+                partition: "test-exact-match".to_string(),
                 items_per_section,
                 compression: None,
                 codec_config: (),
@@ -2578,7 +2579,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_unexpected_data".into(),
+                partition: "test-unexpected-data".into(),
                 items_per_section,
                 compression: None,
                 codec_config: (),
@@ -2624,7 +2625,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_stale".into(),
+                partition: "test-stale".into(),
                 items_per_section,
                 compression: None,
                 codec_config: (),
@@ -2679,7 +2680,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_boundaries".into(),
+                partition: "test-boundaries".into(),
                 items_per_section,
                 compression: None,
                 codec_config: (),
@@ -2747,7 +2748,7 @@ mod tests {
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
             let cfg = Config {
-                partition: "test_same_section".into(),
+                partition: "test-same-section".into(),
                 items_per_section,
                 compression: None,
                 codec_config: (),
@@ -2818,7 +2819,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "single_item_per_section".to_string(),
+                partition: "single-item-per-section".to_string(),
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
@@ -3008,7 +3009,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "clear_test".to_string(),
+                partition: "clear-test".to_string(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),

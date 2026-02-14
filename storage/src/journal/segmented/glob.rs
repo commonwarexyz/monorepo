@@ -236,7 +236,7 @@ mod tests {
 
     fn test_cfg() -> Config<()> {
         Config {
-            partition: "test_partition".to_string(),
+            partition: "test-partition".to_string(),
             compression: None,
             codec_config: (),
             write_buffer: NZUsize!(1024),
@@ -301,7 +301,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: Some(3), // zstd level 3
                 codec_config: (),
                 write_buffer: NZUsize!(1024),

@@ -186,11 +186,11 @@ mod tests {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         immutable::Config {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_{suffix}"),
+            log_partition: format!("log-{suffix}"),
             log_items_per_section: ITEMS_PER_SECTION,
             log_compression: None,
             log_codec_config: (),
@@ -204,7 +204,7 @@ mod tests {
     /// Create a test database with unique partition names
     async fn create_test_db(mut context: deterministic::Context) -> ImmutableSyncTest {
         let seed = context.next_u64();
-        let config = create_sync_config(&format!("sync_test_{seed}"), &context);
+        let config = create_sync_config(&format!("sync-test-{seed}"), &context);
         ImmutableSyncTest::init(context, config).await.unwrap()
     }
 
@@ -419,7 +419,7 @@ mod tests {
             let op_count = bounds.end;
 
             // Perform sync
-            let db_config = create_sync_config("persistence_test", &context);
+            let db_config = create_sync_config("persistence-test", &context);
             let client_context = context.with_label("client");
             let target_db = Arc::new(RwLock::new(target_db));
             let config = Config {
@@ -832,7 +832,7 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("lb_dec_{}", context.next_u64()), &context),
+                db_config: create_sync_config(&format!("lb-dec-{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
@@ -893,7 +893,7 @@ mod tests {
             let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
-                db_config: create_sync_config(&format!("ub_dec_{}", context.next_u64()), &context),
+                db_config: create_sync_config(&format!("ub-dec-{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,

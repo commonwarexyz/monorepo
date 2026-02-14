@@ -55,7 +55,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::seeded(input.seed);
-    const PARTITION: &str = "fuzz_mmr_bitmap_test_partition";
+    const PARTITION: &str = "fuzz-mmr-bitmap-test-partition";
 
     runner.start(|context| async move {
         let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();

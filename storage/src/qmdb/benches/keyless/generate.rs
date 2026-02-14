@@ -22,7 +22,7 @@ use std::{
 const NUM_OPERATIONS: u64 = 10_000;
 const COMMIT_FREQUENCY: u32 = 25;
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-const PARTITION_SUFFIX: &str = "keyless_bench_partition";
+const PARTITION_SUFFIX: &str = "keyless-bench-partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
@@ -38,11 +38,11 @@ fn keyless_cfg(
     context: &(impl BufferPooler + ThreadPooler),
 ) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),

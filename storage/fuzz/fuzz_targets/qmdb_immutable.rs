@@ -92,11 +92,11 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 
 fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
     Config {
-        mmr_journal_partition: format!("journal_{suffix}"),
-        mmr_metadata_partition: format!("metadata_{suffix}"),
+        mmr_journal_partition: format!("journal-{suffix}"),
+        mmr_metadata_partition: format!("metadata-{suffix}"),
         mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("log_{suffix}"),
+        log_partition: format!("log-{suffix}"),
         log_items_per_section: NZU64!(ITEMS_PER_SECTION),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
@@ -113,7 +113,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut rng = StdRng::seed_from_u64(input.seed);
 
-        let cfg = db_config("fuzz_partition", &context);
+        let cfg = db_config("fuzz-partition", &context);
         let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
             .await
             .unwrap()

@@ -889,8 +889,8 @@ mod tests {
 
     fn test_config(pooler: &impl BufferPooler) -> Config {
         Config {
-            journal_partition: "journal_partition".into(),
-            metadata_partition: "metadata_partition".into(),
+            journal_partition: "journal-partition".into(),
+            metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             thread_pool: None,
@@ -1211,7 +1211,7 @@ mod tests {
             // The very last element we added (pos=495) resulted in new parents at positions 496 &
             // 497. Simulate a partial write by corrupting the last page's checksum by truncating
             // the last blob by a single byte.
-            let partition: String = "journal_partition-blobs".into();
+            let partition: String = "journal-partition-blobs".into();
             let (blob, len) = context
                 .open(&partition, &71u64.to_be_bytes())
                 .await
@@ -1266,8 +1266,8 @@ mod tests {
             .await
             .unwrap();
             let cfg_unpruned = Config {
-                journal_partition: "unpruned_journal_partition".into(),
-                metadata_partition: "unpruned_metadata_partition".into(),
+                journal_partition: "unpruned-journal-partition".into(),
+                metadata_partition: "unpruned-metadata-partition".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 thread_pool: None,
@@ -1573,8 +1573,8 @@ mod tests {
                 context.with_label("ref"),
                 &mut hasher,
                 Config {
-                    journal_partition: "ref_journal_pruned".into(),
-                    metadata_partition: "ref_metadata_pruned".into(),
+                    journal_partition: "ref-journal-pruned".into(),
+                    metadata_partition: "ref-metadata-pruned".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
@@ -1626,8 +1626,8 @@ mod tests {
                 context.with_label("server"),
                 &mut hasher,
                 Config {
-                    journal_partition: "server_journal".into(),
-                    metadata_partition: "server_metadata".into(),
+                    journal_partition: "server-journal".into(),
+                    metadata_partition: "server-metadata".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
@@ -1653,8 +1653,8 @@ mod tests {
                 context.with_label("client"),
                 &mut hasher,
                 Config {
-                    journal_partition: "client_journal".into(),
-                    metadata_partition: "client_metadata".into(),
+                    journal_partition: "client-journal".into(),
+                    metadata_partition: "client-metadata".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     thread_pool: None,
@@ -2032,8 +2032,8 @@ mod tests {
 
             // Use small items_per_blob to create many sections and trigger pruning.
             let cfg = Config {
-                journal_partition: "mmr_journal".to_string(),
-                metadata_partition: "mmr_metadata".to_string(),
+                journal_partition: "mmr-journal".to_string(),
+                metadata_partition: "mmr-metadata".to_string(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(64),
                 thread_pool: None,

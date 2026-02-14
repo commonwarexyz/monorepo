@@ -682,7 +682,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -745,7 +745,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -817,7 +817,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -911,7 +911,7 @@ mod tests {
 
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1015,7 +1015,7 @@ mod tests {
 
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1074,7 +1074,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1106,7 +1106,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1161,7 +1161,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1218,7 +1218,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1280,7 +1280,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1352,7 +1352,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1501,7 +1501,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1568,7 +1568,7 @@ mod tests {
         executor.start(|context| async move {
             // Create journal
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1623,7 +1623,7 @@ mod tests {
         executor.start(|context| async move {
             // Create journal
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1676,7 +1676,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1737,7 +1737,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1800,7 +1800,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1848,7 +1848,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1888,7 +1888,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1950,7 +1950,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".to_string(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1995,7 +1995,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2071,7 +2071,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2145,7 +2145,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2264,7 +2264,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2357,7 +2357,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2434,7 +2434,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE, PAGE_CACHE_SIZE),
@@ -2502,7 +2502,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "clear_test".into(),
+                partition: "clear-test".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

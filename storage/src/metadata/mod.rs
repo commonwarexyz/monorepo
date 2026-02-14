@@ -1051,7 +1051,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let cfg = Config {
-                partition: "test_determinism".to_string(),
+                partition: "test-determinism".to_string(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())

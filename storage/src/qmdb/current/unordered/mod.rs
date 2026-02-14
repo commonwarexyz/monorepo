@@ -49,7 +49,7 @@ pub mod tests {
     {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let db: C = open_db(context.with_label("first"), partition.clone()).await;
             assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
             assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));

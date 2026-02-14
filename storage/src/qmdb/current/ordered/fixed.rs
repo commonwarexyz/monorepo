@@ -169,7 +169,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let mut db = open_db(context, partition).await.into_mutable();
 
             // Add one key.
@@ -333,7 +333,7 @@ pub mod test {
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.with_label("db"), partition).await;
             let root = db.root();
@@ -405,7 +405,7 @@ pub mod test {
     pub fn test_current_db_key_value_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.with_label("db"), partition.clone())
                 .await
@@ -497,7 +497,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let mut db = open_db(context, partition).await;
 
             // Add one key.
@@ -543,7 +543,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion_proofs".to_string();
+            let partition = "exclusion-proofs".to_string();
             let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
@@ -756,7 +756,7 @@ pub mod test {
     fn test_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let partition = format!("current_ordered_batch_{seed}");
+            let partition = format!("current-ordered-batch-{seed}");
             open_db(ctx, partition).await.into_mutable()
         });
     }

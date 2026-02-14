@@ -95,7 +95,7 @@ fn test_config(
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        log_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}-log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
@@ -109,7 +109,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config("store_fuzz_test", &context);
+        let cfg = test_config("store-fuzz-test", &context);
         let mut db = StoreDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init db")
@@ -169,7 +169,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(db);
 
-                    let cfg = test_config("store_fuzz_test", &context);
+                    let cfg = test_config("store-fuzz-test", &context);
                     db = StoreDb::init(
                         context
                             .with_label("db")

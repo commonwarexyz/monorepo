@@ -173,7 +173,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let mut db = open_db(context.with_label("db"), partition.clone())
                 .await
                 .into_mutable();
@@ -324,7 +324,7 @@ pub mod test {
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.with_label("db"), partition.clone()).await;
             let root = db.root();
@@ -400,7 +400,7 @@ pub mod test {
     pub fn test_current_db_key_value_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.with_label("db"), partition.clone())
                 .await
@@ -484,7 +484,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let mut db = open_db(context.with_label("db"), partition.clone()).await;
 
             // Add one key.
@@ -527,7 +527,7 @@ pub mod test {
     fn test_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let prefix = format!("current_unordered_batch_{seed}");
+            let prefix = format!("current-unordered-batch-{seed}");
             open_db(ctx, prefix).await.into_mutable()
         });
     }

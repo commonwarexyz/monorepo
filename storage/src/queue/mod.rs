@@ -51,7 +51,7 @@
 //!
 //!     // Create a queue
 //!     let mut queue = Queue::<_, Vec<u8>>::init(context, Config {
-//!         partition: "my_queue".to_string(),
+//!         partition: "my-queue".to_string(),
 //!         items_per_section: NonZeroU64::new(1000).unwrap(),
 //!         compression: None,
 //!         codec_config: ((0..).into(), ()), // RangeCfg for Vec length, () for u8

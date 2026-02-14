@@ -93,11 +93,11 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
+        log_journal_partition: format!("{test_name}-log"),
         log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
@@ -146,7 +146,7 @@ async fn test_sync<
     }
 }
 
-const TEST_NAME: &str = "qmdb_any_fixed_fuzz_test";
+const TEST_NAME: &str = "qmdb-any-fixed-fuzz-test";
 
 fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();

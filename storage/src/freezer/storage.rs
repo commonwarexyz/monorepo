@@ -1244,14 +1244,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
-                key_partition: "test_key_index".into(),
+                key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test_value_journal".into(),
+                value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
-                table_partition: "test_table".into(),
+                table_partition: "test-table".into(),
                 // Use 4 entries but only insert to 2, leaving 2 empty
                 table_initial_size: 4,
                 table_resize_frequency: 1,
@@ -1299,14 +1299,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
-                key_partition: "test_key_index".into(),
+                key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
                 key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                value_partition: "test_value_journal".into(),
+                value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
-                table_partition: "test_table".into(),
+                table_partition: "test-table".into(),
                 table_initial_size: 4,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 4,

@@ -127,9 +127,9 @@
 //!     // Create an archive
 //!     let cfg = Config {
 //!         translator: FourCap,
-//!         key_partition: "demo_index".into(),
+//!         key_partition: "demo-index".into(),
 //!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-//!         value_partition: "demo_value".into(),
+//!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
 //!         items_per_section: NZU64!(1024),
@@ -223,9 +223,9 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -254,9 +254,9 @@ mod tests {
             // Index journal replay succeeds (no compression), but value reads will fail.
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -292,9 +292,9 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -357,9 +357,9 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -416,9 +416,9 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 translator: FourCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -504,9 +504,9 @@ mod tests {
             let items_per_section = 256u64;
             let cfg = Config {
                 translator: TwoCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -565,9 +565,9 @@ mod tests {
             // Reinitialize the archive
             let cfg = Config {
                 translator: TwoCap,
-                key_partition: "test_index".into(),
+                key_partition: "test-index".into(),
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                value_partition: "test_value".into(),
+                value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
                 key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),

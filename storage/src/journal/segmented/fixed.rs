@@ -371,7 +371,7 @@ mod tests {
 
     fn test_cfg(pooler: &impl BufferPooler) -> Config {
         Config {
-            partition: "test_partition".into(),
+            partition: "test-partition".into(),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
@@ -1164,7 +1164,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "clear_test".into(),
+                partition: "clear-test".into(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };

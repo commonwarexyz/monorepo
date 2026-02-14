@@ -74,7 +74,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = JournalConfig {
-            partition: "fixed_journal_operations_fuzz_test".to_string(),
+            partition: "fixed-journal-operations-fuzz-test".to_string(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
