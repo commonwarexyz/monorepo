@@ -34,9 +34,10 @@ thiserror.workspace = true
 bench = false
 
 [dev-dependencies]
+arbitrary.workspace = true
 commonware-conformance.workspace = true
+commonware-invariants.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 

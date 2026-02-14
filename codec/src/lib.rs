@@ -215,10 +215,12 @@ commonware_macros::stability_scope!(BETA {
     pub use extensions::*;
 });
 
-#[cfg(feature = "arbitrary")]
-pub mod conformance;
+commonware_macros::stability_scope!(BETA {
+    #[cfg(feature = "arbitrary")]
+    pub mod conformance;
 
-// Re-export paste for use in conformance macros
-#[cfg(feature = "arbitrary")]
-#[doc(hidden)]
-pub use paste;
+    // Re-export paste for use in conformance macros
+    #[cfg(feature = "arbitrary")]
+    #[doc(hidden)]
+    pub use paste;
+});

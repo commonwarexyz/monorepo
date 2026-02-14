@@ -56,11 +56,12 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
+arbitrary.workspace = true
 commonware-conformance.workspace = true
-commonware-math = { workspace = true, features = ["test_strategies"] }
+commonware-invariants.workspace = true
+commonware-math = { workspace = true, features = ["arbitrary"] }
 crc.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 rayon.workspace = true
 rstest.workspace = true
 
