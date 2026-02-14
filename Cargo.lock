@@ -1578,6 +1578,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rayon",
  "sha2 0.10.9",
+ "socket2 0.5.10",
  "sysinfo",
  "thiserror 2.0.17",
  "tokio",

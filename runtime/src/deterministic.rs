@@ -59,8 +59,8 @@ use crate::{
         supervision::Tree,
         MetricEncoder, Panicker,
     },
-    validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
-    Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
+    validate_label, BufferPool, BufferPoolConfig, Clock, ConnectionOf, Error, Execution, Handle,
+    ListenerOf, Metrics as _, Panicked, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
@@ -1525,7 +1525,7 @@ impl crate::Network for Context {
     async fn dial(
         &self,
         socket: SocketAddr,
-    ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
+    ) -> Result<(ConnectionOf<Self>, SinkOf<Self>, StreamOf<Self>), Error> {
         self.network.dial(socket).await
     }
 }

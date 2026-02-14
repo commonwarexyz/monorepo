@@ -1,9 +1,14 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{
+    BufMut, Connection as ConnectionTrait, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait,
+};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::channel::oneshot;
-use std::sync::{Arc, Mutex};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 /// Default read buffer size for the stream's local buffer (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
@@ -171,6 +176,28 @@ impl Drop for Stream {
         let mut channel = self.channel.lock().unwrap();
         channel.stream_alive = false;
     }
+}
+
+/// A mock connection.
+pub struct Connection {
+    /// Remote address of the connection.
+    pub address: SocketAddr,
+}
+
+impl Default for Connection {
+    fn default() -> Self {
+        Self {
+            address: SocketAddr::from(([0, 0, 0, 0], 0)),
+        }
+    }
+}
+
+impl ConnectionTrait for Connection {
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    fn abort_on_close(&self) {}
 }
 
 #[cfg(test)]

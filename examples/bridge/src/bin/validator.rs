@@ -174,7 +174,7 @@ fn main() {
     // Start context
     executor.start(|context| async move {
         // Dial indexer
-        let (sink, stream) = context
+        let (_, sink, stream) = context
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
