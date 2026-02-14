@@ -11,10 +11,10 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{Finalization, Notarization},
+        types::{Context, Finalization, Notarization},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, Heightable, Reporter,
+    Block, CertifiableBlock, Heightable, Reporter,
 };
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
@@ -98,6 +98,9 @@ pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
+    V::Block: CertifiableBlock<
+        Context = Context<V::Commitment, <P::Scheme as CertificateScheme>::PublicKey>,
+    >,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
@@ -163,6 +166,9 @@ impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
+    V::Block: CertifiableBlock<
+        Context = Context<V::Commitment, <P::Scheme as CertificateScheme>::PublicKey>,
+    >,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
@@ -261,11 +267,11 @@ where
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
-        resolver: (mpsc::Receiver<handler::Message<V::Block>>, R),
+        resolver: (mpsc::Receiver<handler::Message<V::Commitment>>, R),
     ) -> Handle<()>
     where
         R: Resolver<
-            Key = handler::Request<V::Block>,
+            Key = handler::Request<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: BlockBuffer<V>,
@@ -278,10 +284,10 @@ where
         mut self,
         mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
-        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Block>>, R),
+        (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<V::Commitment>>, R),
     ) where
         R: Resolver<
-            Key = handler::Request<V::Block>,
+            Key = handler::Request<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
         Buf: BlockBuffer<V>,
@@ -395,7 +401,7 @@ where
                             self.cache_block(round, digest, block).await;
                         } else {
                             debug!(?round, "notarized block missing");
-                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
+                            resolver.fetch(Request::<V::Commitment>::Notarized { round }).await;
                         }
                     }
                     Message::Finalization { finalization } => {
@@ -427,7 +433,7 @@ where
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
-                            resolver.fetch(Request::<V::Block>::Block(digest)).await;
+                            resolver.fetch(Request::<V::Commitment>::Block(commitment)).await;
                         }
                     }
                     Message::GetBlock { identifier, response } => {
@@ -467,7 +473,7 @@ where
                         }
 
                         // Trigger a targeted fetch via the resolver
-                        let request = Request::<V::Block>::Finalized { height };
+                        let request = Request::<V::Commitment>::Finalized { height };
                         resolver.fetch_targeted(request, targets).await;
                     }
                     Message::SubscribeByDigest { round, digest, response } => {
@@ -494,7 +500,7 @@ where
                             // If this is a valid view, this request should be fine to keep open
                             // until resolution or pruning (even if the oneshot is canceled).
                             debug!(?round, ?digest, "requested block missing");
-                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
+                            resolver.fetch(Request::<V::Commitment>::Notarized { round }).await;
                         }
 
                         // Register subscriber
@@ -540,7 +546,7 @@ where
                             // If this is a valid view, this request should be fine to keep open
                             // until resolution or pruning (even if the oneshot is canceled).
                             debug!(?round, ?digest, "requested block missing");
-                            resolver.fetch(Request::<V::Block>::Notarized { round }).await;
+                            resolver.fetch(Request::<V::Commitment>::Notarized { round }).await;
                         }
 
                         // Register subscriber
@@ -610,10 +616,10 @@ where
                 match message {
                     handler::Message::Produce { key, response } => {
                         match key {
-                            Request::Block(digest) => {
+                            Request::Block(commitment) => {
                                 // Check for block locally
-                                let Some(block) = self.find_block_by_digest(&mut buffer, digest).await else {
-                                    debug!(?digest, "block missing on request");
+                                let Some(block) = self.find_block_by_commitment(&mut buffer, commitment).await else {
+                                    debug!(?commitment, "block missing on request");
                                     continue;
                                 };
                                 response.send_lossy(block.encode());
@@ -654,7 +660,7 @@ where
                     }
                     handler::Message::Deliver { key, value, response } => {
                         match key {
-                            Request::Block(digest) => {
+                            Request::Block(commitment) => {
                                 // Parse block
                                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &self.block_codec_config) else {
                                     response.send_lossy(false);
@@ -662,13 +668,14 @@ where
                                 };
 
                                 // Validation
-                                if block.digest() != digest {
+                                if V::commitment(&block) != commitment {
                                     response.send_lossy(false);
                                     continue;
                                 }
 
                                 // Persist the block, also persisting the finalization if we have it
                                 let height = block.height();
+                                let digest = block.digest();
                                 let finalization = self.cache.get_finalization_for(digest).await;
                                 self.finalize(
                                     height,
@@ -849,14 +856,15 @@ where
         &mut self,
         height: Height,
         commitment: V::Commitment,
-        resolver: &mut impl Resolver<Key = Request<V::Block>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
     ) -> Result<(), metadata::Error> {
         // Update the processed height
         self.set_processed_height(height, resolver).await?;
 
         // Cancel any useless requests
-        let digest = V::commitment_to_application(commitment);
-        resolver.cancel(Request::<V::Block>::Block(digest)).await;
+        resolver
+            .cancel(Request::<V::Commitment>::Block(commitment))
+            .await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             // Trail the previous processed finalized block by the timeout
@@ -875,7 +883,7 @@ where
 
             // Cancel useless requests
             resolver
-                .retain(Request::<V::Block>::Notarized { round }.predicate())
+                .retain(Request::<V::Commitment>::Notarized { round }.predicate())
                 .await;
         }
 
@@ -947,7 +955,7 @@ where
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = Request<V::Block>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
     ) {
         self.store_finalization(height, digest, block, finalization, application, buffer)
             .await;
@@ -1090,7 +1098,7 @@ where
     async fn try_repair_gaps<Buf: BlockBuffer<V>>(
         &mut self,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = Request<V::Block>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
         let start = self.last_processed_height.next();
@@ -1113,8 +1121,12 @@ where
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
+                let (_, parent_commitment) = cursor.context().parent;
                 let parent_digest = cursor.parent();
-                if let Some(block) = self.find_block_by_digest(buffer, parent_digest).await {
+                if let Some(block) = self
+                    .find_block_by_commitment(buffer, parent_commitment)
+                    .await
+                {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
                     self.store_finalization(
                         block.height(),
@@ -1130,7 +1142,7 @@ where
                 } else {
                     // Request the next missing block digest
                     resolver
-                        .fetch(Request::<V::Block>::Block(parent_digest))
+                        .fetch(Request::<V::Commitment>::Block(parent_commitment))
                         .await;
                     break 'cache_repair;
                 }
@@ -1147,7 +1159,7 @@ where
             .missing_items(start, self.max_repair.get());
         let requests = missing_items
             .into_iter()
-            .map(|height| Request::<V::Block>::Finalized { height })
+            .map(|height| Request::<V::Commitment>::Finalized { height })
             .collect::<Vec<_>>();
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
@@ -1159,7 +1171,7 @@ where
     async fn set_processed_height(
         &mut self,
         height: Height,
-        resolver: &mut impl Resolver<Key = Request<V::Block>>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
     ) -> Result<(), metadata::Error> {
         self.application_metadata
             .put_sync(LATEST_KEY.clone(), height)
@@ -1171,7 +1183,7 @@ where
 
         // Cancel any existing requests below the new floor.
         resolver
-            .retain(Request::<V::Block>::Finalized { height }.predicate())
+            .retain(Request::<V::Commitment>::Finalized { height }.predicate())
             .await;
 
         Ok(())

@@ -1,7 +1,7 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::{marshal::resolver::handler, Block};
-use commonware_cryptography::PublicKey;
+use crate::marshal::resolver::handler;
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
@@ -45,19 +45,19 @@ where
 }
 
 /// Initialize a P2P resolver.
-pub fn init<E, C, B, Bl, S, R, P>(
+pub fn init<E, C, B, D, S, R, P>(
     ctx: &E,
     config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (
-    mpsc::Receiver<handler::Message<Bl>>,
-    p2p::Mailbox<handler::Request<Bl>, P>,
+    mpsc::Receiver<handler::Message<D>>,
+    p2p::Mailbox<handler::Request<D>, P>,
 )
 where
     E: BufferPooler + Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    Bl: Block,
+    D: Digest,
     S: Sender<PublicKey = P>,
     R: Receiver<PublicKey = P>,
     P: PublicKey,

@@ -196,8 +196,12 @@ pub trait TestHarness: 'static + Sized {
     ) -> impl Future<Output = ValidatorSetup<Self>> + Send;
 
     /// Create a test block from parent and height.
+    fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment;
+
+    /// Create a test block from parent and height.
     fn make_test_block(
         parent: D,
+        parent_commitment: Self::Commitment,
         height: Height,
         timestamp: u64,
         num_participants: u16,
@@ -442,7 +446,17 @@ impl TestHarness for StandardHarness {
         }
     }
 
-    fn make_test_block(parent: D, height: Height, timestamp: u64, _num_participants: u16) -> B {
+    fn genesis_parent_commitment(_num_participants: u16) -> D {
+        Sha256::hash(b"")
+    }
+
+    fn make_test_block(
+        parent: D,
+        _parent_commitment: D,
+        height: Height,
+        timestamp: u64,
+        _num_participants: u16,
+    ) -> B {
         make_raw_block(parent, height, timestamp)
     }
 
@@ -808,6 +822,7 @@ impl TestHarness for CodingHarness {
 
     fn make_test_block(
         parent: D,
+        parent_commitment: Commitment,
         height: Height,
         timestamp: u64,
         num_participants: u16,
@@ -816,12 +831,6 @@ impl TestHarness for CodingHarness {
             .previous()
             .map(|h| View::new(h.get()))
             .unwrap_or(View::zero());
-        let parent_commitment = Commitment::from((
-            parent,
-            parent,
-            Sha256Digest::EMPTY,
-            coding_config_for_participants(num_participants),
-        ));
         let context = CodingCtx {
             round: Round::new(Epoch::zero(), View::new(height.get())),
             leader: default_leader(),
@@ -830,6 +839,10 @@ impl TestHarness for CodingHarness {
         let raw = CodingB::new::<Sha256>(context, parent, height, timestamp);
         let coding_config = coding_config_for_participants(num_participants);
         CodedBlock::new(raw, coding_config, &Sequential)
+    }
+
+    fn genesis_parent_commitment(_num_participants: u16) -> Commitment {
+        genesis_commitment()
     }
 
     fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>>) -> Commitment {
@@ -1069,9 +1082,17 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
         let mut blocks = Vec::new();
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=NUM_BLOCKS {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             parent = H::digest(&block);
+            parent_commitment = H::commitment(&block);
             blocks.push(block);
         }
 
@@ -1201,9 +1222,17 @@ pub fn sync_height_floor<H: TestHarness>() {
 
         let mut blocks = Vec::new();
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=NUM_BLOCKS {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             parent = H::digest(&block);
+            parent_commitment = H::commitment(&block);
             blocks.push(block);
         }
 
@@ -1356,11 +1385,19 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         let _ = extra; // Used by CodingHarness, silence warning for StandardHarness
 
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
         for i in 1..=20u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, NUM_VALIDATORS as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
             let commitment = H::commitment(&block);
             parent = H::digest(&block);
+            parent_commitment = commitment;
             let bounds = epocher.containing(Height::new(i)).unwrap();
             let round = Round::new(bounds.epoch(), View::new(i));
 
@@ -1506,7 +1543,14 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let parent = Sha256::hash(b"");
-        let block = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 
@@ -1571,9 +1615,17 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let parent = Sha256::hash(b"");
-        let block1 = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block1 = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let block2 = H::make_test_block(
             H::digest(&block1),
+            H::commitment(&block1),
             Height::new(2),
             2,
             participants.len() as u16,
@@ -1654,9 +1706,17 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants, LINK).await;
 
         let parent = Sha256::hash(b"");
-        let block1 = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block1 = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let block2 = H::make_test_block(
             H::digest(&block1),
+            H::commitment(&block1),
             Height::new(2),
             2,
             participants.len() as u16,
@@ -1729,11 +1789,41 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 
         let parent = Sha256::hash(b"");
         let n = participants.len() as u16;
-        let block1 = H::make_test_block(parent, Height::new(1), 1, n);
-        let block2 = H::make_test_block(H::digest(&block1), Height::new(2), 2, n);
-        let block3 = H::make_test_block(H::digest(&block2), Height::new(3), 3, n);
-        let block4 = H::make_test_block(H::digest(&block3), Height::new(4), 4, n);
-        let block5 = H::make_test_block(H::digest(&block4), Height::new(5), 5, n);
+        let block1 = H::make_test_block(
+            parent,
+            H::genesis_parent_commitment(n),
+            Height::new(1),
+            1,
+            n,
+        );
+        let block2 = H::make_test_block(
+            H::digest(&block1),
+            H::commitment(&block1),
+            Height::new(2),
+            2,
+            n,
+        );
+        let block3 = H::make_test_block(
+            H::digest(&block2),
+            H::commitment(&block2),
+            Height::new(3),
+            3,
+            n,
+        );
+        let block4 = H::make_test_block(
+            H::digest(&block3),
+            H::commitment(&block3),
+            Height::new(4),
+            4,
+            n,
+        );
+        let block5 = H::make_test_block(
+            H::digest(&block4),
+            H::commitment(&block4),
+            Height::new(5),
+            5,
+            n,
+        );
 
         let sub1_rx = handle
             .mailbox
@@ -1905,7 +1995,14 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 
         // Create and verify a block, then finalize it
         let parent = Sha256::hash(b"");
-        let block = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
         let round = Round::new(Epoch::zero(), View::new(1));
@@ -1973,10 +2070,17 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
         };
 
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut digests = Vec::new();
 
         for i in 1..=5u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
@@ -1999,6 +2103,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             );
 
             parent = digest;
+            parent_commitment = commitment;
             digests.push(digest);
         }
 
@@ -2046,10 +2151,17 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
         assert!(handle.mailbox.get_block(Identifier::Latest).await.is_none());
 
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut blocks = Vec::new();
 
         for i in 1..=3u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
@@ -2066,6 +2178,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
+            parent_commitment = commitment;
             blocks.push((digest, block));
         }
 
@@ -2121,7 +2234,14 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
 
         // Create and finalize a block
         let parent = Sha256::hash(b"");
-        let block = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
         let round = Round::new(Epoch::zero(), View::new(1));
@@ -2180,9 +2300,16 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             .is_none());
 
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
 
         for i in 1..=3u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
@@ -2208,6 +2335,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             assert_eq!(fin.round().view(), View::new(i));
 
             parent = digest;
+            parent_commitment = commitment;
         }
 
         // Missing height
@@ -2271,8 +2399,15 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 
         // Validator 0: Create and finalize blocks 1-5
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=5u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::new(0), View::new(i));
@@ -2289,6 +2424,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             H::report_finalization(&mut handle0.mailbox, finalization).await;
 
             parent = digest;
+            parent_commitment = commitment;
         }
 
         // Wait for validator 0 to process all blocks
@@ -2355,8 +2491,15 @@ pub fn ancestry_stream<H: TestHarness>() {
 
         // Finalize blocks at heights 1-5
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=5u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
@@ -2373,6 +2516,7 @@ pub fn ancestry_stream<H: TestHarness>() {
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
+            parent_commitment = commitment;
         }
 
         // Stream from latest -> height 1
@@ -2417,7 +2561,14 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Create block at height 1
         let parent = Sha256::hash(b"");
-        let block = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 
@@ -2542,8 +2693,15 @@ pub fn init_processed_height<H: TestHarness>() {
 
         // Finalize blocks 1-5
         let mut parent = Sha256::hash(b"");
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         for i in 1..=5u64 {
-            let block = H::make_test_block(parent, Height::new(i), i, participants.len() as u16);
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
             let digest = H::digest(&block);
             let commitment = H::commitment(&block);
             let round = Round::new(Epoch::zero(), View::new(i));
@@ -2560,6 +2718,7 @@ pub fn init_processed_height<H: TestHarness>() {
             H::report_finalization(&mut handle.mailbox, finalization).await;
 
             parent = digest;
+            parent_commitment = commitment;
         }
 
         // Wait for application to process all blocks
@@ -2612,7 +2771,14 @@ pub fn broadcast_caches_block<H: TestHarness>() {
 
         // Create block at height 1
         let parent = Sha256::hash(b"");
-        let block = H::make_test_block(parent, Height::new(1), 1, participants.len() as u16);
+        let parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let block = H::make_test_block(
+            parent,
+            parent_commitment,
+            Height::new(1),
+            1,
+            participants.len() as u16,
+        );
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 

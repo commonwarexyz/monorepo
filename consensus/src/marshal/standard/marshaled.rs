@@ -86,8 +86,8 @@ use crate::{
     },
     simplex::types::Context,
     types::{Epoch, Epocher, Round},
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Relay,
-    Reporter, VerifyingApplication,
+    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
+    VerifyingApplication,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
@@ -728,7 +728,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block,
+    B: CertifiableBlock,
 {
     let genesis = application.genesis().await;
     if parent_digest == genesis.digest() {

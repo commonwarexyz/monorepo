@@ -6,7 +6,7 @@
 //! - [`Variant`]: Describes the types used by a marshal variant
 //! - [`BlockBuffer`]: Abstracts over block dissemination strategies
 
-use crate::{types::Round, Block};
+use crate::{types::Round, CertifiableBlock};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_utils::channel::oneshot;
@@ -17,17 +17,17 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
-    type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
+    type Block: CertifiableBlock<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>
         + Clone;
 
     /// The application block type.
-    type ApplicationBlock: Block + Clone;
+    type ApplicationBlock: CertifiableBlock + Clone;
 
     /// The type of block stored in the archive.
     ///
     /// Must be convertible back to the working block type via `Into`.
-    type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
+    type StoredBlock: CertifiableBlock<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
         + Clone
         + Codec<Cfg = <Self::Block as Read>::Cfg>;

@@ -602,6 +602,14 @@ impl<B: Block, C: Scheme> Block for StoredCodedBlock<B, C> {
     }
 }
 
+impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for StoredCodedBlock<B, C> {
+    type Context = B::Context;
+
+    fn context(&self) -> Self::Context {
+        self.inner.context()
+    }
+}
+
 impl<B: Block, C: Scheme> Heightable for StoredCodedBlock<B, C> {
     fn height(&self) -> Height {
         self.inner.height()
