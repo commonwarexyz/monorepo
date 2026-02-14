@@ -43,6 +43,7 @@ rand_core.workspace = true
 
 [dev-dependencies]
 commonware-conformance.workspace = true
+criterion.workspace = true
 proptest.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
@@ -50,3 +51,8 @@ rand_chacha.workspace = true
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[[bench]]
+name = "interpolation"
+harness = false
+path = "benches/interpolation.rs"
