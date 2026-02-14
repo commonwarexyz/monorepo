@@ -15,6 +15,8 @@ pub struct Metrics<E: RuntimeMetrics + Clock> {
     pub acks: status::Counter,
     /// Number of certificates produced
     pub certificates: Counter,
+    /// Number of rebroadcast attempts by status
+    pub rebroadcast: status::Counter,
     /// Histogram of application digest durations
     pub digest_duration: histogram::Timed<E>,
 }
@@ -46,7 +48,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         context.register(
             "rebroadcast",
             "Number of rebroadcast attempts by status",
-            rebroadcast,
+            rebroadcast.clone(),
         );
         let digest_duration = Histogram::new(histogram::Buckets::LOCAL);
         context.register(
@@ -61,6 +63,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
             digest,
             acks,
             certificates,
+            rebroadcast,
             digest_duration: histogram::Timed::new(digest_duration, clock),
         }
     }
