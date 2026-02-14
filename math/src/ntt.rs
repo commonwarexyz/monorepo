@@ -612,7 +612,6 @@ impl<F: FieldNTT> EvaluationColumn<F> {
                         ntt::<true, _, _>(next_chunk_size, 1, &mut Columns { data: [chunk] });
                     }
                 }
-                if next_chunk_size == len {}
             }
             lg_chunk_size = next_lg_chunk_size;
         }
