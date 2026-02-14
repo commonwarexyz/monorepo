@@ -113,7 +113,8 @@ pub struct Db<
 
     /// Activity bitmap: one bit per operation, 1 = active (current value), 0 = inactive
     /// (superseded or deleted). Divided into fixed-size chunks of `N` bytes. In the Merkleized
-    /// state this is a [CleanBitMap] with historical reverse diffs for point-in-time queries.
+    /// state this is a [CleanBitMap] which supports historical diffs used to reconstruct state
+    /// in historical proofs.
     pub(super) status: S::Bitmap<N>,
 
     /// Each leaf is hash(chunk || ops_subtree_root) for a complete bitmap chunk and
