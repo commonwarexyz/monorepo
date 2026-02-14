@@ -2,6 +2,7 @@ use commonware_codec::EncodeSize as _;
 use commonware_coding::{Config, NoCoding, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
+use commonware_utils::NZU16;
 use rand::{RngCore as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
@@ -15,8 +16,8 @@ fn bench_size<S: Scheme>(name: &str) {
         for chunks in [10, 25, 50, 100, 250] {
             let min = chunks / 3;
             let config = Config {
-                minimum_shards: min as u16,
-                extra_shards: (chunks - min) as u16,
+                minimum_shards: NZU16!(min as u16),
+                extra_shards: NZU16!((chunks - min) as u16),
             };
 
             let data = {
@@ -35,19 +36,19 @@ fn bench_size<S: Scheme>(name: &str) {
                 shard.encode_size()
             );
 
-            let (_, _, reshard) = S::reshard(
+            let (_, _, weak_shard) = S::weaken(
                 &config,
                 &commitment,
-                config.minimum_shards + config.extra_shards - 1,
+                config.minimum_shards.get() + config.extra_shards.get() - 1,
                 shard,
             )
             .unwrap();
             println!(
-                "{} (reshard)/msg_len={} chunks={}: {} B",
+                "{} (weak_shard)/msg_len={} chunks={}: {} B",
                 name,
                 data_length,
                 chunks,
-                reshard.encode_size()
+                weak_shard.encode_size()
             );
             println!();
         }

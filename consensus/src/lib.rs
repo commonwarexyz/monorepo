@@ -9,13 +9,11 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(ALPHA {
-    pub mod aggregation;
-    pub mod ordered_broadcast;
-});
-commonware_macros::stability_scope!(BETA {
-    use commonware_codec::Codec;
-    use commonware_cryptography::{Committable, Digestible};
+use commonware_macros::stability_scope;
+
+stability_scope!(BETA {
+    use commonware_codec::{Codec, Encode};
+    use commonware_cryptography::Digestible;
 
     pub mod simplex;
 
@@ -46,9 +44,9 @@ commonware_macros::stability_scope!(BETA {
     /// Block is the interface for a block in the blockchain.
     ///
     /// Blocks are used to track the progress of the consensus engine.
-    pub trait Block: Heightable + Codec + Digestible + Committable + Send + Sync + 'static {
+    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
         /// Get the parent block's digest.
-        fn parent(&self) -> Self::Commitment;
+        fn parent(&self) -> Self::Digest;
     }
 
     /// CertifiableBlock extends [Block] with consensus context information.
@@ -58,13 +56,13 @@ commonware_macros::stability_scope!(BETA {
     /// needs to participate in certification but never verified the block locally (necessary for liveness).
     pub trait CertifiableBlock: Block {
         /// The consensus context type stored in this block.
-        type Context: Clone;
+        type Context: Clone + Encode;
 
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
     }
 });
-commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
     use commonware_cryptography::Digest;
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
@@ -202,12 +200,15 @@ commonware_macros::stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
     }
 });
-commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ingress::mailbox::AncestorStream;
-    use commonware_cryptography::certificate::Scheme;
+stability_scope!(ALPHA {
+    pub mod aggregation;
+    pub mod ordered_broadcast;
+});
+stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
+    use crate::marshal::ancestry::{AncestorStream, BlockProvider};
     use commonware_runtime::{Clock, Metrics, Spawner};
+    use commonware_cryptography::certificate::Scheme;
     use rand::Rng;
-    pub mod application;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -231,10 +232,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// the implementor should return [None].
-        fn propose(
+        fn propose<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
     }
 
@@ -249,10 +250,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
-        fn verify(
+        fn verify<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),
-            ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+            ancestry: AncestorStream<A, Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });
