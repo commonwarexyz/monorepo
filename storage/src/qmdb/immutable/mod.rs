@@ -239,12 +239,13 @@ impl<
             .await?)
     }
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// current snapshot.
+    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root, but it
+    /// may affect the snapshot on the next restart, since pruned operations would no longer be
+    /// reflected within it.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > last commit location.
     /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
@@ -492,11 +493,6 @@ impl<
         self.bounds().await
     }
 
-    // All unpruned operations are active in an immutable store.
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.bounds().await.start
-    }
-
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
     }
@@ -526,20 +522,6 @@ impl<
     ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
         self.historical_proof(historical_size, start_loc, max_ops)
             .await
-    }
-}
-
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: VariableValue,
-        H: CHasher,
-        T: Translator,
-        D: DurabilityState,
-    > crate::qmdb::store::PrunableStore for Immutable<E, K, V, H, T, Merkleized<H>, D>
-{
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
     }
 }
 
@@ -988,7 +970,7 @@ pub(super) mod test {
 
     use crate::{
         kv::tests::{assert_gettable, assert_send},
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store},
     };
 
     type MerkleizedDb =
@@ -1007,7 +989,6 @@ pub(super) mod test {
     fn assert_merkleized_db_futures_are_send(db: &mut MerkleizedDb, key: Digest, loc: Location) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_prunable_store(db, loc);
         assert_merkleized_store(db, loc);
         assert_send(db.sync());
     }

@@ -446,20 +446,22 @@ pub(super) mod test {
         let mut db = db.into_mutable();
         db.write_batch([(k1, Some(v1))]).await.unwrap();
         for _ in 1..100 {
-            let (clean_db, _) = db.commit(None).await.unwrap();
+            let (durable_db, _) = db.commit(None).await.unwrap();
+            let merkleized_db = durable_db.into_merkleized().await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
-            assert!(clean_db.bounds().await.end - clean_db.inactivity_floor_loc().await <= 3);
-            db = clean_db.into_mutable();
-            assert!(db.bounds().await.end - db.inactivity_floor_loc().await <= 3);
+            assert!(
+                merkleized_db.bounds().await.end - merkleized_db.inactivity_floor_loc().await <= 3
+            );
+            db = merkleized_db.into_mutable();
         }
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.write_batch([(k1, None)]).await.unwrap();
-        let (db, _) = db.commit(None).await.unwrap();
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let db = durable_db.into_merkleized().await.unwrap();
         assert_eq!(db.bounds().await.end - 1, db.inactivity_floor_loc().await);
 
-        let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -507,7 +509,6 @@ pub(super) mod test {
         }
 
         assert_eq!(db.bounds().await.end, Location::new_unchecked(1478));
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
 
         // Commit + sync with pruning raises inactivity floor.
         let (db, _) = db.commit(None).await.unwrap();
@@ -603,17 +604,21 @@ pub(super) mod test {
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
         assert_eq!(db.bounds().await.end, 6); // 4 updates, 1 deletion + initial commit.
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
-        let (db, _) = db.commit(None).await.unwrap();
-        let mut db = db.into_mutable();
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let merkleized_db = durable_db.into_merkleized().await.unwrap();
+
+        // Should have moved 3 active operations to tip, leading to floor of 7.
+        assert_eq!(
+            merkleized_db.inactivity_floor_loc().await,
+            Location::new_unchecked(7)
+        );
+        // floor of 7 + 2 active keys + 1 commit = 10.
+        assert_eq!(merkleized_db.bounds().await.end, 10);
+        let mut db = merkleized_db.into_mutable();
 
         // Make sure create won't modify active keys.
         assert!(db.get(&d1).await.unwrap().is_some());
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
-
-        // Should have moved 3 active operations to tip, leading to floor of 7.
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(7));
-        assert_eq!(db.bounds().await.end, 10); // floor of 7 + 2 active keys.
 
         // Delete all keys.
         assert!(db.get(&d1).await.unwrap().is_some());
@@ -623,12 +628,15 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
         assert_eq!(db.bounds().await.end, 12); // 2 new delete ops.
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(7));
 
-        let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_mutable();
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(12));
-        assert_eq!(db.bounds().await.end, 13); // only commit should remain.
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let merkleized_db = durable_db.into_merkleized().await.unwrap();
+        assert_eq!(
+            merkleized_db.inactivity_floor_loc().await,
+            Location::new_unchecked(12)
+        );
+        assert_eq!(merkleized_db.bounds().await.end, 13); // only commit should remain.
+        let db = merkleized_db.into_mutable();
 
         // Multiple deletions of the same key should be a no-op.
         assert!(db.get(&d1).await.unwrap().is_none());

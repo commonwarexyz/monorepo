@@ -668,10 +668,6 @@ where
         self.any.bounds().await
     }
 
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
     }
@@ -692,6 +688,10 @@ where
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
+    }
+
+    async fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
     }
 }
 
