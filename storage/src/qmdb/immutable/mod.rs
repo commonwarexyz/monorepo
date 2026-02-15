@@ -239,9 +239,8 @@ impl<
             .await?)
     }
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root, but it
-    /// may affect the snapshot on the next restart, since pruned operations would no longer be
-    /// reflected within it.
+    /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
+    /// affect retrieval of any keys that were set prior to `prune_loc`.
     ///
     /// # Errors
     ///
