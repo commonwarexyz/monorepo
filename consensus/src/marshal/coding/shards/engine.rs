@@ -160,7 +160,7 @@ use super::{
     metrics::{Peer, ShardMetrics},
 };
 use crate::{
-    marshal::coding::types::{CodedBlock, DistributionShard, Shard},
+    marshal::coding::types::{hash_context, CodedBlock, DistributionShard, Shard},
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
 };
@@ -168,6 +168,7 @@ use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
+    sha256::Digest as Sha256Digest,
     Committable, Digestible, Hasher, PublicKey,
 };
 use commonware_macros::select_loop;
@@ -214,6 +215,10 @@ pub enum Error<C: CodingScheme> {
     /// The reconstructed block's config does not match the commitment's coding config
     #[error("block config mismatch: reconstructed config does not match commitment config")]
     ConfigMismatch,
+
+    /// The reconstructed block's embedded context does not match the commitment context hash
+    #[error("block context mismatch: reconstructed context does not match commitment context")]
+    ContextMismatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -574,6 +579,19 @@ where
                 "reconstructed block config does not match commitment config, but digest matches"
             );
             return Err(Error::ConfigMismatch);
+        }
+
+        // Verify the reconstructed block's embedded context hash matches the commitment.
+        let expected_context_hash = commitment.context::<Sha256Digest>();
+        let got_context_hash = hash_context(&inner.context());
+        if expected_context_hash != got_context_hash {
+            warn!(
+                %commitment,
+                expected_context_hash = ?expected_context_hash,
+                actual_context_hash = ?got_context_hash,
+                "reconstructed block context hash does not match commitment context hash"
+            );
+            return Err(Error::ContextMismatch);
         }
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
@@ -3682,6 +3700,133 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_failed_reconstruction_context_mismatch_then_recovery() {
+        // Byzantine scenario: shards decode to a block whose digest and coding root/config
+        // match the commitment, but the commitment carries a mismatched context hash.
+        // The engine must reject reconstruction and keep the commitment unresolved.
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _oracle, mut peers, coding_config| async move {
+                let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let real_commitment = coded_block.commitment();
+
+                let wrong_context_hash = Sha256::hash(b"wrong_context");
+                assert_ne!(
+                    real_commitment.context::<Sha256Digest>(),
+                    wrong_context_hash,
+                    "test requires a distinct context hash"
+                );
+                let fake_commitment = Commitment::from((
+                    coded_block.digest(),
+                    real_commitment.root::<Sha256Digest>(),
+                    wrong_context_hash,
+                    coding_config,
+                ));
+
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let leader = peers[0].public_key.clone();
+                let round = Round::new(Epoch::zero(), View::new(1));
+
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(fake_commitment, leader.clone(), round)
+                    .await;
+                let mut block_sub = peers[receiver_idx].mailbox.subscribe(fake_commitment).await;
+
+                let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
+                let mut strong_shard = coded_block
+                    .shard::<H>(receiver_shard_idx)
+                    .expect("missing shard");
+                strong_shard.commitment = fake_commitment;
+                peers[0]
+                    .sender
+                    .send(
+                        Recipients::One(receiver_pk.clone()),
+                        strong_shard.encode(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+
+                for &idx in &[1usize, 2, 4] {
+                    let peer_shard_idx = peers[idx].index.get() as u16;
+                    let mut weak = coded_block
+                        .shard::<H>(peer_shard_idx)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed");
+                    weak.commitment = fake_commitment;
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak.encode(), true)
+                        .await
+                        .expect("send failed");
+                }
+
+                context.sleep(config.link.latency * 2).await;
+
+                assert!(
+                    peers[receiver_idx].mailbox.get(fake_commitment).await.is_none(),
+                    "block should not be available after ContextMismatch"
+                );
+                assert!(
+                    matches!(block_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "subscription should not resolve for context-mismatched commitment"
+                );
+
+                // Verify the receiver still reconstructs valid commitments afterward.
+                let round2 = Round::new(Epoch::zero(), View::new(2));
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(real_commitment, leader.clone(), round2)
+                    .await;
+
+                let strong_real = coded_block
+                    .shard::<H>(receiver_shard_idx)
+                    .expect("missing shard");
+                peers[0]
+                    .sender
+                    .send(
+                        Recipients::One(receiver_pk.clone()),
+                        strong_real.encode(),
+                        true,
+                    )
+                    .await
+                    .expect("send failed");
+
+                for &idx in &[1usize, 2, 4] {
+                    let peer_shard_idx = peers[idx].index.get() as u16;
+                    let weak = coded_block
+                        .shard::<H>(peer_shard_idx)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed");
+                    peers[idx]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak.encode(), true)
+                        .await
+                        .expect("send failed");
+                }
+
+                context.sleep(config.link.latency * 2).await;
+
+                let reconstructed = peers[receiver_idx]
+                    .mailbox
+                    .get(real_commitment)
+                    .await
+                    .expect("valid block should reconstruct after prior context mismatch");
+                assert_eq!(reconstructed.commitment(), real_commitment);
             },
         );
     }
