@@ -423,6 +423,13 @@ impl<B: Block, C: Scheme> Read for CodedBlock<B, C> {
         let inner = B::read_cfg(buf, block_cfg)?;
         let config = CodingConfig::read(buf)?;
 
+        if config.total_shards() <= config.minimum_shards.get() as u32 {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "invalid coding config: total shards must be greater than minimum shards",
+            ));
+        }
+
         let mut buf = Vec::with_capacity(config.encode_size() + inner.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
