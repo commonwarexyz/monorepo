@@ -260,7 +260,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
+                    let clean_db = durable_db.into_merkleized();
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
                 }

@@ -645,7 +645,7 @@ pub(crate) mod test {
 
             // Drop & reopen the db, making sure the re-opened db has exactly the same state.
             let (db, _) = db.into_mutable().commit(None).await.unwrap();
-            let mut db = db.into_merkleized();
+            let db = db.into_merkleized();
             let root = db.root().await;
             db.sync().await.unwrap();
             drop(db);

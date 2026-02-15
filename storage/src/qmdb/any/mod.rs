@@ -169,7 +169,7 @@ where
         let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let mut log = log.merkleize();
+        let log = log.merkleize();
         log.sync().await?;
         log
     };
@@ -231,7 +231,7 @@ where
         let mut log = log.into_dirty();
         let commit_floor = Operation::CommitFloor(None, Location::new_unchecked(0));
         log.append(commit_floor).await?;
-        let mut log = log.merkleize();
+        let log = log.merkleize();
         log.sync().await?;
         log
     };

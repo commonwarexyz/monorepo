@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
+        contiguous::{fixed, variable, Contiguous, Mutable, Persistable, Reader},
         Error as JournalError,
     },
     mmr::{
@@ -15,7 +15,6 @@ use crate::{
         mem::{Clean, Dirty, State},
         Error as MmrError, Location, Position, Proof, StandardHasher,
     },
-    Persistable,
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -34,11 +33,12 @@ pub enum Error {
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
 }
+
 /// An append-only data structure that maintains a sequential journal of items alongside a Merkle
 /// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
 /// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
 /// specific location.
-pub struct Journal<E, C, H, S: State<H::Digest> + Send + Sync = Dirty>
+pub struct Journal<E, C, H, S: State<H::Digest> = Dirty>
 where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
@@ -60,7 +60,7 @@ where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>>,
 {
     /// Returns the Location of the next item appended to the journal.
     pub async fn size(&self) -> Location {
@@ -71,13 +71,13 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: EncodeShared> + Persistable,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>>,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()`.
-    pub async fn commit(&mut self) -> Result<(), Error> {
+    pub async fn commit(&self) -> Result<(), Error> {
         self.journal.commit().await.map_err(Error::Journal)
     }
 }
@@ -282,7 +282,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: EncodeShared> + Persistable,
     H: Hasher,
 {
     /// Destroy the authenticated journal, removing all data from disk.
@@ -291,11 +291,12 @@ where
             self.journal.destroy().map_err(Error::Journal),
             self.mmr.destroy().map_err(Error::Mmr),
         )?;
+
         Ok(())
     }
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
             self.mmr.sync().map_err(Into::into)
@@ -451,7 +452,7 @@ where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>>,
 {
     type Item = C::Item;
 
@@ -501,20 +502,18 @@ where
 impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
+    C: Contiguous<Item: EncodeShared> + Persistable,
     H: Hasher,
 {
-    type Error = JournalError;
-
-    async fn commit(&mut self) -> Result<(), JournalError> {
+    async fn commit(&self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
             Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
     }
 
-    async fn sync(&mut self) -> Result<(), JournalError> {
-        Self::sync(self).await.map_err(|e| match e {
+    async fn sync(&self) -> Result<(), JournalError> {
+        self.sync().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
             Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
         })
@@ -534,7 +533,7 @@ where
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
-    S: State<DigestOf<H>> + Send + Sync,
+    S: State<DigestOf<H>>,
 {
     /// Test helper: Read the item at the given location.
     pub(crate) async fn read(&self, loc: Location) -> Result<C::Item, Error> {
@@ -643,7 +642,7 @@ mod tests {
             assert_eq!(loc, Location::new_unchecked(i as u64));
         }
 
-        let mut journal = journal.merkleize();
+        let journal = journal.merkleize();
         journal.sync().await.unwrap();
         journal
     }
@@ -795,7 +794,7 @@ mod tests {
                 let loc = journal.append(create_operation(i as u8)).await.unwrap();
                 assert_eq!(loc, Location::new_unchecked(i as u64));
             }
-            let mut journal = journal.merkleize();
+            let journal = journal.merkleize();
 
             // Don't sync - these are uncommitted
             // After alignment, they should be discarded
@@ -1082,7 +1081,7 @@ mod tests {
                 assert_eq!(loc, Location::new_unchecked(i as u64));
                 assert_eq!(journal.size().await, (i + 1) as u64);
             }
-            let mut journal = journal.merkleize();
+            let journal = journal.merkleize();
 
             assert_eq!(journal.size().await, 50);
 
@@ -1209,7 +1208,7 @@ mod tests {
                 .append(Operation::CommitFloor(None, Location::new_unchecked(0)))
                 .await
                 .unwrap();
-            let mut journal = journal.merkleize();
+            let journal = journal.merkleize();
             assert_eq!(
                 commit_loc,
                 Location::new_unchecked(20),
@@ -1581,7 +1580,7 @@ mod tests {
             for i in 50..100 {
                 journal.append(create_operation(i as u8)).await.unwrap();
             }
-            let mut journal = journal.merkleize();
+            let journal = journal.merkleize();
             journal.sync().await.unwrap();
 
             // Generate proof for the historical state

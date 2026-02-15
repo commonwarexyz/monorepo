@@ -7,8 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
-        Error as JournalError,
+        contiguous::{Contiguous, Mutable, Persistable as JournalPersistable, Reader},
     },
     mmr::{Location, Proof},
     qmdb::{
@@ -123,7 +122,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -182,7 +181,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -240,7 +239,7 @@ where
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -348,7 +347,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
@@ -494,7 +493,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -507,11 +506,11 @@ where
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 
@@ -521,7 +520,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -580,7 +579,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,

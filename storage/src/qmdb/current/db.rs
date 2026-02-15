@@ -5,10 +5,7 @@
 use crate::{
     bitmap::partial_chunk_root,
     index::Unordered as UnorderedIndex,
-    journal::{
-        contiguous::{Contiguous, Mutable},
-        Error as JournalError,
-    },
+    journal::contiguous::{Contiguous, Mutable, Persistable as JournalPersistable},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
@@ -28,7 +25,7 @@ use crate::{
             proof::{OperationProof, RangeProof},
         },
         store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, NonDurable,
+        DurabilityState, Durable, Error, MerkleizationState, NonDurable,
     },
     Persistable,
 };
@@ -56,7 +53,7 @@ mod private {
 /// Trait for valid [Db] type states.
 pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
     /// The merkleization type state for the inner `any::db::Db`.
-    type MmrState: mmr::mem::State<D>;
+    type MerkleizationState: MerkleizationState<D>;
 }
 
 /// Merkleized state: the database has been merkleized and the root is cached.
@@ -67,7 +64,7 @@ pub struct Merkleized<D: Digest> {
 
 impl<D: Digest> private::Sealed for Merkleized<D> {}
 impl<D: Digest> State<D> for Merkleized<D> {
-    type MmrState = mmr::mem::Clean<D>;
+    type MerkleizationState = mmr::mem::Clean<D>;
 }
 
 /// Unmerkleized state: the database has pending changes not yet merkleized.
@@ -81,7 +78,7 @@ pub struct Unmerkleized {
 
 impl private::Sealed for Unmerkleized {}
 impl<D: Digest> State<D> for Unmerkleized {
-    type MmrState = mmr::mem::Dirty;
+    type MerkleizationState = mmr::mem::Dirty;
 }
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
@@ -97,7 +94,7 @@ pub struct Db<
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U, S::MmrState, D>,
+    pub(super) any: any::db::Db<E, C, I, H, U, S::MerkleizationState, D>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -238,7 +235,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -306,7 +303,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -478,7 +475,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -565,7 +562,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -592,7 +589,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -624,7 +621,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -684,7 +681,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
