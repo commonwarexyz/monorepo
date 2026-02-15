@@ -72,9 +72,9 @@ pub trait Contiguous: Send + Sync {
 }
 
 /// Journals that can be durably persisted and destroyed.
-///
-/// TODO(<https://github.com/commonwarexyz/monorepo/issues/3118>): This trait is temporary and will
-/// be removed in favor of [crate::Persistable] once it can be updated to use non-mut functions.
+//
+// TODO(<https://github.com/commonwarexyz/monorepo/issues/3118>): This trait is temporary and will
+// be removed in favor of [crate::Persistable] once it can be updated to use non-mut functions.
 pub trait Persistable: Send + Sync {
     /// Durably persist the journal, guaranteeing the current state will survive a crash.
     ///
