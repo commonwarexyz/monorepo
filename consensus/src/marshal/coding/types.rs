@@ -60,7 +60,7 @@ impl<C: Scheme> Read for DistributionShard<C> {
         buf: &mut impl bytes::Buf,
         shard_cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        match buf.get_u8() {
+        match u8::read(buf)? {
             STRONG_SHARD_TAG => {
                 let shard = C::StrongShard::read_cfg(buf, shard_cfg)?;
                 Ok(Self::Strong(shard))
@@ -687,6 +687,16 @@ mod test {
         let decoded =
             DistributionShard::<RS>::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
         assert!(weak_shard == decoded);
+    }
+
+    #[test]
+    fn test_distribution_shard_decode_truncated_returns_error() {
+        let decode = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut buf = &[][..];
+            DistributionShard::<RS>::decode_cfg(&mut buf, &MAX_SHARD_SIZE)
+        }));
+        assert!(decode.is_ok(), "decode must not panic on truncated input");
+        assert!(decode.unwrap().is_err());
     }
 
     #[test]

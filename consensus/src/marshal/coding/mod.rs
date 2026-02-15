@@ -646,6 +646,83 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_reproposal_verify_receiver_drop_does_not_synthesize_false() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Re-proposal payload with valid coding config, but no block available.
+            let missing_payload = Commitment::from((
+                Sha256::hash(b"missing_block"),
+                Sha256::hash(b"missing_root"),
+                Sha256::hash(b"missing_context"),
+                coding_config,
+            ));
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let reproposal_context = CodingCtx {
+                round,
+                leader: me,
+                parent: (View::zero(), missing_payload),
+            };
+
+            // Start verify, then drop the receiver immediately.
+            let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
+            drop(verify_rx);
+
+            // Certify should resolve promptly from the in-progress task, but must
+            // not synthesize `false` when verification was canceled before a verdict.
+            let certify_rx = marshaled.certify(round, missing_payload).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.is_err(),
+                        "certify should resolve without an explicit verdict when verify receiver is dropped"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify task should resolve promptly after verify receiver drop");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_marshaled_rejects_unsupported_epoch() {
         #[derive(Clone)]
         struct LimitedEpocher {
