@@ -920,7 +920,9 @@ where
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
         self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Block(commitment.block::<B::Digest>()));
+            .remove(&BlockSubscriptionKey::Block(
+                commitment.block::<B::Digest>(),
+            ));
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
@@ -1849,8 +1851,12 @@ mod tests {
                 .discovered(old_commitment, leader.clone(), old_round)
                 .await;
 
-            let mut old_shard_sub = peers[receiver_idx].mailbox.subscribe_shard(old_commitment).await;
-            let mut old_commitment_sub = peers[receiver_idx].mailbox.subscribe(old_commitment).await;
+            let mut old_shard_sub = peers[receiver_idx]
+                .mailbox
+                .subscribe_shard(old_commitment)
+                .await;
+            let mut old_commitment_sub =
+                peers[receiver_idx].mailbox.subscribe(old_commitment).await;
             let mut old_digest_sub = peers[receiver_idx]
                 .mailbox
                 .subscribe_by_digest(old_digest)
@@ -1861,7 +1867,10 @@ mod tests {
                 old_commitment_sub.try_recv(),
                 Err(TryRecvError::Empty)
             ));
-            assert!(matches!(old_digest_sub.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(
+                old_digest_sub.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
 
             // Reconstruct a newer commitment. Successful reconstruction prunes all
             // states at or below its round.
@@ -1880,11 +1889,7 @@ mod tests {
                 .expect("missing shard");
             peers[0]
                 .sender
-                .send(
-                    Recipients::One(receiver_pk.clone()),
-                    strong.encode(),
-                    true,
-                )
+                .send(Recipients::One(receiver_pk.clone()), strong.encode(), true)
                 .await
                 .expect("send failed");
 
@@ -1912,12 +1917,18 @@ mod tests {
             assert_eq!(reconstructed.commitment(), new_commitment);
 
             // Stale subscriptions should now be closed, not left hanging.
-            assert!(matches!(old_shard_sub.try_recv(), Err(TryRecvError::Closed)));
+            assert!(matches!(
+                old_shard_sub.try_recv(),
+                Err(TryRecvError::Closed)
+            ));
             assert!(matches!(
                 old_commitment_sub.try_recv(),
                 Err(TryRecvError::Closed)
             ));
-            assert!(matches!(old_digest_sub.try_recv(), Err(TryRecvError::Closed)));
+            assert!(matches!(
+                old_digest_sub.try_recv(),
+                Err(TryRecvError::Closed)
+            ));
         });
     }
 
