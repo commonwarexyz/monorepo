@@ -723,6 +723,157 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_reproposal_missing_block_does_not_synthesize_false() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let mut shards = setup.extra;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new(genesis.clone());
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.clone(), cfg);
+
+            // Re-proposal payload with valid coding config, but no block available.
+            let missing_payload = Commitment::from((
+                Sha256::hash(b"missing_block"),
+                Sha256::hash(b"missing_root"),
+                Sha256::hash(b"missing_context"),
+                coding_config,
+            ));
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let reproposal_context = CodingCtx {
+                round,
+                leader: me,
+                parent: (View::zero(), missing_payload),
+            };
+
+            // Verify must not synthesize `false` when the block cannot be fetched.
+            let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
+
+            // Ensure the verification task has registered its subscription, then
+            // force cancellation by pruning the missing commitment.
+            context.sleep(Duration::from_millis(100)).await;
+            shards.prune(missing_payload).await;
+
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        result.is_err(),
+                        "verify should resolve without explicit false when re-proposal block is unavailable"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("verify should resolve promptly when re-proposal block is unavailable");
+                },
+            }
+
+            // Certify should consume the same unresolved verification task.
+            let certify_rx = marshaled.certify(round, missing_payload).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.is_err(),
+                        "certify should resolve without explicit false when re-proposal block is unavailable"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify should resolve promptly when re-proposal block is unavailable");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_core_subscription_closes_when_coding_buffer_prunes_missing_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let setup = CodingHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut marshal = setup.mailbox;
+            let mut shards = setup.extra;
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let missing_commitment = Commitment::from((
+                Sha256::hash(b"missing_block"),
+                Sha256::hash(b"missing_root"),
+                Sha256::hash(b"missing_context"),
+                coding_config,
+            ));
+            let round = Round::new(Epoch::zero(), View::new(1));
+
+            // Subscribe through the core actor. This internally subscribes to the
+            // coding shard buffer and registers local waiters.
+            let block_rx = marshal
+                .subscribe_by_commitment(Some(round), missing_commitment)
+                .await;
+
+            // Allow core actor to register the underlying buffer subscription.
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Prune the missing commitment in the shard engine, which should cancel
+            // the underlying buffer subscription.
+            shards.prune(missing_commitment).await;
+
+            // The core actor must surface cancellation by closing the subscription,
+            // not by panicking or leaving the waiter parked indefinitely.
+            select! {
+                result = block_rx => {
+                    assert!(
+                        result.is_err(),
+                        "core subscription should close when coding buffer drops subscription"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("core subscription should resolve promptly after coding prune");
+                },
+            }
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_marshaled_rejects_unsupported_epoch() {
         #[derive(Clone)]
         struct LimitedEpocher {

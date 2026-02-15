@@ -10,7 +10,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
 };
 use commonware_parallel::{Sequential, Strategy};
-use commonware_utils::NZU16;
+use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, ops::Deref};
 
 const STRONG_SHARD_TAG: u8 = 0;
@@ -633,18 +633,18 @@ impl<B: Block + Eq, C: Scheme> Eq for StoredCodedBlock<B, C> {}
 
 /// Compute the [`CodingConfig`] for a given number of participants.
 ///
-/// Currently, this function assumes `3f + 1` participants to tolerate at max `f` faults.
-///
-/// The generated coding configuration facilitates any `f + 1` parts to reconstruct the data.
+/// Panics if `n_participants < 4`.
 pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
+    let max_faults = N3f1::max_faults(n_participants);
     assert!(
-        n_participants >= 4,
+        max_faults >= 1,
         "Need at least 4 participants to maintain fault tolerance"
     );
-    let max_faults = (n_participants - 1) / 3;
+    let max_faults = u16::try_from(max_faults).expect("max_faults must fit in u16");
+    let minimum_shards = NZU16!(max_faults + 1);
     CodingConfig {
-        minimum_shards: NZU16!(max_faults + 1),
-        extra_shards: NZU16!(n_participants - (max_faults + 1)),
+        minimum_shards,
+        extra_shards: NZU16!(n_participants - minimum_shards.get()),
     }
 }
 
@@ -697,6 +697,19 @@ mod test {
         }));
         assert!(decode.is_ok(), "decode must not panic on truncated input");
         assert!(decode.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_coding_config_for_participants_valid_for_minimum_set() {
+        let config = coding_config_for_participants(4);
+        assert_eq!(config.minimum_shards.get(), 2);
+        assert_eq!(config.extra_shards.get(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Need at least 4 participants to maintain fault tolerance")]
+    fn test_coding_config_for_participants_panics_for_small_sets() {
+        let _ = coding_config_for_participants(3);
     }
 
     #[test]

@@ -750,8 +750,8 @@ where
                                     reason = "failed to fetch block for re-proposal verification",
                                     "skipping re-proposal verification"
                                 );
-                                task_tx.send_lossy(false);
-                                tx.send_lossy(false);
+                                // Fetch failure is an availability issue, not an explicit
+                                // invalidity proof. Do not synthesize `false` here.
                                 return;
                             }
                         },

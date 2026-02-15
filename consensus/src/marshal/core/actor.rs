@@ -293,7 +293,8 @@ where
         Buf: BlockBuffer<V>,
     {
         // Create a local pool for waiter futures.
-        let mut waiters = AbortablePool::<V::Block>::default();
+        let mut waiters =
+            AbortablePool::<Result<V::Block, <V::Block as Digestible>::Digest>>::default();
 
         // Get tip and send to application
         let tip = self.get_latest().await;
@@ -323,8 +324,17 @@ where
                 debug!("actor stopped");
             },
             // Handle waiter completions first
-            Ok(block) = waiters.next_completed() else continue => {
-                self.notify_subscribers(&block).await;
+            Ok(completion) = waiters.next_completed() else continue => {
+                match completion {
+                    Ok(block) => self.notify_subscribers(&block).await,
+                    Err(digest) => {
+                        debug!(
+                            ?digest,
+                            "buffer subscription closed, canceling local subscribers"
+                        );
+                        self.block_subscriptions.remove(&digest);
+                    }
+                }
             },
             // Handle application acknowledgements next
             ack = &mut self.pending_ack => {
@@ -511,8 +521,12 @@ where
                             }
                             Entry::Vacant(entry) => {
                                 let rx = buffer.subscribe_by_digest(digest).await;
+                                let waiter_digest = digest;
                                 let aborter = waiters.push(async move {
-                                    rx.await.expect("buffer subscriber closed").into_block()
+                                    match rx.await {
+                                        Ok(block) => Ok(block.into_block()),
+                                        Err(_) => Err(waiter_digest),
+                                    }
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
@@ -557,8 +571,12 @@ where
                             }
                             Entry::Vacant(entry) => {
                                 let rx = buffer.subscribe_by_commitment(commitment).await;
+                                let waiter_digest = digest;
                                 let aborter = waiters.push(async move {
-                                    rx.await.expect("buffer subscriber closed").into_block()
+                                    match rx.await {
+                                        Ok(block) => Ok(block.into_block()),
+                                        Err(_) => Err(waiter_digest),
+                                    }
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],

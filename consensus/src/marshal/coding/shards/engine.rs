@@ -927,30 +927,31 @@ where
     /// with the given commitment. Also cleans up stale reconstruction state
     /// and subscriptions.
     fn prune(&mut self, commitment: Commitment) {
-        let Some(height) = self
+        if let Some(height) = self
             .reconstructed_blocks
             .get(&commitment)
             .map(|b| b.height())
-        else {
+        {
+            self.reconstructed_blocks
+                .retain(|_, block| block.height() > height);
+        }
+
+        // Always clear direct state/subscriptions for the pruned commitment.
+        // This avoids dangling waiters when prune is called for a commitment
+        // that was never reconstructed locally.
+        self.drop_subscriptions_for_commitment(commitment);
+        let Some(round) = self.state.remove(&commitment).map(|state| state.round()) else {
             return;
         };
 
-        self.reconstructed_blocks
-            .retain(|_, block| block.height() > height);
-
-        let Some(round) = self.state.get(&commitment).map(ReconstructionState::round) else {
-            return;
-        };
-        let mut state = std::mem::take(&mut self.state);
         let mut pruned_commitments = Vec::new();
-        state.retain(|c, s| {
+        self.state.retain(|c, s| {
             let keep = s.round() > round;
             if !keep {
                 pruned_commitments.push(*c);
             }
             keep
         });
-        self.state = state;
         for pruned in pruned_commitments {
             self.drop_subscriptions_for_commitment(pruned);
         }
