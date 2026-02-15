@@ -3777,7 +3777,11 @@ mod tests {
                 context.sleep(config.link.latency * 2).await;
 
                 assert!(
-                    peers[receiver_idx].mailbox.get(fake_commitment).await.is_none(),
+                    peers[receiver_idx]
+                        .mailbox
+                        .get(fake_commitment)
+                        .await
+                        .is_none(),
                     "block should not be available after ContextMismatch"
                 );
                 assert!(
