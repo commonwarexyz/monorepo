@@ -1,0 +1,138 @@
+digraph revm_architecture {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    pad="0.2",
+    nodesep=0.5,
+    ranksep=0.7,
+    fontname="Helvetica",
+    fontsize=12,
+    splines=true
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="white",
+    color="#4B5563",
+    fontname="Helvetica",
+    fontsize=10
+  ];
+  edge [
+    color="#6B7280",
+    fontname="Helvetica",
+    fontsize=9,
+    arrowsize=0.7
+  ];
+
+  subgraph cluster_sim {
+    label="Simulation and scenario";
+    style="rounded,filled";
+    color="#BFD7FF";
+    fillcolor="#EEF5FF";
+
+    CLI[label="CLI\nsimulate(...)" ];
+    Demo[label="Demo scenario\n(genesis + txs)"];
+    SimHarness[label="Simulation harness\n(spawn nodes, wait for finalization)"];
+    SimNet[label="Simulated P2P network"];
+
+    CLI -> SimHarness;
+    Demo -> SimHarness;
+    SimHarness -> SimNet [label="configure links"];
+  }
+
+  subgraph cluster_node {
+    label="Node (single participant)";
+    style="rounded,filled";
+    color="#D6D6D6";
+    fillcolor="#F7F7F7";
+
+    subgraph cluster_transport {
+      label="Transport";
+      style="rounded,filled";
+      color="#C7D2FE";
+      fillcolor="#EEF2FF";
+
+      Transport[label="Transport channels\n(votes, certs, resolver, blocks)"];
+    }
+
+    subgraph cluster_consensus {
+      label="Consensus";
+      style="rounded,filled";
+      color="#F6E7B8";
+      fillcolor="#FFF7DD";
+
+      Simplex[label="Threshold Simplex\norders digests"];
+    }
+
+    subgraph cluster_broadcast {
+      label="Broadcast and backfill";
+      style="rounded,filled";
+      color="#FFD8B5";
+      fillcolor="#FFF2E6";
+
+      Broadcast[label="Buffered broadcast\n(full blocks)"];
+      Resolver[label="Resolver\n(ancestor backfill)"];
+      Marshal[label="Marshal\nblock delivery"];
+
+      { rank = same; Broadcast; Resolver; }
+      Broadcast -> Marshal [label="deliver blocks"];
+      Resolver -> Marshal [label="serve backfill"];
+    }
+
+    subgraph cluster_app {
+      label="Application and execution";
+      style="rounded,filled";
+      color="#BFE6D0";
+      fillcolor="#ECFFF6";
+
+      App[label="RevmApplication\npropose + verify"];
+      Ledger[label="LedgerService\nmempool, snapshots, seeds"];
+      Exec[label="execute_txs\n(REVM)"];
+      SeedRep[label="SeedReporter\n(hash and store seed)"];
+      FinalRep[label="FinalizedReporter\nverify + persist"];
+      Snapshot[label="Snapshot cache\n(LedgerSnapshot)"];
+
+      App -> Ledger [label="build txs, insert snapshot"];
+      Ledger -> Exec [label="parent snapshot"];
+      Exec -> Ledger [label="state changes"];
+      Ledger -> Snapshot [label="cache"];
+      Snapshot -> Ledger [label="read"];
+    }
+
+    subgraph cluster_storage {
+      label="Persistence";
+      style="rounded,filled";
+      color="#F3C4C4";
+      fillcolor="#FFF0F0";
+
+      QMDB[label="QMDB partitions\naccounts, storage, code"];
+      QmdbAdapter[label="QMDB adapter\nWrapDatabaseAsync"];
+
+      QmdbAdapter -> QMDB [label="reads and writes"];
+    }
+  }
+
+  SimNet -> Transport [label="connect peers"];
+  SimHarness -> App [label="start node"];
+
+  Transport -> Simplex [label="votes, certs, resolver control"];
+  Transport -> Broadcast [label="blocks"];
+  Transport -> Resolver [label="backfill"];
+
+  Simplex -> App [label="propose / verify"];
+  App -> Simplex [label="block digest"];
+
+  App -> Broadcast [label="full blocks"];
+  Marshal -> App [label="backfill ancestors"];
+  Marshal -> FinalRep [label="finalized blocks"];
+
+  Simplex -> SeedRep [label="seed signatures"];
+  SeedRep -> Ledger [label="store seed hash"];
+  FinalRep -> Ledger [label="persist snapshot"];
+
+  Ledger -> QmdbAdapter [label="compute_root / commit_changes"];
+  QmdbAdapter -> Ledger [label="state root, balances"];
+
+  FinalRep -> Exec [style=dashed, label="re-exec if no snapshot"];
+}
