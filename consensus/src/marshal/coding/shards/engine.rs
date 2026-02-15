@@ -797,10 +797,20 @@ where
                     height = %block.height(),
                     "successfully reconstructed block from shards"
                 );
+                let mut pruned_commitments = Vec::new();
                 if let Some(round) = self.state.get(&commitment).map(ReconstructionState::round) {
-                    self.state.retain(|_, state| state.round() > round);
+                    self.state.retain(|pruned, state| {
+                        let keep = state.round() > round;
+                        if !keep {
+                            pruned_commitments.push(*pruned);
+                        }
+                        keep
+                    });
                 }
                 self.notify_block_subscribers(block).await;
+                for pruned in pruned_commitments {
+                    self.drop_subscriptions_for_commitment(pruned);
+                }
             }
             Ok(None) => {
                 debug!(%commitment, "not enough checked shards to reconstruct block");
@@ -808,6 +818,7 @@ where
             Err(err) => {
                 warn!(%commitment, ?err, "failed to reconstruct block from checked shards");
                 self.state.remove(&commitment);
+                self.drop_subscriptions_for_commitment(commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -900,6 +911,18 @@ where
         }
     }
 
+    /// Drops all subscriptions associated with a commitment.
+    ///
+    /// Removing these entries drops all senders, causing receivers to resolve
+    /// with cancellation (`RecvError`) instead of hanging indefinitely.
+    fn drop_subscriptions_for_commitment(&mut self, commitment: Commitment) {
+        self.shard_subscriptions.remove(&commitment);
+        self.block_subscriptions
+            .remove(&BlockSubscriptionKey::Commitment(commitment));
+        self.block_subscriptions
+            .remove(&BlockSubscriptionKey::Block(commitment.block::<B::Digest>()));
+    }
+
     /// Prunes all blocks in the reconstructed block cache that are older than the block
     /// with the given commitment. Also cleans up stale reconstruction state
     /// and subscriptions.
@@ -919,16 +942,18 @@ where
             return;
         };
         let mut state = std::mem::take(&mut self.state);
+        let mut pruned_commitments = Vec::new();
         state.retain(|c, s| {
-            if s.round() > round {
-                return true;
+            let keep = s.round() > round;
+            if !keep {
+                pruned_commitments.push(*c);
             }
-            self.shard_subscriptions.remove(c);
-            self.block_subscriptions
-                .remove(&BlockSubscriptionKey::Commitment(*c));
-            false
+            keep
         });
         self.state = state;
+        for pruned in pruned_commitments {
+            self.drop_subscriptions_for_commitment(pruned);
+        }
     }
 }
 
@@ -1796,6 +1821,102 @@ mod tests {
             let block_by_digest = digest_sub.await.expect("subscription should resolve");
             assert_eq!(block_by_digest.commitment(), commitment);
             assert_eq!(block_by_digest.height(), coded_block.height());
+        });
+    }
+
+    #[test_traced]
+    fn test_successful_reconstruction_prunes_and_closes_stale_subscriptions() {
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(|config, context, _, mut peers, coding_config| async move {
+            let receiver_idx = 3usize;
+            let receiver_pk = peers[receiver_idx].public_key.clone();
+            let leader = peers[0].public_key.clone();
+
+            // Create an older discovered commitment with subscriptions that should
+            // become stale once a newer round successfully reconstructs.
+            let old_inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let old_block = CodedBlock::<B, C>::new(old_inner, coding_config, &STRATEGY);
+            let old_commitment = old_block.commitment();
+            let old_digest = old_block.digest();
+            let old_round = Round::new(Epoch::zero(), View::new(1));
+            peers[receiver_idx]
+                .mailbox
+                .discovered(old_commitment, leader.clone(), old_round)
+                .await;
+
+            let mut old_shard_sub = peers[receiver_idx].mailbox.subscribe_shard(old_commitment).await;
+            let mut old_commitment_sub = peers[receiver_idx].mailbox.subscribe(old_commitment).await;
+            let mut old_digest_sub = peers[receiver_idx]
+                .mailbox
+                .subscribe_by_digest(old_digest)
+                .await;
+
+            assert!(matches!(old_shard_sub.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(
+                old_commitment_sub.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
+            assert!(matches!(old_digest_sub.try_recv(), Err(TryRecvError::Empty)));
+
+            // Reconstruct a newer commitment. Successful reconstruction prunes all
+            // states at or below its round.
+            let new_inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
+            let new_block = CodedBlock::<B, C>::new(new_inner, coding_config, &STRATEGY);
+            let new_commitment = new_block.commitment();
+            let new_round = Round::new(Epoch::zero(), View::new(2));
+            peers[receiver_idx]
+                .mailbox
+                .discovered(new_commitment, leader.clone(), new_round)
+                .await;
+
+            let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
+            let strong = new_block
+                .shard::<H>(receiver_shard_idx)
+                .expect("missing shard");
+            peers[0]
+                .sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    strong.encode(),
+                    true,
+                )
+                .await
+                .expect("send failed");
+
+            for &idx in &[1usize, 2, 4] {
+                let peer_shard_idx = peers[idx].index.get() as u16;
+                let weak = new_block
+                    .shard::<H>(peer_shard_idx)
+                    .expect("missing shard")
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+                peers[idx]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), weak.encode(), true)
+                    .await
+                    .expect("send failed");
+            }
+
+            context.sleep(config.link.latency * 2).await;
+
+            let reconstructed = peers[receiver_idx]
+                .mailbox
+                .get(new_commitment)
+                .await
+                .expect("new block should reconstruct");
+            assert_eq!(reconstructed.commitment(), new_commitment);
+
+            // Stale subscriptions should now be closed, not left hanging.
+            assert!(matches!(old_shard_sub.try_recv(), Err(TryRecvError::Closed)));
+            assert!(matches!(
+                old_commitment_sub.try_recv(),
+                Err(TryRecvError::Closed)
+            ));
+            assert!(matches!(old_digest_sub.try_recv(), Err(TryRecvError::Closed)));
         });
     }
 
@@ -3654,10 +3775,10 @@ mod tests {
                     "block should not be available after DigestMismatch"
                 );
 
-                // Block subscription should not have resolved.
+                // Block subscription should be closed after failed reconstruction cleanup.
                 assert!(
-                    matches!(block_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "subscription should not resolve for failed reconstruction"
+                    matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
+                    "subscription should close for failed reconstruction"
                 );
 
                 // Now verify the engine is not stuck: send valid shards for block1's real
@@ -3785,8 +3906,8 @@ mod tests {
                     "block should not be available after ContextMismatch"
                 );
                 assert!(
-                    matches!(block_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "subscription should not resolve for context-mismatched commitment"
+                    matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
+                    "subscription should close for context-mismatched commitment"
                 );
 
                 // Verify the receiver still reconstructs valid commitments afterward.
