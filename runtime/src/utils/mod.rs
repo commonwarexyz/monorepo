@@ -289,7 +289,6 @@ mod tests {
     use super::*;
     use crate::{deterministic, Metrics, Runner};
     use commonware_macros::test_traced;
-    use commonware_utils::sync::AsyncRwLock;
     use futures::task::waker;
     use prometheus_client::metrics::counter::Counter;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -379,28 +378,6 @@ a_total 2
 "#;
         let output = encode_dedup(input);
         assert_eq!(output, input);
-    }
-
-    #[test_traced]
-    fn test_rwlock() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Create a new AsyncRwLock
-            let lock = AsyncRwLock::new(100);
-
-            // many concurrent readers
-            let r1 = lock.read().await;
-            let r2 = lock.read().await;
-            assert_eq!(*r1 + *r2, 200);
-
-            // exclusive writer
-            drop((r1, r2)); // all readers must go away
-            let mut w = lock.write().await;
-            *w += 1;
-
-            // Check the value
-            assert_eq!(*w, 101);
-        });
     }
 
     #[test]
