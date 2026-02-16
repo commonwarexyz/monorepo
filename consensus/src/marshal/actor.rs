@@ -826,13 +826,14 @@ where
                 })
                 .collect::<Vec<_>>();
 
-            if let Some(scheme) = self.provider.all() {
-                bisect_verified(pending_certs.len(), |start, end| {
-                    self.verify_pending_batch(&scheme, &pending_certs[start..end])
-                })
-            } else {
-                vec![false; pending_certs.len()]
-            }
+            self.provider.all().map_or_else(
+                || vec![false; pending_certs.len()],
+                |scheme| {
+                    bisect_verified(pending_certs.len(), |start, end| {
+                        self.verify_pending_batch(&scheme, &pending_certs[start..end])
+                    })
+                },
+            )
         };
 
         for (index, item) in pending.drain(..).enumerate() {
@@ -852,6 +853,7 @@ where
     }
 
     /// Verify a batch of pending finalization/notarization certificates.
+    #[allow(clippy::type_complexity)]
     fn verify_pending_batch<'a>(
         &mut self,
         scheme: &P::Scheme,
