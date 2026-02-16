@@ -134,9 +134,9 @@ mod tests {
         Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, N3f1};
+    use commonware_utils::{sync::Mutex, test_rng, N3f1};
     use futures::executor::block_on;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     const NAMESPACE: &[u8] = b"test-reporter";
 
@@ -153,11 +153,11 @@ mod tests {
         }
 
         fn reported(&self) -> Vec<Activity<S, D>> {
-            self.activities.lock().unwrap().clone()
+            self.activities.lock().clone()
         }
 
         fn count(&self) -> usize {
-            self.activities.lock().unwrap().len()
+            self.activities.lock().len()
         }
     }
 
@@ -165,7 +165,7 @@ mod tests {
         type Activity = Activity<S, D>;
 
         async fn report(&mut self, activity: Self::Activity) {
-            self.activities.lock().unwrap().push(activity);
+            self.activities.lock().push(activity);
         }
     }
 

@@ -60,14 +60,14 @@ use crate::{
 use commonware_cryptography::{certificate::Scheme, Committable};
 use commonware_macros::select;
 use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
-use commonware_utils::channel::{
-    fallible::OneshotExt,
-    oneshot::{self, error::RecvError},
+use commonware_utils::{
+    channel::{
+        fallible::OneshotExt,
+        oneshot::{self, error::RecvError},
+    },
+    sync::AsyncMutex,
 };
-use futures::{
-    future::{ready, Either, Ready},
-    lock::Mutex,
-};
+use futures::future::{ready, Either, Ready};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -116,8 +116,8 @@ where
     application: A,
     marshal: marshal::Mailbox<S, B>,
     epocher: ES,
-    last_built: Arc<Mutex<Option<(Round, B)>>>,
-    verification_tasks: Arc<Mutex<TasksMap<B>>>,
+    last_built: Arc<AsyncMutex<Option<(Round, B)>>>,
+    verification_tasks: Arc<AsyncMutex<TasksMap<B>>>,
 
     build_duration: Gauge,
 }
@@ -149,8 +149,8 @@ where
             application,
             marshal,
             epocher,
-            last_built: Arc::new(Mutex::new(None)),
-            verification_tasks: Arc::new(Mutex::new(HashMap::new())),
+            last_built: Arc::new(AsyncMutex::new(None)),
+            verification_tasks: Arc::new(AsyncMutex::new(HashMap::new())),
 
             build_duration,
         }
