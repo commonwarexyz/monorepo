@@ -251,7 +251,7 @@ where
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                     // Enter the new epoch.
-                    let (handle, ephemeral) = self
+                    let (handle, scope) = self
                         .enter_epoch(
                             transition.epoch,
                             scheme,
@@ -260,14 +260,14 @@ where
                             &mut resolver_mux,
                         )
                         .await;
-                    engines.insert(transition.epoch, (handle, ephemeral));
+                    engines.insert(transition.epoch, (handle, scope));
                     let _ = self.latest_epoch.try_set(transition.epoch.get());
 
                     info!(epoch = %transition.epoch, "entered epoch");
                 }
                 Message::Exit(epoch) => {
                     // Remove the engine and abort it.
-                    let Some((handle, _ephemeral)) = engines.remove(&epoch) else {
+                    let Some((handle, _scope)) = engines.remove(&epoch) else {
                         warn!(%epoch, "exited non-existent epoch");
                         continue;
                     };
@@ -301,13 +301,13 @@ where
     ) -> (Handle<()>, ContextCell<E>) {
         // Start the new engine
         let elector = L::default();
-        let ephemeral = self
+        let scope = self
             .context
             .with_label("consensus_engine")
             .with_attribute("epoch", epoch)
-            .with_ephemeral();
+            .with_scope();
         let engine = simplex::Engine::new(
-            ephemeral.clone(),
+            scope.clone(),
             simplex::Config {
                 scheme,
                 elector,
@@ -337,8 +337,8 @@ where
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
 
-        // Retain the ephemeral context so its metrics registry stays alive
+        // Retain the scoped context so its metrics registry stays alive
         // until the epoch is exited and the engine is aborted.
-        (engine.start(vote, certificate, resolver), ephemeral)
+        (engine.start(vote, certificate, resolver), scope)
     }
 }

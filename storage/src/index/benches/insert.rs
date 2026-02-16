@@ -68,7 +68,7 @@ impl Metrics for DummyMetrics {
         Self
     }
 
-    fn with_ephemeral(&self) -> Self {
+    fn with_scope(&self) -> Self {
         Self
     }
 }

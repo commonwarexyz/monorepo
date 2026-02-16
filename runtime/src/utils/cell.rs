@@ -165,8 +165,8 @@ where
         Self::Present(self.as_present().with_attribute(key, value))
     }
 
-    fn with_ephemeral(&self) -> Self {
-        Self::Present(self.as_present().with_ephemeral())
+    fn with_scope(&self) -> Self {
+        Self::Present(self.as_present().with_scope())
     }
 }
 
