@@ -3,7 +3,7 @@
 use crate::{Recipients, UnlimitedSender};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
-use commonware_utils::{channel::ring, sync::AsyncMutex};
+use commonware_utils::{channel::ring, sync::Mutex};
 use futures::{Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
@@ -31,7 +31,7 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
-    rate_limit: Arc<AsyncMutex<KeyedRateLimiter<S::PublicKey, E>>>,
+    rate_limit: Arc<Mutex<KeyedRateLimiter<S::PublicKey, E>>>,
     peers: P,
     peer_subscription: Option<ring::Receiver<Vec<S::PublicKey>>>,
     known_peers: Vec<S::PublicKey>,
@@ -75,7 +75,7 @@ where
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
-        let rate_limit = Arc::new(AsyncMutex::new(KeyedRateLimiter::hashmap_with_clock(
+        let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
             quota, clock,
         )));
         Self {
@@ -101,7 +101,7 @@ where
             self.peer_subscription = Some(self.peers.subscribe().await);
         }
 
-        let rate_limit = self.rate_limit.lock().await;
+        let rate_limit = self.rate_limit.lock();
 
         // Update known peers from subscription if available (non-blocking)
         if let Some(ref mut subscription) = self.peer_subscription {
@@ -228,18 +228,18 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct MockSender {
-        sent: Arc<AsyncMutex<Vec<SentMessage>>>,
+        sent: Arc<Mutex<Vec<SentMessage>>>,
     }
 
     impl MockSender {
         fn new() -> Self {
             Self {
-                sent: Arc::new(AsyncMutex::new(Vec::new())),
+                sent: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         async fn sent_messages(&self) -> Vec<SentMessage> {
-            self.sent.lock().await.clone()
+            self.sent.lock().clone()
         }
     }
 
@@ -259,7 +259,7 @@ mod tests {
                 Recipients::All => Vec::new(),
             };
             let message = message.into().coalesce();
-            self.sent.lock().await.push((recipients, message, priority));
+            self.sent.lock().push((recipients, message, priority));
             Ok(sent_to)
         }
     }
