@@ -318,6 +318,7 @@ where
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
         self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
             .await;
+        self.sync_finalization_archives().await;
 
         select_loop! {
             self.context,
@@ -428,16 +429,16 @@ where
                         if let Some(block) = self.find_block(&mut buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
-                            self.finalize(
+                            self.store_finalization(
                                 height,
                                 commitment,
                                 block,
                                 Some(finalization),
                                 &mut application,
-                                &mut buffer,
-                                &mut resolver,
                             )
                             .await;
+                            self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                                .await;
                             self.sync_finalization_archives().await;
                             debug!(?round, %height, "finalized block stored");
                         } else {
@@ -593,16 +594,15 @@ where
                         &mut pending,
                         &mut application,
                         &mut buffer,
-                        &mut resolver,
                     ).await;
                 }
                 needs_sync |= self.verify_and_process_pending(
                     pending,
                     &mut application,
-                    &mut buffer,
-                    &mut resolver,
                 ).await;
                 if needs_sync {
+                    self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                        .await;
                     self.sync_finalization_archives().await;
                 }
             },
@@ -619,7 +619,6 @@ where
         pending: &mut Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<K, B>,
-        resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> bool {
         match message {
             handler::Message::Produce { key, response } => {
@@ -674,14 +673,8 @@ where
                     }
                     let height = block.height();
                     let finalization = self.cache.get_finalization_for(commitment).await;
-                    self.finalize(
-                        height,
-                        commitment,
-                        block,
-                        finalization,
-                        application,
-                        buffer,
-                        resolver,
+                    self.store_finalization(
+                        height, commitment, block, finalization, application,
                     )
                     .await;
                     debug!(?commitment, %height, "received block");
@@ -760,12 +753,10 @@ where
 
     /// Batch verify pending certificates and process valid items. Returns true
     /// if finalization archives were written and need syncing.
-    async fn verify_and_process_pending<K: PublicKey>(
+    async fn verify_and_process_pending(
         &mut self,
         pending: Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-        buffer: &mut buffered::Mailbox<K, B>,
-        resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> bool {
         if pending.is_empty() {
             return false;
@@ -799,9 +790,7 @@ where
         let mut wrote = false;
         if batch_ok {
             for item in pending {
-                wrote |= self
-                    .process_verified(item, application, buffer, resolver)
-                    .await;
+                wrote |= self.process_verified(item, application).await;
             }
         } else {
             // Fall back to individual verification
@@ -831,9 +820,7 @@ where
                         .unwrap_or(false),
                 };
                 if valid {
-                    wrote |= self
-                        .process_verified(item, application, buffer, resolver)
-                        .await;
+                    wrote |= self.process_verified(item, application).await;
                 } else {
                     match item {
                         PendingVerification::Finalized { response, .. }
@@ -849,12 +836,10 @@ where
 
     /// Process a verified pending item (finalization or notarization).
     /// Returns true if finalization archives were written.
-    async fn process_verified<K: PublicKey>(
+    async fn process_verified(
         &mut self,
         item: PendingVerification<P::Scheme, B>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-        buffer: &mut buffered::Mailbox<K, B>,
-        resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> bool {
         match item {
             PendingVerification::Finalized {
@@ -865,14 +850,12 @@ where
             } => {
                 debug!(%height, "received finalization");
                 response.send_lossy(true);
-                self.finalize(
+                self.store_finalization(
                     height,
                     block.commitment(),
                     block,
                     Some(finalization),
                     application,
-                    buffer,
-                    resolver,
                 )
                 .await;
                 true
@@ -888,22 +871,18 @@ where
                 debug!(?round, ?commitment, "received notarization");
 
                 // If there exists a finalization certificate for this block, we
-                // should finalize it. While not necessary, this could finalize
-                // the block faster in the case where a notarization then a
-                // finalization is received via the consensus engine and we
-                // resolve the request for the notarization before we resolve
-                // the request for the block.
+                // should finalize it. This could finalize the block faster when
+                // a notarization then a finalization are received via consensus
+                // and we resolve the notarization request before the block request.
                 let height = block.height();
                 let mut wrote = false;
                 if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                    self.finalize(
+                    self.store_finalization(
                         height,
                         commitment,
                         block.clone(),
                         Some(finalization),
                         application,
-                        buffer,
-                        resolver,
                     )
                     .await;
                     wrote = true;
@@ -1068,25 +1047,6 @@ where
         }
     }
 
-    /// Add a finalized block, and optionally a finalization, to the archive, and
-    /// attempt to identify + repair any gaps in the archive.
-    #[allow(clippy::too_many_arguments)]
-    async fn finalize(
-        &mut self,
-        height: Height,
-        commitment: B::Commitment,
-        block: B,
-        finalization: Option<Finalization<P::Scheme, B::Commitment>>,
-        application: &mut impl Reporter<Activity = Update<B, A>>,
-        buffer: &mut buffered::Mailbox<impl PublicKey, B>,
-        resolver: &mut impl Resolver<Key = Request<B>>,
-    ) {
-        self.store_finalization(height, commitment, block, finalization, application)
-            .await;
-
-        self.try_repair_gaps(buffer, resolver, application).await;
-    }
-
     /// Add a finalized block, and optionally a finalization, to the archive,
     /// then attempt to dispatch the next contiguous block to the application.
     ///
@@ -1185,6 +1145,9 @@ where
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
+    ///
+    /// Writes are buffered. The caller must call
+    /// [`sync_finalization_archives`](Self::sync_finalization_archives) afterward.
     async fn try_repair_gaps<K: PublicKey>(
         &mut self,
         buffer: &mut buffered::Mailbox<K, B>,
