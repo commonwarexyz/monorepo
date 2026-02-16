@@ -129,11 +129,11 @@ fn test_config(
     pooler: &impl BufferPooler,
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}-log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
@@ -148,7 +148,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let cfg = test_config("keyless_fuzz_test", &context);
+        let cfg = test_config("keyless-fuzz-test", &context);
         let mut db = CleanDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init keyless db")
@@ -267,7 +267,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     drop(db);
 
-                    let cfg = test_config("keyless_fuzz_test", &context);
+                    let cfg = test_config("keyless-fuzz-test", &context);
                     db = CleanDb::init(
                         context.with_label("db").with_attribute("instance", restarts),
                         cfg,

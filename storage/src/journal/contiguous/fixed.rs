@@ -890,7 +890,7 @@ mod tests {
 
     fn test_cfg(pooler: &impl BufferPooler, items_per_blob: NonZeroU64) -> Config {
         Config {
-            partition: "test_partition".into(),
+            partition: "test-partition".into(),
             items_per_blob,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
@@ -1766,7 +1766,7 @@ mod tests {
 
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(&context, NZU64!(3));
-            cfg.partition = "test_partition_2".into();
+            cfg.partition = "test-partition-2".into();
             let journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1903,7 +1903,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "single_item_per_blob".into(),
+                partition: "single-item-per-blob".into(),
                 items_per_blob: NZU64!(1),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),

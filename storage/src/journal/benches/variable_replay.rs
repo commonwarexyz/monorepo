@@ -14,7 +14,7 @@ use std::{
 };
 
 /// Partition name to use in the journal config.
-const PARTITION: &str = "variable_test_partition";
+const PARTITION: &str = "variable-test-partition";
 
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {

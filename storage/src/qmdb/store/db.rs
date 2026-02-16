@@ -30,7 +30,7 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_partition: "test_partition".to_string(),
+//!         log_partition: "test-partition".to_string(),
 //!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),

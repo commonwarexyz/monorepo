@@ -1149,7 +1149,7 @@ mod tests {
     fn test_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_metrics", &context);
+            let cfg = test_config("test-metrics", &context);
             let ctx = context.with_label("test_metrics");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
@@ -1253,7 +1253,7 @@ mod tests {
     fn test_metrics_next_updates_on_fast_forward() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ff", &context);
+            let cfg = test_config("test-ff", &context);
             let ctx = context.with_label("test_ff");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 

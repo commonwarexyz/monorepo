@@ -518,8 +518,8 @@ mod tests {
 
     fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         Config {
-            index_partition: "test_index".to_string(),
-            value_partition: "test_values".to_string(),
+            index_partition: "test-index".to_string(),
+            value_partition: "test-values".to_string(),
             index_page_cache: CacheRef::from_pooler(pooler, NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
@@ -910,8 +910,8 @@ mod tests {
             // This allows corrupting just the last entry's page without affecting others.
             // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
             let cfg = Config {
-                index_partition: "test_index".to_string(),
-                value_partition: "test_values".to_string(),
+                index_partition: "test-index".to_string(),
+                value_partition: "test-values".to_string(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -1450,8 +1450,8 @@ mod tests {
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
             let cfg = Config {
-                index_partition: "test_index".to_string(),
-                value_partition: "test_values".to_string(),
+                index_partition: "test-index".to_string(),
+                value_partition: "test-values".to_string(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -1735,8 +1735,8 @@ mod tests {
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
             let cfg = Config {
-                index_partition: "test_index".to_string(),
-                value_partition: "test_values".to_string(),
+                index_partition: "test-index".to_string(),
+                value_partition: "test-values".to_string(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -2462,8 +2462,8 @@ mod tests {
         executor.start(|context| async move {
             // Use page size = entry size so one entry per page
             let cfg = Config {
-                index_partition: "test_index".to_string(),
-                value_partition: "test_values".to_string(),
+                index_partition: "test-index".to_string(),
+                value_partition: "test-values".to_string(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),

@@ -261,11 +261,11 @@ pub(crate) mod test {
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
         FixedConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log_journal_{suffix}"),
+            log_journal_partition: format!("log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             translator: T::default(),
@@ -279,11 +279,11 @@ pub(crate) mod test {
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ()> {
         VariableConfig {
-            mmr_journal_partition: format!("journal_{suffix}"),
-            mmr_metadata_partition: format!("metadata_{suffix}"),
+            mmr_journal_partition: format!("journal-{suffix}"),
+            mmr_metadata_partition: format!("metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(11),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{suffix}"),
+            log_partition: format!("log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
