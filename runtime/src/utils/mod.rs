@@ -334,9 +334,12 @@ struct MetricFamily {
     data: Vec<String>,
 }
 
-fn extract_metric_name(line: &str) -> String {
+/// OpenMetrics suffixes appended to data lines but absent from HELP/TYPE headers.
+const OPENMETRICS_SUFFIXES: &[&str] = &["_total", "_bucket", "_count", "_sum", "_created", "_info"];
+
+fn extract_metric_name(line: &str) -> &str {
     let end = line.find(['{', ' ']).unwrap_or(line.len());
-    line[..end].to_string()
+    &line[..end]
 }
 
 impl MetricEncoder {
@@ -369,35 +372,30 @@ impl MetricEncoder {
         output
     }
 
-    fn get_or_create(&mut self, name: &str) -> &mut MetricFamily {
-        self.families
-            .entry(name.to_string())
-            .or_insert(MetricFamily {
-                help: None,
-                type_line: None,
-                data: Vec::new(),
-            })
-    }
-
-    /// Resolve a data line's metric name to its family key.
+    /// Resolve a data line's metric name to its family key, inserting a new
+    /// family if none exists, and return a mutable reference to it.
     ///
-    /// OpenMetrics uses suffixes on data lines that differ from the base name
-    /// in HELP/TYPE headers (e.g., HELP uses "votes" but the data line is
-    /// "votes_total"). If stripping a known suffix matches an existing family,
-    /// use that family.
-    fn resolve_family(&self, name: &str) -> String {
+    /// OpenMetrics appends suffixes to data lines that differ from the base
+    /// name in HELP/TYPE headers (e.g., HELP uses "votes" but the data line
+    /// is "votes_total"). If stripping a known suffix matches an existing
+    /// family, that family is returned. Otherwise a new family is created
+    /// under the literal metric name.
+    fn resolve_data_family(&mut self, name: &str) -> &mut MetricFamily {
         if self.families.contains_key(name) {
-            return name.to_string();
+            return self.families.get_mut(name).unwrap();
         }
-        const SUFFIXES: &[&str] = &["_total", "_bucket", "_count", "_sum", "_created", "_info"];
-        for suffix in SUFFIXES {
+        for suffix in OPENMETRICS_SUFFIXES {
             if let Some(base) = name.strip_suffix(suffix) {
                 if self.families.contains_key(base) {
-                    return base.to_string();
+                    return self.families.get_mut(base).unwrap();
                 }
             }
         }
-        name.to_string()
+        self.families.entry(name.to_string()).or_insert(MetricFamily {
+            help: None,
+            type_line: None,
+            data: Vec::new(),
+        })
     }
 
     fn flush_line(&mut self) {
@@ -406,21 +404,28 @@ impl MetricEncoder {
             return;
         }
         if let Some(rest) = line.strip_prefix("# HELP ") {
-            let name = rest.split_whitespace().next().unwrap_or("").to_string();
-            let family = self.get_or_create(&name);
+            let name = rest.split_whitespace().next().unwrap_or("");
+            let family = self.families.entry(name.to_string()).or_insert(MetricFamily {
+                help: None,
+                type_line: None,
+                data: Vec::new(),
+            });
             if family.help.is_none() {
                 family.help = Some(line);
             }
         } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-            let name = rest.split_whitespace().next().unwrap_or("").to_string();
-            let family = self.get_or_create(&name);
+            let name = rest.split_whitespace().next().unwrap_or("");
+            let family = self.families.entry(name.to_string()).or_insert(MetricFamily {
+                help: None,
+                type_line: None,
+                data: Vec::new(),
+            });
             if family.type_line.is_none() {
                 family.type_line = Some(line);
             }
         } else {
             let name = extract_metric_name(&line);
-            let key = self.resolve_family(&name);
-            let family = self.get_or_create(&key);
+            let family = self.resolve_data_family(name);
             family.data.push(line);
         }
     }
