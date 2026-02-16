@@ -354,9 +354,10 @@ const TYPED_SUFFIXES: &[(&str, &[&str])] = &[
     ("_info", &["info"]),
 ];
 
-/// Extract the metric name from a sample line: `sample = metricname [labels] SP number ...`
+/// Returns true if `sample_name` can belong to `family_name` (either an
+/// exact match or a valid type-specific suffix per the OpenMetrics spec).
 ///
-/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#abnf>
+/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#suffixes>
 fn family_accepts_sample(
     families: &BTreeMap<String, MetricFamily>,
     family_name: &str,
@@ -379,6 +380,9 @@ fn family_accepts_sample(
     })
 }
 
+/// Extract the metric name from a sample line: `sample = metricname [labels] SP number ...`
+///
+/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#abnf>
 fn extract_metric_name(line: &str) -> &str {
     let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
@@ -397,7 +401,17 @@ impl MetricEncoder {
         if !self.line_buffer.is_empty() {
             self.flush_line();
         }
-        let mut output = String::new();
+        let total: usize = self
+            .families
+            .values()
+            .map(|f| {
+                f.help.as_ref().map_or(0, |h| h.len() + 1)
+                    + f.type_line.as_ref().map_or(0, |t| t.len() + 1)
+                    + f.unit.as_ref().map_or(0, |u| u.len() + 1)
+                    + f.data.iter().map(|d| d.len() + 1).sum::<usize>()
+            })
+            .sum();
+        let mut output = String::with_capacity(total);
         for family in self.families.values() {
             if let Some(help) = &family.help {
                 output.push_str(help);
