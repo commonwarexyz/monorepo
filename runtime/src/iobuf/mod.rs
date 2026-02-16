@@ -684,7 +684,7 @@ pub struct IoBufs {
 ///   - `Single` is the only representation for empty data and one-chunk data.
 ///   - `Chunked` is used only when four or more readable chunks remain.
 /// - `Pair`, `Triple`, and `Chunked` never store empty chunks.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum IoBufsInner {
     /// Single buffer (fast path).
     Single(IoBuf),
