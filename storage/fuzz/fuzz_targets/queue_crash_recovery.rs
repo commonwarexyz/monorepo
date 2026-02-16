@@ -218,7 +218,7 @@ async fn run_operations(
 ) -> RecoveryState {
     let mut state = RecoveryState::new();
 
-    'ops: for op in operations {
+    for op in operations {
         match op {
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
@@ -232,7 +232,7 @@ async fn run_operations(
                     Err(_) => {
                         state.enqueue_failed(*value);
                         state.mark_tainted();
-                        break 'ops;
+                        return state;
                     }
                 }
             }
@@ -246,7 +246,7 @@ async fn run_operations(
                     Err(_) => {
                         state.append_failed(*value);
                         state.mark_tainted();
-                        break 'ops;
+                        return state;
                     }
                 }
             }
@@ -258,7 +258,7 @@ async fn run_operations(
                 Err(_) => {
                     state.commit_failed();
                     state.mark_tainted();
-                    break 'ops;
+                    return state;
                 }
             },
 
@@ -287,7 +287,7 @@ async fn run_operations(
                         }
                         Err(_) => {
                             state.mark_tainted();
-                            break 'ops;
+                            return state;
                         }
                     }
                 }
@@ -302,7 +302,7 @@ async fn run_operations(
                     }
                     Err(_) => {
                         state.mark_tainted();
-                        break 'ops;
+                        return state;
                     }
                 }
             }
@@ -318,7 +318,7 @@ async fn run_operations(
                     Err(_) => {
                         state.commit_failed();
                         state.mark_tainted();
-                        break 'ops;
+                        return state;
                     }
                 }
             }
@@ -339,7 +339,10 @@ async fn run_operations(
 async fn verify_recovery_after_mutable_error(queue: &mut Queue<deterministic::Context, Vec<u8>>) {
     // Basic read-path sanity should not fail.
     let size_before = queue.size().await;
-    let _ = queue.dequeue().await;
+    queue
+        .dequeue()
+        .await
+        .expect("dequeue should not error after recovery");
 
     // Queue should remain writable after recovery.
     let new_pos = queue
