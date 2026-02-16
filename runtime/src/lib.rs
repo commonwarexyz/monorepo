@@ -2803,6 +2803,18 @@ mod tests {
             assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
+            // HELP/TYPE lines should be deduplicated across scopes
+            assert_eq!(
+                buffer.matches("# HELP engine_votes").count(),
+                1,
+                "HELP should appear once: {buffer}"
+            );
+            assert_eq!(
+                buffer.matches("# TYPE engine_votes").count(),
+                1,
+                "TYPE should appear once: {buffer}"
+            );
+
             // Drop epoch 1 context
             drop(epoch1);
             let buffer = context.encode();
