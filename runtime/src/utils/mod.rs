@@ -312,11 +312,11 @@ pub fn add_attribute(
 /// A writer that deduplicates HELP and TYPE metadata lines during Prometheus encoding.
 ///
 /// When the same metric is registered in multiple sub-registries (via
-/// `sub_registry_with_label`) or across scoped registries (via [`Registry::encode`]),
+/// `sub_registry_with_label`) or across scoped registries (via `Registry::encode`),
 /// prometheus_client outputs duplicate HELP/TYPE lines. This writer filters them in
 /// a single pass to produce canonical Prometheus format.
 ///
-/// Also strips `# EOF` lines so that [`Registry::encode`] can append exactly one at
+/// Also strips `# EOF` lines so that `Registry::encode` can append exactly one at
 /// the end of the combined output.
 ///
 /// Uses "first wins" semantics: keeps the first HELP/TYPE description encountered
