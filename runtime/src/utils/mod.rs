@@ -383,15 +383,15 @@ impl std::fmt::Write for MetricEncoder {
 
 /// Internal handle that deregisters a metric scope when dropped.
 ///
-/// Stored inside contexts via `Arc<ScopeHandle>`. When the last context clone
+/// Stored inside contexts via `Arc<ScopeGuard>`. When the last context clone
 /// holding this handle is dropped, the scope's metrics are automatically removed.
-pub(crate) struct ScopeHandle {
+pub(crate) struct ScopeGuard {
     scope_id: u64,
     #[allow(clippy::type_complexity)]
     cleanup: Option<Box<dyn FnOnce(u64) + Send + Sync>>,
 }
 
-impl ScopeHandle {
+impl ScopeGuard {
     pub(crate) fn new(scope_id: u64, cleanup: impl FnOnce(u64) + Send + Sync + 'static) -> Self {
         Self {
             scope_id,
@@ -404,7 +404,7 @@ impl ScopeHandle {
     }
 }
 
-impl Drop for ScopeHandle {
+impl Drop for ScopeGuard {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
             cleanup(self.scope_id);

@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, ScopeHandle,
+        Panicker, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
@@ -866,7 +866,7 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeHandle>>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -1340,10 +1340,10 @@ impl crate::Metrics for Context {
         let weak = self.executor.clone();
         let scope_id = executor.registry.lock().unwrap().create_scope();
 
-        // When the last Arc<ScopeHandle> is dropped, remove the
+        // When the last Arc<ScopeGuard> is dropped, remove the
         // scoped registry. All operations are infallible to avoid
         // panicking in Drop.
-        let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
+        let handle = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
                 let _ = exec.registry.lock().map(|mut s| s.remove_scope(id));
             }

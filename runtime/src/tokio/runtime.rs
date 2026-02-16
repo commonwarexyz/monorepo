@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeHandle},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -440,7 +440,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeHandle>>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -674,7 +674,7 @@ impl crate::Metrics for Context {
         // All operations are infallible to avoid panicking in Drop.
         let executor = self.executor.clone();
         let scope_id = executor.registry.lock().unwrap().create_scope();
-        let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
+        let handle = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Ok(mut registry) = executor.registry.lock() {
                 registry.remove_scope(id);
             }
