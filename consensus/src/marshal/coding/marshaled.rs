@@ -76,11 +76,13 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::verification_tasks::VerificationTasks,
-        validation::{
-            CodedProposalValidationError, is_inferred_reproposal_at_certify,
-            is_valid_reproposal_at_verify, validate_coded_block_for_verification,
-            validate_coded_proposal,
+        application::{
+            validation::{
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
+                validate_coded_block_for_verification, validate_coded_proposal,
+                CodedProposalValidationError,
+            },
+            verification_tasks::VerificationTasks,
         },
         coding::{
             shards,

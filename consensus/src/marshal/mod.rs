@@ -79,7 +79,6 @@ pub mod core;
 pub mod resolver;
 pub mod standard;
 pub mod store;
-pub(crate) mod validation;
 
 commonware_macros::stability_scope!(ALPHA {
     pub(crate) mod application;

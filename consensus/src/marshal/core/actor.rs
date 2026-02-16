@@ -523,10 +523,7 @@ where
                                 let rx = buffer.subscribe_by_digest(digest).await;
                                 let waiter_digest = digest;
                                 let aborter = waiters.push(async move {
-                                    match rx.await {
-                                        Ok(block) => Ok(block.into_block()),
-                                        Err(_) => Err(waiter_digest),
-                                    }
+                                    rx.await.map_or_else(|_| Err(waiter_digest), |block| Ok(block.into_block()))
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
@@ -573,10 +570,7 @@ where
                                 let rx = buffer.subscribe_by_commitment(commitment).await;
                                 let waiter_digest = digest;
                                 let aborter = waiters.push(async move {
-                                    match rx.await {
-                                        Ok(block) => Ok(block.into_block()),
-                                        Err(_) => Err(waiter_digest),
-                                    }
+                                    rx.await.map_or_else(|_| Err(waiter_digest), |block| Ok(block.into_block()))
                                 });
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],

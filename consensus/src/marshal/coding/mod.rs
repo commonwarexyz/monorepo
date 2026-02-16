@@ -1296,8 +1296,8 @@ mod tests {
             coding_config,
         ));
         let encoded = valid.encode();
-        let decoded = Commitment::read(&mut &encoded[..])
-            .expect("valid Commitment must deserialize");
+        let decoded =
+            Commitment::read(&mut &encoded[..]).expect("valid Commitment must deserialize");
         assert_eq!(valid, decoded);
     }
 

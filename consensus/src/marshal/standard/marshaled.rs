@@ -73,10 +73,12 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::verification_tasks::VerificationTasks,
-        validation::{
-            is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
-            is_valid_reproposal_at_verify, validate_standard_block_for_verification,
+        application::{
+            validation::{
+                is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
+                is_valid_reproposal_at_verify, validate_standard_block_for_verification,
+            },
+            verification_tasks::VerificationTasks,
         },
         core::Mailbox,
         standard::Standard,

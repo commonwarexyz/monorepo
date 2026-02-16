@@ -161,10 +161,10 @@ use super::{
 };
 use crate::{
     marshal::{
-        coding::types::{hash_context, CodedBlock, DistributionShard, Shard},
-        validation::{
+        application::validation::{
             validate_reconstruction, ReconstructionValidationError as InvariantError,
         },
+        coding::types::{CodedBlock, DistributionShard, Shard},
     },
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
@@ -173,7 +173,6 @@ use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    sha256::Digest as Sha256Digest,
     Committable, Digestible, Hasher, PublicKey,
 };
 use commonware_macros::select_loop;
@@ -584,13 +583,11 @@ where
                 );
                 return Err(Error::ConfigMismatch);
             }
-            Err(InvariantError::ContextHash) => {
-                let expected_context_hash = commitment.context::<Sha256Digest>();
-                let got_context_hash = hash_context(&inner.context());
+            Err(InvariantError::ContextHash(expected, actual)) => {
                 warn!(
                     %commitment,
-                    expected_context_hash = ?expected_context_hash,
-                    actual_context_hash = ?got_context_hash,
+                    expected_context_digest = ?expected,
+                    actual_context_digest = ?actual,
                     "reconstructed block context hash does not match commitment context hash"
                 );
                 return Err(Error::ContextMismatch);

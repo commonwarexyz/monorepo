@@ -308,7 +308,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
 
-    async fn fetch_block(mut self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
+    async fn fetch_block(
+        mut self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<Self::Block> {
         let subscription = self.subscribe_by_digest(None, digest).await;
         subscription.await.ok().map(V::into_application_block)
     }
