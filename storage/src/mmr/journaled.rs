@@ -2036,8 +2036,8 @@ mod tests {
 
             // Use small items_per_blob to create many sections and trigger pruning.
             let cfg = Config {
-                journal_partition: "mmr-journal".to_string(),
-                metadata_partition: "mmr-metadata".to_string(),
+                journal_partition: "mmr-journal".into(),
+                metadata_partition: "mmr-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(64),
                 thread_pool: None,

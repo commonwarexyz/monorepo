@@ -289,7 +289,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         }
 
         if !legacy_blobs.is_empty() {
-            Ok(legacy_partition.to_string())
+            Ok(legacy_partition.into())
         } else {
             Ok(new_partition)
         }

@@ -24,7 +24,7 @@
 //!     let (sender, mut receiver) = tracked::bounded::<String, u64>(10);
 //
 //!     // Send a message with batch ID
-//!     let sequence = sender.send(Some(1), "hello".to_string()).await.unwrap();
+//!     let sequence = sender.send(Some(1), "hello".into()).await.unwrap();
 //
 //!     // Check pending messages
 //!     assert_eq!(sender.pending(1), 1);
@@ -294,9 +294,9 @@ mod tests {
             let (sender, mut receiver) = bounded::<String, u64>(10);
 
             // Send messages with different batch IDs
-            let watermark1 = sender.send(Some(100), "msg1".to_string()).await.unwrap();
-            let watermark2 = sender.send(Some(100), "msg2".to_string()).await.unwrap();
-            let watermark3 = sender.send(Some(200), "msg3".to_string()).await.unwrap();
+            let watermark1 = sender.send(Some(100), "msg1".into()).await.unwrap();
+            let watermark2 = sender.send(Some(100), "msg2".into()).await.unwrap();
+            let watermark3 = sender.send(Some(200), "msg3".into()).await.unwrap();
 
             assert_eq!(watermark1, 1);
             assert_eq!(watermark2, 2);

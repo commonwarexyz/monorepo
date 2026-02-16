@@ -35,7 +35,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            partition: "metadata-operations-fuzz-test".to_string(),
+            partition: "metadata-operations-fuzz-test".into(),
             codec_config: ((0..).into(), ()),
         };
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)

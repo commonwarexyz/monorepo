@@ -47,7 +47,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
 ) -> FixedJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = FixedConfig {
-        partition: partition_name.to_string(),
+        partition: partition_name.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -83,7 +83,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
 ) -> VariableJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = VariableConfig {
-        partition: partition_name.to_string(),
+        partition: partition_name.into(),
         items_per_section,
         compression: None,
         codec_config: (),

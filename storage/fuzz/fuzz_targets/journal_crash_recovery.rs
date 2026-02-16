@@ -122,7 +122,7 @@ fn fixed_config(
     write_buffer: NonZeroUsize,
 ) -> FixedConfig {
     FixedConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         items_per_blob: NZU64!(items_per_section),
         page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
             pooler,
@@ -142,7 +142,7 @@ fn variable_config(
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<()> {
     VariableConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         items_per_section: NZU64!(items_per_section),
         compression: None,
         codec_config: (),

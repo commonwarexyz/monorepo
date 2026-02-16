@@ -35,7 +35,7 @@ use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, Array};
 use core::{num::NonZeroU64, ops::Range};
-use futures::future::try_join_all;
+use futures::{future::try_join_all, lock::Mutex};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use tracing::{error, warn};
@@ -109,7 +109,7 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted MMR pinned nodes at key [NODE_PREFIX]
-    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
+    pub(super) metadata: Mutex<Metadata<E, U64, Vec<u8>>>,
 
     /// Optional thread pool for parallelizing grafted leaf computation.
     pub(super) thread_pool: Option<ThreadPool>,
@@ -260,12 +260,13 @@ where
     }
 
     /// Sync the metadata to disk.
-    async fn sync_metadata(&mut self) -> Result<(), Error> {
-        self.metadata.clear();
+    async fn sync_metadata(&self) -> Result<(), Error> {
+        let mut metadata = self.metadata.lock().await;
+        metadata.clear();
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        self.metadata.put(
+        metadata.put(
             key,
             (self.status.pruned_chunks() as u64).to_be_bytes().to_vec(),
         );
@@ -284,13 +285,10 @@ where
                 .get_node(grafted_pos)
                 .ok_or(mmr::Error::MissingNode(ops_pos))?;
             let key = U64::new(NODE_PREFIX, i as u64);
-            self.metadata.put(key, digest.to_vec());
+            metadata.put(key, digest.to_vec());
         }
 
-        self.metadata
-            .sync()
-            .await
-            .map_err(mmr::Error::MetadataError)?;
+        metadata.sync().await.map_err(mmr::Error::MetadataError)?;
 
         Ok(())
     }
@@ -309,7 +307,7 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
@@ -320,7 +318,7 @@ where
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        self.metadata.destroy().await?;
+        self.metadata.into_inner().destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -602,7 +600,7 @@ where
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -862,7 +860,7 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {
     let metadata_cfg = MConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         codec_config: ((0..).into(), ()),
     };
     let metadata =

@@ -150,6 +150,7 @@ use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, Array};
+use futures::lock::Mutex;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -354,7 +355,7 @@ where
         any,
         status,
         grafted_mmr,
-        metadata,
+        metadata: Mutex::new(metadata),
         thread_pool,
         state: db::Merkleized { root },
     })
@@ -441,7 +442,7 @@ where
         any,
         status,
         grafted_mmr,
-        metadata,
+        metadata: Mutex::new(metadata),
         thread_pool: pool,
         state: db::Merkleized { root },
     })
@@ -777,13 +778,10 @@ pub mod tests {
         let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
             // Create two databases that are identical other than how they are pruned.
-            let mut db_no_pruning: C = open_db_clone(
-                context.with_label("no_pruning"),
-                "no-pruning-test".to_string(),
-            )
-            .await;
+            let mut db_no_pruning: C =
+                open_db_clone(context.with_label("no_pruning"), "no-pruning-test".into()).await;
             let mut db_pruning: C =
-                open_db(context.with_label("pruning"), "pruning-test".to_string()).await;
+                open_db(context.with_label("pruning"), "pruning-test".into()).await;
 
             let mut db_no_pruning_mut = db_no_pruning.into_mutable();
             let mut db_pruning_mut = db_pruning.into_mutable();
@@ -938,7 +936,7 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
         executor.start(|context| async move {
-            let mut db = open_db_clone(context.with_label("first"), "build-big".to_string())
+            let mut db = open_db_clone(context.with_label("first"), "build-big".into())
                 .await
                 .into_mutable();
 
@@ -993,7 +991,7 @@ pub mod tests {
             drop(db);
 
             // Reopen the db and verify it has exactly the same state.
-            let db: C = open_db(context.with_label("second"), "build-big".to_string()).await;
+            let db: C = open_db(context.with_label("second"), "build-big".into()).await;
             assert_eq!(root, db.root());
             assert_eq!(
                 db.bounds().await.end,

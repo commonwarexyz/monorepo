@@ -30,7 +30,7 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_partition: "test-partition".to_string(),
+//!         log_partition: "test-partition".into(),
 //!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),
@@ -593,7 +593,7 @@ mod test {
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
-            log_partition: "journal".to_string(),
+            log_partition: "journal".into(),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
