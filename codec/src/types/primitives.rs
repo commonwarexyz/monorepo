@@ -22,6 +22,7 @@ use crate::{
     util::at_least, varint::UInt, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 use bytes::{Buf, BufMut};
+use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 // Numeric types implementation
 macro_rules! impl_numeric {
@@ -60,6 +61,34 @@ impl_numeric!(i64, get_i64, put_i64);
 impl_numeric!(i128, get_i128, put_i128);
 impl_numeric!(f32, get_f32, put_f32);
 impl_numeric!(f64, get_f64, put_f64);
+
+macro_rules! impl_nonzero {
+    ($nz:ty, $inner:ty, $name:expr) => {
+        impl Write for $nz {
+            #[inline]
+            fn write(&self, buf: &mut impl BufMut) {
+                self.get().write(buf);
+            }
+        }
+
+        impl Read for $nz {
+            type Cfg = ();
+            #[inline]
+            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, Error> {
+                let v = <$inner>::read_cfg(buf, cfg)?;
+                <$nz>::new(v).ok_or(Error::Invalid($name, "value must not be zero"))
+            }
+        }
+
+        impl FixedSize for $nz {
+            const SIZE: usize = <$inner as FixedSize>::SIZE;
+        }
+    };
+}
+
+impl_nonzero!(NonZeroU16, u16, "NonZeroU16");
+impl_nonzero!(NonZeroU32, u32, "NonZeroU32");
+impl_nonzero!(NonZeroU64, u64, "NonZeroU64");
 
 // Usize implementation
 impl Write for usize {
@@ -321,6 +350,52 @@ mod tests {
         let x = ();
         // Not using an equality check, since that will always pass.
         assert!(<()>::decode(x.encode()).is_ok());
+    }
+
+    #[test]
+    fn test_nonzero_u16() {
+        let values = [
+            NonZeroU16::new(1).unwrap(),
+            NonZeroU16::new(42).unwrap(),
+            NonZeroU16::new(u16::MAX).unwrap(),
+        ];
+        for value in values {
+            let encoded = value.encode();
+            assert_eq!(encoded.len(), 2);
+            let decoded = NonZeroU16::decode(encoded).unwrap();
+            assert_eq!(value, decoded);
+        }
+        assert!(NonZeroU16::decode(0u16.encode()).is_err());
+    }
+
+    #[test]
+    fn test_nonzero_u32() {
+        let values = [
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(u32::MAX).unwrap(),
+        ];
+        for value in values {
+            let encoded = value.encode();
+            assert_eq!(encoded.len(), 4);
+            let decoded = NonZeroU32::decode(encoded).unwrap();
+            assert_eq!(value, decoded);
+        }
+        assert!(NonZeroU32::decode(0u32.encode()).is_err());
+    }
+
+    #[test]
+    fn test_nonzero_u64() {
+        let values = [
+            NonZeroU64::new(1).unwrap(),
+            NonZeroU64::new(u64::MAX).unwrap(),
+        ];
+        for value in values {
+            let encoded = value.encode();
+            assert_eq!(encoded.len(), 8);
+            let decoded = NonZeroU64::decode(encoded).unwrap();
+            assert_eq!(value, decoded);
+        }
+        assert!(NonZeroU64::decode(0u64.encode()).is_err());
     }
 
     #[test]
