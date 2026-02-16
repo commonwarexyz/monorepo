@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricStore, Panicker},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -27,7 +27,6 @@ use commonware_parallel::ThreadPool;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::{Metric, Registry},
 };
@@ -250,7 +249,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    registry: Mutex<Registry>,
+    store: Mutex<MetricStore>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -283,9 +282,9 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        // Create a new metric store
+        let mut store = MetricStore::new();
+        let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -386,7 +385,7 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            registry: Mutex::new(registry),
+            store: Mutex::new(store),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -403,6 +402,7 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
+            scope: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
@@ -440,6 +440,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
+    scope: Option<u64>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -456,6 +457,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
+            scope: self.scope,
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -636,28 +638,48 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Apply attributes to the registry (in sorted order)
-        let mut registry = self.executor.registry.lock().unwrap();
-        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
-            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-        });
+        // Route to the appropriate registry (root or scoped)
+        let mut store = self.executor.store.lock().unwrap();
+        let registry = store.get_registry(self.scope);
+        let sub_registry =
+            self.attributes
+                .iter()
+                .fold(registry, |reg, (k, v): &(String, String)| {
+                    reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+                });
         sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
-        let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        encoder.into_string()
+        self.executor.store.lock().unwrap().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        // Add the attribute to the list of attributes
         let mut attributes = self.attributes.clone();
         add_attribute(&mut attributes, key, value);
         Self {
             attributes,
             ..self.clone()
         }
+    }
+
+    fn scoped(&self) -> Self {
+        let scope = if self.scope.is_some() {
+            self.scope
+        } else {
+            Some(self.executor.store.lock().unwrap().create_scope())
+        };
+        Self {
+            scope,
+            ..self.clone()
+        }
+    }
+
+    fn deregister(&self) {
+        let scope_id = self
+            .scope
+            .expect("deregister() called on unscoped context");
+        self.executor.store.lock().unwrap().remove_scope(scope_id);
     }
 }
 

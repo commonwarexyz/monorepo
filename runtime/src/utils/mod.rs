@@ -1,9 +1,10 @@
 //! Utility functions for interacting with any runtime.
 
 use futures::task::ArcWake;
+use prometheus_client::{encoding::text::encode, registry::Registry};
 use std::{
     any::Any,
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     future::Future,
     pin::Pin,
     sync::{Arc, Condvar, Mutex},
@@ -375,6 +376,64 @@ impl std::fmt::Write for MetricEncoder {
         }
         self.line_buffer.push_str(remaining);
         Ok(())
+    }
+}
+
+/// Manages multiple prometheus registries with lifecycle-based scoping.
+///
+/// Holds a permanent root registry for long-lived metrics (runtime internals)
+/// and a collection of scoped registries that can be removed when the associated
+/// work (e.g., an epoch's consensus engine) is done.
+pub(crate) struct MetricStore {
+    root: Registry,
+    scopes: BTreeMap<u64, Registry>,
+    next_scope_id: u64,
+}
+
+impl MetricStore {
+    pub fn new() -> Self {
+        Self {
+            root: Registry::default(),
+            scopes: BTreeMap::new(),
+            next_scope_id: 0,
+        }
+    }
+
+    pub fn root_mut(&mut self) -> &mut Registry {
+        &mut self.root
+    }
+
+    pub fn create_scope(&mut self) -> u64 {
+        let id = self.next_scope_id;
+        self.next_scope_id += 1;
+        self.scopes.insert(id, Registry::default());
+        id
+    }
+
+    pub fn get_registry(&mut self, scope: Option<u64>) -> &mut Registry {
+        match scope {
+            None => &mut self.root,
+            Some(id) => self
+                .scopes
+                .get_mut(&id)
+                .unwrap_or_else(|| panic!("scope {id} not found (already deregistered?)")),
+        }
+    }
+
+    pub fn remove_scope(&mut self, id: u64) {
+        assert!(
+            self.scopes.remove(&id).is_some(),
+            "scope {id} not found (already deregistered?)"
+        );
+    }
+
+    pub fn encode(&self) -> String {
+        let mut encoder = MetricEncoder::new();
+        encode(&mut encoder, &self.root).expect("encoding root failed");
+        for registry in self.scopes.values() {
+            encode(&mut encoder, registry).expect("encoding scope failed");
+        }
+        encoder.into_string()
     }
 }
 

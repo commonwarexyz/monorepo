@@ -164,6 +164,14 @@ where
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
         Self::Present(self.as_present().with_attribute(key, value))
     }
+
+    fn scoped(&self) -> Self {
+        Self::Present(self.as_present().scoped())
+    }
+
+    fn deregister(&self) {
+        self.as_present().deregister()
+    }
 }
 
 impl<C> crate::Clock for Cell<C>

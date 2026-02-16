@@ -418,6 +418,39 @@ stability_scope!(BETA {
         /// by using `with_label` to create new context instances (ensures all context instances are
         /// namespaced).
         fn encode(&self) -> String;
+
+        /// Create a scoped context. All metrics registered through this context
+        /// (and child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into a
+        /// separate registry that can be removed via [`Metrics::deregister`].
+        ///
+        /// If the context is already scoped, returns a clone with the same scope.
+        ///
+        /// # Example
+        ///
+        /// ```ignore
+        /// let ctx = context
+        ///     .with_label("engine")
+        ///     .with_attribute("epoch", epoch)
+        ///     .scoped();
+        ///
+        /// // Register metrics into the scope
+        /// let counter = Counter::default();
+        /// ctx.register("votes", "vote count", counter.clone());
+        ///
+        /// // Later, remove all metrics from this scope
+        /// ctx.deregister();
+        /// ```
+        fn scoped(&self) -> Self;
+
+        /// Remove all metrics registered through this context's scope.
+        ///
+        /// After this call, the scope's metrics will no longer appear in [`Metrics::encode`] output.
+        /// Any subsequent [`Metrics::register`] calls on contexts sharing this scope will panic.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the context is not scoped (i.e., [`Metrics::scoped`] was never called).
+        fn deregister(&self);
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -2680,6 +2713,356 @@ mod tests {
     fn test_tokio_metrics_family_with_attributes() {
         let runner = tokio::Runner::default();
         test_metrics_family_with_attributes(runner);
+    }
+
+    fn test_scoped_register_and_encode<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scoped = context.with_label("engine").scoped();
+            let counter = Counter::<u64>::default();
+            scoped.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "scoped metric should appear in encode: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_scoped_register_and_encode() {
+        let executor = deterministic::Runner::default();
+        test_scoped_register_and_encode(executor);
+    }
+
+    #[test]
+    fn test_tokio_scoped_register_and_encode() {
+        let runner = tokio::Runner::default();
+        test_scoped_register_and_encode(runner);
+    }
+
+    fn test_scoped_deregister_removes_metrics<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Register a permanent metric
+            let permanent = Counter::<u64>::default();
+            context
+                .with_label("permanent")
+                .register("counter", "permanent counter", permanent.clone());
+            permanent.inc();
+
+            // Register a scoped metric
+            let scoped = context.with_label("engine").scoped();
+            let ephemeral = Counter::<u64>::default();
+            scoped.register("votes", "vote count", ephemeral.clone());
+            ephemeral.inc();
+
+            // Both should appear
+            let buffer = context.encode();
+            assert!(buffer.contains("permanent_counter_total 1"));
+            assert!(buffer.contains("engine_votes_total 1"));
+
+            // Deregister the scope
+            scoped.deregister();
+
+            // Only permanent metric should remain
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("permanent_counter_total 1"),
+                "permanent metric should survive deregister: {buffer}"
+            );
+            assert!(
+                !buffer.contains("engine_votes"),
+                "scoped metric should be removed after deregister: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_scoped_deregister_removes_metrics() {
+        let executor = deterministic::Runner::default();
+        test_scoped_deregister_removes_metrics(executor);
+    }
+
+    #[test]
+    fn test_tokio_scoped_deregister_removes_metrics() {
+        let runner = tokio::Runner::default();
+        test_scoped_deregister_removes_metrics(runner);
+    }
+
+    fn test_scoped_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            // Simulate epoch lifecycle
+            let epoch1 = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .scoped();
+            let c1 = Counter::<u64>::default();
+            epoch1.register("votes", "vote count", c1.clone());
+            c1.inc();
+
+            let epoch2 = context
+                .with_label("engine")
+                .with_attribute("epoch", 2)
+                .scoped();
+            let c2 = Counter::<u64>::default();
+            epoch2.register("votes", "vote count", c2.clone());
+            c2.inc();
+            c2.inc();
+
+            // Both epochs visible
+            let buffer = context.encode();
+            assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
+            assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
+
+            // Deregister epoch 1
+            epoch1.deregister();
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("epoch=\"1\""),
+                "epoch 1 should be gone: {buffer}"
+            );
+            assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
+
+            // Deregister epoch 2
+            epoch2.deregister();
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_votes"),
+                "all epoch metrics should be gone: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_scoped_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_scoped_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_scoped_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_scoped_with_attributes(runner);
+    }
+
+    fn test_scoped_inherits_on_with_label<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scoped = context.with_label("engine").scoped();
+
+            // Child context inherits scope
+            let child = scoped.with_label("batcher");
+            let counter = Counter::<u64>::default();
+            child.register("msgs", "message count", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(buffer.contains("engine_batcher_msgs_total 1"));
+
+            // Deregistering parent scope removes child's metrics too
+            scoped.deregister();
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_batcher_msgs"),
+                "child metric should be removed with parent scope: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_scoped_inherits_on_with_label() {
+        let executor = deterministic::Runner::default();
+        test_scoped_inherits_on_with_label(executor);
+    }
+
+    #[test]
+    fn test_tokio_scoped_inherits_on_with_label() {
+        let runner = tokio::Runner::default();
+        test_scoped_inherits_on_with_label(runner);
+    }
+
+    fn test_multiple_scopes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scope_a = context.with_label("a").scoped();
+            let scope_b = context.with_label("b").scoped();
+
+            let ca = Counter::<u64>::default();
+            scope_a.register("counter", "a counter", ca.clone());
+            ca.inc();
+
+            let cb = Counter::<u64>::default();
+            scope_b.register("counter", "b counter", cb.clone());
+            cb.inc();
+            cb.inc();
+
+            let buffer = context.encode();
+            assert!(buffer.contains("a_counter_total 1"));
+            assert!(buffer.contains("b_counter_total 2"));
+
+            // Deregister only scope_a
+            scope_a.deregister();
+            let buffer = context.encode();
+            assert!(!buffer.contains("a_counter"));
+            assert!(buffer.contains("b_counter_total 2"));
+
+            // Deregister scope_b
+            scope_b.deregister();
+            let buffer = context.encode();
+            assert!(!buffer.contains("b_counter"));
+        });
+    }
+
+    #[test]
+    fn test_deterministic_multiple_scopes() {
+        let executor = deterministic::Runner::default();
+        test_multiple_scopes(executor);
+    }
+
+    #[test]
+    fn test_tokio_multiple_scopes() {
+        let runner = tokio::Runner::default();
+        test_multiple_scopes(runner);
+    }
+
+    #[test]
+    #[should_panic(expected = "deregister() called on unscoped context")]
+    fn test_deterministic_deregister_unscoped_panics() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            context.deregister();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "deregister() called on unscoped context")]
+    fn test_tokio_deregister_unscoped_panics() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            context.deregister();
+        });
+    }
+
+    #[test]
+    fn test_deterministic_reregister_after_deregister() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Register in scope, deregister, then re-register with same name/attributes
+            let scoped = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .scoped();
+            let c1 = Counter::<u64>::default();
+            scoped.register("votes", "vote count", c1.clone());
+            c1.inc();
+            scoped.deregister();
+
+            // Re-register with same name and attributes in a new scope
+            let scoped2 = context
+                .with_label("engine")
+                .with_attribute("epoch", 1)
+                .scoped();
+            let c2 = Counter::<u64>::default();
+            scoped2.register("votes", "vote count", c2.clone());
+            c2.inc();
+            c2.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total{epoch=\"1\"} 2"),
+                "re-registered metric should work: {buffer}"
+            );
+        });
+    }
+
+    fn test_scoped_family_with_attributes<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        use prometheus_client::metrics::family::Family;
+
+        #[derive(Clone, Debug, Hash, PartialEq, Eq)]
+        struct Peer {
+            name: String,
+        }
+        impl prometheus_client::encoding::EncodeLabelSet for Peer {
+            fn encode(
+                &self,
+                encoder: &mut prometheus_client::encoding::LabelSetEncoder<'_>,
+            ) -> Result<(), std::fmt::Error> {
+                use prometheus_client::encoding::EncodeLabelKey;
+                use prometheus_client::encoding::EncodeLabelValue;
+                let mut label = encoder.encode_label();
+                let mut key = label.encode_label_key()?;
+                EncodeLabelKey::encode(&"peer", &mut key)?;
+                let mut value = key.encode_label_value()?;
+                EncodeLabelValue::encode(&self.name.as_str(), &mut value)?;
+                value.finish()
+            }
+        }
+
+        runner.start(|context| async move {
+            let scoped = context
+                .with_label("batcher")
+                .with_attribute("epoch", 1)
+                .scoped();
+
+            let family: Family<Peer, Counter> = Family::default();
+            scoped.register("votes", "votes per peer", family.clone());
+            family
+                .get_or_create(&Peer {
+                    name: "alice".into(),
+                })
+                .inc();
+            family
+                .get_or_create(&Peer {
+                    name: "bob".into(),
+                })
+                .inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("batcher_votes_total{epoch=\"1\",peer=\"alice\"} 1"),
+                "family with attributes should combine labels: {buffer}"
+            );
+            assert!(
+                buffer.contains("batcher_votes_total{epoch=\"1\",peer=\"bob\"} 1"),
+                "family with attributes should combine labels: {buffer}"
+            );
+
+            scoped.deregister();
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("batcher_votes"),
+                "family metrics should be removed: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_scoped_family_with_attributes() {
+        let executor = deterministic::Runner::default();
+        test_scoped_family_with_attributes(executor);
+    }
+
+    #[test]
+    fn test_tokio_scoped_family_with_attributes() {
+        let runner = tokio::Runner::default();
+        test_scoped_family_with_attributes(runner);
     }
 
     #[test]

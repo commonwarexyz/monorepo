@@ -67,6 +67,12 @@ impl Metrics for DummyMetrics {
     fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
         Self
     }
+
+    fn scoped(&self) -> Self {
+        Self
+    }
+
+    fn deregister(&self) {}
 }
 
 fn bench_insert(c: &mut Criterion) {
