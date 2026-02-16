@@ -164,28 +164,24 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             .with_label("cache")
             .with_attribute("epoch", epoch)
             .with_scope();
-        let verified_blocks =
-            Self::init_archive(&scope, &self.cfg, epoch, "verified", self.block_codec_config.clone())
-                .await;
-        let notarized_blocks =
-            Self::init_archive(&scope, &self.cfg, epoch, "notarized", self.block_codec_config.clone())
-                .await;
-        let notarizations = Self::init_archive(
-            &scope,
-            &self.cfg,
-            epoch,
-            "notarizations",
-            S::certificate_codec_config_unbounded(),
-        )
-        .await;
-        let finalizations = Self::init_archive(
-            &scope,
-            &self.cfg,
-            epoch,
-            "finalizations",
-            S::certificate_codec_config_unbounded(),
-        )
-        .await;
+        let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
+            Self::init_archive(&scope, &self.cfg, epoch, "verified", self.block_codec_config.clone()),
+            Self::init_archive(&scope, &self.cfg, epoch, "notarized", self.block_codec_config.clone()),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
+                epoch,
+                "notarizations",
+                S::certificate_codec_config_unbounded(),
+            ),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
+                epoch,
+                "finalizations",
+                S::certificate_codec_config_unbounded(),
+            ),
+        );
         let existing = self.caches.insert(
             epoch,
             Cache {

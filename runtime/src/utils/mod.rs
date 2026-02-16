@@ -454,10 +454,7 @@ impl Registry {
     }
 
     pub fn remove_scope(&mut self, id: u64) {
-        assert!(
-            self.scopes.remove(&id).is_some(),
-            "scope {id} not found (already deregistered?)"
-        );
+        self.scopes.remove(&id);
     }
 
     pub fn encode(&self) -> String {

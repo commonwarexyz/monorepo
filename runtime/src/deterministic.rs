@@ -1335,13 +1335,12 @@ impl crate::Metrics for Context {
         let weak = self.executor.clone();
         let scope_id = executor.store.lock().unwrap().create_scope();
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
-            if let Some(executor) = weak.upgrade() {
-                executor.store.lock().unwrap().remove_scope(id);
-                executor
+            if let Some(exec) = weak.upgrade() {
+                let _ = exec.store.lock().map(|mut s| s.remove_scope(id));
+                let _ = exec
                     .registered_metrics
                     .lock()
-                    .unwrap()
-                    .retain(|(_, _, scope)| *scope != Some(id));
+                    .map(|mut m| m.retain(|(_, _, scope)| *scope != Some(id)));
             }
         }));
         Self {
