@@ -1385,9 +1385,7 @@ mod test {
                 let update = updates_out.recv().await.unwrap();
                 let (epoch, output) = match update.update {
                     Update::Failure { epoch } => (epoch, None),
-                    Update::Success {
-                        epoch, output, ..
-                    } => (epoch, Some(output)),
+                    Update::Success { epoch, output, .. } => (epoch, Some(output)),
                 };
                 status.insert(update.pk, epoch);
                 if let Some(o) = outputs.get(epoch.get() as usize) {
@@ -1403,11 +1401,7 @@ mod test {
                 }
 
                 let post_update = if let Some(target_epoch) = success_target_reached_epoch {
-                    let all_reached = status
-                        .values()
-                        .filter(|e| **e >= target_epoch)
-                        .count()
-                        >= 4;
+                    let all_reached = status.values().filter(|e| **e >= target_epoch).count() >= 4;
                     if all_reached {
                         PostUpdate::Stop
                     } else {
