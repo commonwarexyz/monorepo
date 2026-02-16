@@ -3,8 +3,8 @@
 //!
 //! # Pruning
 //!
-//! A log based store maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These operations can be cleaned from storage by calling [PrunableStore::prune].
+//! Maintains a location before which all operations are inactive, called the _inactivity floor_.
+//! These operations can be cleaned from storage by calling [PrunableStore::prune].
 
 use crate::{mmr::Location, qmdb::Error};
 use commonware_codec::CodecShared;
@@ -56,10 +56,6 @@ pub trait LogStore: Send + Sync {
         async { self.bounds().await.end }
     }
 
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> impl Future<Output = Location> + Send;
-
     /// Get the metadata associated with the last commit.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send;
 }
@@ -68,6 +64,10 @@ pub trait LogStore: Send + Sync {
 pub trait PrunableStore: LogStore {
     /// Prune historical operations prior to `loc`.
     fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// The location before which all operations can be pruned without affecting the state of the
+    /// database.
+    fn inactivity_floor_loc(&self) -> impl Future<Output = Location> + Send;
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.

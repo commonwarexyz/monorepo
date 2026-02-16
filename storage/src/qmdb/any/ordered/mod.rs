@@ -1,3 +1,10 @@
+#[cfg(any(test, feature = "test-traits"))]
+use crate::journal::contiguous::Persistable as JournalPersistable;
+#[cfg(any(test, feature = "test-traits"))]
+use crate::qmdb::{
+    any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
+    Durable, Merkleized,
+};
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
@@ -9,14 +16,6 @@ use crate::{
         operation::Operation as OperationTrait,
         update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
     },
-};
-#[cfg(any(test, feature = "test-traits"))]
-use crate::{
-    qmdb::{
-        any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-        Durable, Merkleized,
-    },
-    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -48,7 +47,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -473,7 +472,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -555,7 +554,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -575,7 +574,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -602,7 +601,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -621,7 +620,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -653,7 +652,7 @@ mod test {
     use super::*;
     use crate::{
         kv::Gettable as _,
-        qmdb::store::{LogStore as _, MerkleizedStore},
+        qmdb::store::{LogStore as _, MerkleizedStore, PrunableStore},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::deterministic::Context;
@@ -663,22 +662,28 @@ mod test {
     /// Helper trait for testing Any databases with FixedBytes<4> keys.
     /// Used for edge case tests that require specific key patterns.
     pub(crate) trait FixedBytesDb:
-        CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = Digest, Digest = Digest>
+        CleanAny<Key = FixedBytes<4>>
+        + MerkleizedStore<Value = Digest, Digest = Digest>
+        + PrunableStore
     {
     }
     impl<T> FixedBytesDb for T where
-        T: CleanAny<Key = FixedBytes<4>> + MerkleizedStore<Value = Digest, Digest = Digest>
+        T: CleanAny<Key = FixedBytes<4>>
+            + MerkleizedStore<Value = Digest, Digest = Digest>
+            + PrunableStore
     {
     }
 
     /// Helper trait for testing Any databases with Digest keys.
     /// Used for generic tests that can be shared with partitioned variants.
     pub(crate) trait DigestDb:
-        CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>
+        CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest> + PrunableStore
     {
     }
     impl<T> DigestDb for T where
-        T: CleanAny<Key = Digest> + MerkleizedStore<Value = Digest, Digest = Digest>
+        T: CleanAny<Key = Digest>
+            + MerkleizedStore<Value = Digest, Digest = Digest>
+            + PrunableStore
     {
     }
 
@@ -733,11 +738,12 @@ mod test {
         let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
             let (durable_db, _) = mutable_db.commit(None).await.unwrap();
+            let merkleized_db = durable_db.into_merkleized().await.unwrap();
             assert_eq!(
-                durable_db.size().await - 1,
-                durable_db.inactivity_floor_loc().await
+                merkleized_db.size().await - 1,
+                merkleized_db.inactivity_floor_loc().await
             );
-            mutable_db = durable_db.into_mutable();
+            mutable_db = merkleized_db.into_mutable();
         }
         let db = mutable_db.commit(None).await.unwrap().0;
         db.into_merkleized().await.unwrap().destroy().await.unwrap();
@@ -785,7 +791,6 @@ mod test {
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
         assert_eq!(db.size().await, 9);
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
         let (durable_db, _) = db.commit(None).await.unwrap();
         let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
 
@@ -925,11 +930,12 @@ mod test {
         let mut mutable_db = db.into_mutable();
         for _ in 1..100 {
             let (durable_db, _) = mutable_db.commit(None).await.unwrap();
+            let merkleized_db = durable_db.into_merkleized().await.unwrap();
             assert_eq!(
-                durable_db.bounds().await.end - 1,
-                durable_db.inactivity_floor_loc().await
+                merkleized_db.bounds().await.end - 1,
+                merkleized_db.inactivity_floor_loc().await
             );
-            mutable_db = durable_db.into_mutable();
+            mutable_db = merkleized_db.into_mutable();
         }
         let db = mutable_db.commit(None).await.unwrap().0;
         db.into_merkleized().await.unwrap().destroy().await.unwrap();
@@ -978,7 +984,6 @@ mod test {
 
         // 2 new keys (4 ops), 2 updates (2 ops), 1 deletion (2 ops) + 1 initial commit = 9 ops
         assert_eq!(db.bounds().await.end, 9);
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
         let (durable_db, _) = db.commit(None).await.unwrap();
         let mut db = durable_db.into_merkleized().await.unwrap().into_mutable();
 

@@ -13,7 +13,7 @@ use crate::{
     qmdb::{
         any::VariableValue,
         operation::Committable,
-        store::{LogStore, MerkleizedStore, PrunableStore},
+        store::{LogStore, MerkleizedStore},
         DurabilityState, Durable, Error, MerkleizationState, Merkleized, NonDurable, Unmerkleized,
     },
 };
@@ -369,25 +369,8 @@ impl<
         Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
     }
 
-    async fn inactivity_floor_loc(&self) -> Location {
-        Location::new_unchecked(self.journal.reader().await.bounds().start)
-    }
-
     async fn get_metadata(&self) -> Result<Option<Self::Value>, Error> {
         self.get_metadata().await
-    }
-}
-
-// Implementation of PrunableStore for the Merkleized state (any durability).
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilityState> PrunableStore
-    for Keyless<E, V, H, Merkleized<H>, D>
-{
-    async fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        if loc > self.last_commit_loc {
-            return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
-        }
-        self.journal.prune(loc).await?;
-        Ok(())
     }
 }
 
@@ -1142,13 +1125,12 @@ mod test {
 
     use crate::{
         kv::tests::assert_send,
-        qmdb::store::tests::{assert_log_store, assert_merkleized_store, assert_prunable_store},
+        qmdb::store::tests::{assert_log_store, assert_merkleized_store},
     };
 
     #[allow(dead_code)]
     fn assert_clean_db_futures_are_send(db: &mut CleanDb, loc: Location) {
         assert_log_store(db);
-        assert_prunable_store(db, loc);
         assert_merkleized_store(db, loc);
         assert_send(db.sync());
         assert_send(db.get(loc));
