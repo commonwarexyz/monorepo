@@ -539,15 +539,7 @@ where
         // Number of grafted leaves (i.e. complete bitmap chunks) at last merkleization.
         let old_grafted_leaves = *grafted_mmr.leaves() as usize;
         // Number of grafted leaves (i.e. complete bitmap chunks) now.
-        let new_grafted_leaves = {
-            let len = status.len();
-            let total_chunks = len.div_ceil(BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-            if len.is_multiple_of(BitMap::<N>::CHUNK_SIZE_BITS) {
-                total_chunks
-            } else {
-                total_chunks - 1
-            }
-        };
+        let new_grafted_leaves = (status.len() / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
 
         // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
         // dirty_chunks is guaranteed to only contain indices < old_grafted_leaves, so no
