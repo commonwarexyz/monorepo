@@ -519,6 +519,7 @@ mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use crate::conformance::CodecConformance;
+        use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
         commonware_conformance::conformance_tests! {
             CodecConformance<u8>,
@@ -537,6 +538,9 @@ mod tests {
             CodecConformance<[u8; 32]>,
             CodecConformance<Option<u64>>,
             CodecConformance<()>,
+            CodecConformance<NonZeroU16>,
+            CodecConformance<NonZeroU32>,
+            CodecConformance<NonZeroU64>,
         }
     }
 }
