@@ -7,7 +7,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Persistable as JournalPersistable, Reader},
+        contiguous::{Contiguous, Mutable, Reader},
+        Error as JournalError,
     },
     mmr::{Location, Proof},
     qmdb::{
@@ -181,7 +182,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -240,12 +241,12 @@ where
 
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error> {
-        self.log.sync().await.map_err(Into::into)
+        self.log.sync().await.map_err(|e| e.into())
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Into::into)
+        self.log.destroy().await.map_err(|e| e.into())
     }
 
     /// Convert this database into a mutable state.
@@ -347,7 +348,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
@@ -493,19 +494,19 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         // No-op, DB already in recoverable state.
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         Self::sync(self).await
     }
 

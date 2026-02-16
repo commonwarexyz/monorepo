@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Mutable, Persistable, Reader},
+        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     mmr::{
@@ -15,6 +15,7 @@ use crate::{
         mem::{Clean, Dirty, State},
         Error as MmrError, Location, Position, Proof, StandardHasher,
     },
+    Persistable,
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -71,14 +72,14 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
-        self.journal.commit().await.map_err(Error::Journal)
+        self.journal.commit().await.map_err(Into::into)
     }
 }
 
@@ -282,7 +283,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     /// Destroy the authenticated journal, removing all data from disk.
@@ -299,7 +300,7 @@ where
     pub async fn sync(&self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync().map_err(Into::into)
+            self.mmr.sync().map_err(Error::Mmr)
         )?;
 
         Ok(())
@@ -502,9 +503,11 @@ where
 impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
+    type Error = JournalError;
+
     async fn commit(&self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,

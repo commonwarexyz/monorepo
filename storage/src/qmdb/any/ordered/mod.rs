@@ -1,10 +1,3 @@
-#[cfg(any(test, feature = "test-traits"))]
-use crate::journal::contiguous::Persistable as JournalPersistable;
-#[cfg(any(test, feature = "test-traits"))]
-use crate::qmdb::{
-    any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-    Durable, Merkleized,
-};
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
@@ -16,6 +9,14 @@ use crate::{
         operation::Operation as OperationTrait,
         update_known_loc, DurabilityState, Error, MerkleizationState, NonDurable, Unmerkleized,
     },
+};
+#[cfg(any(test, feature = "test-traits"))]
+use crate::{
+    qmdb::{
+        any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
+        Durable, Merkleized,
+    },
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -36,6 +37,15 @@ pub mod fixed;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
+
+#[cfg(any(test, feature = "test-traits"))]
+trait PersistableMutableLog<O>: Mutable<Item = O> + Persistable<Error = crate::journal::Error> {}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<T, O> PersistableMutableLog<O> for T where
+    T: Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
 
 /// Type alias for a location and its associated key data.
 type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
@@ -554,7 +564,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -574,7 +584,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -601,7 +611,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -620,7 +630,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,

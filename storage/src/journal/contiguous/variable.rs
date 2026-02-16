@@ -4,10 +4,13 @@
 //! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::Reader as _;
-use crate::journal::{
-    contiguous::{fixed, Contiguous, Mutable, Persistable},
-    segmented::variable,
-    Error,
+use crate::{
+    journal::{
+        contiguous::{fixed, Contiguous, Mutable},
+        segmented::variable,
+        Error,
+    },
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::{
@@ -914,6 +917,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
+    type Error = Error;
+
     async fn commit(&self) -> Result<(), Error> {
         self.commit().await
     }

@@ -102,7 +102,7 @@ pub mod tests {
             let db = db.into_mutable();
             assert!(db.get(&k1).await.unwrap().is_none());
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             // Commit adds a commit even for no-op, so op_count increases and root changes.
             assert_eq!(db.bounds().await.end, Location::new_unchecked(7));

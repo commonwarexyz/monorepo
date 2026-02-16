@@ -62,6 +62,7 @@ use crate::{
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
+    Persistable,
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{
@@ -853,7 +854,9 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Persistable for Journal<E, A> {
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
+    type Error = Error;
+
     async fn commit(&self) -> Result<(), Error> {
         self.sync().await
     }

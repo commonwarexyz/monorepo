@@ -242,7 +242,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 OrdinalOperation::ReopenAfterOperations => {
-                    if let Some(mut o) = store.take() {
+                    if let Some(o) = store.take() {
                         // Sync and drop the current ordinal
                         o.sync().await.expect("failed to sync store before reopen failed");
                         drop(o);

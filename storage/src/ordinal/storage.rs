@@ -14,6 +14,7 @@ use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
+    sync::Mutex,
 };
 use tracing::{debug, warn};
 
@@ -81,7 +82,7 @@ pub struct Ordinal<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cf
     intervals: RMap,
 
     // Pending index entries to be synced, grouped by section
-    pending: BTreeSet<u64>,
+    pending: Mutex<BTreeSet<u64>>,
 
     // Metrics
     puts: Counter,
@@ -240,7 +241,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             config,
             blobs,
             intervals,
-            pending: BTreeSet::new(),
+            pending: Mutex::new(BTreeSet::new()),
             puts,
             gets,
             has,
@@ -276,7 +277,10 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(offset, record.encode_mut()).await?;
-        self.pending.insert(section);
+        self.pending
+            .lock()
+            .expect("pending sections lock poisoned")
+            .insert(section);
 
         // Add to intervals
         self.intervals.insert(index);
@@ -379,24 +383,33 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
+        self.pending
+            .lock()
+            .expect("pending sections lock poisoned")
+            .retain(|&section| section >= min_section);
 
         Ok(())
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Sync all modified blobs
-        let mut futures = Vec::with_capacity(self.pending.len());
-        for &section in &self.pending {
-            futures.push(self.blobs.get(&section).unwrap().sync());
+        // Take all pending sections then release the lock to avoid blocking reads.
+        let sections: BTreeSet<u64> = {
+            let mut pending = self.pending.lock().expect("pending sections lock poisoned");
+            std::mem::take(&mut *pending)
+        };
+        if sections.is_empty() {
+            return Ok(());
+        }
+
+        // Sync all modified blobs without holding the lock.
+        let mut futures = Vec::with_capacity(sections.len());
+        for section in &sections {
+            futures.push(self.blobs.get(section).unwrap().sync());
         }
         try_join_all(futures).await?;
-
-        // Clear pending sections
-        self.pending.clear();
 
         Ok(())
     }
@@ -446,11 +459,11 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> Persistab
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Self::Error> {
+    async fn commit(&self) -> Result<(), Self::Error> {
         self.sync().await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(&self) -> Result<(), Self::Error> {
         self.sync().await
     }
 

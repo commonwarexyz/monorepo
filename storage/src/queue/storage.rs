@@ -347,12 +347,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         self.journal.commit().await?;
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.journal.sync().await?;
         self.journal.prune(self.ack_floor).await?;
         Ok(())

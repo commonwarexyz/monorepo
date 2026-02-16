@@ -344,7 +344,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -481,12 +481,12 @@ where
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         // No-op, DB already in recoverable state.
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.sync().await
     }
 
@@ -803,7 +803,7 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -852,7 +852,7 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -1056,7 +1056,7 @@ mod test {
             assert_eq!(db.bounds().await.end, op_count);
 
             // Sync and reopen the store to ensure the final commit is preserved.
-            let mut db = db;
+            let db = db;
             db.sync().await.unwrap();
             drop(db);
             let mut db = create_test_store(context.with_label("store_4"))
