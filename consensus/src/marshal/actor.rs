@@ -811,6 +811,10 @@ where
     // -------------------- Application Dispatch --------------------
 
     /// Attempt to dispatch the next finalized block to the application if ready.
+    ///
+    /// If there are dirty (unsynced) finalization archives, they are flushed after
+    /// reporting the block but before the acknowledgement can be processed. This
+    /// allows the application to begin work on the block while the sync happens.
     async fn try_dispatch_block(
         &mut self,
         application: &mut impl Reporter<Activity = Update<B, A>>,
@@ -834,19 +838,7 @@ where
         application.report(Update::Block(block, ack)).await;
 
         if self.finalization_archives_dirty {
-            if let Err(e) = try_join!(
-                async {
-                    self.finalized_blocks.sync().await.map_err(Box::new)?;
-                    Ok::<_, BoxedError>(())
-                },
-                async {
-                    self.finalizations_by_height.sync().await.map_err(Box::new)?;
-                    Ok::<_, BoxedError>(())
-                },
-            ) {
-                panic!("failed to sync finalization archives: {e}");
-            }
-            self.finalization_archives_dirty = false;
+            self.sync_finalization_archives().await;
         }
 
         self.pending_ack.replace(PendingAck {
@@ -956,8 +948,9 @@ where
     /// Add a finalized block, and optionally a finalization, to the archive, and
     /// attempt to identify + repair any gaps in the archive.
     ///
-    /// When `sync` is true, the archives are durably synced before dispatching. When
-    /// false, writes are buffered and synced lazily in [try_dispatch_block].
+    /// When `sync` is true, the archives are durably synced immediately after the
+    /// write. When false, writes are buffered and synced lazily in
+    /// [Self::try_dispatch_block].
     #[allow(clippy::too_many_arguments)]
     async fn finalize(
         &mut self,
@@ -976,11 +969,12 @@ where
         self.try_repair_gaps(buffer, resolver, application).await;
     }
 
-    /// Add a finalized block, and optionally a finalization, to the archive.
+    /// Add a finalized block, and optionally a finalization, to the archive,
+    /// then attempt to dispatch the next contiguous block to the application.
     ///
-    /// After persisting the block, attempt to dispatch the next contiguous block to the
-    /// application. When `sync` is true, the archives are durably synced immediately
-    /// after the write.
+    /// When `sync` is true, the archives are durably synced immediately after
+    /// the write. When false, writes are buffered and synced lazily in
+    /// [Self::try_dispatch_block].
     async fn store_finalization(
         &mut self,
         height: Height,
