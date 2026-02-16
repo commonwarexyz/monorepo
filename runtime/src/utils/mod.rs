@@ -338,7 +338,9 @@ struct MetricFamily {
     data: Vec<String>,
 }
 
-/// Each OpenMetrics suffix is only valid for specific metric types.
+/// OpenMetrics data lines use type-specific suffixes that differ from the
+/// base name in HELP/TYPE headers (e.g., a counter named `foo` emits data
+/// as `foo_total`). Each suffix is only valid for specific metric types.
 ///
 /// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#suffixes>
 const TYPED_SUFFIXES: &[(&str, &[&str])] = &[
@@ -355,6 +357,28 @@ const TYPED_SUFFIXES: &[(&str, &[&str])] = &[
 /// Extract the metric name from a sample line: `sample = metricname [labels] SP number ...`
 ///
 /// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#abnf>
+fn family_accepts_sample(
+    families: &BTreeMap<String, MetricFamily>,
+    family_name: &str,
+    sample_name: &str,
+) -> bool {
+    if sample_name == family_name {
+        return true;
+    }
+    let Some(metric_type) = families
+        .get(family_name)
+        .and_then(|family| family.metric_type.as_deref())
+    else {
+        return false;
+    };
+    let Some(suffix) = sample_name.strip_prefix(family_name) else {
+        return false;
+    };
+    TYPED_SUFFIXES.iter().any(|(known_suffix, valid_types)| {
+        suffix == *known_suffix && valid_types.contains(&metric_type)
+    })
+}
+
 fn extract_metric_name(line: &str) -> &str {
     let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
@@ -419,30 +443,6 @@ impl MetricEncoder {
         })
     }
 
-    /// Returns true if `sample_name` can belong to `family_name`.
-    ///
-    /// Data lines may use a type-specific suffix (for example `foo_total` for
-    /// a counter family `foo`), so we allow either exact match or a valid
-    /// OpenMetrics suffix for the family's declared type.
-    fn family_accepts_sample(&self, family_name: &str, sample_name: &str) -> bool {
-        if sample_name == family_name {
-            return true;
-        }
-        let Some(metric_type) = self
-            .families
-            .get(family_name)
-            .and_then(|family| family.metric_type.as_deref())
-        else {
-            return false;
-        };
-        let Some(suffix) = sample_name.strip_prefix(family_name) else {
-            return false;
-        };
-        TYPED_SUFFIXES.iter().any(|(known_suffix, valid_types)| {
-            suffix == *known_suffix && valid_types.contains(&metric_type)
-        })
-    }
-
     fn flush_line(&mut self) {
         let line = std::mem::take(&mut self.line_buffer);
         if line == "# EOF" {
@@ -475,21 +475,18 @@ impl MetricEncoder {
             self.active_family = Some(name);
         } else {
             let name = extract_metric_name(&line);
-            let active = self
-                .active_family
-                .as_deref()
-                .filter(|family_name| self.family_accepts_sample(family_name, name))
-                .map(str::to_string);
-            if let Some(family_name) = active {
-                self.families
-                    .entry(family_name)
-                    .or_default()
-                    .data
-                    .push(line);
-            } else {
-                let family = self.resolve_data_family(name);
-                family.data.push(line);
+            if let Some(family_name) = &self.active_family {
+                if family_accepts_sample(&self.families, family_name, name) {
+                    self.families
+                        .get_mut(family_name.as_str())
+                        .unwrap()
+                        .data
+                        .push(line);
+                    return;
+                }
             }
+            let family = self.resolve_data_family(name);
+            family.data.push(line);
         }
     }
 }
