@@ -664,7 +664,7 @@ impl crate::Metrics for Context {
     }
 
     fn with_scope(&self) -> Self {
-        // Already scoped -- inherit the existing scope
+        // If already scoped, inherit the existing scope
         if self.scope.is_some() {
             return self.clone();
         }

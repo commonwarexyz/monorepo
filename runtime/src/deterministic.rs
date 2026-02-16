@@ -1326,7 +1326,7 @@ impl crate::Metrics for Context {
         let executor = self.executor();
         executor.auditor.event(b"with_scope", |_| {});
 
-        // Already scoped -- inherit the existing scope
+        // If already scoped, inherit the existing scope
         if self.scope.is_some() {
             return self.clone();
         }
