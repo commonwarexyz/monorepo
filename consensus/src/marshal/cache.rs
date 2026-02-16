@@ -16,7 +16,7 @@ use std::{
     cmp::max,
     collections::BTreeMap,
     num::{NonZero, NonZeroUsize},
-    time::Instant,
+    time::Duration,
 };
 use tracing::{debug, info};
 
@@ -215,7 +215,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         name: &str,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
-        let start = Instant::now();
+        let start = ctx.current();
         let archive_cfg = prunable::Config {
             translator: TwoCap,
             key_partition: format!("{}-cache-{epoch}-{name}-key", cfg.partition_prefix),
@@ -231,7 +231,8 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
             .await
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
-        info!(elapsed = ?start.elapsed(), "restored {name} archive");
+        let elapsed = ctx.current().duration_since(start).unwrap_or(Duration::ZERO);
+        info!(?elapsed, "restored {name} archive");
         archive
     }
 
