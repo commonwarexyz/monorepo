@@ -664,9 +664,14 @@ impl crate::Metrics for Context {
     }
 
     fn with_scope(&self) -> Self {
+        // Already scoped -- inherit the existing scope
         if self.scope.is_some() {
             return self.clone();
         }
+
+        // The closure moves the Arc<Executor> so the scoped registry
+        // can be cleaned up even after the Context is dropped.
+        // All operations are infallible to avoid panicking in Drop.
         let executor = self.executor.clone();
         let scope_id = executor.store.lock().unwrap().create_scope();
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {

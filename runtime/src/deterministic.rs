@@ -1327,13 +1327,22 @@ impl crate::Metrics for Context {
     }
 
     fn with_scope(&self) -> Self {
+        let executor = self.executor();
+        executor.auditor.event(b"with_scope", |_| {});
+
+        // Already scoped -- inherit the existing scope
         if self.scope.is_some() {
             return self.clone();
         }
-        let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
+
+        // Capture a Weak so the cleanup closure doesn't prevent
+        // the executor from being dropped.
         let weak = self.executor.clone();
         let scope_id = executor.store.lock().unwrap().create_scope();
+
+        // When the last Arc<ScopeHandle> is dropped, remove the
+        // scoped registry and its duplicate-detection entries.
+        // All operations are infallible to avoid panicking in Drop.
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
                 let _ = exec.store.lock().map(|mut s| s.remove_scope(id));
