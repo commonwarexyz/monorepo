@@ -395,11 +395,13 @@ impl MetricEncoder {
                 })
                 .unwrap_or(name)
         };
-        self.families.entry(key.to_string()).or_insert(MetricFamily {
-            help: None,
-            type_line: None,
-            data: Vec::new(),
-        })
+        self.families
+            .entry(key.to_string())
+            .or_insert(MetricFamily {
+                help: None,
+                type_line: None,
+                data: Vec::new(),
+            })
     }
 
     fn flush_line(&mut self) {
@@ -409,21 +411,27 @@ impl MetricEncoder {
         }
         if let Some(rest) = line.strip_prefix("# HELP ") {
             let name = rest.split_whitespace().next().unwrap_or("");
-            let family = self.families.entry(name.to_string()).or_insert(MetricFamily {
-                help: None,
-                type_line: None,
-                data: Vec::new(),
-            });
+            let family = self
+                .families
+                .entry(name.to_string())
+                .or_insert(MetricFamily {
+                    help: None,
+                    type_line: None,
+                    data: Vec::new(),
+                });
             if family.help.is_none() {
                 family.help = Some(line);
             }
         } else if let Some(rest) = line.strip_prefix("# TYPE ") {
             let name = rest.split_whitespace().next().unwrap_or("");
-            let family = self.families.entry(name.to_string()).or_insert(MetricFamily {
-                help: None,
-                type_line: None,
-                data: Vec::new(),
-            });
+            let family = self
+                .families
+                .entry(name.to_string())
+                .or_insert(MetricFamily {
+                    help: None,
+                    type_line: None,
+                    data: Vec::new(),
+                });
             if family.type_line.is_none() {
                 family.type_line = Some(line);
             }
