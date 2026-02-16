@@ -3033,34 +3033,24 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_reregister_after_scope_drop() {
+    #[should_panic(expected = "duplicate metric")]
+    fn test_deterministic_reregister_after_scope_drop_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Register in scope, drop it, then re-register with same name/attributes
             let scoped = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
                 .with_scope();
             let c1 = Counter::<u64>::default();
             scoped.register("votes", "vote count", c1.clone());
-            c1.inc();
             drop(scoped);
 
-            // Re-register with same name and attributes in a new scope
             let scoped2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
                 .with_scope();
             let c2 = Counter::<u64>::default();
             scoped2.register("votes", "vote count", c2.clone());
-            c2.inc();
-            c2.inc();
-
-            let buffer = context.encode();
-            assert!(
-                buffer.contains("engine_votes_total{epoch=\"1\"} 2"),
-                "re-registered metric should work: {buffer}"
-            );
         });
     }
 

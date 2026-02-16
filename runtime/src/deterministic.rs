@@ -342,8 +342,8 @@ impl Default for Config {
     }
 }
 
-/// Key for detecting duplicate metric registrations: (metric_name, attributes, scope_id).
-type MetricKey = (String, Vec<(String, String)>, Option<u64>);
+/// Key for detecting duplicate metric registrations: (metric_name, attributes).
+type MetricKey = (String, Vec<(String, String)>);
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
@@ -1295,7 +1295,7 @@ impl crate::Metrics for Context {
 
         // Check for duplicate registration (O(1) lookup)
         let scope_id = self.scope.as_ref().map(|s| s.scope_id());
-        let metric_key = (prefixed_name.clone(), self.attributes.clone(), scope_id);
+        let metric_key = (prefixed_name.clone(), self.attributes.clone());
         let is_new = executor
             .registered_metrics
             .lock()
@@ -1341,15 +1341,11 @@ impl crate::Metrics for Context {
         let scope_id = executor.registry.lock().unwrap().create_scope();
 
         // When the last Arc<ScopeHandle> is dropped, remove the
-        // scoped registry and its duplicate-detection entries.
-        // All operations are infallible to avoid panicking in Drop.
+        // scoped registry. All operations are infallible to avoid
+        // panicking in Drop.
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
                 let _ = exec.registry.lock().map(|mut s| s.remove_scope(id));
-                let _ = exec
-                    .registered_metrics
-                    .lock()
-                    .map(|mut m| m.retain(|(_, _, scope)| *scope != Some(id)));
             }
         }));
         Self {
