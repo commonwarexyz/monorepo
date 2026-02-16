@@ -387,7 +387,6 @@ impl std::fmt::Write for MetricEncoder {
 /// holding this handle is dropped, the scope's metrics are automatically removed.
 pub(crate) struct ScopeGuard {
     scope_id: u64,
-    #[allow(clippy::type_complexity)]
     cleanup: Option<Box<dyn FnOnce(u64) + Send + Sync>>,
 }
 
