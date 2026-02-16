@@ -351,9 +351,12 @@ where
         self.try_dispatch_block(&mut application).await;
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-            .await;
-        self.sync_finalization_archives().await;
+        if self
+            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+            .await
+        {
+            self.sync_finalization_archives().await;
+        }
 
         select_loop! {
             self.context,
@@ -472,8 +475,9 @@ where
                                 &mut application,
                             )
                             .await;
-                            self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-                                .await;
+                            let _ =
+                                self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                                    .await;
                             self.sync_finalization_archives().await;
                             debug!(?round, %height, "finalized block stored");
                         } else {
@@ -641,7 +645,8 @@ where
                     &mut application,
                 ).await;
                 if needs_sync {
-                    self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                    let _ = self
+                        .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                         .await;
                     self.sync_finalization_archives().await;
                 }
@@ -802,12 +807,32 @@ where
 
         let mut wrote = false;
 
-        let verified = if let Some(scheme) = self.provider.all() {
-            bisect_verified(pending.len(), |start, end| {
-                self.verify_pending_batch(&scheme, &pending[start..end])
-            })
-        } else {
-            vec![false; pending.len()]
+        let verified = {
+            let pending_certs = pending
+                .iter()
+                .map(|item| match item {
+                    PendingVerification::Finalized { finalization, .. } => (
+                        Subject::Finalize {
+                            proposal: &finalization.proposal,
+                        },
+                        &finalization.certificate,
+                    ),
+                    PendingVerification::Notarized { notarization, .. } => (
+                        Subject::Notarize {
+                            proposal: &notarization.proposal,
+                        },
+                        &notarization.certificate,
+                    ),
+                })
+                .collect::<Vec<_>>();
+
+            if let Some(scheme) = self.provider.all() {
+                bisect_verified(pending_certs.len(), |start, end| {
+                    self.verify_pending_batch(&scheme, &pending_certs[start..end])
+                })
+            } else {
+                vec![false; pending_certs.len()]
+            }
         };
 
         for (index, item) in pending.drain(..).enumerate() {
@@ -827,28 +852,14 @@ where
     }
 
     /// Verify a batch of pending finalization/notarization certificates.
-    fn verify_pending_batch(
+    fn verify_pending_batch<'a>(
         &mut self,
         scheme: &P::Scheme,
-        batch: &[PendingVerification<P::Scheme, B>],
+        batch: &[(Subject<'a, B::Commitment>, &'a <P::Scheme as CertificateScheme>::Certificate)],
     ) -> bool {
-        let certs = batch.iter().map(|item| match item {
-            PendingVerification::Finalized { finalization, .. } => (
-                Subject::Finalize {
-                    proposal: &finalization.proposal,
-                },
-                &finalization.certificate,
-            ),
-            PendingVerification::Notarized { notarization, .. } => (
-                Subject::Notarize {
-                    proposal: &notarization.proposal,
-                },
-                &notarization.certificate,
-            ),
-        });
         scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
             &mut self.context,
-            certs,
+            batch.iter().copied(),
             &self.strategy,
         )
     }
@@ -1189,19 +1200,20 @@ where
     /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
     /// though multiple gaps may be spanned.
     ///
-    /// Writes are buffered. The caller must call
-    /// [`sync_finalization_archives`](Self::sync_finalization_archives) afterward.
+    /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
+    /// needs a subsequent [`sync_finalization_archives`](Self::sync_finalization_archives).
     async fn try_repair_gaps<K: PublicKey>(
         &mut self,
         buffer: &mut buffered::Mailbox<K, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-    ) {
+    ) -> bool {
+        let mut wrote = false;
         let start = self.last_processed_height.next();
         'cache_repair: loop {
             let (gap_start, Some(gap_end)) = self.finalized_blocks.next_gap(start) else {
                 // No gaps detected
-                return;
+                return wrote;
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
@@ -1228,6 +1240,7 @@ where
                         application,
                     )
                     .await;
+                    wrote = true;
                     debug!(height = %block.height(), "repaired block");
                     cursor = block;
                 } else {
@@ -1253,6 +1266,7 @@ where
         if !requests.is_empty() {
             resolver.fetch_all(requests).await
         }
+        wrote
     }
 
     /// Sets the processed height in storage, metrics, and in-memory state. Also cancels any
