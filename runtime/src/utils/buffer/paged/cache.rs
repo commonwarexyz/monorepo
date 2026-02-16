@@ -2,7 +2,8 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, RwLock};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use commonware_utils::sync::AsyncRwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -93,7 +94,7 @@ pub struct CacheRef {
     next_id: Arc<AtomicU64>,
 
     /// Shareable reference to the page cache.
-    cache: Arc<RwLock<Cache>>,
+    cache: Arc<AsyncRwLock<Cache>>,
 
     /// Pool used for page-cache and associated buffer allocations.
     pool: BufferPool,
@@ -110,7 +111,11 @@ impl CacheRef {
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
+            cache: Arc::new(AsyncRwLock::new(Cache::new(
+                pool.clone(),
+                page_size,
+                capacity,
+            ))),
             pool,
         }
     }

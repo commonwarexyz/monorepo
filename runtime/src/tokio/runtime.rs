@@ -24,6 +24,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
+use commonware_utils::sync::Mutex;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -41,7 +42,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime},
 };
@@ -560,7 +561,7 @@ impl crate::Spawner for Context {
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            let mut shutdown = self.executor.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -579,7 +580,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.shutdown.lock().unwrap().stopped()
+        self.executor.shutdown.lock().stopped()
     }
 }
 
@@ -637,7 +638,7 @@ impl crate::Metrics for Context {
         };
 
         // Apply attributes to the registry (in sorted order)
-        let mut registry = self.executor.registry.lock().unwrap();
+        let mut registry = self.executor.registry.lock();
         let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
         });
@@ -646,7 +647,7 @@ impl crate::Metrics for Context {
 
     fn encode(&self) -> String {
         let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &self.executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(&mut encoder, &self.executor.registry.lock()).expect("encoding failed");
         encoder.into_string()
     }
 

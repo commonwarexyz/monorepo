@@ -32,10 +32,11 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut, RwLock, RwLockWriteGuard,
+    Blob, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
+use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -67,7 +68,7 @@ struct BlobState<B: Blob> {
 #[derive(Clone)]
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
-    blob_state: Arc<RwLock<BlobState<B>>>,
+    blob_state: Arc<AsyncRwLock<BlobState<B>>>,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -77,7 +78,7 @@ pub struct Append<B: Blob> {
 
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
-    buffer: Arc<RwLock<Buffer>>,
+    buffer: Arc<AsyncRwLock<Buffer>>,
 }
 
 /// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
@@ -151,10 +152,10 @@ impl<B: Blob> Append<B> {
         }
 
         Ok(Self {
-            blob_state: Arc::new(RwLock::new(blob_state)),
+            blob_state: Arc::new(AsyncRwLock::new(blob_state)),
             id: cache_ref.next_id().await,
             cache_ref,
-            buffer: Arc::new(RwLock::new(buffer)),
+            buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
     }
 
@@ -209,10 +210,10 @@ impl<B: Blob> Append<B> {
         buffer.immutable = true;
 
         Ok(Self {
-            blob_state: Arc::new(RwLock::new(blob_state)),
+            blob_state: Arc::new(AsyncRwLock::new(blob_state)),
             id: cache_ref.next_id().await,
             cache_ref,
-            buffer: Arc::new(RwLock::new(buffer)),
+            buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
     }
 
@@ -356,7 +357,7 @@ impl<B: Blob> Append<B> {
     /// to the blob as well along with a CRC record.
     async fn flush_internal(
         &self,
-        mut buf_guard: RwLockWriteGuard<'_, Buffer>,
+        mut buf_guard: AsyncRwLockWriteGuard<'_, Buffer>,
         write_partial_page: bool,
     ) -> Result<(), Error> {
         let buffer = &mut *buf_guard;

@@ -805,6 +805,7 @@ mod tests {
     use commonware_macros::{select, test_collect_traces};
     use commonware_utils::{
         channel::{mpsc, oneshot},
+        sync::Mutex,
         NZUsize,
     };
     use futures::{
@@ -823,7 +824,7 @@ mod tests {
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
-            Arc, Mutex,
+            Arc,
         },
         task::{Context as TContext, Poll, Waker},
     };
@@ -1041,24 +1042,24 @@ mod tests {
             let output = Mutex::new(0);
             select! {
                 v1 = ready(1) => {
-                    *output.lock().unwrap() = v1;
+                    *output.lock() = v1;
                 },
                 v2 = ready(2) => {
-                    *output.lock().unwrap() = v2;
+                    *output.lock() = v2;
                 },
             };
-            assert_eq!(*output.lock().unwrap(), 1);
+            assert_eq!(*output.lock(), 1);
 
             // Test second branch
             select! {
                 v1 = std::future::pending::<i32>() => {
-                    *output.lock().unwrap() = v1;
+                    *output.lock() = v1;
                 },
                 v2 = ready(2) => {
-                    *output.lock().unwrap() = v2;
+                    *output.lock() = v2;
                 },
             };
-            assert_eq!(*output.lock().unwrap(), 2);
+            assert_eq!(*output.lock(), 2);
         });
     }
 
@@ -1669,7 +1670,7 @@ mod tests {
                 let handle = context.spawn(|_| async {});
 
                 // Store child handle so we can test it later
-                *child_handle2.lock().unwrap() = Some(handle);
+                *child_handle2.lock() = Some(handle);
 
                 parent_initialized_tx.send(()).unwrap();
 
@@ -1681,7 +1682,7 @@ mod tests {
             parent_initialized_rx.await.unwrap();
 
             // Child task completes successfully
-            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            let child_handle = child_handle.lock().take().unwrap();
             assert!(child_handle.await.is_ok());
 
             // Complete the parent task
@@ -1706,7 +1707,7 @@ mod tests {
                 let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
-                *child_handle2.lock().unwrap() = Some(handle);
+                *child_handle2.lock() = Some(handle);
 
                 parent_initialized_tx.send(()).unwrap();
 
@@ -1722,7 +1723,7 @@ mod tests {
             assert!(matches!(parent_handle.await, Err(Error::Closed)));
 
             // Child task should also resolve with error since its parent aborted
-            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            let child_handle = child_handle.lock().take().unwrap();
             assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
@@ -1741,7 +1742,7 @@ mod tests {
                 let handle = context.spawn(|_| pending::<()>());
 
                 // Store child task handle so we can test it later
-                *child_handle2.lock().unwrap() = Some(handle);
+                *child_handle2.lock() = Some(handle);
 
                 // Parent task completes
                 parent_complete_rx.await.unwrap();
@@ -1754,7 +1755,7 @@ mod tests {
             assert!(parent_handle.await.is_ok());
 
             // Child task should resolve with error since its parent has completed
-            let child_handle = child_handle.lock().unwrap().take().unwrap();
+            let child_handle = child_handle.lock().take().unwrap();
             assert!(matches!(child_handle.await, Err(Error::Closed)));
         });
     }
@@ -1799,14 +1800,14 @@ mod tests {
                                     let handle = grandchild.spawn(|_| async {
                                         pending::<()>().await;
                                     });
-                                    handles.lock().unwrap().push(handle);
+                                    handles.lock().push(handle);
                                     initialized_tx.send(()).await.unwrap();
                                 }
 
                                 pending::<()>().await;
                             }
                         });
-                        handles.lock().unwrap().push(handle);
+                        handles.lock().push(handle);
                         initialized_tx.send(()).await.unwrap();
                     }
 
@@ -1820,14 +1821,14 @@ mod tests {
             }
 
             // Verify we have all 9 handles (3 children + 6 grandchildren)
-            assert_eq!(handles.lock().unwrap().len(), 9);
+            assert_eq!(handles.lock().len(), 9);
 
             // Abort root task
             root_task.abort();
             assert!(matches!(root_task.await, Err(Error::Closed)));
 
             // All handles should resolve with error due to cascading abort
-            let handles = handles.lock().unwrap().drain(..).collect::<Vec<_>>();
+            let handles = handles.lock().drain(..).collect::<Vec<_>>();
             for handle in handles {
                 assert!(matches!(handle.await, Err(Error::Closed)));
             }

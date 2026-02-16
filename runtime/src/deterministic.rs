@@ -67,7 +67,12 @@ use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
 use commonware_macros::select;
 use commonware_parallel::ThreadPool;
-use commonware_utils::{hex, time::SYSTEM_TIME_PRECISION, SystemTimeExt};
+use commonware_utils::{
+    hex,
+    sync::{Mutex, RwLock},
+    time::SYSTEM_TIME_PRECISION,
+    SystemTimeExt,
+};
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
@@ -95,7 +100,7 @@ use std::{
     num::NonZeroUsize,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, RwLock, Weak},
+    sync::{Arc, Weak},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -174,7 +179,7 @@ impl Auditor {
     where
         F: FnOnce(&mut Sha256),
     {
-        let mut digest = self.digest.lock().unwrap();
+        let mut digest = self.digest.lock();
 
         let mut hasher = Sha256::new();
         hasher.update(digest.as_ref());
@@ -189,7 +194,7 @@ impl Auditor {
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
     pub fn state(&self) -> String {
-        let hash = self.digest.lock().unwrap();
+        let hash = self.digest.lock();
         hex(hash.as_ref())
     }
 }
@@ -372,7 +377,7 @@ impl Executor {
         #[cfg(feature = "external")]
         std::thread::sleep(self.cycle);
 
-        let mut time = self.time.lock().unwrap();
+        let mut time = self.time.lock();
         *time = time
             .checked_add(self.cycle)
             .expect("executor time overflowed");
@@ -392,7 +397,7 @@ impl Executor {
 
         let mut skip_until = None;
         {
-            let sleeping = self.sleeping.lock().unwrap();
+            let sleeping = self.sleeping.lock();
             if let Some(next) = sleeping.peek() {
                 if next.time > current {
                     skip_until = Some(next.time);
@@ -401,7 +406,7 @@ impl Executor {
         }
 
         skip_until.map_or(current, |deadline| {
-            let mut time = self.time.lock().unwrap();
+            let mut time = self.time.lock();
             *time = deadline;
             let now = *time;
             trace!(now = now.epoch_millis(), "time skipped");
@@ -411,7 +416,7 @@ impl Executor {
 
     /// Wake any sleepers whose deadlines have elapsed.
     fn wake_ready_sleepers(&self, current: SystemTime) {
-        let mut sleeping = self.sleeping.lock().unwrap();
+        let mut sleeping = self.sleeping.lock();
         while let Some(next) = sleeping.peek() {
             if next.time <= current {
                 let sleeper = sleeping.pop().unwrap();
@@ -535,7 +540,7 @@ impl Runner {
         let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {
-                let current = executor.time.lock().unwrap();
+                let current = executor.time.lock();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
                         // Drop the lock before panicking to avoid mutex poisoning.
@@ -550,7 +555,7 @@ impl Runner {
 
             // Shuffle tasks (if more than one)
             if queue.len() > 1 {
-                let mut rng = executor.rng.lock().unwrap();
+                let mut rng = executor.rng.lock();
                 queue.shuffle(&mut *rng);
             }
 
@@ -599,7 +604,7 @@ impl Runner {
                     }
                     Mode::Work(future) => {
                         // Get the future (if it still exists)
-                        let mut fut_opt = future.lock().unwrap();
+                        let mut fut_opt = future.lock();
                         let Some(fut) = fut_opt.as_mut() else {
                             trace!(id, "skipping already complete task");
 
@@ -647,13 +652,13 @@ impl Runner {
         // reference to executor until after we have dropped
         // all tasks (as they may attempt to upgrade their weak
         // reference to the executor during drop).
-        executor.sleeping.lock().unwrap().clear(); // included in tasks
+        executor.sleeping.lock().clear(); // included in tasks
         let tasks = executor.tasks.clear();
         for task in tasks {
             let Mode::Work(future) = &task.mode else {
                 continue;
             };
-            *future.lock().unwrap() = None;
+            *future.lock() = None;
         }
 
         // Drop the root task to release any Context references it may still hold.
@@ -769,7 +774,7 @@ impl Tasks {
 
     /// Increment the task counter and return the old value.
     fn increment(&self) -> u128 {
-        let mut counter = self.counter.lock().unwrap();
+        let mut counter = self.counter.lock();
         let old = *counter;
         *counter = counter.checked_add(1).expect("task counter overflow");
         old
@@ -806,7 +811,7 @@ impl Tasks {
     /// Register a new task to be executed.
     fn register(&self, id: u128, task: Arc<Task>) {
         // Track as running until completion
-        self.running.lock().unwrap().insert(id, task);
+        self.running.lock().insert(id, task);
 
         // Add to ready
         self.queue(id);
@@ -814,20 +819,20 @@ impl Tasks {
 
     /// Enqueue an already registered task to be executed.
     fn queue(&self, id: u128) {
-        let mut ready = self.ready.lock().unwrap();
+        let mut ready = self.ready.lock();
         ready.push(id);
     }
 
     /// Drain all ready tasks.
     fn drain(&self) -> Vec<u128> {
-        let mut queue = self.ready.lock().unwrap();
+        let mut queue = self.ready.lock();
         let len = queue.len();
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
     /// The number of ready tasks.
     fn ready(&self) -> usize {
-        self.ready.lock().unwrap().len()
+        self.ready.lock().len()
     }
 
     /// Lookup a task.
@@ -835,23 +840,23 @@ impl Tasks {
     /// We must return cloned here because we cannot hold the running lock while polling a task (will
     /// deadlock if [Self::register_work] is called).
     fn get(&self, id: u128) -> Option<Arc<Task>> {
-        let running = self.running.lock().unwrap();
+        let running = self.running.lock();
         running.get(&id).cloned()
     }
 
     /// Remove a task.
     fn remove(&self, id: u128) {
-        self.running.lock().unwrap().remove(&id);
+        self.running.lock().remove(&id);
     }
 
     /// Clear all tasks.
     fn clear(&self) -> Vec<Arc<Task>> {
         // Clear ready
-        self.ready.lock().unwrap().clear();
+        self.ready.lock().clear();
 
         // Clear running tasks
         let running: BTreeMap<u128, Arc<Task>> = {
-            let mut running = self.running.lock().unwrap();
+            let mut running = self.running.lock();
             take(&mut *running)
         };
         running.into_values().collect()
@@ -1092,7 +1097,7 @@ impl Context {
         });
 
         // Update the DNS mapping
-        let mut dns = executor.dns.lock().unwrap();
+        let mut dns = executor.dns.lock();
         match addrs {
             Some(addrs) => {
                 dns.insert(host, addrs);
@@ -1173,7 +1178,7 @@ impl crate::Spawner for Context {
             hasher.update(value.to_be_bytes());
         });
         let stop_resolved = {
-            let mut shutdown = executor.shutdown.lock().unwrap();
+            let mut shutdown = executor.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -1194,7 +1199,7 @@ impl crate::Spawner for Context {
     fn stopped(&self) -> Signal {
         let executor = self.executor();
         executor.auditor.event(b"stopped", |_| {});
-        let stopped = executor.shutdown.lock().unwrap().stopped();
+        let stopped = executor.shutdown.lock().stopped();
         stopped
     }
 }
@@ -1292,11 +1297,7 @@ impl crate::Metrics for Context {
 
         // Check for duplicate registration (O(1) lookup)
         let metric_key = (prefixed_name.clone(), self.attributes.clone());
-        let is_new = executor
-            .registered_metrics
-            .lock()
-            .unwrap()
-            .insert(metric_key);
+        let is_new = executor.registered_metrics.lock().insert(metric_key);
         assert!(
             is_new,
             "duplicate metric: {} with attributes {:?}",
@@ -1304,7 +1305,7 @@ impl crate::Metrics for Context {
         );
 
         // Apply attributes to the registry (in sorted order)
-        let mut registry = executor.registry.lock().unwrap();
+        let mut registry = executor.registry.lock();
         let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
             reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
         });
@@ -1315,7 +1316,7 @@ impl crate::Metrics for Context {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
         let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &executor.registry.lock().unwrap()).expect("encoding failed");
+        encode(&mut encoder, &executor.registry.lock()).expect("encoding failed");
         encoder.into_string()
     }
 }
@@ -1365,14 +1366,14 @@ impl Future for Sleeper {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let executor = self.executor();
         {
-            let current_time = *executor.time.lock().unwrap();
+            let current_time = *executor.time.lock();
             if current_time >= self.time {
                 return Poll::Ready(());
             }
         }
         if !self.registered {
             self.registered = true;
-            executor.sleeping.lock().unwrap().push(Alarm {
+            executor.sleeping.lock().push(Alarm {
                 time: self.time,
                 waker: cx.waker().clone(),
             });
@@ -1383,7 +1384,7 @@ impl Future for Sleeper {
 
 impl Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.executor().time.lock().unwrap()
+        *self.executor().time.lock()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -1443,13 +1444,13 @@ where
 
         // Only allow the task to progress once the sampled delay has elapsed.
         let executor = this.executor.upgrade().expect("executor already dropped");
-        let current_time = *executor.time.lock().unwrap();
+        let current_time = *executor.time.lock();
         if current_time < *this.target {
             // Register exactly once with the deterministic sleeper queue so the executor
             // wakes us once the clock reaches the scheduled target time.
             if !*this.registered {
                 *this.registered = true;
-                executor.sleeping.lock().unwrap().push(Alarm {
+                executor.sleeping.lock().push(Alarm {
                     time: *this.target,
                     waker: cx.waker().clone(),
                 });
@@ -1490,7 +1491,6 @@ impl Pacer for Context {
             .executor()
             .time
             .lock()
-            .unwrap()
             .checked_add(latency)
             .expect("overflow when setting wake time");
 
@@ -1534,7 +1534,7 @@ impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
         // Get the record
         let executor = self.executor();
-        let dns = executor.dns.lock().unwrap();
+        let dns = executor.dns.lock();
         let result = dns.get(host).cloned();
         drop(dns);
 
@@ -1553,7 +1553,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u32");
         });
-        let result = executor.rng.lock().unwrap().next_u32();
+        let result = executor.rng.lock().next_u32();
         result
     }
 
@@ -1562,7 +1562,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"next_u64");
         });
-        let result = executor.rng.lock().unwrap().next_u64();
+        let result = executor.rng.lock().next_u64();
         result
     }
 
@@ -1571,7 +1571,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"fill_bytes");
         });
-        executor.rng.lock().unwrap().fill_bytes(dest);
+        executor.rng.lock().fill_bytes(dest);
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
@@ -1579,7 +1579,7 @@ impl RngCore for Context {
         executor.auditor.event(b"rand", |hasher| {
             hasher.update(b"try_fill_bytes");
         });
-        let result = executor.rng.lock().unwrap().try_fill_bytes(dest);
+        let result = executor.rng.lock().try_fill_bytes(dest);
         result
     }
 }
@@ -2126,7 +2126,7 @@ mod tests {
         // Phase 2: Recover and disable faults explicitly
         deterministic::Runner::from(checkpoint).start(|ctx| async move {
             // Explicitly disable faults for recovery verification
-            *ctx.storage_fault_config().write().unwrap() = FaultConfig::default();
+            *ctx.storage_fault_config().write() = FaultConfig::default();
 
             // Data was not synced, so blob should be empty (unsynced writes are lost)
             let (blob, len) = ctx.open("test_fault", b"blob").await.unwrap();
@@ -2156,7 +2156,7 @@ mod tests {
 
             // Enable sync faults dynamically
             let storage_fault_cfg = ctx.storage_fault_config();
-            storage_fault_cfg.write().unwrap().sync_rate = Some(1.0);
+            storage_fault_cfg.write().sync_rate = Some(1.0);
 
             // Now sync should fail
             blob.write_at(0, b"updated".to_vec()).await.unwrap();
@@ -2164,7 +2164,7 @@ mod tests {
             assert!(result.is_err(), "sync should fail with faults enabled");
 
             // Disable faults
-            storage_fault_cfg.write().unwrap().sync_rate = Some(0.0);
+            storage_fault_cfg.write().sync_rate = Some(0.0);
 
             // Sync should succeed again
             blob.sync()
