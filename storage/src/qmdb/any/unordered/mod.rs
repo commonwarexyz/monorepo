@@ -1,6 +1,6 @@
 #[cfg(any(test, feature = "test-traits"))]
 use crate::qmdb::any::states::{
-    CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+    CleanAny, MerkleizedNonDurableAny, MutableAny, PersistableMutableLog, UnmerkleizedDurableAny,
 };
 use crate::{
     index::Unordered as Index,
@@ -18,8 +18,6 @@ use crate::{
         NonDurable, Unmerkleized,
     },
 };
-#[cfg(any(test, feature = "test-traits"))]
-use crate::{journal::Error as JournalError, Persistable};
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -31,15 +29,6 @@ pub mod fixed;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
-
-#[cfg(any(test, feature = "test-traits"))]
-trait PersistableMutableLog<O>: Mutable<Item = O> + Persistable<Error = JournalError> {}
-
-#[cfg(any(test, feature = "test-traits"))]
-impl<T, O> PersistableMutableLog<O> for T where
-    T: Mutable<Item = O> + Persistable<Error = JournalError>
-{
-}
 
 impl<
         E: Storage + Clock + Metrics,
