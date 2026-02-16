@@ -120,6 +120,12 @@ struct RecoveryState {
     /// Items that were appended but not yet committed (position -> value).
     /// These may be lost on crash. On commit, they move to `committed`.
     uncommitted: BTreeMap<u64, u8>,
+
+    /// Whether we observed a mutable storage error during the operation phase.
+    ///
+    /// After mutable errors, recovery bounds are conservative because the queue
+    /// may be left in an inconsistent state until restart.
+    tainted: bool,
 }
 
 impl RecoveryState {
@@ -130,7 +136,12 @@ impl RecoveryState {
             committed_ack_floor: 0,
             current_ack_floor: 0,
             uncommitted: BTreeMap::new(),
+            tainted: false,
         }
+    }
+
+    fn mark_tainted(&mut self) {
+        self.tainted = true;
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
@@ -181,11 +192,17 @@ impl RecoveryState {
 
     /// Returns the minimum size we expect after recovery.
     fn min_recovered_size(&self) -> u64 {
+        if self.tainted {
+            return 0;
+        }
         self.committed.len() as u64
     }
 
     /// Returns the maximum size we expect after recovery.
     fn max_recovered_size(&self) -> u64 {
+        if self.tainted {
+            return u64::MAX;
+        }
         (self.committed.len() + self.pending.len() + self.uncommitted.len()) as u64
     }
 
@@ -196,6 +213,9 @@ impl RecoveryState {
 
     /// Returns the maximum ack floor we expect after recovery.
     fn max_recovered_ack_floor(&self) -> u64 {
+        if self.tainted {
+            return u64::MAX;
+        }
         self.current_ack_floor
     }
 }
@@ -211,7 +231,7 @@ async fn run_operations(
 ) -> RecoveryState {
     let mut state = RecoveryState::new();
 
-    for op in operations {
+    'ops: for op in operations {
         match op {
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
@@ -224,6 +244,8 @@ async fn run_operations(
                     }
                     Err(_) => {
                         state.enqueue_failed(*value);
+                        state.mark_tainted();
+                        break 'ops;
                     }
                 }
             }
@@ -236,6 +258,8 @@ async fn run_operations(
                     }
                     Err(_) => {
                         state.append_failed(*value);
+                        state.mark_tainted();
+                        break 'ops;
                     }
                 }
             }
@@ -246,6 +270,8 @@ async fn run_operations(
                 }
                 Err(_) => {
                     state.commit_failed();
+                    state.mark_tainted();
+                    break 'ops;
                 }
             },
 
@@ -268,8 +294,14 @@ async fn run_operations(
                 if size > ack_floor {
                     let range = size - ack_floor;
                     let pos = ack_floor + (*offset as u64 % range);
-                    if queue.ack(pos).await.is_ok() {
-                        state.update_ack_floor(queue.ack_floor());
+                    match queue.ack(pos).await {
+                        Ok(()) => {
+                            state.update_ack_floor(queue.ack_floor());
+                        }
+                        Err(_) => {
+                            state.mark_tainted();
+                            break 'ops;
+                        }
                     }
                 }
             }
@@ -277,17 +309,30 @@ async fn run_operations(
             QueueOperation::AckUpToOffset { offset } => {
                 let size = queue.size().await;
                 let up_to = (*offset as u64) % (size + 1);
-                if queue.ack_up_to(up_to).await.is_ok() {
-                    state.update_ack_floor(queue.ack_floor());
+                match queue.ack_up_to(up_to).await {
+                    Ok(()) => {
+                        state.update_ack_floor(queue.ack_floor());
+                    }
+                    Err(_) => {
+                        state.mark_tainted();
+                        break 'ops;
+                    }
                 }
             }
 
             QueueOperation::Sync => {
-                if queue.sync().await.is_ok() {
-                    // sync = commit + prune, so success means ALL
-                    // previously uncommitted items are now durable too.
-                    state.commit_succeeded();
-                    state.sync_succeeded(queue.ack_floor());
+                match queue.sync().await {
+                    Ok(()) => {
+                        // sync = commit + prune, so success means ALL
+                        // previously uncommitted items are now durable too.
+                        state.commit_succeeded();
+                        state.sync_succeeded(queue.ack_floor());
+                    }
+                    Err(_) => {
+                        state.commit_failed();
+                        state.mark_tainted();
+                        break 'ops;
+                    }
                 }
             }
 
