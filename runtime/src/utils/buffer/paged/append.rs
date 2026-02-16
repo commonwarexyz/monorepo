@@ -153,7 +153,7 @@ impl<B: Blob> Append<B> {
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
-            id: cache_ref.next_id().await,
+            id: cache_ref.next_id(),
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
@@ -211,7 +211,7 @@ impl<B: Blob> Append<B> {
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
-            id: cache_ref.next_id().await,
+            id: cache_ref.next_id(),
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
@@ -364,10 +364,9 @@ impl<B: Blob> Append<B> {
 
         // Cache the pages we are writing in the page cache so they remain cached for concurrent
         // reads while we flush the buffer.
-        let remaining_byte_count = self
-            .cache_ref
-            .cache(self.id, buffer.data.as_ref(), buffer.offset)
-            .await;
+        let remaining_byte_count =
+            self.cache_ref
+                .cache(self.id, buffer.data.as_ref(), buffer.offset);
 
         // Read the old partial page state before doing the heavy work of preparing physical pages.
         // This is safe because partial_page_state is only modified by flush_internal, and we hold
@@ -557,8 +556,7 @@ impl<B: Blob> Append<B> {
         // concurrent reads even while a flush is in progress.
         let cached = self
             .cache_ref
-            .read_cached(self.id, &mut buf[..remaining], logical_offset)
-            .await;
+            .read_cached(self.id, &mut buf[..remaining], logical_offset);
 
         if cached == remaining {
             // All bytes found in cache.
