@@ -3026,7 +3026,7 @@ mod tests {
                 .with_attribute("epoch", 1)
                 .with_scope();
             let c1 = Counter::<u64>::default();
-            scoped.register("votes", "vote count", c1.clone());
+            scoped.register("votes", "vote count", c1);
             drop(scoped);
 
             let scoped2 = context
@@ -3034,7 +3034,7 @@ mod tests {
                 .with_attribute("epoch", 1)
                 .with_scope();
             let c2 = Counter::<u64>::default();
-            scoped2.register("votes", "vote count", c2.clone());
+            scoped2.register("votes", "vote count", c2);
         });
     }
 

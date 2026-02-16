@@ -431,7 +431,7 @@ impl Registry {
         }
     }
 
-    pub fn root_mut(&mut self) -> &mut PrometheusRegistry {
+    pub const fn root_mut(&mut self) -> &mut PrometheusRegistry {
         &mut self.root
     }
 
