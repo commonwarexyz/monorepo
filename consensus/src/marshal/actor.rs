@@ -855,7 +855,10 @@ where
     fn verify_pending_batch<'a>(
         &mut self,
         scheme: &P::Scheme,
-        batch: &[(Subject<'a, B::Commitment>, &'a <P::Scheme as CertificateScheme>::Certificate)],
+        batch: &[(
+            Subject<'a, B::Commitment>,
+            &'a <P::Scheme as CertificateScheme>::Certificate,
+        )],
     ) -> bool {
         scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
             &mut self.context,

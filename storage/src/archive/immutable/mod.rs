@@ -254,10 +254,9 @@ mod tests {
             drop(archive);
 
             // Third init to verify persistence
-            let archive: Archive<_, Digest, i32> =
-                Archive::init(context.with_label("third"), cfg)
-                    .await
-                    .unwrap();
+            let archive: Archive<_, Digest, i32> = Archive::init(context.with_label("third"), cfg)
+                .await
+                .unwrap();
             assert_eq!(
                 archive
                     .get(crate::archive::Identifier::Key(&key))
