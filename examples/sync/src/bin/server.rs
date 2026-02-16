@@ -18,7 +18,11 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock, DurationExt};
+use commonware_utils::{
+    channel::mpsc,
+    sync::{AsyncRwLock, Mutex},
+    DurationExt,
+};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -56,7 +60,7 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async mutex with Option to allow ownership transfers.
+    /// The database wrapped in async rwlock with Option to allow ownership transfers.
     database: AsyncRwLock<Option<DB>>,
     /// Request counter for metrics.
     request_counter: Counter,
@@ -65,7 +69,7 @@ struct State<DB> {
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: AsyncRwLock<SystemTime>,
+    last_operation_time: Mutex<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -78,7 +82,7 @@ impl<DB> State<DB> {
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: AsyncRwLock::new(SystemTime::now()),
+            last_operation_time: Mutex::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -105,10 +109,17 @@ where
     DB: Syncable,
     E: Storage + Clock + Metrics + RngCore,
 {
-    let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
-        *last_time = now;
+    let should_add = {
+        let mut last_time = state.last_operation_time.lock();
+        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
+            *last_time = now;
+            true
+        } else {
+            false
+        }
+    };
+    if should_add {
         // Generate new operations
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, context.next_u64());
