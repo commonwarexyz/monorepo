@@ -234,12 +234,12 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
     use proptest::{
         prelude::{any, prop, Just, ProptestConfig},
         proptest,
         strategy::Strategy as PStrategy,
     };
-    use commonware_utils::NZU16;
 
     const MAX_SHARD_SIZE: usize = 1 << 31;
     const MAX_SHARDS: u16 = 32;

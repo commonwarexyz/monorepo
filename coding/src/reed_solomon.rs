@@ -484,7 +484,12 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode::<H, _>(total_shards(config)?, config.minimum_shards.get(), data, strategy)
+        encode::<H, _>(
+            total_shards(config)?,
+            config.minimum_shards.get(),
+            data,
+            strategy,
+        )
     }
 
     fn reshard(

@@ -1,7 +1,6 @@
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
-use commonware_utils::NZU16;
+use commonware_utils::{NZUsize, NZU16};
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
