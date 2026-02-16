@@ -2935,6 +2935,53 @@ mod tests {
         test_multiple_scopes(runner);
     }
 
+    fn test_encode_single_eof<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let root_counter = Counter::<u64>::default();
+            context.register("root", "root metric", root_counter.clone());
+            root_counter.inc();
+
+            let scoped = context.with_label("engine").with_scope();
+            let scoped_counter = Counter::<u64>::default();
+            scoped.register("ops", "scoped metric", scoped_counter.clone());
+            scoped_counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("root_total 1"),
+                "root metric missing: {buffer}"
+            );
+            assert!(
+                buffer.contains("engine_ops_total 1"),
+                "scoped metric missing: {buffer}"
+            );
+            assert_eq!(
+                buffer.matches("# EOF").count(),
+                1,
+                "expected exactly one EOF marker: {buffer}"
+            );
+            assert!(
+                buffer.ends_with("# EOF\n"),
+                "EOF must be the last line: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_encode_single_eof() {
+        let executor = deterministic::Runner::default();
+        test_encode_single_eof(executor);
+    }
+
+    #[test]
+    fn test_tokio_encode_single_eof() {
+        let runner = tokio::Runner::default();
+        test_encode_single_eof(runner);
+    }
+
     fn test_with_scope_nested_inherits<R: Runner>(runner: R)
     where
         R::Context: Metrics,

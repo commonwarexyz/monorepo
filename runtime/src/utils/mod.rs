@@ -343,7 +343,9 @@ impl MetricEncoder {
 
     fn flush_line(&mut self) {
         let line = &self.line_buffer;
-        let should_write = if let Some(rest) = line.strip_prefix("# HELP ") {
+        let should_write = if line == "# EOF" {
+            false
+        } else if let Some(rest) = line.strip_prefix("# HELP ") {
             let metric_name = rest.split_whitespace().next().unwrap_or("");
             self.seen_help.insert(metric_name.to_string())
         } else if let Some(rest) = line.strip_prefix("# TYPE ") {
@@ -385,25 +387,26 @@ impl std::fmt::Write for MetricEncoder {
 /// holding this handle is dropped, the scope's metrics are automatically removed.
 pub(crate) struct ScopeHandle {
     scope_id: u64,
-    cleanup: Mutex<Option<Box<dyn FnOnce(u64) + Send + Sync>>>,
+    #[allow(clippy::type_complexity)]
+    cleanup: Option<Box<dyn FnOnce(u64) + Send + Sync>>,
 }
 
 impl ScopeHandle {
     pub(crate) fn new(scope_id: u64, cleanup: impl FnOnce(u64) + Send + Sync + 'static) -> Self {
         Self {
             scope_id,
-            cleanup: Mutex::new(Some(Box::new(cleanup))),
+            cleanup: Some(Box::new(cleanup)),
         }
     }
 
-    pub(crate) fn scope_id(&self) -> u64 {
+    pub(crate) const fn scope_id(&self) -> u64 {
         self.scope_id
     }
 }
 
 impl Drop for ScopeHandle {
     fn drop(&mut self) {
-        if let Some(cleanup) = self.cleanup.lock().unwrap().take() {
+        if let Some(cleanup) = self.cleanup.take() {
             cleanup(self.scope_id);
         }
     }
@@ -429,7 +432,7 @@ impl MetricStore {
         }
     }
 
-    pub fn root_mut(&mut self) -> &mut Registry {
+    pub const fn root_mut(&mut self) -> &mut Registry {
         &mut self.root
     }
 
@@ -463,7 +466,9 @@ impl MetricStore {
         for registry in self.scopes.values() {
             encode(&mut encoder, registry).expect("encoding scope failed");
         }
-        encoder.into_string()
+        let mut output = encoder.into_string();
+        output.push_str("# EOF\n");
+        output
     }
 }
 
