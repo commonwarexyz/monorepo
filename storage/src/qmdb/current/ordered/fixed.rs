@@ -710,7 +710,7 @@ pub mod test {
             db.write_batch([(key_exists_1, None)]).await.unwrap();
             db.write_batch([(key_exists_2, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
