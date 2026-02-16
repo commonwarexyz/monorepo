@@ -326,12 +326,14 @@ pub fn add_attribute(
 pub struct MetricEncoder {
     line_buffer: String,
     families: BTreeMap<String, MetricFamily>,
+    active_family: Option<String>,
 }
 
 #[derive(Default)]
 struct MetricFamily {
     help: Option<String>,
     type_line: Option<String>,
+    unit: Option<String>,
     metric_type: Option<String>,
     data: Vec<String>,
 }
@@ -363,6 +365,7 @@ impl MetricEncoder {
         Self {
             line_buffer: String::new(),
             families: BTreeMap::new(),
+            active_family: None,
         }
     }
 
@@ -378,6 +381,10 @@ impl MetricEncoder {
             }
             if let Some(type_line) = &family.type_line {
                 output.push_str(type_line);
+                output.push('\n');
+            }
+            if let Some(unit) = &family.unit {
+                output.push_str(unit);
                 output.push('\n');
             }
             for data in &family.data {
@@ -412,30 +419,77 @@ impl MetricEncoder {
         })
     }
 
+    /// Returns true if `sample_name` can belong to `family_name`.
+    ///
+    /// Data lines may use a type-specific suffix (for example `foo_total` for
+    /// a counter family `foo`), so we allow either exact match or a valid
+    /// OpenMetrics suffix for the family's declared type.
+    fn family_accepts_sample(&self, family_name: &str, sample_name: &str) -> bool {
+        if sample_name == family_name {
+            return true;
+        }
+        let Some(metric_type) = self
+            .families
+            .get(family_name)
+            .and_then(|family| family.metric_type.as_deref())
+        else {
+            return false;
+        };
+        let Some(suffix) = sample_name.strip_prefix(family_name) else {
+            return false;
+        };
+        TYPED_SUFFIXES.iter().any(|(known_suffix, valid_types)| {
+            suffix == *known_suffix && valid_types.contains(&metric_type)
+        })
+    }
+
     fn flush_line(&mut self) {
         let line = std::mem::take(&mut self.line_buffer);
         if line == "# EOF" {
+            self.active_family = None;
             return;
         }
         if let Some(rest) = line.strip_prefix("# HELP ") {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            let family = self.families.entry(name.to_string()).or_default();
+            let name = rest.split_whitespace().next().unwrap_or("").to_string();
+            let family = self.families.entry(name.clone()).or_default();
             if family.help.is_none() {
                 family.help = Some(line);
             }
+            self.active_family = Some(name);
         } else if let Some(rest) = line.strip_prefix("# TYPE ") {
             let mut parts = rest.split_whitespace();
-            let name = parts.next().unwrap_or("");
+            let name = parts.next().unwrap_or("").to_string();
             let metric_type = parts.next().map(|s| s.to_string());
-            let family = self.families.entry(name.to_string()).or_default();
+            let family = self.families.entry(name.clone()).or_default();
             if family.type_line.is_none() {
                 family.type_line = Some(line);
                 family.metric_type = metric_type;
             }
+            self.active_family = Some(name);
+        } else if let Some(rest) = line.strip_prefix("# UNIT ") {
+            let name = rest.split_whitespace().next().unwrap_or("").to_string();
+            let family = self.families.entry(name.clone()).or_default();
+            if family.unit.is_none() {
+                family.unit = Some(line);
+            }
+            self.active_family = Some(name);
         } else {
             let name = extract_metric_name(&line);
-            let family = self.resolve_data_family(name);
-            family.data.push(line);
+            let active = self
+                .active_family
+                .as_deref()
+                .filter(|family_name| self.family_accepts_sample(family_name, name))
+                .map(str::to_string);
+            if let Some(family_name) = active {
+                self.families
+                    .entry(family_name)
+                    .or_default()
+                    .data
+                    .push(line);
+            } else {
+                let family = self.resolve_data_family(name);
+                family.data.push(line);
+            }
         }
     }
 }
@@ -721,6 +775,134 @@ foo_total 1
 # HELP foo_total A gauge.
 # TYPE foo_total gauge
 foo_total 42
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_literal_suffix_family_not_hijacked() {
+        // A family may legitimately end with a reserved OpenMetrics suffix.
+        // The encoder must not always remap "foo_created" to base family "foo".
+        let input = r#"# HELP foo A counter.
+# TYPE foo counter
+foo_total 1
+# HELP foo_created A gauge.
+# TYPE foo_created gauge
+foo_created 42
+# EOF
+"#;
+        let expected = r#"# HELP foo A counter.
+# TYPE foo counter
+foo_total 1
+# HELP foo_created A gauge.
+# TYPE foo_created gauge
+foo_created 42
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_type_aware_suffix_interleaved_segments() {
+        // Two families may emit lines with the same sample name (`foo_total`):
+        // a counter named `foo` and a gauge named `foo_total`.
+        //
+        // Repeated counter descriptors (as emitted by separate scoped registries)
+        // must keep all counter samples in family `foo` and not leak them into
+        // family `foo_total`.
+        let input = r#"# HELP foo Counter.
+# TYPE foo counter
+foo_total{scope="a"} 1
+# HELP foo_total Gauge.
+# TYPE foo_total gauge
+foo_total 42
+# HELP foo Counter.
+# TYPE foo counter
+foo_total{scope="b"} 2
+# EOF
+"#;
+        let expected = r#"# HELP foo Counter.
+# TYPE foo counter
+foo_total{scope="a"} 1
+foo_total{scope="b"} 2
+# HELP foo_total Gauge.
+# TYPE foo_total gauge
+foo_total 42
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_unit_metadata_is_grouped() {
+        let input = r#"# HELP latency Latency histogram.
+# TYPE latency histogram
+# UNIT latency seconds
+latency_sum 1.2
+latency_count 3
+# HELP requests Requests.
+# TYPE requests counter
+requests_total 9
+# EOF
+"#;
+        let expected = r#"# HELP latency Latency histogram.
+# TYPE latency histogram
+# UNIT latency seconds
+latency_sum 1.2
+latency_count 3
+# HELP requests Requests.
+# TYPE requests counter
+requests_total 9
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_unit_metadata_deduped_across_segments() {
+        let input = r#"# HELP req Requests.
+# TYPE req counter
+# UNIT req requests
+req_total{scope="a"} 1
+# HELP req Requests.
+# TYPE req counter
+# UNIT req requests
+req_total{scope="b"} 2
+# EOF
+"#;
+        let expected = r#"# HELP req Requests.
+# TYPE req counter
+# UNIT req requests
+req_total{scope="a"} 1
+req_total{scope="b"} 2
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_fallback_uses_typed_suffix_even_if_literal_exists() {
+        // Regression test for a buggy fallback that preferred `contains_key(name)`
+        // before typed-suffix mapping.
+        //
+        // Here `foo_total` exists as its own counter family, but a sample named
+        // `foo_total` can only come from counter family `foo` (because
+        // `foo_total` counter samples are `foo_total_total`).
+        //
+        // We force fallback mode by ending descriptor groups with `# EOF`, which
+        // clears `active_family`.
+        let input = r#"# HELP foo_total Counter with literal suffix.
+# TYPE foo_total counter
+foo_total_total 9
+# EOF
+# HELP foo Base counter.
+# TYPE foo counter
+# EOF
+foo_total{scope="x"} 1
+# EOF
+"#;
+        let expected = r#"# HELP foo Base counter.
+# TYPE foo counter
+foo_total{scope="x"} 1
+# HELP foo_total Counter with literal suffix.
+# TYPE foo_total counter
+foo_total_total 9
 "#;
         assert_eq!(encode_dedup(input), expected);
     }
