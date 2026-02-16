@@ -342,13 +342,10 @@ impl Default for Config {
     }
 }
 
-/// Key for detecting duplicate metric registrations: (metric_name, attributes).
-type MetricKey = (String, Vec<(String, String)>);
-
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     registry: Mutex<Registry>,
-    registered_metrics: Mutex<HashSet<MetricKey>>,
+    registered_metrics: Mutex<HashSet<(String, Vec<(String, String)>)>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
@@ -1344,7 +1341,9 @@ impl crate::Metrics for Context {
         // panicking in Drop.
         let handle = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
-                let _ = exec.registry.lock().map(|mut s| s.remove_scope(id));
+                if let Ok(mut reg) = exec.registry.lock() {
+                    reg.remove_scope(id);
+                }
             }
         }));
         Self {

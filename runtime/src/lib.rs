@@ -398,9 +398,9 @@ stability_scope!(BETA {
         /// Encode all metrics into a buffer.
         ///
         /// To ensure downstream analytics tools work correctly, users must never duplicate metrics
-        /// (via the concatenation of nested `with_label` and `register` calls). This can be avoided
-        /// by using `with_label` to create new context instances (ensures all context instances are
-        /// namespaced).
+        /// (via the concatenation of nested `with_label` and `register` calls). This can be
+        /// avoided by using `with_label` and `with_attribute` to create new context instances
+        /// (ensures all context instances are namespaced).
         fn encode(&self) -> String;
 
         /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
@@ -411,6 +411,13 @@ stability_scope!(BETA {
         ///
         /// If the context is already scoped, returns a clone with the same scope (scopes
         /// nest by inheritance, not by creating new independent scopes).
+        ///
+        /// # Uniqueness
+        ///
+        /// Scoped metrics share the same global uniqueness constraint as
+        /// [`Metrics::register`]: each (prefixed_name, attributes) pair must be unique.
+        /// Callers should use [`Metrics::with_attribute`] to distinguish metrics across
+        /// scopes (e.g., an "epoch" attribute) rather than re-registering identical keys.
         ///
         /// # Example
         ///
@@ -3029,8 +3036,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate metric")]
-    fn test_deterministic_reregister_after_scope_drop_panics() {
+    #[should_panic(expected = "duplicate metric:")]
+    fn test_deterministic_reregister_after_scope_drop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let scoped = context
@@ -3041,6 +3048,7 @@ mod tests {
             scoped.register("votes", "vote count", c1);
             drop(scoped);
 
+            // Re-registering the same key after scope drop is not allowed
             let scoped2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
