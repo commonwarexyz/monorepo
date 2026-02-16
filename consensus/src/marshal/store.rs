@@ -20,27 +20,21 @@ pub trait Certificates: Send + Sync + 'static {
     /// The type of error returned when storing, retrieving, or pruning finalizations.
     type Error: Error + Send + Sync + 'static;
 
-    /// Store a finalization certificate, keyed by height and commitment.
+    /// Buffer a finalization certificate for storage, keyed by height and commitment.
     ///
-    /// Implementations must:
-    /// - Durably sync the write before returning; successful completion implies that the certificate is persisted.
-    /// - Ignore overwrites for an existing finalization at the same height or commitment.
+    /// The write is not durable until [sync](Self::sync) is called.
     ///
-    /// # Arguments
-    ///
-    /// * `height`: The application height associated with the finalization.
-    /// * `commitment`: The block commitment associated with the finalization.
-    /// * `finalization`: The finalization certificate.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` once the write is synced, or `Err` if persistence fails.
+    /// Implementations must ignore overwrites for an existing finalization at the same
+    /// height or commitment.
     fn put(
         &mut self,
         height: Height,
         commitment: Self::Commitment,
         finalization: Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Flush all buffered writes to durable storage.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Retrieve a [Finalization] by height or commitment.
     ///
@@ -88,20 +82,16 @@ pub trait Blocks: Send + Sync + 'static {
     /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
 
-    /// Store a finalized block, keyed by height and commitment.
+    /// Buffer a finalized block for storage, keyed by height and commitment.
     ///
-    /// Implementations must:
-    /// - Durably sync the write before returning; successful completion implies that the block is persisted.
-    /// - Ignore overwrites for an existing block at the same height or commitment.
+    /// The write is not durable until [sync](Self::sync) is called.
     ///
-    /// # Arguments
-    ///
-    /// * `block`: The finalized block, which provides its `height()` and `commitment()`.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` once the write is synced, or `Err` if persistence fails.
+    /// Implementations must ignore overwrites for an existing block at the same
+    /// height or commitment.
     fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Flush all buffered writes to durable storage.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Retrieve a finalized block by height or commitment.
     ///
@@ -188,7 +178,11 @@ where
         commitment: Self::Commitment,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        self.put_sync(height.get(), commitment, finalization).await
+        Archive::put(self, height.get(), commitment, finalization).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Archive::sync(self).await
     }
 
     async fn get(
@@ -217,8 +211,11 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        self.put_sync(block.height().get(), block.commitment(), block)
-            .await
+        Archive::put(self, block.height().get(), block.commitment(), block).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Archive::sync(self).await
     }
 
     async fn get(
@@ -263,7 +260,11 @@ where
         commitment: Self::Commitment,
         finalization: Finalization<S, Self::Commitment>,
     ) -> Result<(), Self::Error> {
-        self.put_sync(height.get(), commitment, finalization).await
+        Archive::put(self, height.get(), commitment, finalization).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Archive::sync(self).await
     }
 
     async fn get(
@@ -292,8 +293,11 @@ where
     type Error = archive::Error;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
-        self.put_sync(block.height().get(), block.commitment(), block)
-            .await
+        Archive::put(self, block.height().get(), block.commitment(), block).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Archive::sync(self).await
     }
 
     async fn get(

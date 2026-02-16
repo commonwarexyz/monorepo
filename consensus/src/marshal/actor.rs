@@ -140,6 +140,8 @@ where
     pending_ack: OptionFuture<PendingAck<B, A>>,
     // Highest known finalized height
     tip: Height,
+    // Whether the finalization archives have unsynced writes
+    finalization_archives_dirty: bool,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -240,6 +242,7 @@ where
                 last_processed_height,
                 pending_ack: None.into(),
                 tip: Height::zero(),
+                finalization_archives_dirty: false,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
@@ -417,6 +420,7 @@ where
                                 commitment,
                                 block,
                                 Some(finalization),
+                                true,
                                 &mut application,
                                 &mut buffer,
                                 &mut resolver,
@@ -646,6 +650,7 @@ where
                                     commitment,
                                     block,
                                     finalization,
+                                    false,
                                     &mut application,
                                     &mut buffer,
                                     &mut resolver,
@@ -701,6 +706,7 @@ where
                                     block.commitment(),
                                     block,
                                     Some(finalization),
+                                    false,
                                     &mut application,
                                     &mut buffer,
                                     &mut resolver,
@@ -762,6 +768,7 @@ where
                                         commitment,
                                         block.clone(),
                                         Some(finalization),
+                                        false,
                                         &mut application,
                                         &mut buffer,
                                         &mut resolver,
@@ -825,6 +832,23 @@ where
         let (height, commitment) = (block.height(), block.commitment());
         let (ack, ack_waiter) = A::handle();
         application.report(Update::Block(block, ack)).await;
+
+        if self.finalization_archives_dirty {
+            if let Err(e) = try_join!(
+                async {
+                    self.finalized_blocks.sync().await.map_err(Box::new)?;
+                    Ok::<_, BoxedError>(())
+                },
+                async {
+                    self.finalizations_by_height.sync().await.map_err(Box::new)?;
+                    Ok::<_, BoxedError>(())
+                },
+            ) {
+                panic!("failed to sync finalization archives: {e}");
+            }
+            self.finalization_archives_dirty = false;
+        }
+
         self.pending_ack.replace(PendingAck {
             height,
             commitment,
@@ -883,6 +907,23 @@ where
         self.cache.put_block(round, commitment, block).await;
     }
 
+    /// Sync both finalization archives and clear the dirty flag.
+    async fn sync_finalization_archives(&mut self) {
+        if let Err(e) = try_join!(
+            async {
+                self.finalized_blocks.sync().await.map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            },
+            async {
+                self.finalizations_by_height.sync().await.map_err(Box::new)?;
+                Ok::<_, BoxedError>(())
+            },
+        ) {
+            panic!("failed to sync finalization archives: {e}");
+        }
+        self.finalization_archives_dirty = false;
+    }
+
     // -------------------- Immutable Storage --------------------
 
     /// Get a finalized block from the immutable archive.
@@ -914,6 +955,9 @@ where
 
     /// Add a finalized block, and optionally a finalization, to the archive, and
     /// attempt to identify + repair any gaps in the archive.
+    ///
+    /// When `sync` is true, the archives are durably synced before dispatching. When
+    /// false, writes are buffered and synced lazily in [try_dispatch_block].
     #[allow(clippy::too_many_arguments)]
     async fn finalize(
         &mut self,
@@ -921,11 +965,12 @@ where
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
+        sync: bool,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) {
-        self.store_finalization(height, commitment, block, finalization, application)
+        self.store_finalization(height, commitment, block, finalization, sync, application)
             .await;
 
         self.try_repair_gaps(buffer, resolver, application).await;
@@ -934,13 +979,15 @@ where
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
     /// After persisting the block, attempt to dispatch the next contiguous block to the
-    /// application.
+    /// application. When `sync` is true, the archives are durably synced immediately
+    /// after the write.
     async fn store_finalization(
         &mut self,
         height: Height,
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
+        sync: bool,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         self.notify_subscribers(commitment, &block);
@@ -967,6 +1014,11 @@ where
             }
         ) {
             panic!("failed to finalize: {e}");
+        }
+        if sync {
+            self.sync_finalization_archives().await;
+        } else {
+            self.finalization_archives_dirty = true;
         }
 
         // Update metrics and send tip update to application
@@ -1062,6 +1114,7 @@ where
                         commitment,
                         block.clone(),
                         finalization,
+                        false,
                         application,
                     )
                     .await;
