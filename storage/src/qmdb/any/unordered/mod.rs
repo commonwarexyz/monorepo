@@ -361,7 +361,7 @@ pub(super) mod test {
     use super::*;
     use crate::{
         kv::Gettable as _,
-        mmr::StandardHasher,
+        mmr::{Proof, StandardHasher},
         qmdb::{
             store::{LogStore, MerkleizedStore},
             verify_proof,
@@ -375,12 +375,22 @@ pub(super) mod test {
 
     /// Helper trait for testing Any databases that cycle through all four states.
     pub(crate) trait TestableAnyDb<V>:
-        CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+        CleanAny<Key = Digest>
+        + MerkleizedStore<
+            Value = V,
+            Digest = Digest,
+            Proof = (Proof<Digest>, Vec<<Self as MerkleizedStore>::Operation>),
+        >
     {
     }
 
     impl<T, V> TestableAnyDb<V> for T where
-        T: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>
+        T: CleanAny<Key = Digest>
+            + MerkleizedStore<
+                Value = V,
+                Digest = Digest,
+                Proof = (Proof<Digest>, Vec<<T as MerkleizedStore>::Operation>),
+            >
     {
     }
 

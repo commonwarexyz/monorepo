@@ -15,7 +15,7 @@ use crate::{
         hasher::Hasher as _,
         iterator::{nodes_to_pin, PeakIterator},
         storage::Storage as _,
-        Location, Position, Proof, StandardHasher,
+        Location, Position, StandardHasher,
     },
     qmdb::{
         any::{
@@ -806,6 +806,11 @@ where
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
+    type Proof = (
+        RangeProof<DigestOf<H>>,
+        Vec<Operation<K, V, U>>,
+        Vec<[u8; N]>,
+    );
 
     async fn root(&self) -> H::Digest {
         self.root()
@@ -816,12 +821,10 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
+    ) -> Result<Self::Proof, Error> {
         let mut hasher = H::new();
-        let (range_proof, ops, _chunks) = self
-            .historical_range_proof(&mut hasher, historical_size, start_loc, max_ops)
-            .await?;
-        Ok((range_proof.proof, ops))
+        self.historical_range_proof(&mut hasher, historical_size, start_loc, max_ops)
+            .await
     }
 }
 

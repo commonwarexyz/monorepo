@@ -245,6 +245,7 @@ where
 pub(crate) mod test {
     use super::*;
     use crate::{
+        mmr::Proof,
         qmdb::any::{FixedConfig, VariableConfig},
         translator::OneCap,
     };
@@ -529,7 +530,12 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest>
+            + MerkleizedStore<
+                Value = V,
+                Digest = Digest,
+                Proof = (Proof<Digest>, Vec<<D as MerkleizedStore>::Operation>),
+            >,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -605,7 +611,12 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest>
+            + MerkleizedStore<
+                Value = V,
+                Digest = Digest,
+                Proof = (Proof<Digest>, Vec<<D as MerkleizedStore>::Operation>),
+            >,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
@@ -738,7 +749,12 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: CleanAny<Key = Digest> + MerkleizedStore<Value = V, Digest = Digest>,
+        D: CleanAny<Key = Digest>
+            + MerkleizedStore<
+                Value = V,
+                Digest = Digest,
+                Proof = (Proof<Digest>, Vec<<D as MerkleizedStore>::Operation>),
+            >,
         <D as MerkleizedStore>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;

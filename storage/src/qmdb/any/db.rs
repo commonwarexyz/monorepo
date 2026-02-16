@@ -529,6 +529,7 @@ where
 {
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
+    type Proof = (Proof<H::Digest>, Vec<Operation<K, V, U>>);
 
     async fn root(&self) -> H::Digest {
         self.root().await
@@ -539,7 +540,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<Self::Proof, Error> {
         self.historical_proof(historical_size, start_loc, max_ops)
             .await
     }
