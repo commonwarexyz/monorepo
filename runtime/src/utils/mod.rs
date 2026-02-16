@@ -379,6 +379,27 @@ impl MetricEncoder {
             })
     }
 
+    /// Resolve a data line's metric name to its family key.
+    ///
+    /// OpenMetrics uses suffixes on data lines that differ from the base name
+    /// in HELP/TYPE headers (e.g., HELP uses "votes" but the data line is
+    /// "votes_total"). If stripping a known suffix matches an existing family,
+    /// use that family.
+    fn resolve_family(&self, name: &str) -> String {
+        if self.families.contains_key(name) {
+            return name.to_string();
+        }
+        const SUFFIXES: &[&str] = &["_total", "_bucket", "_count", "_sum", "_created", "_info"];
+        for suffix in SUFFIXES {
+            if let Some(base) = name.strip_suffix(suffix) {
+                if self.families.contains_key(base) {
+                    return base.to_string();
+                }
+            }
+        }
+        name.to_string()
+    }
+
     fn flush_line(&mut self) {
         let line = std::mem::take(&mut self.line_buffer);
         if line == "# EOF" {
@@ -398,7 +419,8 @@ impl MetricEncoder {
             }
         } else {
             let name = extract_metric_name(&line);
-            let family = self.get_or_create(&name);
+            let key = self.resolve_family(&name);
+            let family = self.get_or_create(&key);
             family.data.push(line);
         }
     }
@@ -634,6 +656,34 @@ a_total 2
 # HELP z First alphabetically last.
 # TYPE z counter
 z_total 1
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_counter_suffix_grouping() {
+        // prometheus_client uses the base name for HELP/TYPE (e.g., "ab_votes")
+        // but appends "_total" to the data line (e.g., "ab_votes_total").
+        // A metric whose name sorts between these (e.g., "ab_votes_size")
+        // must not split the family.
+        let input = r#"# HELP ab_votes vote count.
+# TYPE ab_votes counter
+ab_votes_total{epoch="1"} 1
+# HELP ab_votes_size size gauge.
+# TYPE ab_votes_size gauge
+ab_votes_size 99
+# HELP ab_votes vote count.
+# TYPE ab_votes counter
+ab_votes_total{epoch="2"} 2
+# EOF
+"#;
+        let expected = r#"# HELP ab_votes vote count.
+# TYPE ab_votes counter
+ab_votes_total{epoch="1"} 1
+ab_votes_total{epoch="2"} 2
+# HELP ab_votes_size size gauge.
+# TYPE ab_votes_size gauge
+ab_votes_size 99
 "#;
         assert_eq!(encode_dedup(input), expected);
     }
