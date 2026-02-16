@@ -61,7 +61,7 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 
 /// Maximum number of blocks to process before forcing a sync during catchup.
 /// Limits data loss on crash to at most this many blocks of re-processing.
-const SYNC_BATCH_SIZE: u64 = 1024;
+const SYNC_BATCH_SIZE: u64 = 16_384;
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
