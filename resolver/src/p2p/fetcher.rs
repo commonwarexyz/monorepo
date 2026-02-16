@@ -580,9 +580,9 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
-        BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, RwLock,
+        BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{sync::AsyncRwLock, NZU32};
     use std::{fmt, sync::Arc, time::Duration};
 
     // Mock error type for testing
@@ -696,14 +696,14 @@ mod tests {
     #[derive(Clone)]
     struct LimitedMockSender<E: Clock> {
         inner: SuccessMockSenderInner,
-        rate_limiter: Arc<RwLock<KeyedRateLimiter<PublicKey, E>>>,
+        rate_limiter: Arc<AsyncRwLock<KeyedRateLimiter<PublicKey, E>>>,
     }
 
     impl<E: Clock> LimitedMockSender<E> {
         fn new(quota: Quota, clock: E) -> Self {
             Self {
                 inner: SuccessMockSenderInner,
-                rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::hashmap_with_clock(
+                rate_limiter: Arc::new(AsyncRwLock::new(KeyedRateLimiter::hashmap_with_clock(
                     quota, clock,
                 ))),
             }
