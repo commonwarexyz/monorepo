@@ -55,11 +55,4 @@ where
 
     /// Strategy for parallel operations.
     pub strategy: T,
-
-    /// Skip certificate verification for resolver deliveries.
-    ///
-    /// When true, certificates received via the resolver are accepted without
-    /// cryptographic verification. This improves sync performance but relies
-    /// on peers to only send valid certificates.
-    pub trusted_resolver: bool,
 }

@@ -227,7 +227,6 @@ mod tests {
             value_write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
-            trusted_resolver: false,
         };
 
         // Create the resolver
@@ -826,7 +825,6 @@ mod tests {
                         value_write_buffer: NZUsize!(1024),
                         page_cache: page_cache.clone(),
                         strategy: Sequential,
-                        trusted_resolver: false,
                     };
 
                     // Create resolver

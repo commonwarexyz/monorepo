@@ -14,7 +14,7 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{Finalization, Notarization},
+        types::{Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
@@ -42,7 +42,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, BoxedError,
+    Acknowledgement, BoxedError, N3f1,
 };
 use futures::try_join;
 use pin_project::pin_project;
@@ -58,6 +58,22 @@ use tracing::{debug, error, info, warn};
 
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
+
+/// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
+enum PendingVerification<S: CertificateScheme, B: Block> {
+    Finalized {
+        height: Height,
+        finalization: Finalization<S, B::Commitment>,
+        block: B,
+        response: oneshot::Sender<bool>,
+    },
+    Notarized {
+        round: Round,
+        notarization: Notarization<S, B::Commitment>,
+        block: B,
+        response: oneshot::Sender<bool>,
+    },
+}
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
@@ -130,8 +146,6 @@ where
     block_codec_config: B::Cfg,
     // Strategy for parallel operations
     strategy: T,
-    // Whether to skip certificate verification for resolver deliveries
-    trusted_resolver: bool,
 
     // ---------- State ----------
     // Last view processed
@@ -238,7 +252,6 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
-                trusted_resolver: config.trusted_resolver,
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
@@ -572,15 +585,23 @@ where
                 break;
             } => {
                 let mut needs_sync = false;
+                let mut pending = Vec::new();
                 let mut message = Some(message);
                 while let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) {
                     needs_sync |= self.handle_resolver_message(
                         msg,
+                        &mut pending,
                         &mut application,
                         &mut buffer,
                         &mut resolver,
                     ).await;
                 }
+                needs_sync |= self.verify_and_process_pending(
+                    pending,
+                    &mut application,
+                    &mut buffer,
+                    &mut resolver,
+                ).await;
                 if needs_sync {
                     self.sync_finalization_archives().await;
                 }
@@ -588,11 +609,14 @@ where
         }
     }
 
-    /// Handle a single resolver message. Returns true if finalization archives
-    /// were written and need syncing.
+    /// Handle a single resolver message. Produce and Block deliveries are handled
+    /// immediately. Finalized/Notarized deliveries are parsed and structurally
+    /// validated, then collected into `pending` for batch certificate verification.
+    /// Returns true if finalization archives were written and need syncing.
     async fn handle_resolver_message<K: PublicKey>(
         &mut self,
         message: handler::Message<B>,
+        pending: &mut Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<K, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
@@ -699,29 +723,13 @@ where
                             response.send_lossy(false);
                             return false;
                         }
-                        if !self.trusted_resolver
-                            && !finalization.verify(
-                                &mut self.context,
-                                &scheme,
-                                &self.strategy,
-                            )
-                        {
-                            response.send_lossy(false);
-                            return false;
-                        }
-                        debug!(%height, "received finalization");
-                        response.send_lossy(true);
-                        self.finalize(
+                        pending.push(PendingVerification::Finalized {
                             height,
-                            block.commitment(),
+                            finalization,
                             block,
-                            Some(finalization),
-                            application,
-                            buffer,
-                            resolver,
-                        )
-                        .await;
-                        true
+                            response,
+                        });
+                        false
                     }
                     Request::Notarized { round } => {
                         let Some(scheme) =
@@ -748,43 +756,177 @@ where
                             response.send_lossy(false);
                             return false;
                         }
-                        if !self.trusted_resolver
-                            && !notarization.verify(
+                        pending.push(PendingVerification::Notarized {
+                            round,
+                            notarization,
+                            block,
+                            response,
+                        });
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Batch verify pending certificates and process valid items. Returns true
+    /// if finalization archives were written and need syncing.
+    async fn verify_and_process_pending<K: PublicKey>(
+        &mut self,
+        pending: Vec<PendingVerification<P::Scheme, B>>,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
+        buffer: &mut buffered::Mailbox<K, B>,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+    ) -> bool {
+        if pending.is_empty() {
+            return false;
+        }
+
+        // Try batch verification with universal verifier
+        let batch_ok = if let Some(scheme) = self.provider.all() {
+            let certs = pending.iter().map(|item| match item {
+                PendingVerification::Finalized { finalization, .. } => (
+                    Subject::Finalize {
+                        proposal: &finalization.proposal,
+                    },
+                    &finalization.certificate,
+                ),
+                PendingVerification::Notarized { notarization, .. } => (
+                    Subject::Notarize {
+                        proposal: &notarization.proposal,
+                    },
+                    &notarization.certificate,
+                ),
+            });
+            scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
+                &mut self.context,
+                certs,
+                &self.strategy,
+            )
+        } else {
+            false
+        };
+
+        let mut wrote = false;
+        if batch_ok {
+            for item in pending {
+                wrote |= self
+                    .process_verified(item, application, buffer, resolver)
+                    .await;
+            }
+        } else {
+            // Fall back to individual verification
+            for item in pending {
+                let valid = match &item {
+                    PendingVerification::Finalized {
+                        height,
+                        finalization,
+                        ..
+                    } => self
+                        .epocher
+                        .containing(*height)
+                        .and_then(|b| self.get_scheme_certificate_verifier(b.epoch()))
+                        .map(|scheme| {
+                            finalization.verify(
                                 &mut self.context,
                                 &scheme,
                                 &self.strategy,
                             )
-                        {
-                            response.send_lossy(false);
-                            return false;
-                        }
-                        response.send_lossy(true);
-                        let commitment = block.commitment();
-                        debug!(?round, ?commitment, "received notarization");
-                        let height = block.height();
-                        let mut wrote = false;
-                        if let Some(finalization) =
-                            self.cache.get_finalization_for(commitment).await
-                        {
-                            self.finalize(
-                                height,
-                                commitment,
-                                block.clone(),
-                                Some(finalization),
-                                application,
-                                buffer,
-                                resolver,
+                        })
+                        .unwrap_or(false),
+                    PendingVerification::Notarized {
+                        round,
+                        notarization,
+                        ..
+                    } => self
+                        .get_scheme_certificate_verifier(round.epoch())
+                        .map(|scheme| {
+                            notarization.verify(
+                                &mut self.context,
+                                &scheme,
+                                &self.strategy,
                             )
-                            .await;
-                            wrote = true;
+                        })
+                        .unwrap_or(false),
+                };
+                if valid {
+                    wrote |= self
+                        .process_verified(item, application, buffer, resolver)
+                        .await;
+                } else {
+                    match item {
+                        PendingVerification::Finalized { response, .. }
+                        | PendingVerification::Notarized { response, .. } => {
+                            response.send_lossy(false);
                         }
-                        self.cache_block(round, commitment, block).await;
-                        self.cache
-                            .put_notarization(round, commitment, notarization)
-                            .await;
-                        wrote
                     }
                 }
+            }
+        }
+        wrote
+    }
+
+    /// Process a verified pending item (finalization or notarization).
+    /// Returns true if finalization archives were written.
+    async fn process_verified<K: PublicKey>(
+        &mut self,
+        item: PendingVerification<P::Scheme, B>,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
+        buffer: &mut buffered::Mailbox<K, B>,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+    ) -> bool {
+        match item {
+            PendingVerification::Finalized {
+                height,
+                finalization,
+                block,
+                response,
+            } => {
+                debug!(%height, "received finalization");
+                response.send_lossy(true);
+                self.finalize(
+                    height,
+                    block.commitment(),
+                    block,
+                    Some(finalization),
+                    application,
+                    buffer,
+                    resolver,
+                )
+                .await;
+                true
+            }
+            PendingVerification::Notarized {
+                round,
+                notarization,
+                block,
+                response,
+            } => {
+                response.send_lossy(true);
+                let commitment = block.commitment();
+                debug!(?round, ?commitment, "received notarization");
+                let height = block.height();
+                let mut wrote = false;
+                if let Some(finalization) =
+                    self.cache.get_finalization_for(commitment).await
+                {
+                    self.finalize(
+                        height,
+                        commitment,
+                        block.clone(),
+                        Some(finalization),
+                        application,
+                        buffer,
+                        resolver,
+                    )
+                    .await;
+                    wrote = true;
+                }
+                self.cache_block(round, commitment, block).await;
+                self.cache
+                    .put_notarization(round, commitment, notarization)
+                    .await;
+                wrote
             }
         }
     }
@@ -891,7 +1033,7 @@ where
         self.cache.put_block(round, commitment, block).await;
     }
 
-    /// Sync both finalization archives and clear the dirty flag.
+    /// Sync both finalization archives to durable storage.
     async fn sync_finalization_archives(&mut self) {
         if let Err(e) = try_join!(
             async {
