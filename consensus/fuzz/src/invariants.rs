@@ -4,8 +4,9 @@ use crate::{
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
 use commonware_codec::{Encode, Read};
-use commonware_consensus::simplex::{
-    elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
+use commonware_consensus::{
+    elector::Config as Elector,
+    simplex::{mocks::reporter::Reporter, scheme, scheme::Scheme},
 };
 use commonware_cryptography::{
     certificate::{Scheme as CertificateScheme, Signers},
