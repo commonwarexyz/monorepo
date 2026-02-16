@@ -201,7 +201,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
 
     /// Helper to initialize an archive.
     async fn init_archive<T: CodecShared>(
-        scope: &R,
+        ctx: &R,
         cfg: &Config,
         epoch: Epoch,
         name: &str,
@@ -220,7 +220,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             key_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(scope.with_label(name), archive_cfg)
+        let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
             .await
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
