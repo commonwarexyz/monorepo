@@ -165,8 +165,20 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             .with_attribute("epoch", epoch)
             .with_scope();
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
-            Self::init_archive(&scope, &self.cfg, epoch, "verified", self.block_codec_config.clone()),
-            Self::init_archive(&scope, &self.cfg, epoch, "notarized", self.block_codec_config.clone()),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
+                epoch,
+                "verified",
+                self.block_codec_config.clone()
+            ),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
+                epoch,
+                "notarized",
+                self.block_codec_config.clone()
+            ),
             Self::init_archive(
                 &scope,
                 &self.cfg,

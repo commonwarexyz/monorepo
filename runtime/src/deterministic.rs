@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Registry, Panicker, ScopeHandle,
+        Panicker, Registry, ScopeHandle,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
