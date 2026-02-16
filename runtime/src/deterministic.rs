@@ -866,7 +866,7 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
+    ephemeral: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -883,7 +883,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
+            ephemeral: self.ephemeral.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -965,7 +965,7 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
-                scope: None,
+                ephemeral: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -1037,7 +1037,7 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
-                scope: None,
+                ephemeral: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1308,7 +1308,7 @@ impl crate::Metrics for Context {
 
         // Route to the appropriate registry (root or scoped)
         let mut registry = executor.registry.lock().unwrap();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let scoped = registry.get_scope(self.ephemeral.as_ref().map(|s| s.scope_id()));
         let sub_registry = self
             .attributes
             .iter()
@@ -1325,12 +1325,12 @@ impl crate::Metrics for Context {
         result
     }
 
-    fn with_scope(&self) -> Self {
+    fn with_ephemeral(&self) -> Self {
         let executor = self.executor();
-        executor.auditor.event(b"with_scope", |_| {});
+        executor.auditor.event(b"with_ephemeral", |_| {});
 
-        // Already scoped -- inherit the existing scope
-        if self.scope.is_some() {
+        // Already ephemeral -- inherit the existing ephemeral registry
+        if self.ephemeral.is_some() {
             return self.clone();
         }
 
@@ -1340,7 +1340,7 @@ impl crate::Metrics for Context {
         let scope_id = executor.registry.lock().unwrap().create_scope();
 
         // When the last Arc<ScopeGuard> is dropped, remove the
-        // scoped registry. All operations are infallible to avoid
+        // ephemeral registry. All operations are infallible to avoid
         // panicking in Drop.
         let handle = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
@@ -1348,7 +1348,7 @@ impl crate::Metrics for Context {
             }
         }));
         Self {
-            scope: Some(handle),
+            ephemeral: Some(handle),
             ..self.clone()
         }
     }

@@ -402,7 +402,7 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
-            scope: None,
+            ephemeral: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
@@ -440,7 +440,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
+    ephemeral: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -457,7 +457,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope.clone(),
+            ephemeral: self.ephemeral.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -640,7 +640,7 @@ impl crate::Metrics for Context {
 
         // Route to the appropriate registry (root or scoped)
         let mut registry = self.executor.registry.lock().unwrap();
-        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let scoped = registry.get_scope(self.ephemeral.as_ref().map(|s| s.scope_id()));
         let sub_registry = self
             .attributes
             .iter()
@@ -663,13 +663,13 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn with_scope(&self) -> Self {
-        // Already scoped -- inherit the existing scope
-        if self.scope.is_some() {
+    fn with_ephemeral(&self) -> Self {
+        // Already ephemeral -- inherit the existing ephemeral registry
+        if self.ephemeral.is_some() {
             return self.clone();
         }
 
-        // The closure moves the Arc<Executor> so the scoped registry
+        // The closure moves the Arc<Executor> so the ephemeral registry
         // can be cleaned up even after the Context is dropped.
         // All operations are infallible to avoid panicking in Drop.
         let executor = self.executor.clone();
@@ -680,7 +680,7 @@ impl crate::Metrics for Context {
             }
         }));
         Self {
-            scope: Some(handle),
+            ephemeral: Some(handle),
             ..self.clone()
         }
     }

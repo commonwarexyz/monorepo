@@ -35,8 +35,8 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
-    /// Scoped context that keeps this epoch's metrics alive until the cache is dropped.
-    _scope: R,
+    /// Ephemeral context that keeps this epoch's metrics alive until the cache is dropped.
+    _ephemeral: R,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -159,35 +159,35 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let scope = self
+        let ephemeral = self
             .context
             .with_label("cache")
             .with_attribute("epoch", epoch)
-            .with_scope();
+            .with_ephemeral();
         let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
-                &scope,
+                &ephemeral,
                 &self.cfg,
                 epoch,
                 "verified",
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
-                &scope,
+                &ephemeral,
                 &self.cfg,
                 epoch,
                 "notarized",
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
-                &scope,
+                &ephemeral,
                 &self.cfg,
                 epoch,
                 "notarizations",
                 S::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
-                &scope,
+                &ephemeral,
                 &self.cfg,
                 epoch,
                 "finalizations",
@@ -197,7 +197,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         let existing = self.caches.insert(
             epoch,
             Cache {
-                _scope: scope,
+                _ephemeral: ephemeral,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,

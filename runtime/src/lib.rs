@@ -419,30 +419,30 @@ stability_scope!(BETA {
         /// namespaced).
         fn encode(&self) -> String;
 
-        /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
+        /// Create an ephemeral context for metrics with a bounded lifetime (e.g., per-epoch
         /// consensus engines). All metrics registered through the returned context (and
         /// child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into
-        /// a separate registry that is automatically removed when all clones of the scoped
+        /// a separate registry that is automatically removed when all clones of the ephemeral
         /// context are dropped.
         ///
-        /// If the context is already scoped, returns a clone with the same scope (scopes
-        /// nest by inheritance, not by creating new independent scopes).
+        /// If the context is already ephemeral, returns a clone with the same ephemeral
+        /// registry (ephemeral contexts nest by inheritance, not by creating new independent registries).
         ///
         /// # Example
         ///
         /// ```ignore
-        /// let scoped = context
+        /// let ephemeral = context
         ///     .with_label("engine")
         ///     .with_attribute("epoch", epoch)
-        ///     .with_scope();
+        ///     .with_ephemeral();
         ///
-        /// // Register metrics into the scope
+        /// // Register metrics into the ephemeral registry
         /// let counter = Counter::default();
-        /// scoped.register("votes", "vote count", counter.clone());
+        /// ephemeral.register("votes", "vote count", counter.clone());
         ///
-        /// // Metrics are removed when all clones of `scoped` are dropped.
+        /// // Metrics are removed when all clones of `ephemeral` are dropped.
         /// ```
-        fn with_scope(&self) -> Self;
+        fn with_ephemeral(&self) -> Self;
 
     }
 
@@ -2708,14 +2708,14 @@ mod tests {
         test_metrics_family_with_attributes(runner);
     }
 
-    fn test_with_scope_register_and_encode<R: Runner>(runner: R)
+    fn test_with_ephemeral_register_and_encode<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").with_scope();
+            let ephemeral = context.with_label("engine").with_ephemeral();
             let counter = Counter::<u64>::default();
-            scoped.register("votes", "vote count", counter.clone());
+            ephemeral.register("votes", "vote count", counter.clone());
             counter.inc();
 
             let buffer = context.encode();
@@ -2727,18 +2727,18 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_register_and_encode() {
+    fn test_deterministic_with_ephemeral_register_and_encode() {
         let executor = deterministic::Runner::default();
-        test_with_scope_register_and_encode(executor);
+        test_with_ephemeral_register_and_encode(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_register_and_encode() {
+    fn test_tokio_with_ephemeral_register_and_encode() {
         let runner = tokio::Runner::default();
-        test_with_scope_register_and_encode(runner);
+        test_with_ephemeral_register_and_encode(runner);
     }
 
-    fn test_with_scope_drop_removes_metrics<R: Runner>(runner: R)
+    fn test_with_ephemeral_drop_removes_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -2753,10 +2753,10 @@ mod tests {
             permanent.inc();
 
             // Register a scoped metric
-            let scoped = context.with_label("engine").with_scope();
-            let ephemeral = Counter::<u64>::default();
-            scoped.register("votes", "vote count", ephemeral.clone());
-            ephemeral.inc();
+            let ephemeral = context.with_label("engine").with_ephemeral();
+            let counter = Counter::<u64>::default();
+            ephemeral.register("votes", "vote count", counter.clone());
+            counter.inc();
 
             // Both should appear
             let buffer = context.encode();
@@ -2764,7 +2764,7 @@ mod tests {
             assert!(buffer.contains("engine_votes_total 1"));
 
             // Drop the scoped context
-            drop(scoped);
+            drop(ephemeral);
 
             // Only permanent metric should remain
             let buffer = context.encode();
@@ -2780,18 +2780,18 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_drop_removes_metrics() {
+    fn test_deterministic_with_ephemeral_drop_removes_metrics() {
         let executor = deterministic::Runner::default();
-        test_with_scope_drop_removes_metrics(executor);
+        test_with_ephemeral_drop_removes_metrics(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_drop_removes_metrics() {
+    fn test_tokio_with_ephemeral_drop_removes_metrics() {
         let runner = tokio::Runner::default();
-        test_with_scope_drop_removes_metrics(runner);
+        test_with_ephemeral_drop_removes_metrics(runner);
     }
 
-    fn test_with_scope_attributes<R: Runner>(runner: R)
+    fn test_with_ephemeral_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -2800,7 +2800,7 @@ mod tests {
             let epoch1 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .with_scope();
+                .with_ephemeral();
             let c1 = Counter::<u64>::default();
             epoch1.register("votes", "vote count", c1.clone());
             c1.inc();
@@ -2808,7 +2808,7 @@ mod tests {
             let epoch2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 2)
-                .with_scope();
+                .with_ephemeral();
             let c2 = Counter::<u64>::default();
             epoch2.register("votes", "vote count", c2.clone());
             c2.inc();
@@ -2839,26 +2839,26 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_attributes() {
+    fn test_deterministic_with_ephemeral_attributes() {
         let executor = deterministic::Runner::default();
-        test_with_scope_attributes(executor);
+        test_with_ephemeral_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_attributes() {
+    fn test_tokio_with_ephemeral_attributes() {
         let runner = tokio::Runner::default();
-        test_with_scope_attributes(runner);
+        test_with_ephemeral_attributes(runner);
     }
 
-    fn test_with_scope_inherits_on_with_label<R: Runner>(runner: R)
+    fn test_with_ephemeral_inherits_on_with_label<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").with_scope();
+            let ephemeral = context.with_label("engine").with_ephemeral();
 
             // Child context inherits scope
-            let child = scoped.with_label("batcher");
+            let child = ephemeral.with_label("batcher");
             let counter = Counter::<u64>::default();
             child.register("msgs", "message count", counter.clone());
             counter.inc();
@@ -2868,7 +2868,7 @@ mod tests {
 
             // Dropping all scoped contexts removes all metrics in the scope
             drop(child);
-            drop(scoped);
+            drop(ephemeral);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("engine_batcher_msgs"),
@@ -2878,15 +2878,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_inherits_on_with_label() {
+    fn test_deterministic_with_ephemeral_inherits_on_with_label() {
         let executor = deterministic::Runner::default();
-        test_with_scope_inherits_on_with_label(executor);
+        test_with_ephemeral_inherits_on_with_label(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_inherits_on_with_label() {
+    fn test_tokio_with_ephemeral_inherits_on_with_label() {
         let runner = tokio::Runner::default();
-        test_with_scope_inherits_on_with_label(runner);
+        test_with_ephemeral_inherits_on_with_label(runner);
     }
 
     fn test_multiple_scopes<R: Runner>(runner: R)
@@ -2894,8 +2894,8 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let ctx_a = context.with_label("a").with_scope();
-            let ctx_b = context.with_label("b").with_scope();
+            let ctx_a = context.with_label("a").with_ephemeral();
+            let ctx_b = context.with_label("b").with_ephemeral();
 
             let ca = Counter::<u64>::default();
             ctx_a.register("counter", "a counter", ca.clone());
@@ -2944,9 +2944,9 @@ mod tests {
             context.register("root", "root metric", root_counter.clone());
             root_counter.inc();
 
-            let scoped = context.with_label("engine").with_scope();
+            let ephemeral = context.with_label("engine").with_ephemeral();
             let scoped_counter = Counter::<u64>::default();
-            scoped.register("ops", "scoped metric", scoped_counter.clone());
+            ephemeral.register("ops", "scoped metric", scoped_counter.clone());
             scoped_counter.inc();
 
             let buffer = context.encode();
@@ -2982,15 +2982,15 @@ mod tests {
         test_encode_single_eof(runner);
     }
 
-    fn test_with_scope_nested_inherits<R: Runner>(runner: R)
+    fn test_with_ephemeral_nested_inherits<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").with_scope();
+            let ephemeral = context.with_label("engine").with_ephemeral();
 
-            // Calling with_scope() on an already-scoped context inherits the scope
-            let nested = scoped.with_scope();
+            // Calling with_ephemeral() on an already-scoped context inherits the scope
+            let nested = ephemeral.with_ephemeral();
             let counter = Counter::<u64>::default();
             nested.register("votes", "vote count", counter.clone());
             counter.inc();
@@ -3011,7 +3011,7 @@ mod tests {
             );
 
             // Dropping the parent scoped context cleans up
-            drop(scoped);
+            drop(ephemeral);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("engine_votes"),
@@ -3021,15 +3021,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_nested_inherits() {
+    fn test_deterministic_with_ephemeral_nested_inherits() {
         let executor = deterministic::Runner::default();
-        test_with_scope_nested_inherits(executor);
+        test_with_ephemeral_nested_inherits(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_nested_inherits() {
+    fn test_tokio_with_ephemeral_nested_inherits() {
         let runner = tokio::Runner::default();
-        test_with_scope_nested_inherits(runner);
+        test_with_ephemeral_nested_inherits(runner);
     }
 
     #[test]
@@ -3037,24 +3037,24 @@ mod tests {
     fn test_deterministic_reregister_after_scope_drop_panics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let scoped = context
+            let ephemeral = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .with_scope();
+                .with_ephemeral();
             let c1 = Counter::<u64>::default();
-            scoped.register("votes", "vote count", c1.clone());
-            drop(scoped);
+            ephemeral.register("votes", "vote count", c1.clone());
+            drop(ephemeral);
 
             let scoped2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .with_scope();
+                .with_ephemeral();
             let c2 = Counter::<u64>::default();
             scoped2.register("votes", "vote count", c2.clone());
         });
     }
 
-    fn test_with_scope_family_with_attributes<R: Runner>(runner: R)
+    fn test_with_ephemeral_family_with_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -3077,13 +3077,13 @@ mod tests {
         }
 
         runner.start(|context| async move {
-            let scoped = context
+            let ephemeral = context
                 .with_label("batcher")
                 .with_attribute("epoch", 1)
-                .with_scope();
+                .with_ephemeral();
 
             let family: Family<Peer, Counter> = Family::default();
-            scoped.register("votes", "votes per peer", family.clone());
+            ephemeral.register("votes", "votes per peer", family.clone());
             family
                 .get_or_create(&Peer {
                     name: "alice".into(),
@@ -3101,7 +3101,7 @@ mod tests {
                 "family with attributes should combine labels: {buffer}"
             );
 
-            drop(scoped);
+            drop(ephemeral);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("batcher_votes"),
@@ -3111,15 +3111,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_with_scope_family_with_attributes() {
+    fn test_deterministic_with_ephemeral_family_with_attributes() {
         let executor = deterministic::Runner::default();
-        test_with_scope_family_with_attributes(executor);
+        test_with_ephemeral_family_with_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_with_scope_family_with_attributes() {
+    fn test_tokio_with_ephemeral_family_with_attributes() {
         let runner = tokio::Runner::default();
-        test_with_scope_family_with_attributes(runner);
+        test_with_ephemeral_family_with_attributes(runner);
     }
 
     #[test]
