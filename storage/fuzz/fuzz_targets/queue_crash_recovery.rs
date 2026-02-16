@@ -111,9 +111,6 @@ struct RecoveryState {
     /// or were appended but not yet committed.
     pending: Vec<u8>,
 
-    /// The ack floor at the time of last successful commit.
-    committed_ack_floor: u64,
-
     /// Current in-memory ack floor (lost on crash).
     current_ack_floor: u64,
 
@@ -123,8 +120,9 @@ struct RecoveryState {
 
     /// Whether we observed a mutable storage error during the operation phase.
     ///
-    /// After mutable errors, recovery bounds are conservative because the queue
-    /// may be left in an inconsistent state until restart.
+    /// After mutable errors, the queue may be left in an inconsistent state until
+    /// restart. In that case recovery checks should only assert basic liveness,
+    /// not exact durability/accounting bounds.
     tainted: bool,
 }
 
@@ -133,7 +131,6 @@ impl RecoveryState {
         Self {
             committed: BTreeMap::new(),
             pending: Vec::new(),
-            committed_ack_floor: 0,
             current_ack_floor: 0,
             uncommitted: BTreeMap::new(),
             tainted: false,
@@ -142,6 +139,10 @@ impl RecoveryState {
 
     fn mark_tainted(&mut self) {
         self.tainted = true;
+    }
+
+    fn is_tainted(&self) -> bool {
+        self.tainted
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
@@ -185,24 +186,13 @@ impl RecoveryState {
         self.current_ack_floor = ack_floor;
     }
 
-    fn sync_succeeded(&mut self, ack_floor: u64) {
-        self.current_ack_floor = ack_floor;
-        self.committed_ack_floor = ack_floor;
-    }
-
     /// Returns the minimum size we expect after recovery.
     fn min_recovered_size(&self) -> u64 {
-        if self.tainted {
-            return 0;
-        }
         self.committed.len() as u64
     }
 
     /// Returns the maximum size we expect after recovery.
     fn max_recovered_size(&self) -> u64 {
-        if self.tainted {
-            return u64::MAX;
-        }
         (self.committed.len() + self.pending.len() + self.uncommitted.len()) as u64
     }
 
@@ -213,9 +203,6 @@ impl RecoveryState {
 
     /// Returns the maximum ack floor we expect after recovery.
     fn max_recovered_ack_floor(&self) -> u64 {
-        if self.tainted {
-            return u64::MAX;
-        }
         self.current_ack_floor
     }
 }
@@ -326,7 +313,7 @@ async fn run_operations(
                         // sync = commit + prune, so success means ALL
                         // previously uncommitted items are now durable too.
                         state.commit_succeeded();
-                        state.sync_succeeded(queue.ack_floor());
+                        state.update_ack_floor(queue.ack_floor());
                     }
                     Err(_) => {
                         state.commit_failed();
@@ -345,11 +332,42 @@ async fn run_operations(
     state
 }
 
+/// Verify recovery after a mutable error during the operation phase.
+///
+/// Mutable errors may leave storage temporarily inconsistent, so we only assert
+/// that the queue can be re-initialized and used again for basic operations.
+async fn verify_recovery_after_mutable_error(queue: &mut Queue<deterministic::Context, Vec<u8>>) {
+    // Basic read-path sanity should not fail.
+    let size_before = queue.size().await;
+    let _ = queue.dequeue().await;
+
+    // Queue should remain writable after recovery.
+    let new_pos = queue
+        .enqueue(make_item(0xFF))
+        .await
+        .expect("enqueue should succeed after recovery");
+    assert_eq!(
+        new_pos, size_before,
+        "new item should be appended at current queue size"
+    );
+
+    // Persist path should also remain usable.
+    queue
+        .sync()
+        .await
+        .expect("sync should succeed after recovery");
+}
+
 /// Verify the queue state after recovery.
 async fn verify_recovery(
     queue: &mut Queue<deterministic::Context, Vec<u8>>,
     state: &RecoveryState,
 ) {
+    if state.is_tainted() {
+        verify_recovery_after_mutable_error(queue).await;
+        return;
+    }
+
     let size = queue.size().await;
     let ack_floor = queue.ack_floor();
 
