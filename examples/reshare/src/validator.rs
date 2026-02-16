@@ -179,7 +179,7 @@ mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Runner},
-        Clock, Handle, Quota, Runner as _, Spawner,
+        Clock, Handle, Metrics, Quota, Runner as _, Spawner,
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
@@ -1349,5 +1349,87 @@ mod test {
         }
         .run()
         .unwrap();
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn reshare_scoped_metrics_cleanup() {
+        Runner::seeded(0).start(|mut ctx| async move {
+            let (network, mut oracle) = Network::<_, PublicKey>::new(
+                ctx.with_label("network"),
+                simulated::Config {
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                    max_size: 1024 * 1024,
+                },
+            );
+            network.start();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            let (updates_in, mut updates_out) = mpsc::channel(1);
+            let mut team = Team::reshare(&mut ctx, 4, &[4]);
+            team.start(&ctx, &mut oracle, link, updates_in.clone(), &HashSet::new())
+                .await;
+
+            // Run through 2 successful reshares (epochs 0 and 1)
+            let target = 2u64;
+            let mut outputs = Vec::<Option<Output<MinSig, PublicKey>>>::new();
+            let mut status = BTreeMap::<PublicKey, Epoch>::new();
+            let mut successes = 0u64;
+            let mut success_target_reached_epoch = None;
+            loop {
+                let update = updates_out.recv().await.unwrap();
+                let (epoch, output) = match update.update {
+                    Update::Failure { epoch } => (epoch, None),
+                    Update::Success { epoch, output, .. } => (epoch, Some(output)),
+                };
+                status.insert(update.pk, epoch);
+                if let Some(o) = outputs.get(epoch.get() as usize) {
+                    assert_eq!(o.as_ref(), output.as_ref());
+                } else {
+                    if output.is_some() {
+                        successes += 1;
+                    }
+                    outputs.push(output);
+                }
+                if successes >= target {
+                    success_target_reached_epoch = Some(epoch);
+                }
+
+                let post_update =
+                    success_target_reached_epoch.map_or(PostUpdate::Continue, |target_epoch| {
+                        let all_reached =
+                            status.values().filter(|e| **e >= target_epoch).count() >= 4;
+                        if all_reached {
+                            PostUpdate::Stop
+                        } else {
+                            PostUpdate::Continue
+                        }
+                    });
+                let done = matches!(post_update, PostUpdate::Stop);
+                let _ = update.callback.send(post_update);
+                if done {
+                    break;
+                }
+            }
+
+            // Allow the orchestrator to process the epoch exit
+            ctx.sleep(Duration::from_secs(1)).await;
+
+            // Verify scoped metrics: epoch 0 should be gone, epoch 1 should be present
+            let buffer = ctx.encode();
+            assert!(
+                !buffer.contains("epoch=\"0\""),
+                "epoch 0 metrics should be cleaned up: {buffer}"
+            );
+            assert!(
+                buffer.contains("epoch=\"1\""),
+                "epoch 1 metrics should still be present: {buffer}"
+            );
+        });
     }
 }
