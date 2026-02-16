@@ -1318,8 +1318,8 @@ impl crate::Metrics for Context {
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let result = executor.registry.lock().unwrap().encode();
-        result
+        let encoded = executor.registry.lock().unwrap().encode();
+        encoded
     }
 
     fn with_scope(&self) -> Self {
@@ -1331,15 +1331,11 @@ impl crate::Metrics for Context {
             return self.clone();
         }
 
-        // Capture a Weak so the cleanup closure doesn't prevent
-        // the executor from being dropped.
+        // RAII guard removes the scoped registry when all clones drop.
+        // Closure is infallible to avoid panicking in Drop.
         let weak = self.executor.clone();
         let scope_id = executor.registry.lock().unwrap().create_scope();
-
-        // When the last Arc<ScopeGuard> is dropped, remove the
-        // scoped registry. All operations are infallible to avoid
-        // panicking in Drop.
-        let handle = Arc::new(ScopeGuard::new(scope_id, move |id| {
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
                 if let Ok(mut reg) = exec.registry.lock() {
                     reg.remove_scope(id);
@@ -1347,7 +1343,7 @@ impl crate::Metrics for Context {
             }
         }));
         Self {
-            scope: Some(handle),
+            scope: Some(guard),
             ..self.clone()
         }
     }

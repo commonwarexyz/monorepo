@@ -669,18 +669,17 @@ impl crate::Metrics for Context {
             return self.clone();
         }
 
-        // The closure moves the Arc<Executor> so the scoped registry
-        // can be cleaned up even after the Context is dropped.
-        // All operations are infallible to avoid panicking in Drop.
+        // RAII guard removes the scoped registry when all clones drop.
+        // Closure is infallible to avoid panicking in Drop.
         let executor = self.executor.clone();
         let scope_id = executor.registry.lock().unwrap().create_scope();
-        let handle = Arc::new(ScopeGuard::new(scope_id, move |id| {
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
             if let Ok(mut registry) = executor.registry.lock() {
                 registry.remove_scope(id);
             }
         }));
         Self {
-            scope: Some(handle),
+            scope: Some(guard),
             ..self.clone()
         }
     }
