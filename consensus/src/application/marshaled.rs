@@ -65,7 +65,7 @@ use commonware_utils::{
         fallible::OneshotExt,
         oneshot::{self, error::RecvError},
     },
-    sync::AsyncMutex,
+    sync::Mutex,
 };
 use futures::future::{ready, Either, Ready};
 use prometheus_client::metrics::gauge::Gauge;
@@ -116,8 +116,8 @@ where
     application: A,
     marshal: marshal::Mailbox<S, B>,
     epocher: ES,
-    last_built: Arc<AsyncMutex<Option<(Round, B)>>>,
-    verification_tasks: Arc<AsyncMutex<TasksMap<B>>>,
+    last_built: Arc<Mutex<Option<(Round, B)>>>,
+    verification_tasks: Arc<Mutex<TasksMap<B>>>,
 
     build_duration: Gauge,
 }
@@ -149,8 +149,8 @@ where
             application,
             marshal,
             epocher,
-            last_built: Arc::new(AsyncMutex::new(None)),
-            verification_tasks: Arc::new(AsyncMutex::new(HashMap::new())),
+            last_built: Arc::new(Mutex::new(None)),
+            verification_tasks: Arc::new(Mutex::new(HashMap::new())),
 
             build_duration,
         }
@@ -365,7 +365,7 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.commitment();
                     {
-                        let mut lock = last_built.lock().await;
+                        let mut lock = last_built.lock();
                         *lock = Some((consensus_context.round, parent));
                     }
 
@@ -411,7 +411,7 @@ where
 
                 let digest = built_block.commitment();
                 {
-                    let mut lock = last_built.lock().await;
+                    let mut lock = last_built.lock();
                     *lock = Some((consensus_context.round, built_block));
                 }
 
@@ -509,7 +509,6 @@ where
                     marshaled
                         .verification_tasks
                         .lock()
-                        .await
                         .insert((round, commitment), task_rx);
 
                     tx.send_lossy(true);
@@ -540,7 +539,6 @@ where
                 marshaled
                     .verification_tasks
                     .lock()
-                    .await
                     .insert((round, commitment), task);
 
                 tx.send_lossy(true);
@@ -564,9 +562,10 @@ where
 {
     async fn certify(&mut self, round: Round, commitment: Self::Digest) -> oneshot::Receiver<bool> {
         // Attempt to retrieve the existing verification task for this (round, payload).
-        let mut tasks_guard = self.verification_tasks.lock().await;
-        let task = tasks_guard.remove(&(round, commitment));
-        drop(tasks_guard);
+        let task = {
+            let mut tasks_guard = self.verification_tasks.lock();
+            tasks_guard.remove(&(round, commitment))
+        };
         if let Some(task) = task {
             return task;
         }
@@ -655,7 +654,7 @@ where
     /// This uses the cached block from the last proposal operation. If no block was built or
     /// the commitment does not match the cached block, the broadcast is skipped with a warning.
     async fn broadcast(&mut self, commitment: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().await.clone() else {
+        let Some((round, block)) = self.last_built.lock().clone() else {
             warn!("missing block to broadcast");
             return;
         };
@@ -695,7 +694,7 @@ where
     async fn report(&mut self, update: Self::Activity) {
         // Clean up verification tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
-            let mut tasks_guard = self.verification_tasks.lock().await;
+            let mut tasks_guard = self.verification_tasks.lock();
             tasks_guard.retain(|(task_round, _), _| task_round > round);
         }
         self.application.report(update).await
