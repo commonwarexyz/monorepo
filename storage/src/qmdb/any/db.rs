@@ -510,7 +510,7 @@ where
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        Self::destroy(self).await
+        self.destroy().await
     }
 }
 
