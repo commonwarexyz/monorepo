@@ -149,8 +149,7 @@ use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, Array};
-use futures::lock::Mutex;
+use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub mod db;
@@ -355,7 +354,7 @@ where
         any,
         status,
         grafted_mmr,
-        metadata: Mutex::new(metadata),
+        metadata: AsyncMutex::new(metadata),
         thread_pool,
         state: db::Merkleized { root },
     })
@@ -442,7 +441,7 @@ where
         any,
         status,
         grafted_mmr,
-        metadata: Mutex::new(metadata),
+        metadata: AsyncMutex::new(metadata),
         thread_pool: pool,
         state: db::Merkleized { root },
     })
