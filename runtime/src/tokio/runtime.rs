@@ -249,7 +249,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    store: Mutex<Registry>,
+    registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -282,9 +282,9 @@ impl crate::Runner for Runner {
         F: FnOnce(Self::Context) -> Fut,
         Fut: Future,
     {
-        // Create a new metric store
-        let mut store = Registry::new();
-        let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        // Create a new registry
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -385,7 +385,7 @@ impl crate::Runner for Runner {
 
         // Initialize executor
         let executor = Arc::new(Executor {
-            store: Mutex::new(store),
+            registry: Mutex::new(registry),
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
@@ -639,19 +639,19 @@ impl crate::Metrics for Context {
         };
 
         // Route to the appropriate registry (root or scoped)
-        let mut store = self.executor.store.lock().unwrap();
-        let registry = store.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let mut registry = self.executor.registry.lock().unwrap();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
         let sub_registry =
             self.attributes
                 .iter()
-                .fold(registry, |reg, (k, v): &(String, String)| {
+                .fold(scoped, |reg, (k, v): &(String, String)| {
                     reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
                 });
         sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
-        self.executor.store.lock().unwrap().encode()
+        self.executor.registry.lock().unwrap().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
@@ -673,10 +673,10 @@ impl crate::Metrics for Context {
         // can be cleaned up even after the Context is dropped.
         // All operations are infallible to avoid panicking in Drop.
         let executor = self.executor.clone();
-        let scope_id = executor.store.lock().unwrap().create_scope();
+        let scope_id = executor.registry.lock().unwrap().create_scope();
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
-            if let Ok(mut store) = executor.store.lock() {
-                store.remove_scope(id);
+            if let Ok(mut registry) = executor.registry.lock() {
+                registry.remove_scope(id);
             }
         }));
         Self {

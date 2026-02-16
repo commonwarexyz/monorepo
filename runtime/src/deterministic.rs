@@ -347,7 +347,7 @@ type MetricKey = (String, Vec<(String, String)>, Option<u64>);
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    store: Mutex<Registry>,
+    registry: Mutex<Registry>,
     registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
@@ -899,9 +899,9 @@ impl Clone for Context {
 
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
-        // Create a new metric store
-        let mut store = Registry::new();
-        let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        // Create a new registry
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -946,7 +946,7 @@ impl Context {
         let (panicker, panicked) = Panicker::new(cfg.catch_panics);
 
         let executor = Arc::new(Executor {
-            store: Mutex::new(store),
+            registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
@@ -993,8 +993,8 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
-        let mut store = Registry::new();
-        let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
@@ -1025,7 +1025,7 @@ impl Context {
             dns: checkpoint.dns,
 
             // New state for the new runtime
-            store: Mutex::new(store),
+            registry: Mutex::new(registry),
             registered_metrics: Mutex::new(HashSet::new()),
             metrics,
             tasks: Arc::new(Tasks::new()),
@@ -1308,12 +1308,12 @@ impl crate::Metrics for Context {
         );
 
         // Route to the appropriate registry (root or scoped)
-        let mut store = executor.store.lock().unwrap();
-        let registry = store.get_scope(scope_id);
+        let mut registry = executor.registry.lock().unwrap();
+        let scoped = registry.get_scope(scope_id);
         let sub_registry =
             self.attributes
                 .iter()
-                .fold(registry, |reg, (k, v): &(String, String)| {
+                .fold(scoped, |reg, (k, v): &(String, String)| {
                     reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
                 });
         sub_registry.register(prefixed_name, help, metric);
@@ -1322,7 +1322,7 @@ impl crate::Metrics for Context {
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let result = executor.store.lock().unwrap().encode();
+        let result = executor.registry.lock().unwrap().encode();
         result
     }
 
@@ -1338,14 +1338,14 @@ impl crate::Metrics for Context {
         // Capture a Weak so the cleanup closure doesn't prevent
         // the executor from being dropped.
         let weak = self.executor.clone();
-        let scope_id = executor.store.lock().unwrap().create_scope();
+        let scope_id = executor.registry.lock().unwrap().create_scope();
 
         // When the last Arc<ScopeHandle> is dropped, remove the
         // scoped registry and its duplicate-detection entries.
         // All operations are infallible to avoid panicking in Drop.
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
             if let Some(exec) = weak.upgrade() {
-                let _ = exec.store.lock().map(|mut s| s.remove_scope(id));
+                let _ = exec.registry.lock().map(|mut s| s.remove_scope(id));
                 let _ = exec
                     .registered_metrics
                     .lock()
