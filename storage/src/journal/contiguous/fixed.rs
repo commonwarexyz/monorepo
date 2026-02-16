@@ -64,10 +64,8 @@ use crate::{
     metadata::{Config as MetadataConfig, Metadata},
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{
-    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard,
-    RwLockWriteGuard, Storage,
-};
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_utils::sync::{AsyncRwLock, AsyncRwLockReadGuard};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
@@ -177,7 +175,7 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     ///
     /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
     /// race conditions while allowing concurrent reads during sync.
-    inner: RwLock<Inner<E, A>>,
+    inner: AsyncRwLock<Inner<E, A>>,
 
     /// The maximum number of items per blob (section).
     items_per_blob: u64,
@@ -185,7 +183,7 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
 
 /// A reader guard that holds a consistent snapshot of the journal's bounds.
 pub struct Reader<'a, E: Clock + Storage + Metrics, A: CodecFixedShared> {
-    guard: RwLockReadGuard<'a, Inner<E, A>>,
+    guard: AsyncRwLockReadGuard<'a, Inner<E, A>>,
     items_per_blob: u64,
 }
 
@@ -354,7 +352,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         journal.ensure_section_exists(tail_section).await?;
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: AsyncRwLock::new(Inner {
                 journal,
                 size,
                 metadata,
@@ -564,7 +562,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         }
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: AsyncRwLock::new(Inner {
                 journal,
                 size,
                 metadata,
@@ -587,9 +585,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Only the tail section can have pending updates since historical sections are synced
     /// when they become full.
     pub async fn sync(&self) -> Result<(), Error> {
-        // Serialize with append/prune/rewind to ensure section selection is stable, while still allowing
-        // concurrent readers.
-        let inner = self.inner.upgradable_read().await;
+        // Serialize with append/prune/rewind to ensure section selection is stable.
+        let mut inner = self.inner.write().await;
 
         // Sync the tail section
         let tail_section = inner.size / self.items_per_blob;
@@ -616,9 +613,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Ok(());
         };
 
-        // Upgrade only for the metadata mutation/sync step; reads were allowed while syncing
-        // the tail section above.
-        let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
         if put {
             inner.metadata.put(
                 PRUNING_BOUNDARY_KEY,
@@ -663,15 +657,11 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Ok(position);
         }
 
-        // The section was filled and must be synced. Downgrade so readers can continue during the
-        // sync, but keep mutators blocked. After sync, upgrade again to create the next tail
-        // section before any append can proceed.
-        let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
+        // The section was filled and must be synced.
         inner.journal.sync(section).await?;
 
         // Ensure the new tail section exists, as required to maintain the invariant. This must
         // happen after the previous section is synced.
-        let mut inner = RwLockUpgradableReadGuard::upgrade(inner).await;
         inner.journal.ensure_section_exists(section + 1).await?;
 
         Ok(position)

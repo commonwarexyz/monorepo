@@ -145,9 +145,11 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, RwLock,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
-    use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{
+        channel::mpsc, sync::AsyncRwLock, test_rng_seeded, NZUsize, NZU16, NZU64,
+    };
     use rand::RngCore as _;
     use rstest::rstest;
     use std::{
@@ -284,7 +286,7 @@ mod tests {
             let db_config =
                 create_sync_config(&format!("sync_client_{}", context.next_u64()), &context);
 
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size,
@@ -367,7 +369,7 @@ mod tests {
 
             let db_config =
                 create_sync_config(&format!("empty_sync_{}", context.next_u64()), &context);
-            let target_db = Arc::new(RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 db_config,
                 fetch_batch_size: NZU64!(10),
@@ -421,7 +423,7 @@ mod tests {
             // Perform sync
             let db_config = create_sync_config("persistence-test", &context);
             let client_context = context.with_label("client");
-            let target_db = Arc::new(RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(5),
@@ -506,7 +508,7 @@ mod tests {
             let final_root = target_db.root().await;
 
             // Wrap target database for shared mutable access
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
 
             // Create client with initial smaller target and very small batch size
             let (update_sender, update_receiver) = mpsc::channel(1);
@@ -600,7 +602,7 @@ mod tests {
                     range: Location::new_unchecked(31)..Location::new_unchecked(31),
                 },
                 context: context.with_label("client"),
-                resolver: Arc::new(commonware_runtime::RwLock::new(target_db)),
+                resolver: Arc::new(AsyncRwLock::new(target_db)),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
@@ -644,7 +646,7 @@ mod tests {
             let (durable_db, _) = target_db.commit(None).await.unwrap();
             let target_db = durable_db.into_merkleized();
 
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 db_config: create_sync_config(&format!("subset_{}", context.next_u64()), &context),
                 fetch_batch_size: NZU64!(10),
@@ -715,7 +717,7 @@ mod tests {
             let upper_bound = bounds.end; // Up to the last operation
 
             // Reopen the sync database and sync it to the target database
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 db_config: sync_db_config, // Use same config as before
                 fetch_batch_size: NZU64!(10),
@@ -779,7 +781,7 @@ mod tests {
             let upper_bound = bounds.end;
 
             // Sync should complete immediately without fetching
-            let resolver = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let resolver = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 db_config: sync_config,
                 fetch_batch_size: NZU64!(10),
@@ -829,7 +831,7 @@ mod tests {
 
             // Create client with initial target
             let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
                 db_config: create_sync_config(&format!("lb-dec-{}", context.next_u64()), &context),
@@ -890,7 +892,7 @@ mod tests {
 
             // Create client with initial target
             let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
                 db_config: create_sync_config(&format!("ub-dec-{}", context.next_u64()), &context),
@@ -974,7 +976,7 @@ mod tests {
 
             // Create client with initial target
             let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
                 db_config: create_sync_config(
@@ -1040,7 +1042,7 @@ mod tests {
 
             // Create client with initial target
             let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
                 db_config: create_sync_config(
@@ -1102,7 +1104,7 @@ mod tests {
 
             // Create client with target that will complete immediately
             let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(commonware_runtime::RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
                 db_config: create_sync_config(&format!("done_{}", context.next_u64()), &context),

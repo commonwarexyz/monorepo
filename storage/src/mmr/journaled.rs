@@ -28,10 +28,12 @@ use crate::{
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, RwLock, Storage as RStorage};
-use commonware_utils::sequence::prefixed_u64::U64;
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_utils::{
+    sequence::prefixed_u64::U64,
+    sync::{AsyncMutex, AsyncRwLock},
+};
 use core::ops::Range;
-use futures::lock::Mutex;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -85,7 +87,7 @@ pub struct SyncConfig<D: Digest> {
     pub pinned_nodes: Option<Vec<D>>,
 }
 
-/// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
+/// Fields of [Mmr] that are protected by an [AsyncRwLock] for interior mutability.
 struct Inner<D: Digest, S: State<D> + Send + Sync> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
@@ -100,7 +102,7 @@ struct Inner<D: Digest, S: State<D> + Send + Sync> {
 /// A MMR backed by a fixed-item-length journal.
 pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sync = Dirty> {
     /// Lock-protected mutable state.
-    inner: RwLock<Inner<D, S>>,
+    inner: AsyncRwLock<Inner<D, S>>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, D>,
@@ -111,7 +113,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> + Send + Sy
     metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Serializes concurrent sync calls.
-    sync_lock: Mutex<()>,
+    sync_lock: AsyncMutex<()>,
 
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
@@ -121,7 +123,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr
     fn from(clean: Mmr<E, D, Clean<D>>) -> Self {
         let inner = clean.inner.into_inner();
         Self {
-            inner: RwLock::new(Inner {
+            inner: AsyncRwLock::new(Inner {
                 mem_mmr: inner.mem_mmr.into(),
                 pruned_to_pos: inner.pruned_to_pos,
             }),
@@ -251,13 +253,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 hasher,
             )?;
             return Ok(Self {
-                inner: RwLock::new(Inner {
+                inner: AsyncRwLock::new(Inner {
                     mem_mmr,
                     pruned_to_pos: Position::new(0),
                 }),
                 journal,
                 metadata,
-                sync_lock: Mutex::new(()),
+                sync_lock: AsyncMutex::new(()),
                 pool: cfg.thread_pool,
             });
         }
@@ -365,13 +367,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         }
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: AsyncRwLock::new(Inner {
                 mem_mmr,
                 pruned_to_pos: prune_pos,
             }),
             journal,
             metadata,
-            sync_lock: Mutex::new(()),
+            sync_lock: AsyncMutex::new(()),
             pool: cfg.thread_pool,
         })
     }
@@ -473,13 +475,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         journal.prune(*cfg.range.start).await?;
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: AsyncRwLock::new(Inner {
                 mem_mmr,
                 pruned_to_pos: cfg.range.start,
             }),
             journal,
             metadata,
-            sync_lock: Mutex::new(()),
+            sync_lock: AsyncMutex::new(()),
             pool: cfg.config.thread_pool,
         })
     }
@@ -736,7 +738,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
         let inner = self.inner.into_inner();
         CleanMmr {
-            inner: RwLock::new(Inner {
+            inner: AsyncRwLock::new(Inner {
                 mem_mmr: inner.mem_mmr.merkleize(h, self.pool.clone()),
                 pruned_to_pos: inner.pruned_to_pos,
             }),

@@ -23,8 +23,8 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
-use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _, RwLock};
-use commonware_utils::{channel::mpsc, NZU64};
+use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
+use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZU64};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -115,7 +115,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that invalid bounds are rejected
 pub(crate) fn test_sync_invalid_bounds<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -131,7 +131,7 @@ where
                 range: Location::new_unchecked(31)..Location::new_unchecked(30), // Invalid: start > end
             },
             context: context.with_label("client"),
-            resolver: Arc::new(RwLock::new(target_db)),
+            resolver: Arc::new(AsyncRwLock::new(target_db)),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -186,7 +186,7 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -209,7 +209,7 @@ where
 
         // Configure sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let client_context = context.with_label("client");
         let config = Config {
             db_config: H::clone_config(&db_config),
@@ -266,7 +266,7 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -299,7 +299,7 @@ where
                 range: lower_bound..upper_bound,
             },
             context: context.with_label("client"),
-            resolver: Arc::new(RwLock::new(target_db)),
+            resolver: Arc::new(AsyncRwLock::new(target_db)),
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
@@ -328,7 +328,7 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -362,7 +362,7 @@ where
         let upper_bound = target_db.bounds().await.end;
 
         // Reopen the sync database and sync it to the target database
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let config = Config {
             db_config: sync_db_config,
             fetch_batch_size: NZU64!(10),
@@ -505,7 +505,7 @@ where
 /// Test that the client fails to sync if the lower bound is decreased via target update.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -524,7 +524,7 @@ where
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
@@ -570,7 +570,7 @@ where
 /// Test that the client fails to sync if the upper bound is decreased via target update.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -589,7 +589,7 @@ where
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
@@ -634,7 +634,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -666,7 +666,7 @@ where
             // Create client with placeholder initial target (stale compared to final target)
             let (update_sender, update_receiver) = mpsc::channel(1);
 
-            let target_db = Arc::new(RwLock::new(target_db));
+            let target_db = Arc::new(AsyncRwLock::new(target_db));
             let config = Config {
                 context: context.with_label("client"),
                 db_config: H::config(&context.next_u64().to_string(), &context),
@@ -716,7 +716,7 @@ where
 /// Test that the client fails to sync with invalid bounds (lower > upper) sent via target update.
 pub(crate) fn test_target_update_invalid_bounds<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -735,7 +735,7 @@ where
 
         // Create client with initial target
         let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
@@ -778,7 +778,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -797,7 +797,7 @@ where
 
         // Create client with target that will complete immediately
         let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let config = Config {
             context: context.with_label("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
@@ -846,7 +846,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<RwLock<Option<DbOf<H>>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -864,7 +864,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let initial_root = target_db.root().await;
 
         // Wrap target database for shared mutable access (using Option so we can take ownership)
-        let target_db = Arc::new(RwLock::new(Some(target_db)));
+        let target_db = Arc::new(AsyncRwLock::new(Some(target_db)));
 
         // Create client with initial target and small batch size
         let (update_sender, update_receiver) = mpsc::channel(1);
@@ -953,7 +953,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<RwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<DbOf<H>>>: Resolver<Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -973,7 +973,7 @@ where
         // Perform sync
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.with_label("client");
-        let target_db = Arc::new(RwLock::new(target_db));
+        let target_db = Arc::new(AsyncRwLock::new(target_db));
         let config = Config {
             db_config: H::clone_config(&db_config),
             fetch_batch_size: NZU64!(5),

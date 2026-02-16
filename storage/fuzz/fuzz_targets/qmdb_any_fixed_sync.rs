@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, RwLock,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     qmdb::{
         any::{
@@ -16,7 +14,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{num::NonZeroU16, sync::Arc};
 
@@ -222,7 +220,7 @@ fn fuzz(mut input: FuzzInput) {
                         range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(RwLock::new(clean_db));
+                    let wrapped_src = Arc::new(AsyncRwLock::new(clean_db));
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
