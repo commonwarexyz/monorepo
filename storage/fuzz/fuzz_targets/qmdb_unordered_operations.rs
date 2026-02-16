@@ -120,7 +120,7 @@ fn fuzz(data: FuzzInput) {
                 QmdbOperation::Root => {
                     // root requires merkleization but not commit
                     let clean_db = db.into_merkleized();
-                    clean_db.root().await;
+                    clean_db.root();
                     db = clean_db.into_mutable();
                 }
 
@@ -133,7 +133,7 @@ fn fuzz(data: FuzzInput) {
 
                     let clean_db = db.into_merkleized();
 
-                    let current_root = clean_db.root().await;
+                    let current_root = clean_db.root();
                     // Adjust start_loc to be within valid range
                     // Locations are 0-indexed (first operation is at location 0)
                     let adjusted_start = Location::new(*start_loc % *actual_op_count).unwrap();

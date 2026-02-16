@@ -121,18 +121,18 @@ async fn run_operations(
     operations: &[MmrOperation],
 ) -> ExpectedBounds {
     let mut min_size = 0u64;
-    let mut max_size = mmr.size().await.as_u64();
+    let mut max_size = mmr.size().as_u64();
     let mut min_leaves = 0u64;
-    let mut max_leaves = mmr.leaves().await.as_u64();
+    let mut max_leaves = mmr.leaves().as_u64();
     let mut min_pruned = 0u64;
-    let mut max_pruned = mmr.bounds().await.start.as_u64();
+    let mut max_pruned = mmr.bounds().start.as_u64();
 
     for op in operations.iter() {
         let step_result: Result<UnmerkleizedMmr, ()> = match op {
             MmrOperation::Add { data } => {
-                let leaves_before = mmr.leaves().await.as_u64();
+                let leaves_before = mmr.leaves().as_u64();
 
-                if mmr.add(hasher, data).await.is_err() {
+                if mmr.add(hasher, data).is_err() {
                     // Partial write possible: max is size after one leaf added
                     max_size = max_size.max(
                         Position::try_from(Location::new(leaves_before).unwrap() + 1)
@@ -142,18 +142,18 @@ async fn run_operations(
                     max_leaves = max_leaves.max(leaves_before + 1);
                     Err(())
                 } else {
-                    max_size = max_size.max(mmr.size().await.as_u64());
-                    max_leaves = max_leaves.max(mmr.leaves().await.as_u64());
+                    max_size = max_size.max(mmr.size().as_u64());
+                    max_leaves = max_leaves.max(mmr.leaves().as_u64());
                     Ok(mmr)
                 }
             }
 
             MmrOperation::Pop { count } => {
                 let count = *count as usize;
-                if count == 0 || count as u64 > mmr.leaves().await.as_u64() {
+                if count == 0 || count as u64 > mmr.leaves().as_u64() {
                     Ok(mmr)
                 } else {
-                    let target_leaves = mmr.leaves().await.as_u64() - count as u64;
+                    let target_leaves = mmr.leaves().as_u64() - count as u64;
 
                     if mmr.pop(count).await.is_err() {
                         // Partial pop possible: min could be target
@@ -170,8 +170,8 @@ async fn run_operations(
                         Err(())
                     } else {
                         // Pop decreases size: update min bounds
-                        min_size = min_size.min(mmr.size().await.as_u64());
-                        min_leaves = min_leaves.min(mmr.leaves().await.as_u64());
+                        min_size = min_size.min(mmr.size().as_u64());
+                        min_leaves = min_leaves.min(mmr.leaves().as_u64());
                         Ok(mmr)
                     }
                 }
@@ -183,9 +183,9 @@ async fn run_operations(
                     Err(())
                 } else {
                     // Sync commits state: update all bounds to current values
-                    let size = clean_mmr.size().await.as_u64();
-                    let leaves = clean_mmr.leaves().await.as_u64();
-                    let pruned = clean_mmr.bounds().await.start.as_u64();
+                    let size = clean_mmr.size().as_u64();
+                    let leaves = clean_mmr.leaves().as_u64();
+                    let pruned = clean_mmr.bounds().start.as_u64();
                     min_size = size;
                     max_size = max_size.max(size);
                     min_leaves = leaves;
@@ -197,8 +197,8 @@ async fn run_operations(
             }
 
             MmrOperation::PruneToPos { pos } => {
-                let size = mmr.size().await.as_u64();
-                let current_pruned = mmr.bounds().await.start.as_u64();
+                let size = mmr.size().as_u64();
+                let current_pruned = mmr.bounds().start.as_u64();
                 let safe_pos = (*pos).min(size);
 
                 if safe_pos <= current_pruned {
@@ -214,7 +214,7 @@ async fn run_operations(
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = clean_mmr.bounds().await.start.as_u64();
+                            let pruned = clean_mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
                             Ok(clean_mmr.into_dirty())
@@ -224,8 +224,8 @@ async fn run_operations(
             }
 
             MmrOperation::PruneAll => {
-                let size = mmr.size().await.as_u64();
-                let current_pruned = mmr.bounds().await.start.as_u64();
+                let size = mmr.size().as_u64();
+                let current_pruned = mmr.bounds().start.as_u64();
 
                 if size == 0 || current_pruned >= size {
                     // No-op: nothing to prune
@@ -240,7 +240,7 @@ async fn run_operations(
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = clean_mmr.bounds().await.start.as_u64();
+                            let pruned = clean_mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
                             Ok(clean_mmr.into_dirty())
@@ -336,9 +336,9 @@ fn fuzz(input: FuzzInput) {
         .expect("MMR recovery should succeed");
 
         // Verify recovered state is within expected bounds
-        let size = mmr.size().await.as_u64();
-        let leaves = mmr.leaves().await.as_u64();
-        let pruned = mmr.bounds().await.start.as_u64();
+        let size = mmr.size().as_u64();
+        let leaves = mmr.leaves().as_u64();
+        let pruned = mmr.bounds().start.as_u64();
 
         assert!(
             size <= bounds.max_size,
@@ -381,7 +381,6 @@ fn fuzz(input: FuzzInput) {
         let test_data = [0xABu8; DATA_SIZE];
         let mut mmr = mmr.into_dirty();
         mmr.add(&mut hasher, &test_data)
-            .await
             .expect("Should be able to add after recovery");
         let mmr = mmr.merkleize(&mut hasher);
         mmr.destroy().await.expect("Should be able to destroy MMR");

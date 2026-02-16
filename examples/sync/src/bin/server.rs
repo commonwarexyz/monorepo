@@ -130,7 +130,7 @@ where
             let database = db_opt.take().expect("database should exist");
             match database.add_operations(new_operations).await {
                 Ok(database) => {
-                    let root = database.root().await;
+                    let root = database.root();
                     *db_opt = Some(database);
                     root
                 }
@@ -171,7 +171,7 @@ where
         let db_opt = state.database.read().await;
         let database = db_opt.as_ref().expect("database should exist");
         (
-            database.root().await,
+            database.root(),
             database.inactivity_floor().await,
             database.size().await,
         )
@@ -395,7 +395,7 @@ where
     let database = database.add_operations(initial_ops).await?;
 
     // Display database state
-    let root = database.root().await;
+    let root = database.root();
     let root_hex = root
         .as_ref()
         .iter()
