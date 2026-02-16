@@ -3405,10 +3405,7 @@ mod tests {
 
     #[test]
     fn test_encode_with_pool_matches_encode() {
-        use commonware_codec::Encode;
-
-        let mut registry = prometheus_client::registry::Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let pool = test_pool();
         let value = vec![1u8, 2, 3, 4, 5, 6];
 
         let pooled = value.encode_with_pool(&pool);
@@ -3418,8 +3415,7 @@ mod tests {
 
     #[test]
     fn test_encode_with_pool_mut_len_matches_encode_size() {
-        let mut registry = prometheus_client::registry::Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_network(), &mut registry);
+        let pool = test_pool();
         let value = vec![9u8, 8, 7, 6];
 
         let buf = value.encode_with_pool_mut(&pool);
