@@ -542,7 +542,6 @@ impl Runner {
                 let current = executor.time.lock();
                 if let Some(deadline) = executor.deadline {
                     if *current >= deadline {
-                        // Drop the lock before panicking to avoid mutex poisoning.
                         drop(current);
                         panic!("runtime timeout");
                     }
