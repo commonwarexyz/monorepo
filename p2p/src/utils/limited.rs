@@ -3,8 +3,8 @@
 use crate::{Recipients, UnlimitedSender};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
-use commonware_utils::channel::ring;
-use futures::{lock::Mutex, Future, FutureExt, StreamExt};
+use commonware_utils::{channel::ring, sync::AsyncMutex};
+use futures::{Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer subscriptions for resolving [`Recipients::All`].
@@ -31,7 +31,7 @@ where
     P: Connected<PublicKey = S::PublicKey>,
 {
     sender: S,
-    rate_limit: Arc<Mutex<KeyedRateLimiter<S::PublicKey, E>>>,
+    rate_limit: Arc<AsyncMutex<KeyedRateLimiter<S::PublicKey, E>>>,
     peers: P,
     peer_subscription: Option<ring::Receiver<Vec<S::PublicKey>>>,
     known_peers: Vec<S::PublicKey>,
@@ -75,7 +75,7 @@ where
 {
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
-        let rate_limit = Arc::new(Mutex::new(KeyedRateLimiter::hashmap_with_clock(
+        let rate_limit = Arc::new(AsyncMutex::new(KeyedRateLimiter::hashmap_with_clock(
             quota, clock,
         )));
         Self {
@@ -228,13 +228,13 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct MockSender {
-        sent: Arc<Mutex<Vec<SentMessage>>>,
+        sent: Arc<AsyncMutex<Vec<SentMessage>>>,
     }
 
     impl MockSender {
         fn new() -> Self {
             Self {
-                sent: Arc::new(Mutex::new(Vec::new())),
+                sent: Arc::new(AsyncMutex::new(Vec::new())),
             }
         }
 
