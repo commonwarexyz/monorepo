@@ -339,6 +339,9 @@ struct MetricFamily {
 /// See: https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md
 const OPENMETRICS_SUFFIXES: &[&str] = &["_total", "_bucket", "_count", "_sum", "_created", "_info"];
 
+/// Extract the metric name from a sample line: `sample = metricname [labels] SP number ...`
+///
+/// See: https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md
 fn extract_metric_name(line: &str) -> &str {
     let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
