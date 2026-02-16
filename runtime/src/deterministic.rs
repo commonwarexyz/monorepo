@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricEncoder, Panicker,
+        Panicker, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
@@ -79,9 +79,8 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use prometheus_client::{
-    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry},
+    registry::{Metric, Registry as PrometheusRegistry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -113,7 +112,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut Registry) -> Self {
+    pub fn init(registry: &mut PrometheusRegistry) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),
@@ -343,7 +342,7 @@ impl Default for Config {
     }
 }
 
-/// Key for detecting duplicate metric registrations: (metric_name, attributes).
+/// A (prefixed_name, attributes) pair identifying a unique metric registration.
 type MetricKey = (String, Vec<(String, String)>);
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
@@ -867,6 +866,7 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -883,6 +883,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
+            scope: self.scope.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -899,8 +900,8 @@ impl Clone for Context {
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -964,6 +965,7 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
+                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
@@ -991,8 +993,8 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
         // Copy state
@@ -1035,6 +1037,7 @@ impl Context {
             Self {
                 name: String::new(),
                 attributes: Vec::new(),
+                scope: None,
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: checkpoint.storage,
@@ -1303,20 +1306,49 @@ impl crate::Metrics for Context {
             prefixed_name, self.attributes
         );
 
-        // Apply attributes to the registry (in sorted order)
+        // Route to the appropriate registry (root or scoped)
         let mut registry = executor.registry.lock().unwrap();
-        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
-            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-        });
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
         sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});
-        let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &executor.registry.lock().unwrap()).expect("encoding failed");
-        encoder.into_string()
+        let encoded = executor.registry.lock().unwrap().encode();
+        encoded
+    }
+
+    fn with_scope(&self) -> Self {
+        let executor = self.executor();
+        executor.auditor.event(b"with_scope", |_| {});
+
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        // Closure is infallible to avoid panicking in Drop.
+        let weak = self.executor.clone();
+        let scope_id = executor.registry.lock().unwrap().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            if let Some(exec) = weak.upgrade() {
+                if let Ok(mut reg) = exec.registry.lock() {
+                    reg.remove_scope(id);
+                }
+            }
+        }));
+        Self {
+            scope: Some(guard),
+            ..self.clone()
+        }
     }
 }
 
