@@ -268,7 +268,7 @@ mod topology {
         }
 
         /// Figure out what size different values will have, based on the config and the data.
-        pub fn reckon(config: &Config, data_bytes: usize) -> Self {
+        pub fn reckon(config: &Config, data_bytes: usize) -> Result<Self, Error> {
             let n = config.minimum_shards as usize;
             let k = config.extra_shards as usize;
             // The following calculations don't tolerate data_bytes = 0, so we
@@ -307,8 +307,11 @@ mod topology {
                 }
             }
             out.correct_column_samples();
+            if out.required_samples() == usize::MAX {
+                return Err(Error::InsufficientRedundancy);
+            }
             out.data_bytes = data_bytes;
-            out
+            Ok(out)
         }
 
         pub fn check_index(&self, i: u16) -> Result<(), Error> {
@@ -514,7 +517,7 @@ impl<D: Digest> CheckingData<D> {
         root: D,
         checksum: &Matrix,
     ) -> Result<Self, Error> {
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
@@ -598,6 +601,8 @@ pub enum Error {
     InvalidReShard,
     #[error("invalid index {0}")]
     InvalidIndex(u16),
+    #[error("insufficient redundancy: extra_shards too low for data size")]
+    InsufficientRedundancy,
     #[error("insufficient shards {0} < {1}")]
     InsufficientShards(usize, usize),
     #[error("insufficient unique rows {0} < {1}")]
@@ -639,7 +644,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
@@ -801,7 +806,7 @@ mod tests {
             minimum_shards: 3,
             extra_shards: 1,
         };
-        let topology = Topology::reckon(&config, 16);
+        let topology = Topology::reckon(&config, 16).unwrap();
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
 

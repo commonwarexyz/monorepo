@@ -345,7 +345,7 @@ mod test {
 
         #[test]
         fn proptest_roundtrip_zoda(
-            (config, data, selected) in roundtrip_strategy(0)
+            (config, data, selected) in roundtrip_strategy(1)
         ) {
             roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
         }
