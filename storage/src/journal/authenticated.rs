@@ -140,7 +140,7 @@ where
             let mut batch_size = 0;
             while mmr_size < journal_size {
                 let op = reader.read(*mmr_size).await?;
-                mmr.add(hasher, &op.encode()).await?;
+                mmr.add(hasher, &op.encode())?;
                 mmr_size += 1;
                 batch_size += 1;
                 if batch_size >= apply_batch_size {
@@ -336,13 +336,11 @@ where
     pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
         let encoded_item = item.encode();
 
-        // Append item to the journal and update the MMR in parallel.
-        let (_, loc) = try_join!(
-            self.mmr
-                .add(&mut self.hasher, &encoded_item)
-                .map_err(Error::Mmr),
-            self.journal.append(item).map_err(Into::into)
-        )?;
+        // Append item to the journal and update the MMR.
+        let loc = self.journal.append(item).await?;
+        self.mmr
+            .add(&mut self.hasher, &encoded_item)
+            .map_err(Error::Mmr)?;
 
         Ok(Location::new_unchecked(loc))
     }
@@ -730,7 +728,7 @@ mod tests {
             for i in 0..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
-                mmr.add(&mut hasher, &encoded).await.unwrap();
+                mmr.add(&mut hasher, &encoded).unwrap();
                 journal.append(op).await.unwrap();
             }
             let mmr = mmr.merkleize(&mut hasher);

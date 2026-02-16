@@ -138,7 +138,7 @@ impl CacheRef {
     }
 
     /// Returns a unique id for the next blob that will use this page cache.
-    pub async fn next_id(&self) -> u64 {
+    pub fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -555,8 +555,8 @@ mod tests {
 
             // Fill the page cache with the blob's data via CacheRef::read.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
-            assert_eq!(cache_ref.next_id().await, 0);
-            assert_eq!(cache_ref.next_id().await, 1);
+            assert_eq!(cache_ref.next_id(), 0);
+            assert_eq!(cache_ref.next_id(), 1);
             for i in 0..11 {
                 // Read expects logical bytes only (CRCs are stripped).
                 let mut buf = vec![0; PAGE_SIZE.get() as usize];

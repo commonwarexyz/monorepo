@@ -132,7 +132,7 @@ async fn run_operations(
             MmrOperation::Add { data } => {
                 let leaves_before = mmr.leaves().await.as_u64();
 
-                if mmr.add(hasher, data).await.is_err() {
+                if mmr.add(hasher, data).is_err() {
                     // Partial write possible: max is size after one leaf added
                     max_size = max_size.max(
                         Position::try_from(Location::new(leaves_before).unwrap() + 1)
@@ -381,7 +381,6 @@ fn fuzz(input: FuzzInput) {
         let test_data = [0xABu8; DATA_SIZE];
         let mut mmr = mmr.into_dirty();
         mmr.add(&mut hasher, &test_data)
-            .await
             .expect("Should be able to add after recovery");
         let mmr = mmr.merkleize(&mut hasher);
         mmr.destroy().await.expect("Should be able to destroy MMR");

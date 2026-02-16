@@ -90,7 +90,7 @@ impl<
 
     /// Dial a peer for which we have a reservation.
     #[allow(clippy::type_complexity)]
-    async fn dial_peer(
+    fn dial_peer(
         &mut self,
         reservation: Reservation<C::PublicKey>,
         supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
@@ -182,7 +182,7 @@ impl<
                     let Some(reservation) = tracker.dial(peer).await else {
                         continue;
                     };
-                    self.dial_peer(reservation, &mut supervisor).await;
+                    self.dial_peer(reservation, &mut supervisor);
                     break;
                 }
             },

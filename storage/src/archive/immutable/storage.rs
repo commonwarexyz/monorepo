@@ -219,7 +219,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Arch
     }
 
     /// Initialize the section.
-    async fn initialize_section(&mut self, section: u64) {
+    fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
         let bits = BitMap::zeroes(self.items_per_section);
 
@@ -246,7 +246,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> crat
         let section = index / self.items_per_section;
         let ordinal_key = U64::new(ORDINAL_PREFIX, section);
         if self.metadata.get(&ordinal_key).is_none() {
-            self.initialize_section(section).await;
+            self.initialize_section(section);
         }
         let record = self.metadata.get_mut(&ordinal_key).unwrap();
 

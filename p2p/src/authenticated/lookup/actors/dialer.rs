@@ -93,7 +93,7 @@ impl<
 
     /// Dial a peer for which we have a reservation.
     #[allow(clippy::type_complexity)]
-    async fn dial_peer(
+    fn dial_peer(
         &mut self,
         reservation: Reservation<C::PublicKey>,
         ingress: Ingress,
@@ -186,7 +186,7 @@ impl<
                     let Some((reservation, ingress)) = tracker.dial(peer).await else {
                         continue;
                     };
-                    self.dial_peer(reservation, ingress, &mut supervisor).await;
+                    self.dial_peer(reservation, ingress, &mut supervisor);
                     break;
                 }
             },

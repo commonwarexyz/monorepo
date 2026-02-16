@@ -331,9 +331,9 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
     }
 
-    async fn broadcast(&mut self, payload: H::Digest) {
+    fn broadcast(&mut self, payload: H::Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
-        self.relay.broadcast(&self.me, (payload, contents)).await;
+        self.relay.broadcast(&self.me, (payload, contents));
     }
 
     pub fn start(mut self) -> Handle<()> {
@@ -393,7 +393,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         }
                     }
                     Message::Broadcast { payload } => {
-                        self.broadcast(payload).await;
+                        self.broadcast(payload);
                     }
                 }
             },

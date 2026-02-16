@@ -152,7 +152,7 @@ impl<B: Blob> Append<B> {
 
         Ok(Self {
             blob_state: Arc::new(RwLock::new(blob_state)),
-            id: cache_ref.next_id().await,
+            id: cache_ref.next_id(),
             cache_ref,
             buffer: Arc::new(RwLock::new(buffer)),
         })
@@ -210,7 +210,7 @@ impl<B: Blob> Append<B> {
 
         Ok(Self {
             blob_state: Arc::new(RwLock::new(blob_state)),
-            id: cache_ref.next_id().await,
+            id: cache_ref.next_id(),
             cache_ref,
             buffer: Arc::new(RwLock::new(buffer)),
         })

@@ -831,6 +831,7 @@ mod tests {
     use utils::reschedule;
 
     fn test_error_future<R: Runner>(runner: R) {
+        #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
         }

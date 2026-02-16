@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size().await;
-                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
+                    let pos = mmr.add(&mut hasher, limited_data).unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.size().await);
                     assert!(mmr.size().await > size_before);
@@ -165,7 +165,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size().await;
-                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
+                    let pos = mmr.add(&mut hasher, limited_data).unwrap();
                     assert!(mmr.size().await > size_before);
 
                     leaves.push(limited_data.to_vec());

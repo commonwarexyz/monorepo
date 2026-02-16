@@ -141,7 +141,7 @@ where
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
-    pub async fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
+    pub fn init(context: E, config: Config<C, P>) -> (Self, Mailbox<H, C, V>) {
         // Create mailbox
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 

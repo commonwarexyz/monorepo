@@ -145,8 +145,7 @@ where
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
             },
-        )
-        .await;
+        );
 
         let (buffer, buffered_mailbox) = buffered::Engine::new(
             context.with_label("buffer"),

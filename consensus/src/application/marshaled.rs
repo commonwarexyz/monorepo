@@ -166,7 +166,7 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
     #[inline]
-    async fn deferred_verify(
+    fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
         block: B,
@@ -536,7 +536,7 @@ where
 
                 // Begin the rest of the verification process asynchronously.
                 let round = context.round;
-                let task = marshaled.deferred_verify(context, block).await;
+                let task = marshaled.deferred_verify(context, block);
                 marshaled
                     .verification_tasks
                     .lock()
@@ -631,7 +631,7 @@ where
                     return;
                 }
 
-                let verify_rx = marshaled.deferred_verify(embedded_context, block).await;
+                let verify_rx = marshaled.deferred_verify(embedded_context, block);
                 if let Ok(result) = verify_rx.await {
                     tx.send_lossy(result);
                 }

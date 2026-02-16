@@ -749,7 +749,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
     /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
     /// aren't persisted to disk until `sync` is called.
-    pub async fn add(
+    pub fn add(
         &mut self,
         h: &mut impl Hasher<Digest = D>,
         element: &[u8],
@@ -921,7 +921,7 @@ mod tests {
             for i in 0u64..NUM_ELEMENTS {
                 hasher.inner().update(&i.to_be_bytes());
                 let element = hasher.inner().finalize();
-                journaled_mmr.add(&mut hasher, &element).await.unwrap();
+                journaled_mmr.add(&mut hasher, &element).unwrap();
             }
 
             let journaled_mmr = journaled_mmr.merkleize(&mut hasher);
@@ -954,7 +954,7 @@ mod tests {
             let mut mmr = mmr.into_dirty();
             assert!(matches!(mmr.pop(1).await, Err(Error::Empty)));
 
-            mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
+            mmr.add(&mut hasher, &test_digest(0)).unwrap();
             assert_eq!(mmr.size().await, 1);
             let mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
@@ -991,7 +991,7 @@ mod tests {
 
             // Confirm empty proof no longer verifies after adding an element.
             let mut mmr = mmr.into_dirty();
-            mmr.add(&mut hasher, &test_digest(0)).await.unwrap();
+            mmr.add(&mut hasher, &test_digest(0)).unwrap();
             let mmr = mmr.merkleize(&mut hasher);
             let root = mmr.root().await;
             assert!(!empty_proof.verify_range_inclusion(
@@ -1027,7 +1027,7 @@ mod tests {
             for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                mmr.add(&mut hasher, &element).unwrap();
             }
 
             // Pop off one node at a time without syncing until empty, confirming the root matches.
@@ -1057,7 +1057,7 @@ mod tests {
             for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                mmr.add(&mut hasher, &element).unwrap();
                 if i == 101 {
                     let clean_mmr = mmr.merkleize(&mut hasher);
                     clean_mmr.sync().await.unwrap();
@@ -1084,7 +1084,7 @@ mod tests {
             for i in 0u64..NUM_ELEMENTS {
                 c_hasher.update(&i.to_be_bytes());
                 let element = c_hasher.finalize();
-                mmr.add(&mut hasher, &element).await.unwrap();
+                mmr.add(&mut hasher, &element).unwrap();
                 if i == 101 {
                     let clean_mmr = mmr.merkleize(&mut hasher);
                     clean_mmr.sync().await.unwrap();
@@ -1133,7 +1133,7 @@ mod tests {
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
-                let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
+                let pos = mmr.add(&mut hasher, leaves.last().unwrap()).unwrap();
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -1199,7 +1199,7 @@ mod tests {
             for i in 0..LEAF_COUNT {
                 let digest = test_digest(i);
                 leaves.push(digest);
-                let pos = mmr.add(&mut hasher, leaves.last().unwrap()).await.unwrap();
+                let pos = mmr.add(&mut hasher, leaves.last().unwrap()).unwrap();
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -1284,9 +1284,9 @@ mod tests {
                 let digest = test_digest(i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
+                let pos = mmr.add(&mut hasher, last_leaf).unwrap();
                 positions.push(pos);
-                pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                pruned_mmr.add(&mut hasher, last_leaf).unwrap();
             }
             let mut mmr = mmr.merkleize(&mut hasher);
             let mut pruned_mmr = pruned_mmr.merkleize(&mut hasher);
@@ -1307,11 +1307,11 @@ mod tests {
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
                 let mut dirty_pruned_mmr = pruned_mmr.into_dirty();
-                let pos = dirty_pruned_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                let pos = dirty_pruned_mmr.add(&mut hasher, last_leaf).unwrap();
                 pruned_mmr = dirty_pruned_mmr.merkleize(&mut hasher);
                 positions.push(pos);
                 let mut dirty_mmr = mmr.into_dirty();
-                dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                 mmr = dirty_mmr.merkleize(&mut hasher);
                 assert_eq!(pruned_mmr.root().await, mmr.root().await);
             }
@@ -1343,14 +1343,11 @@ mod tests {
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
             let mut mmr = mmr.into_dirty();
-            mmr.add(&mut hasher, &test_digest(LEAF_COUNT))
-                .await
-                .unwrap();
+            mmr.add(&mut hasher, &test_digest(LEAF_COUNT)).unwrap();
             let mmr = mmr.merkleize(&mut hasher);
             let mut dirty_pruned = pruned_mmr.into_dirty();
             dirty_pruned
                 .add(&mut hasher, &test_digest(LEAF_COUNT))
-                .await
                 .unwrap();
             let pruned_mmr = dirty_pruned.merkleize(&mut hasher);
             assert!(*pruned_mmr.size().await % cfg_pruned.items_per_blob != 0);
@@ -1378,7 +1375,6 @@ mod tests {
                 let mut dirty_pruned_mmr = pruned_mmr.into_dirty();
                 dirty_pruned_mmr
                     .add(&mut hasher, &test_digest(LEAF_COUNT))
-                    .await
                     .unwrap();
                 pruned_mmr = dirty_pruned_mmr.merkleize(&mut hasher);
             }
@@ -1412,7 +1408,7 @@ mod tests {
                 let digest = test_digest(i);
                 leaves.push(digest);
                 let last_leaf = leaves.last().unwrap();
-                let pos = mmr.add(&mut hasher, last_leaf).await.unwrap();
+                let pos = mmr.add(&mut hasher, last_leaf).unwrap();
                 positions.push(pos);
             }
             let mmr = mmr.merkleize(&mut hasher);
@@ -1445,17 +1441,17 @@ mod tests {
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
                     let mut dirty_mmr = mmr.into_dirty();
-                    let pos = dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    let pos = dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                     positions.push(pos);
-                    dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                     mmr = dirty_mmr.merkleize(&mut hasher);
                     let digest = test_digest(LEAF_COUNT + i);
                     leaves.push(digest);
                     let last_leaf = leaves.last().unwrap();
                     let mut dirty_mmr = mmr.into_dirty();
-                    let pos = dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    let pos = dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                     positions.push(pos);
-                    dirty_mmr.add(&mut hasher, last_leaf).await.unwrap();
+                    dirty_mmr.add(&mut hasher, last_leaf).unwrap();
                     mmr = dirty_mmr.merkleize(&mut hasher);
                 }
                 let end_size = mmr.size().await;
@@ -1492,7 +1488,7 @@ mod tests {
             let mut positions = Vec::new();
             for i in 0..10 {
                 elements.push(test_digest(i));
-                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+                positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
             }
             let mmr = mmr.merkleize(&mut hasher);
             let original_leaves = mmr.leaves().await;
@@ -1524,7 +1520,7 @@ mod tests {
             let mut mmr = mmr.into_dirty();
             for i in 10..20 {
                 elements.push(test_digest(i));
-                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+                positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
             }
             let mmr = mmr.merkleize(&mut hasher);
             let new_historical_proof = mmr
@@ -1560,7 +1556,7 @@ mod tests {
             let mut mmr = mmr.into_dirty();
             for i in 0..50 {
                 elements.push(test_digest(i));
-                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+                positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
             }
             let mut mmr = mmr.merkleize(&mut hasher);
 
@@ -1586,7 +1582,7 @@ mod tests {
 
             let mut ref_mmr = ref_mmr.into_dirty();
             for elt in elements.iter().take(41) {
-                ref_mmr.add(&mut hasher, elt).await.unwrap();
+                ref_mmr.add(&mut hasher, elt).unwrap();
             }
             let ref_mmr = ref_mmr.merkleize(&mut hasher);
             let historical_leaves = ref_mmr.leaves().await;
@@ -1642,7 +1638,7 @@ mod tests {
             let mut mmr = mmr.into_dirty();
             for i in 0..100 {
                 elements.push(test_digest(i));
-                positions.push(mmr.add(&mut hasher, &elements[i]).await.unwrap());
+                positions.push(mmr.add(&mut hasher, &elements[i]).unwrap());
             }
             let mmr = mmr.merkleize(&mut hasher);
 
@@ -1667,7 +1663,7 @@ mod tests {
             // Add elements up to the end of the range to verify historical root
             let mut ref_mmr = ref_mmr.into_dirty();
             for elt in elements.iter().take(*range.end as usize) {
-                ref_mmr.add(&mut hasher, elt).await.unwrap();
+                ref_mmr.add(&mut hasher, elt).unwrap();
             }
             let ref_mmr = ref_mmr.merkleize(&mut hasher);
             let historical_leaves = ref_mmr.leaves().await;
@@ -1703,7 +1699,7 @@ mod tests {
                 .into_dirty();
 
             let element = test_digest(0);
-            mmr.add(&mut hasher, &element).await.unwrap();
+            mmr.add(&mut hasher, &element).unwrap();
             let mmr = mmr.merkleize(&mut hasher);
 
             // Test single element proof at historical position
@@ -1754,7 +1750,7 @@ mod tests {
             // Should be able to add new elements
             let new_element = test_digest(999);
             let mut sync_mmr = sync_mmr.into_dirty();
-            sync_mmr.add(&mut hasher, &new_element).await.unwrap();
+            sync_mmr.add(&mut hasher, &new_element).unwrap();
             let sync_mmr = sync_mmr.merkleize(&mut hasher);
 
             // Root should be computable
@@ -1781,7 +1777,7 @@ mod tests {
             .unwrap();
             let mut mmr = mmr.into_dirty();
             for i in 0..50 {
-                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
             let mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
@@ -1848,7 +1844,7 @@ mod tests {
             .unwrap();
             let mut mmr = mmr.into_dirty();
             for i in 0..30 {
-                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
             let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
@@ -1922,7 +1918,7 @@ mod tests {
             // Add 50 elements
             let mut mmr = mmr.into_dirty();
             for i in 0..50 {
-                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
             let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
@@ -1988,7 +1984,7 @@ mod tests {
 
             // Add 50 elements
             for i in 0..50 {
-                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
             let mut mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();
@@ -2046,7 +2042,7 @@ mod tests {
                 .unwrap();
             let mut mmr = mmr.into_dirty();
             for i in 0..100 {
-                mmr.add(&mut hasher, &test_digest(i)).await.unwrap();
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
             }
             let mmr = mmr.merkleize(&mut hasher);
             mmr.sync().await.unwrap();

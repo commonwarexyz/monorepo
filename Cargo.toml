@@ -63,6 +63,7 @@ option-if-let-else = "warn"
 disallowed_types = "deny"
 disallowed_macros = "deny"
 undocumented_unsafe_blocks = "deny"
+unused-async = "warn"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
 suspicious_op_assign_impl = "allow"
