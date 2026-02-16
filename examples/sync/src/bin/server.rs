@@ -5,8 +5,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, RwLock,
-    SinkOf, Spawner, Storage, StreamOf,
+    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
+    Spawner, Storage, StreamOf,
 };
 use commonware_storage::qmdb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -18,7 +18,7 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::{channel::mpsc, DurationExt};
+use commonware_utils::{channel::mpsc, sync::AsyncRwLock, DurationExt};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -57,7 +57,7 @@ struct Config {
 /// Server state containing the database and metrics.
 struct State<DB> {
     /// The database wrapped in async mutex with Option to allow ownership transfers.
-    database: RwLock<Option<DB>>,
+    database: AsyncRwLock<Option<DB>>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -65,7 +65,7 @@ struct State<DB> {
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: RwLock<SystemTime>,
+    last_operation_time: AsyncRwLock<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -74,11 +74,11 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: RwLock::new(Some(database)),
+            database: AsyncRwLock::new(Some(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: RwLock::new(SystemTime::now()),
+            last_operation_time: AsyncRwLock::new(SystemTime::now()),
         };
         context.register(
             "requests",

@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use commonware_utils::sync::Mutex;
+use std::sync::Arc;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Appends logs to a provided vector.
@@ -58,7 +59,7 @@ impl std::io::Write for Writer {
         let log_message = log_message.replace("()", "");
 
         // Append log message
-        let mut logs = self.logs.lock().unwrap();
+        let mut logs = self.logs.lock();
         logs.push(log_message.trim_end().to_string());
         Ok(buf.len())
     }

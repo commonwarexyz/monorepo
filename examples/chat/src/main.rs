@@ -59,11 +59,11 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager};
 use commonware_runtime::{tokio, Metrics, Quota, Runner as _};
-use commonware_utils::{ordered::Set, TryCollect, NZU32};
+use commonware_utils::{ordered::Set, sync::Mutex, TryCollect, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use tracing::info;
 
