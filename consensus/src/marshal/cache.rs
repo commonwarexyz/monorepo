@@ -35,6 +35,8 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
+    /// Scoped context that keeps this epoch's metrics alive until the cache is dropped.
+    _scope: R,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -157,14 +159,20 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
+        let scope = self
+            .context
+            .with_label("cache")
+            .with_attribute("epoch", epoch)
+            .with_scope();
         let verified_blocks = self
-            .init_archive(epoch, "verified", self.block_codec_config.clone())
+            .init_archive(&scope, epoch, "verified", self.block_codec_config.clone())
             .await;
         let notarized_blocks = self
-            .init_archive(epoch, "notarized", self.block_codec_config.clone())
+            .init_archive(&scope, epoch, "notarized", self.block_codec_config.clone())
             .await;
         let notarizations = self
             .init_archive(
+                &scope,
                 epoch,
                 "notarizations",
                 S::certificate_codec_config_unbounded(),
@@ -172,6 +180,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             .await;
         let finalizations = self
             .init_archive(
+                &scope,
                 epoch,
                 "finalizations",
                 S::certificate_codec_config_unbounded(),
@@ -180,6 +189,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         let existing = self.caches.insert(
             epoch,
             Cache {
+                _scope: scope,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -192,6 +202,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
     /// Helper to initialize an archive.
     async fn init_archive<T: CodecShared>(
         &self,
+        scope: &R,
         epoch: Epoch,
         name: &str,
         codec_config: T::Cfg,
@@ -209,15 +220,9 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             key_write_buffer: self.cfg.key_write_buffer,
             value_write_buffer: self.cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(
-            self.context
-                .with_label(&format!("cache_{name}"))
-                .with_attribute("epoch", epoch)
-                .with_scope(),
-            cfg,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
+        let archive = prunable::Archive::init(scope.with_label(name), cfg)
+            .await
+            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
     }
