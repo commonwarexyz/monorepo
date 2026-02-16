@@ -59,10 +59,6 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
-/// Maximum number of blocks to process before forcing a sync during catchup.
-/// Limits data loss on crash to at most this many blocks of re-processing.
-const SYNC_BATCH_SIZE: u64 = 16_384;
-
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
@@ -146,10 +142,6 @@ where
     pending_ack: OptionFuture<PendingAck<B, A>>,
     // Highest known finalized height
     tip: Height,
-    // Whether the finalization archives have unsynced writes
-    finalization_archives_dirty: bool,
-    // Number of blocks processed since the last durable sync
-    blocks_since_last_sync: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -251,8 +243,6 @@ where
                 last_processed_height,
                 pending_ack: None.into(),
                 tip: Height::zero(),
-                finalization_archives_dirty: false,
-                blocks_since_last_sync: 0,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
@@ -340,8 +330,13 @@ where
 
                 match ack {
                     Ok(()) => {
-                        self.handle_block_processed(height, commitment, &mut resolver)
-                            .await;
+                        if let Err(e) = self
+                            .handle_block_processed(height, commitment, &mut resolver)
+                            .await
+                        {
+                            error!(?e, %height, "failed to update application progress");
+                            return;
+                        }
                         self.try_dispatch_block(&mut application).await;
                     }
                     Err(e) => {
@@ -425,12 +420,12 @@ where
                                 commitment,
                                 block,
                                 Some(finalization),
-                                true,
                                 &mut application,
                                 &mut buffer,
                                 &mut resolver,
                             )
                             .await;
+                            self.sync_finalization_archives().await;
                             debug!(?round, %height, "finalized block stored");
                         } else {
                             // Otherwise, fetch the block from the network.
@@ -571,236 +566,226 @@ where
                     }
                 }
             },
-            // Handle resolver messages last
+            // Handle resolver messages last (batched: drain all pending, sync once)
             Some(message) = resolver_rx.recv() else {
                 info!("handler closed, shutting down");
                 break;
             } => {
-                match message {
-                    handler::Message::Produce { key, response } => {
-                        match key {
-                            Request::Block(commitment) => {
-                                // Check for block locally
-                                let Some(block) = self.find_block(&mut buffer, commitment).await
-                                else {
-                                    debug!(?commitment, "block missing on request");
-                                    continue;
-                                };
-                                response.send_lossy(block.encode());
-                            }
-                            Request::Finalized { height } => {
-                                // Get finalization
-                                let Some(finalization) =
-                                    self.get_finalization_by_height(height).await
-                                else {
-                                    debug!(%height, "finalization missing on request");
-                                    continue;
-                                };
-
-                                // Get block
-                                let Some(block) = self.get_finalized_block(height).await else {
-                                    debug!(%height, "finalized block missing on request");
-                                    continue;
-                                };
-
-                                // Send finalization
-                                response.send_lossy((finalization, block).encode());
-                            }
-                            Request::Notarized { round } => {
-                                // Get notarization
-                                let Some(notarization) = self.cache.get_notarization(round).await
-                                else {
-                                    debug!(?round, "notarization missing on request");
-                                    continue;
-                                };
-
-                                // Get block
-                                let commitment = notarization.proposal.payload;
-                                let Some(block) = self.find_block(&mut buffer, commitment).await
-                                else {
-                                    debug!(?commitment, "block missing on request");
-                                    continue;
-                                };
-                                response.send_lossy((notarization, block).encode());
-                            }
-                        }
-                    }
-                    handler::Message::Deliver {
-                        key,
-                        value,
-                        response,
-                    } => {
-                        match key {
-                            Request::Block(commitment) => {
-                                // Parse block
-                                let Ok(block) =
-                                    B::decode_cfg(value.as_ref(), &self.block_codec_config)
-                                else {
-                                    response.send_lossy(false);
-                                    continue;
-                                };
-
-                                // Validation
-                                if block.commitment() != commitment {
-                                    response.send_lossy(false);
-                                    continue;
-                                }
-
-                                // Persist the block, also persisting the finalization if we have it
-                                let height = block.height();
-                                let finalization =
-                                    self.cache.get_finalization_for(commitment).await;
-                                self.finalize(
-                                    height,
-                                    commitment,
-                                    block,
-                                    finalization,
-                                    false,
-                                    &mut application,
-                                    &mut buffer,
-                                    &mut resolver,
-                                )
-                                .await;
-                                debug!(?commitment, %height, "received block");
-                                response.send_lossy(true);
-                            }
-                            Request::Finalized { height } => {
-                                let Some(bounds) = self.epocher.containing(height) else {
-                                    response.send_lossy(false);
-                                    continue;
-                                };
-                                let Some(scheme) =
-                                    self.get_scheme_certificate_verifier(bounds.epoch())
-                                else {
-                                    response.send_lossy(false);
-                                    continue;
-                                };
-
-                                // Parse finalization
-                                let Ok((finalization, block)) =
-                                    <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
-                                        value,
-                                        &(
-                                            scheme.certificate_codec_config(),
-                                            self.block_codec_config.clone(),
-                                        ),
-                                    )
-                                else {
-                                    response.send_lossy(false);
-                                    continue;
-                                };
-
-                                // Validation
-                                if block.height() != height
-                                    || finalization.proposal.payload != block.commitment()
-                                {
-                                    response.send_lossy(false);
-                                    continue;
-                                }
-                                if !self.trusted_resolver
-                                    && !finalization.verify(
-                                        &mut self.context,
-                                        &scheme,
-                                        &self.strategy,
-                                    )
-                                {
-                                    response.send_lossy(false);
-                                    continue;
-                                }
-
-                                // Valid finalization received
-                                debug!(%height, "received finalization");
-                                response.send_lossy(true);
-                                self.finalize(
-                                    height,
-                                    block.commitment(),
-                                    block,
-                                    Some(finalization),
-                                    false,
-                                    &mut application,
-                                    &mut buffer,
-                                    &mut resolver,
-                                )
-                                .await;
-                            }
-                            Request::Notarized { round } => {
-                                let Some(scheme) =
-                                    self.get_scheme_certificate_verifier(round.epoch())
-                                else {
-                                    response.send_lossy(false);
-                                    continue;
-                                };
-
-                                // Parse notarization
-                                let Ok((notarization, block)) =
-                                    <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
-                                        value,
-                                        &(
-                                            scheme.certificate_codec_config(),
-                                            self.block_codec_config.clone(),
-                                        ),
-                                    )
-                                else {
-                                    response.send_lossy(false);
-                                    continue;
-                                };
-
-                                // Validation
-                                if notarization.round() != round
-                                    || notarization.proposal.payload != block.commitment()
-                                {
-                                    response.send_lossy(false);
-                                    continue;
-                                }
-                                if !self.trusted_resolver
-                                    && !notarization.verify(
-                                        &mut self.context,
-                                        &scheme,
-                                        &self.strategy,
-                                    )
-                                {
-                                    response.send_lossy(false);
-                                    continue;
-                                }
-
-                                // Valid notarization received
-                                response.send_lossy(true);
-                                let commitment = block.commitment();
-                                debug!(?round, ?commitment, "received notarization");
-
-                                // If there exists a finalization certificate for this block, we
-                                // should finalize it. While not necessary, this could finalize
-                                // the block faster in the case where a notarization then a
-                                // finalization is received via the consensus engine and we
-                                // resolve the request for the notarization before we resolve
-                                // the request for the block.
-                                let height = block.height();
-                                if let Some(finalization) =
-                                    self.cache.get_finalization_for(commitment).await
-                                {
-                                    self.finalize(
-                                        height,
-                                        commitment,
-                                        block.clone(),
-                                        Some(finalization),
-                                        false,
-                                        &mut application,
-                                        &mut buffer,
-                                        &mut resolver,
-                                    )
-                                    .await;
-                                }
-
-                                // Cache the notarization and block
-                                self.cache_block(round, commitment, block).await;
-                                self.cache
-                                    .put_notarization(round, commitment, notarization)
-                                    .await;
-                            }
-                        }
-                    }
+                let mut needs_sync = false;
+                let mut message = Some(message);
+                while let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) {
+                    needs_sync |= self.handle_resolver_message(
+                        msg,
+                        &mut application,
+                        &mut buffer,
+                        &mut resolver,
+                    ).await;
+                }
+                if needs_sync {
+                    self.sync_finalization_archives().await;
                 }
             },
+        }
+    }
+
+    /// Handle a single resolver message. Returns true if finalization archives
+    /// were written and need syncing.
+    async fn handle_resolver_message<K: PublicKey>(
+        &mut self,
+        message: handler::Message<B>,
+        application: &mut impl Reporter<Activity = Update<B, A>>,
+        buffer: &mut buffered::Mailbox<K, B>,
+        resolver: &mut impl Resolver<Key = Request<B>>,
+    ) -> bool {
+        match message {
+            handler::Message::Produce { key, response } => {
+                match key {
+                    Request::Block(commitment) => {
+                        let Some(block) = self.find_block(buffer, commitment).await else {
+                            debug!(?commitment, "block missing on request");
+                            return false;
+                        };
+                        response.send_lossy(block.encode());
+                    }
+                    Request::Finalized { height } => {
+                        let Some(finalization) =
+                            self.get_finalization_by_height(height).await
+                        else {
+                            debug!(%height, "finalization missing on request");
+                            return false;
+                        };
+                        let Some(block) = self.get_finalized_block(height).await else {
+                            debug!(%height, "finalized block missing on request");
+                            return false;
+                        };
+                        response.send_lossy((finalization, block).encode());
+                    }
+                    Request::Notarized { round } => {
+                        let Some(notarization) = self.cache.get_notarization(round).await
+                        else {
+                            debug!(?round, "notarization missing on request");
+                            return false;
+                        };
+                        let commitment = notarization.proposal.payload;
+                        let Some(block) = self.find_block(buffer, commitment).await else {
+                            debug!(?commitment, "block missing on request");
+                            return false;
+                        };
+                        response.send_lossy((notarization, block).encode());
+                    }
+                }
+                false
+            }
+            handler::Message::Deliver {
+                key,
+                value,
+                response,
+            } => {
+                match key {
+                    Request::Block(commitment) => {
+                        let Ok(block) =
+                            B::decode_cfg(value.as_ref(), &self.block_codec_config)
+                        else {
+                            response.send_lossy(false);
+                            return false;
+                        };
+                        if block.commitment() != commitment {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        let height = block.height();
+                        let finalization =
+                            self.cache.get_finalization_for(commitment).await;
+                        self.finalize(
+                            height,
+                            commitment,
+                            block,
+                            finalization,
+                            application,
+                            buffer,
+                            resolver,
+                        )
+                        .await;
+                        debug!(?commitment, %height, "received block");
+                        response.send_lossy(true);
+                        true
+                    }
+                    Request::Finalized { height } => {
+                        let Some(bounds) = self.epocher.containing(height) else {
+                            response.send_lossy(false);
+                            return false;
+                        };
+                        let Some(scheme) =
+                            self.get_scheme_certificate_verifier(bounds.epoch())
+                        else {
+                            response.send_lossy(false);
+                            return false;
+                        };
+                        let Ok((finalization, block)) =
+                            <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
+                                value,
+                                &(
+                                    scheme.certificate_codec_config(),
+                                    self.block_codec_config.clone(),
+                                ),
+                            )
+                        else {
+                            response.send_lossy(false);
+                            return false;
+                        };
+                        if block.height() != height
+                            || finalization.proposal.payload != block.commitment()
+                        {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        if !self.trusted_resolver
+                            && !finalization.verify(
+                                &mut self.context,
+                                &scheme,
+                                &self.strategy,
+                            )
+                        {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        debug!(%height, "received finalization");
+                        response.send_lossy(true);
+                        self.finalize(
+                            height,
+                            block.commitment(),
+                            block,
+                            Some(finalization),
+                            application,
+                            buffer,
+                            resolver,
+                        )
+                        .await;
+                        true
+                    }
+                    Request::Notarized { round } => {
+                        let Some(scheme) =
+                            self.get_scheme_certificate_verifier(round.epoch())
+                        else {
+                            response.send_lossy(false);
+                            return false;
+                        };
+                        let Ok((notarization, block)) =
+                            <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
+                                value,
+                                &(
+                                    scheme.certificate_codec_config(),
+                                    self.block_codec_config.clone(),
+                                ),
+                            )
+                        else {
+                            response.send_lossy(false);
+                            return false;
+                        };
+                        if notarization.round() != round
+                            || notarization.proposal.payload != block.commitment()
+                        {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        if !self.trusted_resolver
+                            && !notarization.verify(
+                                &mut self.context,
+                                &scheme,
+                                &self.strategy,
+                            )
+                        {
+                            response.send_lossy(false);
+                            return false;
+                        }
+                        response.send_lossy(true);
+                        let commitment = block.commitment();
+                        debug!(?round, ?commitment, "received notarization");
+                        let height = block.height();
+                        let mut wrote = false;
+                        if let Some(finalization) =
+                            self.cache.get_finalization_for(commitment).await
+                        {
+                            self.finalize(
+                                height,
+                                commitment,
+                                block.clone(),
+                                Some(finalization),
+                                application,
+                                buffer,
+                                resolver,
+                            )
+                            .await;
+                            wrote = true;
+                        }
+                        self.cache_block(round, commitment, block).await;
+                        self.cache
+                            .put_notarization(round, commitment, notarization)
+                            .await;
+                        wrote
+                    }
+                }
+            }
         }
     }
 
@@ -856,44 +841,16 @@ where
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
-    ///
-    /// Syncs are batched during catchup: when behind tip, we only flush to disk
-    /// every [SYNC_BATCH_SIZE] blocks. When caught up, every block is synced.
-    /// Archives are always synced before metadata so that on crash recovery the
-    /// cursor never points beyond durable archive data.
     async fn handle_block_processed(
         &mut self,
         height: Height,
         commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
-    ) {
-        // Buffer metadata update (in-memory only)
-        self.application_metadata.put(LATEST_KEY.clone(), height);
-        self.blocks_since_last_sync += 1;
+    ) -> Result<(), metadata::Error> {
+        // Update the processed height
+        self.set_processed_height(height, resolver).await?;
 
-        // Sync when caught up to tip or when enough blocks have accumulated
-        if height >= self.tip || self.blocks_since_last_sync >= SYNC_BATCH_SIZE {
-            // Sync archives first so that on crash, metadata never points
-            // beyond durable archive data (at-least-once reprocessing).
-            if self.finalization_archives_dirty {
-                self.sync_finalization_archives().await;
-            }
-            if let Err(e) = self.application_metadata.sync().await {
-                panic!("failed to sync application metadata: {e}");
-            }
-            self.blocks_since_last_sync = 0;
-        }
-
-        // Update in-memory state
-        self.last_processed_height = height;
-        let _ = self
-            .processed_height
-            .try_set(self.last_processed_height.get());
-
-        // Cancel any existing requests below the new floor
-        resolver
-            .retain(Request::<B>::Finalized { height }.predicate())
-            .await;
+        // Cancel useless requests
         resolver.cancel(Request::<B>::Block(commitment)).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -916,6 +873,8 @@ where
                 .retain(Request::<B>::Notarized { round }.predicate())
                 .await;
         }
+
+        Ok(())
     }
 
     // -------------------- Prunable Storage --------------------
@@ -949,7 +908,6 @@ where
         ) {
             panic!("failed to sync finalization archives: {e}");
         }
-        self.finalization_archives_dirty = false;
     }
 
     // -------------------- Immutable Storage --------------------
@@ -983,10 +941,6 @@ where
 
     /// Add a finalized block, and optionally a finalization, to the archive, and
     /// attempt to identify + repair any gaps in the archive.
-    ///
-    /// When `sync` is true, the archives are durably synced immediately after the
-    /// write. When false, writes are buffered and synced lazily in
-    /// [Self::handle_block_processed].
     #[allow(clippy::too_many_arguments)]
     async fn finalize(
         &mut self,
@@ -994,12 +948,11 @@ where
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
-        sync: bool,
         application: &mut impl Reporter<Activity = Update<B, A>>,
         buffer: &mut buffered::Mailbox<impl PublicKey, B>,
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) {
-        self.store_finalization(height, commitment, block, finalization, sync, application)
+        self.store_finalization(height, commitment, block, finalization, application)
             .await;
 
         self.try_repair_gaps(buffer, resolver, application).await;
@@ -1008,16 +961,14 @@ where
     /// Add a finalized block, and optionally a finalization, to the archive,
     /// then attempt to dispatch the next contiguous block to the application.
     ///
-    /// When `sync` is true, the archives are durably synced immediately after
-    /// the write. When false, writes are buffered and synced lazily in
-    /// [Self::handle_block_processed].
+    /// Writes are buffered and not synced. The caller is responsible for
+    /// calling [Self::sync_finalization_archives] when appropriate.
     async fn store_finalization(
         &mut self,
         height: Height,
         commitment: B::Commitment,
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
-        sync: bool,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         self.notify_subscribers(commitment, &block);
@@ -1027,12 +978,10 @@ where
 
         // In parallel, update the finalized blocks and finalizations archives
         if let Err(e) = try_join!(
-            // Update the finalized blocks archive
             async {
                 self.finalized_blocks.put(block).await.map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
             },
-            // Update the finalizations archive (if provided)
             async {
                 if let Some(finalization) = finalization {
                     self.finalizations_by_height
@@ -1044,11 +993,6 @@ where
             }
         ) {
             panic!("failed to finalize: {e}");
-        }
-        if sync {
-            self.sync_finalization_archives().await;
-        } else {
-            self.finalization_archives_dirty = true;
         }
 
         // Update metrics and send tip update to application
@@ -1144,7 +1088,6 @@ where
                         commitment,
                         block.clone(),
                         finalization,
-                        false,
                         application,
                     )
                     .await;
