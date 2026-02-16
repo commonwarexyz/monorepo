@@ -76,7 +76,7 @@ fn fuzz(input: FuzzInput) {
         // Initialize the ordinal
         let items_per_blob = NZU64!(input.items_per_blob.clamp(1, u16::MAX) as u64);
         let cfg = Config {
-            partition: "ordinal_operations_fuzz_test".to_string(),
+            partition: "ordinal-operations-fuzz-test".to_string(),
             items_per_blob,
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(64 * 1024),

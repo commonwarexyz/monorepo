@@ -145,7 +145,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the cache
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: Some(3),
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -168,7 +168,7 @@ mod tests {
 
             // Initialize the cache again without compression
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -191,7 +191,7 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the cache
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -253,7 +253,7 @@ mod tests {
             // Initialize the cache
             let items_per_blob = 256u64;
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -297,7 +297,7 @@ mod tests {
 
             // Reinitialize the cache
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -369,7 +369,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -423,7 +423,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -502,7 +502,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -551,7 +551,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -603,7 +603,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -661,7 +661,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -714,7 +714,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),

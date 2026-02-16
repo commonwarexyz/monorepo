@@ -84,8 +84,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
     Config {
-        journal_partition: format!("journal_{partition_suffix}"),
-        metadata_partition: format!("metadata_{partition_suffix}"),
+        journal_partition: format!("journal-{partition_suffix}"),
+        metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
         let mmr = Mmr::init(
             context.clone(),
             &mut hasher,
-            test_config("fuzz_test_mmr_journaled", &context),
+            test_config("fuzz-test-mmr-journaled", &context),
         )
         .await
         .unwrap();
@@ -433,7 +433,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
                         &mut hasher,
-                        test_config("fuzz_test_mmr_journaled", &context),
+                        test_config("fuzz-test-mmr-journaled", &context),
                     )
                     .await
                     .unwrap();

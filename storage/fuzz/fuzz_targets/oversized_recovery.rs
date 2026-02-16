@@ -158,8 +158,8 @@ struct FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4);
-const INDEX_PARTITION: &str = "fuzz_index";
-const VALUE_PARTITION: &str = "fuzz_values";
+const INDEX_PARTITION: &str = "fuzz-index";
+const VALUE_PARTITION: &str = "fuzz-values";
 
 fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
     Config {

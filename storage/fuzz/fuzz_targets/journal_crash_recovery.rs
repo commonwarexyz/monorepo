@@ -529,7 +529,7 @@ where
     let items_per_section = input.items_per_section;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_name = format!("{}_{}", partition_prefix, input.seed);
+    let partition_name = format!("{}-{}", partition_prefix, input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
@@ -610,13 +610,13 @@ fn fuzz(input: FuzzInput) {
         JournalType::Fixed => {
             fuzz_journal::<FixedJournal<deterministic::Context, Item>>(
                 &input,
-                "fixed_crash_recovery",
+                "fixed-crash-recovery",
             );
         }
         JournalType::Variable => {
             fuzz_journal::<VariableJournal<deterministic::Context, Item>>(
                 &input,
-                "variable_crash_recovery",
+                "variable-crash-recovery",
             );
         }
     }

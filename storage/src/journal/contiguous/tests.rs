@@ -96,7 +96,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("bounds_with_items".to_string()).await.unwrap();
+    let mut journal = factory("bounds-with-items".to_string()).await.unwrap();
 
     // Append some items
     for i in 0..10 {
@@ -118,7 +118,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("bounds_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("bounds-after-prune".to_string()).await.unwrap();
 
     // Append items across multiple sections
     for i in 0..30 {
@@ -156,7 +156,7 @@ where
     // Drop and reopen
     journal.sync().await.unwrap();
     drop(journal);
-    let journal = factory("bounds_after_prune".to_string()).await.unwrap();
+    let journal = factory("bounds-after-prune".to_string()).await.unwrap();
     let bounds = get_bounds(&journal).await;
     assert!(bounds.is_empty());
     journal.destroy().await.unwrap();
@@ -168,7 +168,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("append_and_size".to_string()).await.unwrap();
+    let mut journal = factory("append-and-size".to_string()).await.unwrap();
 
     let pos1 = journal.append(100).await.unwrap();
     let pos2 = journal.append(200).await.unwrap();
@@ -193,7 +193,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("sequential_appends".to_string()).await.unwrap();
+    let mut journal = factory("sequential-appends".to_string()).await.unwrap();
 
     for i in 0..25u64 {
         let pos = journal.append(i * 10).await.unwrap();
@@ -215,7 +215,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay_from_start".to_string()).await.unwrap();
+    let mut journal = factory("replay-from-start".to_string()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i * 10).await.unwrap();
@@ -247,7 +247,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay_from_middle".to_string()).await.unwrap();
+    let mut journal = factory("replay-from-middle".to_string()).await.unwrap();
 
     for i in 0..15u64 {
         journal.append(i * 10).await.unwrap();
@@ -279,7 +279,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("prune_retains_size".to_string()).await.unwrap();
+    let mut journal = factory("prune-retains-size".to_string()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -299,7 +299,7 @@ where
     journal.sync().await.unwrap();
     drop(journal);
 
-    let journal = factory("prune_retains_size".to_string()).await.unwrap();
+    let journal = factory("prune-retains-size".to_string()).await.unwrap();
     let size_after_close = get_bounds(&journal).await.end;
     assert_eq!(size_after_close, size_after_all);
 
@@ -312,7 +312,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("through_trait".to_string()).await.unwrap();
+    let mut journal = factory("through-trait".to_string()).await.unwrap();
 
     let pos1 = Mutable::append(&mut journal, 42).await.unwrap();
     let pos2 = Mutable::append(&mut journal, 100).await.unwrap();
@@ -332,7 +332,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("replay-after-prune".to_string()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i * 10).await.unwrap();
@@ -371,7 +371,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("prune_then_append".to_string()).await.unwrap();
+    let mut journal = factory("prune-then-append".to_string()).await.unwrap();
 
     // Append exactly one section (10 items)
     for i in 0..10u64 {
@@ -397,7 +397,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("position_stability".to_string()).await.unwrap();
+    let mut journal = factory("position-stability".to_string()).await.unwrap();
 
     // Append initial items
     for i in 0..20u64 {
@@ -447,7 +447,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("sync_behavior".to_string()).await.unwrap();
+    let mut journal = factory("sync-behavior".to_string()).await.unwrap();
 
     for i in 0..5u64 {
         journal.append(i).await.unwrap();
@@ -472,7 +472,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let journal = factory("replay_on_empty".to_string()).await.unwrap();
+    let journal = factory("replay-on-empty".to_string()).await.unwrap();
 
     {
         let reader = journal.reader().await;
@@ -496,7 +496,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("replay_at_exact_size".to_string()).await.unwrap();
+    let mut journal = factory("replay-at-exact-size".to_string()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -526,7 +526,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("multiple_prunes".to_string()).await.unwrap();
+    let mut journal = factory("multiple-prunes".to_string()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -551,7 +551,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("prune_beyond_size".to_string()).await.unwrap();
+    let mut journal = factory("prune-beyond-size".to_string()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -576,7 +576,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let test_name = "persistence_basic".to_string();
+    let test_name = "persistence-basic".to_string();
 
     // Create journal and append items
     {
@@ -631,7 +631,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let test_name = "persistence_after_prune".to_string();
+    let test_name = "persistence-after-prune".to_string();
 
     // Create journal, append items, and prune
     {
@@ -706,7 +706,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("read_by_position".to_string()).await.unwrap();
+    let mut journal = factory("read-by-position".to_string()).await.unwrap();
 
     for i in 0..1000u64 {
         journal.append(i * 100).await.unwrap();
@@ -727,7 +727,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("read_out_of_range".to_string()).await.unwrap();
+    let mut journal = factory("read-out-of-range".to_string()).await.unwrap();
 
     journal.append(42).await.unwrap();
 
@@ -744,7 +744,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("read_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("read-after-prune".to_string()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -765,7 +765,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_to_middle".to_string()).await.unwrap();
+    let mut journal = factory("rewind-to-middle".to_string()).await.unwrap();
 
     // Append 20 items
     for i in 0..20u64 {
@@ -804,7 +804,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_to_zero".to_string()).await.unwrap();
+    let mut journal = factory("rewind-to-zero".to_string()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -829,7 +829,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_current_size".to_string()).await.unwrap();
+    let mut journal = factory("rewind-current-size".to_string()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -848,7 +848,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_invalid_forward".to_string()).await.unwrap();
+    let mut journal = factory("rewind-invalid-forward".to_string()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -867,7 +867,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_invalid_pruned".to_string()).await.unwrap();
+    let mut journal = factory("rewind-invalid-pruned".to_string()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -890,7 +890,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_then_append".to_string()).await.unwrap();
+    let mut journal = factory("rewind-then-append".to_string()).await.unwrap();
 
     // Append across section boundary (15 items = 1.5 sections)
     for i in 0..15u64 {
@@ -918,7 +918,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_zero_then_append".to_string())
+    let mut journal = factory("rewind-zero-then-append".to_string())
         .await
         .unwrap();
 
@@ -951,7 +951,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("rewind-after-prune".to_string()).await.unwrap();
 
     // Append items across 3 sections (30 items, assuming items_per_section = 10)
     for i in 0..30u64 {
@@ -999,7 +999,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let mut journal = factory("section_boundary".to_string()).await.unwrap();
+    let mut journal = factory("section-boundary".to_string()).await.unwrap();
 
     // Append exactly one section worth of items (10 items)
     for i in 0..10u64 {
@@ -1057,7 +1057,7 @@ where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: PersistableContiguous,
 {
-    let test_name = "destroy_and_reinit".to_string();
+    let test_name = "destroy-and-reinit".to_string();
 
     // Create journal and add data
     {

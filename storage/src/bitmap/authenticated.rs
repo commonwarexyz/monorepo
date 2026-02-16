@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test_traced]
     fn test_bitmap_persistence() {
-        const PARTITION: &str = "bitmap_test";
+        const PARTITION: &str = "bitmap-test";
         const FULL_CHUNK_COUNT: usize = 100;
 
         let executor = deterministic::Runner::default();
