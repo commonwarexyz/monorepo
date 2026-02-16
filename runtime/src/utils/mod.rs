@@ -4,7 +4,7 @@ use futures::task::ArcWake;
 use prometheus_client::{encoding::text::encode, registry::Registry as PrometheusRegistry};
 use std::{
     any::Any,
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Condvar, Mutex},
@@ -309,12 +309,14 @@ pub fn add_attribute(
     }
 }
 
-/// A writer that deduplicates HELP and TYPE metadata lines during Prometheus encoding.
+/// A writer that groups metrics by family name and deduplicates HELP/TYPE metadata
+/// during Prometheus encoding.
 ///
-/// When the same metric is registered in multiple sub-registries (via
-/// `sub_registry_with_label`) or across scoped registries (via `Registry::encode`),
-/// prometheus_client outputs duplicate HELP/TYPE lines. This writer filters them in
-/// a single pass to produce canonical Prometheus format.
+/// When the same metric is registered across scoped registries (via
+/// `Registry::encode`), prometheus_client outputs each scope's metrics
+/// separately, interleaving families. This writer collects all lines and
+/// regroups them so that every sample for a given metric name appears
+/// together with a single HELP/TYPE header.
 ///
 /// Also strips `# EOF` lines so that `Registry::encode` can append exactly one at
 /// the end of the combined output.
@@ -322,19 +324,26 @@ pub fn add_attribute(
 /// Uses "first wins" semantics: keeps the first HELP/TYPE description encountered
 /// for each metric name and discards subsequent duplicates.
 pub struct MetricEncoder {
-    output: String,
     line_buffer: String,
-    seen_help: HashSet<String>,
-    seen_type: HashSet<String>,
+    families: BTreeMap<String, MetricFamily>,
+}
+
+struct MetricFamily {
+    help: Option<String>,
+    type_line: Option<String>,
+    data: Vec<String>,
+}
+
+fn extract_metric_name(line: &str) -> String {
+    let end = line.find(['{', ' ']).unwrap_or(line.len());
+    line[..end].to_string()
 }
 
 impl MetricEncoder {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            output: String::new(),
             line_buffer: String::new(),
-            seen_help: HashSet::new(),
-            seen_type: HashSet::new(),
+            families: BTreeMap::new(),
         }
     }
 
@@ -342,27 +351,56 @@ impl MetricEncoder {
         if !self.line_buffer.is_empty() {
             self.flush_line();
         }
-        self.output
+        let mut output = String::new();
+        for family in self.families.values() {
+            if let Some(help) = &family.help {
+                output.push_str(help);
+                output.push('\n');
+            }
+            if let Some(type_line) = &family.type_line {
+                output.push_str(type_line);
+                output.push('\n');
+            }
+            for data in &family.data {
+                output.push_str(data);
+                output.push('\n');
+            }
+        }
+        output
+    }
+
+    fn get_or_create(&mut self, name: &str) -> &mut MetricFamily {
+        self.families
+            .entry(name.to_string())
+            .or_insert(MetricFamily {
+                help: None,
+                type_line: None,
+                data: Vec::new(),
+            })
     }
 
     fn flush_line(&mut self) {
-        let line = &self.line_buffer;
-        let should_write = if line == "# EOF" {
-            false
-        } else if let Some(rest) = line.strip_prefix("# HELP ") {
-            let metric_name = rest.split_whitespace().next().unwrap_or("");
-            self.seen_help.insert(metric_name.to_string())
-        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-            let metric_name = rest.split_whitespace().next().unwrap_or("");
-            self.seen_type.insert(metric_name.to_string())
-        } else {
-            true
-        };
-        if should_write {
-            self.output.push_str(line);
-            self.output.push('\n');
+        let line = std::mem::take(&mut self.line_buffer);
+        if line == "# EOF" {
+            return;
         }
-        self.line_buffer.clear();
+        if let Some(rest) = line.strip_prefix("# HELP ") {
+            let name = rest.split_whitespace().next().unwrap_or("").to_string();
+            let family = self.get_or_create(&name);
+            if family.help.is_none() {
+                family.help = Some(line);
+            }
+        } else if let Some(rest) = line.strip_prefix("# TYPE ") {
+            let name = rest.split_whitespace().next().unwrap_or("").to_string();
+            let family = self.get_or_create(&name);
+            if family.type_line.is_none() {
+                family.type_line = Some(line);
+            }
+        } else {
+            let name = extract_metric_name(&line);
+            let family = self.get_or_create(&name);
+            family.data.push(line);
+        }
     }
 }
 
@@ -504,12 +542,12 @@ foo_total 1
 bar_gauge 42
 # EOF
 "#;
-        let expected = r#"# HELP foo_total A counter.
-# TYPE foo_total counter
-foo_total 1
-# HELP bar_gauge A gauge.
+        let expected = r#"# HELP bar_gauge A gauge.
 # TYPE bar_gauge gauge
 bar_gauge 42
+# HELP foo_total A counter.
+# TYPE foo_total counter
+foo_total 1
 "#;
         assert_eq!(encode_dedup(input), expected);
     }
@@ -548,16 +586,40 @@ a_total{tag="y"} 2
         let expected = r#"# HELP a_total First.
 # TYPE a_total counter
 a_total{tag="x"} 1
+a_total{tag="y"} 2
 # HELP b_total Second.
 # TYPE b_total counter
 b_total 5
-a_total{tag="y"} 2
 "#;
         assert_eq!(encode_dedup(input), expected);
     }
 
     #[test]
-    fn test_metric_encoder_preserves_order() {
+    fn test_metric_encoder_groups_by_name() {
+        let input = r#"# HELP a_total First.
+# TYPE a_total counter
+a_total{tag="x"} 1
+# HELP b_total Second.
+# TYPE b_total counter
+b_total 5
+# HELP a_total First.
+# TYPE a_total counter
+a_total{tag="y"} 2
+# EOF
+"#;
+        let expected = r#"# HELP a_total First.
+# TYPE a_total counter
+a_total{tag="x"} 1
+a_total{tag="y"} 2
+# HELP b_total Second.
+# TYPE b_total counter
+b_total 5
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_deterministic_order() {
         let input = r#"# HELP z First alphabetically last.
 # TYPE z counter
 z_total 1
@@ -566,12 +628,12 @@ z_total 1
 a_total 2
 # EOF
 "#;
-        let expected = r#"# HELP z First alphabetically last.
-# TYPE z counter
-z_total 1
-# HELP a Last alphabetically first.
+        let expected = r#"# HELP a Last alphabetically first.
 # TYPE a counter
 a_total 2
+# HELP z First alphabetically last.
+# TYPE z counter
+z_total 1
 "#;
         assert_eq!(encode_dedup(input), expected);
     }
