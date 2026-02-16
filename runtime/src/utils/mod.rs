@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn test_metric_encoder_empty() {
         assert_eq!(encode_dedup(""), "");
-        assert_eq!(encode_dedup("# EOF\n"), "# EOF\n");
+        assert_eq!(encode_dedup("# EOF\n"), "");
     }
 
     #[test]
@@ -504,8 +504,14 @@ foo_total 1
 bar_gauge 42
 # EOF
 "#;
-        let output = encode_dedup(input);
-        assert_eq!(output, input);
+        let expected = r#"# HELP foo_total A counter.
+# TYPE foo_total counter
+foo_total 1
+# HELP bar_gauge A gauge.
+# TYPE bar_gauge gauge
+bar_gauge 42
+"#;
+        assert_eq!(encode_dedup(input), expected);
     }
 
     #[test]
@@ -522,10 +528,8 @@ votes_total{epoch="e6"} 2
 # TYPE votes_total counter
 votes_total{epoch="e5"} 1
 votes_total{epoch="e6"} 2
-# EOF
 "#;
-        let output = encode_dedup(input);
-        assert_eq!(output, expected);
+        assert_eq!(encode_dedup(input), expected);
     }
 
     #[test]
@@ -548,10 +552,8 @@ a_total{tag="x"} 1
 # TYPE b_total counter
 b_total 5
 a_total{tag="y"} 2
-# EOF
 "#;
-        let output = encode_dedup(input);
-        assert_eq!(output, expected);
+        assert_eq!(encode_dedup(input), expected);
     }
 
     #[test]
@@ -564,8 +566,35 @@ z_total 1
 a_total 2
 # EOF
 "#;
-        let output = encode_dedup(input);
-        assert_eq!(output, input);
+        let expected = r#"# HELP z First alphabetically last.
+# TYPE z counter
+z_total 1
+# HELP a Last alphabetically first.
+# TYPE a counter
+a_total 2
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_strips_intermediate_eof() {
+        let input = r#"# HELP a_total Root.
+# TYPE a_total counter
+a_total 1
+# EOF
+# HELP b_total Scoped.
+# TYPE b_total counter
+b_total 2
+# EOF
+"#;
+        let expected = r#"# HELP a_total Root.
+# TYPE a_total counter
+a_total 1
+# HELP b_total Scoped.
+# TYPE b_total counter
+b_total 2
+"#;
+        assert_eq!(encode_dedup(input), expected);
     }
 
     #[test_traced]
