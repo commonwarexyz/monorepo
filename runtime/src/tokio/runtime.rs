@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricStore, Panicker},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricStore, Panicker, ScopeGuard},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -440,7 +440,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<u64>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -457,7 +457,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope,
+            scope: self.scope.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -639,8 +639,9 @@ impl crate::Metrics for Context {
         };
 
         // Route to the appropriate registry (root or scoped)
+        let scope_id = self.scope.as_ref().map(|g| g.scope_id());
         let mut store = self.executor.store.lock().unwrap();
-        let registry = store.get_registry(self.scope);
+        let registry = store.get_registry(scope_id);
         let sub_registry =
             self.attributes
                 .iter()
@@ -665,21 +666,18 @@ impl crate::Metrics for Context {
 
     fn scoped(&self) -> Self {
         let scope = if self.scope.is_some() {
-            self.scope
+            self.scope.clone()
         } else {
-            Some(self.executor.store.lock().unwrap().create_scope())
+            let executor = self.executor.clone();
+            let scope_id = executor.store.lock().unwrap().create_scope();
+            Some(Arc::new(ScopeGuard::new(scope_id, move |id| {
+                executor.store.lock().unwrap().remove_scope(id);
+            })))
         };
         Self {
             scope,
             ..self.clone()
         }
-    }
-
-    fn deregister(&self) {
-        let scope_id = self
-            .scope
-            .expect("deregister() called on unscoped context");
-        self.executor.store.lock().unwrap().remove_scope(scope_id);
     }
 }
 

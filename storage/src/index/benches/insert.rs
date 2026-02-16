@@ -71,8 +71,6 @@ impl Metrics for DummyMetrics {
     fn scoped(&self) -> Self {
         Self
     }
-
-    fn deregister(&self) {}
 }
 
 fn bench_insert(c: &mut Criterion) {

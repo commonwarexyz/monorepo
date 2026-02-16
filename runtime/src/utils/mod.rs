@@ -379,6 +379,35 @@ impl std::fmt::Write for MetricEncoder {
     }
 }
 
+/// Guard that automatically deregisters a metric scope when all references are dropped.
+///
+/// Created by [`crate::Metrics::scoped`]. Shared via `Arc` across all contexts derived from
+/// the same scope (via `with_label`, `with_attribute`, or `Clone`). When the last `Arc` drops,
+/// the scope's registry is removed from the store.
+pub(crate) struct ScopeGuard {
+    scope_id: u64,
+    cleanup: Box<dyn Fn(u64) + Send + Sync>,
+}
+
+impl ScopeGuard {
+    pub fn new(scope_id: u64, cleanup: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        Self {
+            scope_id,
+            cleanup: Box::new(cleanup),
+        }
+    }
+
+    pub fn scope_id(&self) -> u64 {
+        self.scope_id
+    }
+}
+
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        (self.cleanup)(self.scope_id);
+    }
+}
+
 /// Manages multiple prometheus registries with lifecycle-based scoping.
 ///
 /// Holds a permanent root registry for long-lived metrics (runtime internals)

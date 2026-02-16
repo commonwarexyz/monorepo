@@ -195,7 +195,7 @@ where
 
         // Wait for instructions to transition epochs.
         let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-        let mut engines: BTreeMap<Epoch, (Handle<()>, ContextCell<E>)> = BTreeMap::new();
+        let mut engines: BTreeMap<Epoch, Handle<()>> = BTreeMap::new();
 
         select_loop! {
             self.context,
@@ -251,7 +251,7 @@ where
                     assert!(self.provider.register(transition.epoch, scheme.clone()));
 
                     // Enter the new epoch.
-                    let (handle, scoped_ctx) = self
+                    let handle = self
                         .enter_epoch(
                             transition.epoch,
                             scheme,
@@ -260,19 +260,18 @@ where
                             &mut resolver_mux,
                         )
                         .await;
-                    engines.insert(transition.epoch, (handle, scoped_ctx));
+                    engines.insert(transition.epoch, handle);
                     let _ = self.latest_epoch.try_set(transition.epoch.get());
 
                     info!(epoch = %transition.epoch, "entered epoch");
                 }
                 Message::Exit(epoch) => {
                     // Remove the engine and abort it.
-                    let Some((handle, scoped_ctx)) = engines.remove(&epoch) else {
+                    let Some(handle) = engines.remove(&epoch) else {
                         warn!(%epoch, "exited non-existent epoch");
                         continue;
                     };
                     handle.abort();
-                    scoped_ctx.deregister();
 
                     // Unregister the signing scheme for the epoch.
                     assert!(self.provider.unregister(&epoch));
@@ -299,16 +298,16 @@ where
             impl Sender<PublicKey = C::PublicKey>,
             impl Receiver<PublicKey = C::PublicKey>,
         >,
-    ) -> (Handle<()>, ContextCell<E>) {
+    ) -> Handle<()> {
         // Start the new engine
         let elector = L::default();
-        let scoped_ctx = self
+        let context = self
             .context
             .with_label("consensus_engine")
             .with_attribute("epoch", epoch)
             .scoped();
         let engine = simplex::Engine::new(
-            scoped_ctx.clone(),
+            context.clone(),
             simplex::Config {
                 scheme,
                 elector,
@@ -338,6 +337,6 @@ where
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
 
-        (engine.start(vote, certificate, resolver), scoped_ctx)
+        engine.start(vote, certificate, resolver)
     }
 }

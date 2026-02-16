@@ -168,10 +168,6 @@ where
     fn scoped(&self) -> Self {
         Self::Present(self.as_present().scoped())
     }
-
-    fn deregister(&self) {
-        self.as_present().deregister()
-    }
 }
 
 impl<C> crate::Clock for Cell<C>

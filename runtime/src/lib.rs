@@ -421,7 +421,13 @@ stability_scope!(BETA {
 
         /// Create a scoped context. All metrics registered through this context
         /// (and child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into a
-        /// separate registry that can be removed via [`Metrics::deregister`].
+        /// separate registry that is automatically removed when all references to the scope are
+        /// dropped.
+        ///
+        /// The scope is reference-counted: cloning a scoped context (or deriving children via
+        /// `with_label`/`with_attribute`) shares the same scope. When the last context holding the
+        /// scope is dropped, the scope's metrics are automatically removed from
+        /// [`Metrics::encode`] output.
         ///
         /// If the context is already scoped, returns a clone with the same scope.
         ///
@@ -437,20 +443,11 @@ stability_scope!(BETA {
         /// let counter = Counter::default();
         /// ctx.register("votes", "vote count", counter.clone());
         ///
-        /// // Later, remove all metrics from this scope
-        /// ctx.deregister();
+        /// // Metrics are automatically removed when ctx (and all clones) are dropped.
+        /// drop(ctx);
         /// ```
         fn scoped(&self) -> Self;
 
-        /// Remove all metrics registered through this context's scope.
-        ///
-        /// After this call, the scope's metrics will no longer appear in [`Metrics::encode`] output.
-        /// Any subsequent [`Metrics::register`] calls on contexts sharing this scope will panic.
-        ///
-        /// # Panics
-        ///
-        /// Panics if the context is not scoped (i.e., [`Metrics::scoped`] was never called).
-        fn deregister(&self);
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -2745,16 +2742,18 @@ mod tests {
         test_scoped_register_and_encode(runner);
     }
 
-    fn test_scoped_deregister_removes_metrics<R: Runner>(runner: R)
+    fn test_scoped_drop_removes_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
             // Register a permanent metric
             let permanent = Counter::<u64>::default();
-            context
-                .with_label("permanent")
-                .register("counter", "permanent counter", permanent.clone());
+            context.with_label("permanent").register(
+                "counter",
+                "permanent counter",
+                permanent.clone(),
+            );
             permanent.inc();
 
             // Register a scoped metric
@@ -2768,32 +2767,32 @@ mod tests {
             assert!(buffer.contains("permanent_counter_total 1"));
             assert!(buffer.contains("engine_votes_total 1"));
 
-            // Deregister the scope
-            scoped.deregister();
+            // Drop the scope
+            drop(scoped);
 
             // Only permanent metric should remain
             let buffer = context.encode();
             assert!(
                 buffer.contains("permanent_counter_total 1"),
-                "permanent metric should survive deregister: {buffer}"
+                "permanent metric should survive drop: {buffer}"
             );
             assert!(
                 !buffer.contains("engine_votes"),
-                "scoped metric should be removed after deregister: {buffer}"
+                "scoped metric should be removed after drop: {buffer}"
             );
         });
     }
 
     #[test]
-    fn test_deterministic_scoped_deregister_removes_metrics() {
+    fn test_deterministic_scoped_drop_removes_metrics() {
         let executor = deterministic::Runner::default();
-        test_scoped_deregister_removes_metrics(executor);
+        test_scoped_drop_removes_metrics(executor);
     }
 
     #[test]
-    fn test_tokio_scoped_deregister_removes_metrics() {
+    fn test_tokio_scoped_drop_removes_metrics() {
         let runner = tokio::Runner::default();
-        test_scoped_deregister_removes_metrics(runner);
+        test_scoped_drop_removes_metrics(runner);
     }
 
     fn test_scoped_with_attributes<R: Runner>(runner: R)
@@ -2824,8 +2823,8 @@ mod tests {
             assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
-            // Deregister epoch 1
-            epoch1.deregister();
+            // Drop epoch 1
+            drop(epoch1);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("epoch=\"1\""),
@@ -2833,8 +2832,8 @@ mod tests {
             );
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
-            // Deregister epoch 2
-            epoch2.deregister();
+            // Drop epoch 2
+            drop(epoch2);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("engine_votes"),
@@ -2871,8 +2870,9 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("engine_batcher_msgs_total 1"));
 
-            // Deregistering parent scope removes child's metrics too
-            scoped.deregister();
+            // Dropping parent and child removes the scope's metrics
+            drop(child);
+            drop(scoped);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("engine_batcher_msgs"),
@@ -2914,14 +2914,14 @@ mod tests {
             assert!(buffer.contains("a_counter_total 1"));
             assert!(buffer.contains("b_counter_total 2"));
 
-            // Deregister only scope_a
-            scope_a.deregister();
+            // Drop only scope_a
+            drop(scope_a);
             let buffer = context.encode();
             assert!(!buffer.contains("a_counter"));
             assert!(buffer.contains("b_counter_total 2"));
 
-            // Deregister scope_b
-            scope_b.deregister();
+            // Drop scope_b
+            drop(scope_b);
             let buffer = context.encode();
             assert!(!buffer.contains("b_counter"));
         });
@@ -2940,28 +2940,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "deregister() called on unscoped context")]
-    fn test_deterministic_deregister_unscoped_panics() {
+    fn test_deterministic_reregister_after_drop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            context.deregister();
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "deregister() called on unscoped context")]
-    fn test_tokio_deregister_unscoped_panics() {
-        let runner = tokio::Runner::default();
-        runner.start(|context| async move {
-            context.deregister();
-        });
-    }
-
-    #[test]
-    fn test_deterministic_reregister_after_deregister() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Register in scope, deregister, then re-register with same name/attributes
+            // Register in scope, drop, then re-register with same name/attributes
             let scoped = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
@@ -2969,7 +2951,7 @@ mod tests {
             let c1 = Counter::<u64>::default();
             scoped.register("votes", "vote count", c1.clone());
             c1.inc();
-            scoped.deregister();
+            drop(scoped);
 
             // Re-register with same name and attributes in a new scope
             let scoped2 = context
@@ -3004,8 +2986,7 @@ mod tests {
                 &self,
                 encoder: &mut prometheus_client::encoding::LabelSetEncoder<'_>,
             ) -> Result<(), std::fmt::Error> {
-                use prometheus_client::encoding::EncodeLabelKey;
-                use prometheus_client::encoding::EncodeLabelValue;
+                use prometheus_client::encoding::{EncodeLabelKey, EncodeLabelValue};
                 let mut label = encoder.encode_label();
                 let mut key = label.encode_label_key()?;
                 EncodeLabelKey::encode(&"peer", &mut key)?;
@@ -3028,11 +3009,7 @@ mod tests {
                     name: "alice".into(),
                 })
                 .inc();
-            family
-                .get_or_create(&Peer {
-                    name: "bob".into(),
-                })
-                .inc();
+            family.get_or_create(&Peer { name: "bob".into() }).inc();
 
             let buffer = context.encode();
             assert!(
@@ -3044,7 +3021,7 @@ mod tests {
                 "family with attributes should combine labels: {buffer}"
             );
 
-            scoped.deregister();
+            drop(scoped);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("batcher_votes"),

@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricStore, Panicker,
+        MetricStore, Panicker, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
@@ -342,7 +342,7 @@ impl Default for Config {
     }
 }
 
-/// Key for detecting duplicate metric registrations: (metric_name, attributes, scope).
+/// Key for detecting duplicate metric registrations: (metric_name, attributes, scope_id).
 type MetricKey = (String, Vec<(String, String)>, Option<u64>);
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
@@ -866,7 +866,7 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<u64>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -883,7 +883,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
-            scope: self.scope,
+            scope: self.scope.clone(),
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
@@ -1294,7 +1294,8 @@ impl crate::Metrics for Context {
         };
 
         // Check for duplicate registration (O(1) lookup)
-        let metric_key = (prefixed_name.clone(), self.attributes.clone(), self.scope);
+        let scope_id = self.scope.as_ref().map(|g| g.scope_id());
+        let metric_key = (prefixed_name.clone(), self.attributes.clone(), scope_id);
         let is_new = executor
             .registered_metrics
             .lock()
@@ -1308,7 +1309,7 @@ impl crate::Metrics for Context {
 
         // Route to the appropriate registry (root or scoped)
         let mut store = executor.store.lock().unwrap();
-        let registry = store.get_registry(self.scope);
+        let registry = store.get_registry(scope_id);
         let sub_registry =
             self.attributes
                 .iter()
@@ -1329,28 +1330,25 @@ impl crate::Metrics for Context {
         let executor = self.executor();
         executor.auditor.event(b"scoped", |_| {});
         let scope = if self.scope.is_some() {
-            self.scope
+            self.scope.clone()
         } else {
-            Some(executor.store.lock().unwrap().create_scope())
+            let weak = self.executor.clone();
+            let scope_id = executor.store.lock().unwrap().create_scope();
+            Some(Arc::new(ScopeGuard::new(scope_id, move |id| {
+                if let Some(executor) = weak.upgrade() {
+                    executor.store.lock().unwrap().remove_scope(id);
+                    executor
+                        .registered_metrics
+                        .lock()
+                        .unwrap()
+                        .retain(|(_, _, scope)| *scope != Some(id));
+                }
+            })))
         };
         Self {
             scope,
             ..self.clone()
         }
-    }
-
-    fn deregister(&self) {
-        let scope_id = self
-            .scope
-            .expect("deregister() called on unscoped context");
-        let executor = self.executor();
-        executor.auditor.event(b"deregister", |_| {});
-        executor.store.lock().unwrap().remove_scope(scope_id);
-        executor
-            .registered_metrics
-            .lock()
-            .unwrap()
-            .retain(|(_, _, scope)| *scope != Some(scope_id));
     }
 }
 

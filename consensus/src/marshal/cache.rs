@@ -35,8 +35,9 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
-    /// Scoped context for this epoch's metrics (deregistered on prune)
-    scoped_context: R,
+    /// Scoped context for this epoch's metrics (dropped on prune).
+    /// Held to keep the scope alive; metrics auto-deregister when this is dropped.
+    _scoped_context: R,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -165,10 +166,20 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             .with_attribute("epoch", epoch)
             .scoped();
         let verified_blocks = self
-            .init_archive(&scoped_context, epoch, "verified", self.block_codec_config.clone())
+            .init_archive(
+                &scoped_context,
+                epoch,
+                "verified",
+                self.block_codec_config.clone(),
+            )
             .await;
         let notarized_blocks = self
-            .init_archive(&scoped_context, epoch, "notarized", self.block_codec_config.clone())
+            .init_archive(
+                &scoped_context,
+                epoch,
+                "notarized",
+                self.block_codec_config.clone(),
+            )
             .await;
         let notarizations = self
             .init_archive(
@@ -189,7 +200,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         let existing = self.caches.insert(
             epoch,
             Cache {
-                scoped_context,
+                _scoped_context: scoped_context,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -220,12 +231,10 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             key_write_buffer: self.cfg.key_write_buffer,
             value_write_buffer: self.cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(
-            scoped_context.with_label(&format!("cache_{name}")),
-            cfg,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
+        let archive =
+            prunable::Archive::init(scoped_context.with_label(&format!("cache_{name}")), cfg)
+                .await
+                .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
         info!(elapsed = ?start.elapsed(), "restored {name} archive");
         archive
     }
@@ -370,17 +379,16 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             .collect();
         for epoch in old_epochs.iter() {
             let Cache {
-                scoped_context,
                 verified_blocks: vb,
                 notarized_blocks: nb,
                 notarizations: nv,
                 finalizations: fv,
+                ..
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
             nv.destroy().await.expect("failed to destroy nv");
             fv.destroy().await.expect("failed to destroy fv");
-            scoped_context.deregister();
         }
 
         // Update metadata if necessary
