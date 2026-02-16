@@ -580,7 +580,7 @@ where
                     }
                 }
             },
-            // Handle resolver messages last (batched: drain all pending, sync once)
+            // Handle resolver messages last (batched up to max_repair, sync once)
             Some(message) = resolver_rx.recv() else {
                 info!("handler closed, shutting down");
                 break;
@@ -588,7 +588,12 @@ where
                 let mut needs_sync = false;
                 let mut pending = Vec::new();
                 let mut message = Some(message);
-                while let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) {
+                let mut remaining = self.max_repair.get();
+                while remaining > 0 {
+                    let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) else {
+                        break;
+                    };
+                    remaining -= 1;
                     needs_sync |= self.handle_resolver_message(
                         msg,
                         &mut pending,
