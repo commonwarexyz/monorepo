@@ -14,7 +14,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{num::NonZeroU16, sync::Arc};
 
@@ -220,7 +220,7 @@ fn fuzz(mut input: FuzzInput) {
                         range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(AsyncRwLock::new(clean_db));
+                    let wrapped_src = Arc::new(clean_db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -232,7 +232,6 @@ fn fuzz(mut input: FuzzInput) {
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_inner()
                         .into_mutable();
                     sync_id += 1;
                 }
