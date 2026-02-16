@@ -328,20 +328,31 @@ pub struct MetricEncoder {
     families: BTreeMap<String, MetricFamily>,
 }
 
+#[derive(Default)]
 struct MetricFamily {
     help: Option<String>,
     type_line: Option<String>,
+    metric_type: Option<String>,
     data: Vec<String>,
 }
 
-/// OpenMetrics suffixes appended to data lines but absent from HELP/TYPE headers.
+/// Each OpenMetrics suffix is only valid for specific metric types.
 ///
-/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md>
-const OPENMETRICS_SUFFIXES: &[&str] = &["_total", "_bucket", "_count", "_sum", "_created", "_info"];
+/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#suffixes>
+const TYPED_SUFFIXES: &[(&str, &[&str])] = &[
+    ("_total", &["counter"]),
+    ("_bucket", &["histogram", "gaugehistogram"]),
+    ("_count", &["histogram", "summary"]),
+    ("_sum", &["histogram", "summary"]),
+    ("_gcount", &["gaugehistogram"]),
+    ("_gsum", &["gaugehistogram"]),
+    ("_created", &["counter", "histogram", "summary"]),
+    ("_info", &["info"]),
+];
 
 /// Extract the metric name from a sample line: `sample = metricname [labels] SP number ...`
 ///
-/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md>
+/// See: <https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md#abnf>
 fn extract_metric_name(line: &str) -> &str {
     let end = line.find(['{', ' ']).unwrap_or(line.len());
     &line[..end]
@@ -380,31 +391,25 @@ impl MetricEncoder {
     /// Resolve a data line's metric name to its family key, inserting a new
     /// family if none exists, and return a mutable reference to it.
     ///
-    /// OpenMetrics appends suffixes to data lines that differ from the base
-    /// name in HELP/TYPE headers (e.g., HELP uses "votes" but the data line
-    /// is "votes_total"). If stripping a known suffix matches an existing
-    /// family, that family is returned. Otherwise a new family is created
-    /// under the literal metric name.
+    /// OpenMetrics appends type-specific suffixes to data lines that differ
+    /// from the base name in HELP/TYPE headers (e.g., a counter named "votes"
+    /// emits data as "votes_total"). This method uses the TYPE declaration to
+    /// correctly match suffixed data lines to their family, even when another
+    /// family with the suffixed name exists (e.g., a gauge named "votes_total").
     fn resolve_data_family(&mut self, name: &str) -> &mut MetricFamily {
-        // Find the key to use: exact match, suffix-stripped match, or the name itself.
-        let key = if self.families.contains_key(name) {
-            name
-        } else {
-            OPENMETRICS_SUFFIXES
-                .iter()
-                .find_map(|suffix| {
-                    let base = name.strip_suffix(suffix)?;
-                    self.families.contains_key(base).then_some(base)
-                })
-                .unwrap_or(name)
-        };
-        self.families
-            .entry(key.to_string())
-            .or_insert(MetricFamily {
-                help: None,
-                type_line: None,
-                data: Vec::new(),
-            })
+        let key = self.find_typed_family(name).unwrap_or(name);
+        self.families.entry(key.to_string()).or_default()
+    }
+
+    /// Try to find an existing family whose TYPE declaration expects the
+    /// suffix present in `name`.
+    fn find_typed_family<'a>(&self, name: &'a str) -> Option<&'a str> {
+        TYPED_SUFFIXES.iter().find_map(|(suffix, valid_types)| {
+            let base = name.strip_suffix(suffix)?;
+            let family = self.families.get(base)?;
+            let t = family.metric_type.as_deref()?;
+            valid_types.contains(&t).then_some(base)
+        })
     }
 
     fn flush_line(&mut self) {
@@ -414,29 +419,18 @@ impl MetricEncoder {
         }
         if let Some(rest) = line.strip_prefix("# HELP ") {
             let name = rest.split_whitespace().next().unwrap_or("");
-            let family = self
-                .families
-                .entry(name.to_string())
-                .or_insert(MetricFamily {
-                    help: None,
-                    type_line: None,
-                    data: Vec::new(),
-                });
+            let family = self.families.entry(name.to_string()).or_default();
             if family.help.is_none() {
                 family.help = Some(line);
             }
         } else if let Some(rest) = line.strip_prefix("# TYPE ") {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            let family = self
-                .families
-                .entry(name.to_string())
-                .or_insert(MetricFamily {
-                    help: None,
-                    type_line: None,
-                    data: Vec::new(),
-                });
+            let mut parts = rest.split_whitespace();
+            let name = parts.next().unwrap_or("");
+            let metric_type = parts.next().map(|s| s.to_string());
+            let family = self.families.entry(name.to_string()).or_default();
             if family.type_line.is_none() {
                 family.type_line = Some(line);
+                family.metric_type = metric_type;
             }
         } else {
             let name = extract_metric_name(&line);
@@ -704,6 +698,29 @@ ab_votes_total{epoch="2"} 2
 # HELP ab_votes_size size gauge.
 # TYPE ab_votes_size gauge
 ab_votes_size 99
+"#;
+        assert_eq!(encode_dedup(input), expected);
+    }
+
+    #[test]
+    fn test_metric_encoder_type_aware_suffix() {
+        // A gauge named "foo_total" and a counter named "foo" both produce
+        // data lines called "foo_total". The encoder must use the TYPE info
+        // to route each data line to the correct family.
+        let input = r#"# HELP foo_total A gauge.
+# TYPE foo_total gauge
+foo_total 42
+# HELP foo A counter.
+# TYPE foo counter
+foo_total 1
+# EOF
+"#;
+        let expected = r#"# HELP foo A counter.
+# TYPE foo counter
+foo_total 1
+# HELP foo_total A gauge.
+# TYPE foo_total gauge
+foo_total 42
 "#;
         assert_eq!(encode_dedup(input), expected);
     }
