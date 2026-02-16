@@ -7,7 +7,8 @@ use commonware_storage::{
     archive::{self, immutable, prunable, Archive, Identifier},
     translator::Translator,
 };
-use std::{error::Error, future::Future};
+use futures::Stream;
+use std::{error::Error, future::Future, pin::Pin};
 
 /// Durable store for [Finalizations](Finalization) keyed by height and commitment.
 pub trait Certificates: Send + Sync + 'static {
@@ -77,7 +78,7 @@ pub trait Certificates: Send + Sync + 'static {
     ///
     /// # Returns
     /// `Some(height)` if there are any stored finalizations, or `None` if the store is empty.
-    fn last_index(&self) -> Option<Height>;
+    fn last_index(&self) -> impl Future<Output = Result<Option<Height>, Self::Error>> + Send;
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and commitment.
@@ -87,6 +88,10 @@ pub trait Blocks: Send + Sync + 'static {
 
     /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
+
+    type MissingItemsStream<'a>: Stream<Item = Result<Height, Self::Error>> + Send + 'a
+    where
+        Self: 'a;
 
     /// Store a finalized block, keyed by height and commitment.
     ///
@@ -146,7 +151,11 @@ pub trait Blocks: Send + Sync + 'static {
     /// A vector containing up to `max` missing heights from gaps between ranges.
     /// The vector may contain fewer than `max` items if there aren't enough gaps.
     /// If there are no more ranges after the current position, no items are returned.
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height>;
+    fn missing_items(
+        &self,
+        start: Height,
+        max: usize,
+    ) -> impl Future<Output = Result<Self::MissingItemsStream<'_>, Self::Error>> + Send;
 
     /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
@@ -169,7 +178,10 @@ pub trait Blocks: Send + Sync + 'static {
     /// A tuple `(Option<Height>, Option<Height>)` where:
     /// - The first element (`current_range_end`) is `Some(end)` of the range that contains `value`. It's `None` if `value` is before all ranges, the store is empty, or `value` is not in any range.
     /// - The second element (`next_range_start`) is `Some(start)` of the first range that begins strictly after `value`. It's `None` if no range starts after `value` or the store is empty.
-    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
+    fn next_gap(
+        &self,
+        value: Height,
+    ) -> impl Future<Output = Result<(Option<Height>, Option<Height>), Self::Error>> + Send;
 }
 
 impl<E, C, S> Certificates for immutable::Archive<E, C, Finalization<S, C>>
@@ -203,8 +215,8 @@ where
         Ok(())
     }
 
-    fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
+    async fn last_index(&self) -> Result<Option<Height>, Self::Error> {
+        Ok(<Self as Archive>::last_index(self).map(Height::new))
     }
 }
 
@@ -215,6 +227,11 @@ where
 {
     type Block = B;
     type Error = archive::Error;
+
+    type MissingItemsStream<'a>
+        = Pin<Box<dyn Stream<Item = Result<Height, Self::Error>> + Send + 'a>>
+    where
+        Self: 'a;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
         self.put_sync(block.height().get(), block.commitment(), block)
@@ -233,16 +250,25 @@ where
         Ok(())
     }
 
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        <Self as Archive>::missing_items(self, start.get(), max)
-            .into_iter()
-            .map(Height::new)
-            .collect()
+    async fn missing_items(
+        &self,
+        start: Height,
+        max: usize,
+    ) -> Result<Self::MissingItemsStream<'_>, Self::Error> {
+        Ok(Box::pin(futures::stream::iter(
+            <Self as Archive>::missing_items(self, start.get(), max)
+                .into_iter()
+                .map(Height::new)
+                .map(Ok),
+        )))
     }
 
-    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+    async fn next_gap(
+        &self,
+        value: Height,
+    ) -> Result<(Option<Height>, Option<Height>), Self::Error> {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
-        (a.map(Height::new), b.map(Height::new))
+        Ok((a.map(Height::new), b.map(Height::new)))
     }
 }
 
@@ -277,8 +303,8 @@ where
         Self::prune(self, min.get()).await
     }
 
-    fn last_index(&self) -> Option<Height> {
-        <Self as Archive>::last_index(self).map(Height::new)
+    async fn last_index(&self) -> Result<Option<Height>, Self::Error> {
+        Ok(<Self as Archive>::last_index(self).map(Height::new))
     }
 }
 
@@ -290,6 +316,11 @@ where
 {
     type Block = B;
     type Error = archive::Error;
+
+    type MissingItemsStream<'a>
+        = Pin<Box<dyn Stream<Item = Result<Height, Self::Error>> + Send + 'a>>
+    where
+        Self: 'a;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
         self.put_sync(block.height().get(), block.commitment(), block)
@@ -307,15 +338,24 @@ where
         Self::prune(self, min.get()).await
     }
 
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        <Self as Archive>::missing_items(self, start.get(), max)
-            .into_iter()
-            .map(Height::new)
-            .collect()
+    async fn missing_items(
+        &self,
+        start: Height,
+        max: usize,
+    ) -> Result<Self::MissingItemsStream<'_>, Self::Error> {
+        Ok(Box::pin(futures::stream::iter(
+            <Self as Archive>::missing_items(self, start.get(), max)
+                .into_iter()
+                .map(Height::new)
+                .map(Ok),
+        )))
     }
 
-    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+    async fn next_gap(
+        &self,
+        value: Height,
+    ) -> Result<(Option<Height>, Option<Height>), Self::Error> {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
-        (a.map(Height::new), b.map(Height::new))
+        Ok((a.map(Height::new), b.map(Height::new)))
     }
 }
