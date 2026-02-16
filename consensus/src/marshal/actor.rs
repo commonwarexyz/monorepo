@@ -760,83 +760,102 @@ where
     /// if finalization archives were written and need syncing.
     async fn verify_and_process_pending(
         &mut self,
-        pending: Vec<PendingVerification<P::Scheme, B>>,
+        mut pending: Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) -> bool {
         if pending.is_empty() {
             return false;
         }
 
-        // Try batch verification with universal verifier
-        let batch_ok = if let Some(scheme) = self.provider.all() {
-            let certs = pending.iter().map(|item| match item {
-                PendingVerification::Finalized { finalization, .. } => (
-                    Subject::Finalize {
-                        proposal: &finalization.proposal,
-                    },
-                    &finalization.certificate,
-                ),
-                PendingVerification::Notarized { notarization, .. } => (
-                    Subject::Notarize {
-                        proposal: &notarization.proposal,
-                    },
-                    &notarization.certificate,
-                ),
-            });
-            scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
-                &mut self.context,
-                certs,
-                &self.strategy,
-            )
-        } else {
-            false
-        };
-
         let mut wrote = false;
-        if batch_ok {
-            for item in pending {
-                wrote |= self.process_verified(item, application).await;
+
+        // Use the universal verifier for bisection when available. If a batch fails,
+        // recursively split it to salvage valid certificates and minimize per-item checks.
+        let mut verified = vec![false; pending.len()];
+        if let Some(scheme) = self.provider.all() {
+            let mut ranges = vec![(0usize, pending.len())];
+            while let Some((start, end)) = ranges.pop() {
+                let len = end - start;
+                if len == 0 {
+                    continue;
+                }
+
+                if self.verify_pending_batch(&scheme, &pending[start..end]) {
+                    for is_verified in &mut verified[start..end] {
+                        *is_verified = true;
+                    }
+                    continue;
+                }
+
+                if len > 1 {
+                    let mid = start + len / 2;
+                    ranges.push((mid, end));
+                    ranges.push((start, mid));
+                }
             }
-        } else {
-            // Fall back to individual verification
-            for item in pending {
-                let valid = match &item {
-                    PendingVerification::Finalized {
-                        height,
-                        finalization,
-                        ..
-                    } => self
-                        .epocher
-                        .containing(*height)
-                        .and_then(|b| self.get_scheme_certificate_verifier(b.epoch()))
-                        .map(|scheme| {
-                            finalization.verify(&mut self.context, &scheme, &self.strategy)
-                        })
-                        .unwrap_or(false),
-                    PendingVerification::Notarized {
-                        round,
-                        notarization,
-                        ..
-                    } => self
-                        .get_scheme_certificate_verifier(round.epoch())
-                        .map(|scheme| {
-                            notarization.verify(&mut self.context, &scheme, &self.strategy)
-                        })
-                        .unwrap_or(false),
-                };
-                if valid {
-                    wrote |= self.process_verified(item, application).await;
-                } else {
-                    match item {
-                        PendingVerification::Finalized { response, .. }
-                        | PendingVerification::Notarized { response, .. } => {
-                            response.send_lossy(false);
-                        }
+        }
+
+        for (index, item) in pending.drain(..).enumerate() {
+            if verified[index] || self.verify_pending_item(&item) {
+                wrote |= self.process_verified(item, application).await;
+            } else {
+                match item {
+                    PendingVerification::Finalized { response, .. }
+                    | PendingVerification::Notarized { response, .. } => {
+                        response.send_lossy(false);
                     }
                 }
             }
         }
+
         wrote
+    }
+
+    /// Verify a batch of pending finalization/notarization certificates.
+    fn verify_pending_batch(
+        &mut self,
+        scheme: &P::Scheme,
+        batch: &[PendingVerification<P::Scheme, B>],
+    ) -> bool {
+        let certs = batch.iter().map(|item| match item {
+            PendingVerification::Finalized { finalization, .. } => (
+                Subject::Finalize {
+                    proposal: &finalization.proposal,
+                },
+                &finalization.certificate,
+            ),
+            PendingVerification::Notarized { notarization, .. } => (
+                Subject::Notarize {
+                    proposal: &notarization.proposal,
+                },
+                &notarization.certificate,
+            ),
+        });
+        scheme.verify_certificates::<_, B::Commitment, _, N3f1>(&mut self.context, certs, &self.strategy)
+    }
+
+    /// Verify a single pending finalization/notarization certificate.
+    fn verify_pending_item(&mut self, item: &PendingVerification<P::Scheme, B>) -> bool {
+        match item {
+            PendingVerification::Finalized {
+                height,
+                finalization,
+                ..
+            } => self
+                .epocher
+                .containing(*height)
+                .and_then(|b| self.get_scheme_certificate_verifier(b.epoch()))
+                .map(|scheme| finalization.verify(&mut self.context, &scheme, &self.strategy))
+                .unwrap_or(false),
+            PendingVerification::Notarized {
+                round,
+                notarization,
+                ..
+            } => self
+                .get_scheme_certificate_verifier(round.epoch())
+                .map(|scheme| notarization.verify(&mut self.context, &scheme, &self.strategy))
+                .unwrap_or(false),
+        }
     }
 
     /// Process a verified pending item (finalization or notarization).
