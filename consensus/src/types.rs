@@ -799,6 +799,17 @@ commonware_macros::stability_scope!(ALPHA {
                 }
                 let mut arr = [0u8; Self::SIZE];
                 buf.copy_to_slice(&mut arr);
+
+                // Validate the embedded CodingConfig so that `config()` can
+                // never panic on a successfully-deserialized Commitment.
+                let mut cfg_buf = &arr[Self::CONFIG_OFFSET..];
+                CodingConfig::read(&mut cfg_buf).map_err(|_| {
+                    commonware_codec::Error::Invalid(
+                        "Commitment",
+                        "invalid embedded CodingConfig",
+                    )
+                })?;
+
                 Ok(Self(arr))
             }
         }

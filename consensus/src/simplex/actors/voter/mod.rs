@@ -3315,6 +3315,125 @@ mod tests {
         cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
 
+    /// Cancelled certification should still notify resolver with
+    /// `Certified { success: false }` so resolver can aggressively fetch
+    /// nullifications for the stuck view.
+    fn cancelled_certification_notifies_resolver_failure<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"cancelled_cert_reports_failure".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Create simulated network.
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            // Get participants.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+
+            // Set up voter with Certifier::Cancel (certify receiver closes).
+            let (
+                mut mailbox,
+                mut batcher_receiver,
+                mut resolver_receiver,
+                relay,
+                _,
+            ) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                Duration::from_millis(500),
+                mocks::application::Certifier::Cancel,
+            )
+            .await;
+
+            // Advance to a follower view.
+            let target_view = View::new(3);
+            let parent_payload = advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Provide proposal contents so verification can complete.
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"test_proposal"),
+            );
+            let leader = participants[1].clone();
+            let contents = (proposal.round, parent_payload, 0u64).encode();
+            relay
+                .broadcast(&leader, (proposal.payload, contents))
+                .await;
+            mailbox.proposal(proposal.clone()).await;
+
+            // Build and send notarization so voter attempts certification.
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            // Cancelled certification should be surfaced as an explicit
+            // certification failure to resolver.
+            loop {
+                select! {
+                    msg = resolver_receiver.recv() => {
+                        match msg.unwrap() {
+                            MailboxMessage::Certified { view, success } if view == target_view => {
+                                assert!(
+                                    !success,
+                                    "expected certification failure notification for canceled certify receiver"
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    },
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Update { active, .. } = msg.unwrap() {
+                            active.send(true).unwrap();
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!(
+                            "expected resolver Certified {{ success: false }} for canceled certification in view {target_view}"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_cancelled_certification_notifies_resolver_failure() {
+        cancelled_certification_notifies_resolver_failure::<_, _>(ed25519::fixture);
+    }
+
     /// Demonstrates that validators in future views cannot retroactively help
     /// stuck validators escape via nullification.
     ///

@@ -82,6 +82,7 @@ mod tests {
         types::{coding::Commitment, Epoch, Epocher, FixedEpocher, Height, Round, View},
         Automaton, CertifiableAutomaton,
     };
+    use commonware_codec::FixedSize;
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
@@ -1265,6 +1266,39 @@ mod tests {
                 },
             }
         })
+    }
+
+    /// Regression test: a Byzantine leader must not be able to crash honest nodes
+    /// by proposing a `Commitment` with invalid `CodingConfig` bytes (e.g.
+    /// zero-valued `NonZeroU16` fields). The fix validates the embedded config
+    /// during deserialization so malformed commitments are rejected at the codec
+    /// level before reaching `verify()`.
+    #[test_traced("WARN")]
+    fn test_malformed_commitment_config_rejected_at_deserialization() {
+        use commonware_codec::{Encode, ReadExt};
+
+        // Construct a Commitment with all-zero bytes (invalid CodingConfig:
+        // minimum_shards=0, extra_shards=0). Serialize it and attempt to
+        // deserialize -- this must fail.
+        let malformed_bytes = [0u8; Commitment::SIZE];
+        let result = Commitment::read(&mut &malformed_bytes[..]);
+        assert!(
+            result.is_err(),
+            "deserialization of Commitment with zeroed CodingConfig must fail"
+        );
+
+        // A validly-constructed Commitment must still round-trip.
+        let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+        let valid = Commitment::from((
+            Sha256::hash(b"block"),
+            Sha256::hash(b"root"),
+            Sha256::hash(b"context"),
+            coding_config,
+        ));
+        let encoded = valid.encode();
+        let decoded = Commitment::read(&mut &encoded[..])
+            .expect("valid Commitment must deserialize");
+        assert_eq!(valid, decoded);
     }
 
     #[test_traced("WARN")]
