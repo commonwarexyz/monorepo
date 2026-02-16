@@ -1310,12 +1310,12 @@ impl crate::Metrics for Context {
         // Route to the appropriate registry (root or scoped)
         let mut registry = executor.registry.lock().unwrap();
         let scoped = registry.get_scope(scope_id);
-        let sub_registry =
-            self.attributes
-                .iter()
-                .fold(scoped, |reg, (k, v): &(String, String)| {
-                    reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-                });
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
         sub_registry.register(prefixed_name, help, metric);
     }
 

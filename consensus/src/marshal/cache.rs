@@ -231,7 +231,10 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
         let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
             .await
             .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
-        let elapsed = ctx.current().duration_since(start).unwrap_or(Duration::ZERO);
+        let elapsed = ctx
+            .current()
+            .duration_since(start)
+            .unwrap_or(Duration::ZERO);
         info!(?elapsed, "restored {name} archive");
         archive
     }
