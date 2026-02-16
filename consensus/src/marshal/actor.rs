@@ -130,6 +130,8 @@ where
     block_codec_config: B::Cfg,
     // Strategy for parallel operations
     strategy: T,
+    // Whether to skip certificate verification for resolver deliveries
+    trusted_resolver: bool,
 
     // ---------- State ----------
     // Last view processed
@@ -238,6 +240,7 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
+                trusted_resolver: config.trusted_resolver,
                 last_processed_round: Round::zero(),
                 last_processed_height,
                 pending_ack: None.into(),
@@ -688,7 +691,12 @@ where
                                 // Validation
                                 if block.height() != height
                                     || finalization.proposal.payload != block.commitment()
-                                    || !finalization.verify(
+                                {
+                                    response.send_lossy(false);
+                                    continue;
+                                }
+                                if !self.trusted_resolver
+                                    && !finalization.verify(
                                         &mut self.context,
                                         &scheme,
                                         &self.strategy,
@@ -738,7 +746,12 @@ where
                                 // Validation
                                 if notarization.round() != round
                                     || notarization.proposal.payload != block.commitment()
-                                    || !notarization.verify(
+                                {
+                                    response.send_lossy(false);
+                                    continue;
+                                }
+                                if !self.trusted_resolver
+                                    && !notarization.verify(
                                         &mut self.context,
                                         &scheme,
                                         &self.strategy,
@@ -907,7 +920,10 @@ where
                 Ok::<_, BoxedError>(())
             },
             async {
-                self.finalizations_by_height.sync().await.map_err(Box::new)?;
+                self.finalizations_by_height
+                    .sync()
+                    .await
+                    .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
             },
         ) {

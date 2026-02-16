@@ -274,6 +274,7 @@ where
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
                 strategy: config.strategy.clone(),
+                trusted_resolver: false,
             },
         )
         .await;
