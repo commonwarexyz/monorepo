@@ -364,15 +364,19 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Rewind index first (this also removes sections after `section`)
         self.index.rewind(section, index_size).await?;
 
-        // Derive value size from last entry
-        let value_size = match self.index.last(section).await? {
-            Some(entry) => {
-                let (offset, size) = entry.value_location();
-                offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::OffsetOverflow)?
+        // Derive value size from last entry (skip if section has no data)
+        let value_size = if index_size == 0 {
+            0
+        } else {
+            match self.index.last(section).await? {
+                Some(entry) => {
+                    let (offset, size) = entry.value_location();
+                    offset
+                        .checked_add(u64::from(size))
+                        .ok_or(Error::OffsetOverflow)?
+                }
+                None => 0,
             }
-            None => 0,
         };
 
         // Rewind values (this also removes sections after `section`)
