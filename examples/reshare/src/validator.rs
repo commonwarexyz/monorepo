@@ -1400,16 +1400,16 @@ mod test {
                     success_target_reached_epoch = Some(epoch);
                 }
 
-                let post_update = if let Some(target_epoch) = success_target_reached_epoch {
-                    let all_reached = status.values().filter(|e| **e >= target_epoch).count() >= 4;
-                    if all_reached {
-                        PostUpdate::Stop
-                    } else {
-                        PostUpdate::Continue
-                    }
-                } else {
-                    PostUpdate::Continue
-                };
+                let post_update =
+                    success_target_reached_epoch.map_or(PostUpdate::Continue, |target_epoch| {
+                        let all_reached =
+                            status.values().filter(|e| **e >= target_epoch).count() >= 4;
+                        if all_reached {
+                            PostUpdate::Stop
+                        } else {
+                            PostUpdate::Continue
+                        }
+                    });
                 let done = matches!(post_update, PostUpdate::Stop);
                 let _ = update.callback.send(post_update);
                 if done {
