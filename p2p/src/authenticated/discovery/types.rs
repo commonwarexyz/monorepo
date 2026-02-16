@@ -1,9 +1,12 @@
-use crate::{authenticated::data::Data, Ingress};
+use crate::{
+    authenticated::data::{Data, EncodedData},
+    Channel, Ingress,
+};
 use commonware_codec::{
     config::RangeCfg, varint::UInt, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
 use commonware_cryptography::{PublicKey, Signer};
-use commonware_runtime::{Buf, BufMut, Clock};
+use commonware_runtime::{Buf, BufMut, BufferPool, Clock, IoBufs};
 use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 use thiserror::Error;
@@ -76,6 +79,13 @@ pub enum Payload<C: PublicKey> {
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
+}
+
+impl<C: PublicKey> Payload<C> {
+    /// Encode `Payload::Data` bytes for transmission using pooled header allocation.
+    pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
+        EncodedData::new(pool, DATA_PREFIX, channel, message)
+    }
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {

@@ -134,7 +134,6 @@ pub mod partitioned {
 #[cfg(test)]
 mod test {
     use crate::{
-        bitmap::MerkleizedBitMap,
         kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, StandardHasher},
         qmdb::{
@@ -157,7 +156,7 @@ mod test {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::NZU64;
+    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
@@ -185,7 +184,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let mut db = open_db(context, partition).await.into_mutable();
 
             // Add one key.
@@ -308,10 +307,8 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
-                    *proof_inactive.proof.loc
-                )
+                BitMap::<32>::to_chunk_index(*active_loc),
+                BitMap::<32>::to_chunk_index(*proof_inactive.proof.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
@@ -351,7 +348,7 @@ mod test {
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition).await;
             let root = db.root();
@@ -423,7 +420,7 @@ mod test {
     pub fn test_current_db_key_value_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition.clone())
                 .await
@@ -515,7 +512,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".to_string();
             let mut db = open_db(context, partition).await;
 
             // Add one key.
@@ -559,7 +556,7 @@ mod test {
     fn test_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let prefix = format!("current_ordered_variable_batch_{seed}");
+            let prefix = format!("current-ordered-variable-batch-{seed}");
             open_db(ctx, prefix).await.into_mutable()
         });
     }
@@ -570,7 +567,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion_proofs".to_string();
+            let partition = "exclusion-proofs".to_string();
             let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);

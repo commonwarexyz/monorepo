@@ -464,7 +464,7 @@ where
             .await?;
 
             // Verify the final root digest matches the final target
-            let got_root = database.root();
+            let got_root = database.root().await;
             let expected_root = self.target.root;
             if got_root != expected_root {
                 return Err(SyncError::Engine(EngineError::RootMismatch {

@@ -93,11 +93,11 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
+        log_journal_partition: format!("{test_name}-log"),
         log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
@@ -134,7 +134,7 @@ async fn test_sync<
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {
-        let actual_root = synced.root();
+        let actual_root = synced.root().await;
         assert_eq!(
             actual_root, expected_root,
             "Synced root must match target root"
@@ -146,7 +146,7 @@ async fn test_sync<
     }
 }
 
-const TEST_NAME: &str = "qmdb_any_fixed_fuzz_test";
+const TEST_NAME: &str = "qmdb-any-fixed-fuzz-test";
 
 fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
@@ -218,7 +218,7 @@ fn fuzz(mut input: FuzzInput) {
                     let clean_db = durable_db.into_merkleized();
 
                     let target = sync::Target {
-                        root: clean_db.root(),
+                        root: clean_db.root().await,
                         range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
                     };
 

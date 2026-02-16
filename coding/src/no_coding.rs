@@ -28,7 +28,7 @@ impl<H> std::fmt::Debug for NoCoding<H> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Shard(Vec<u8>);
 
@@ -55,7 +55,7 @@ impl Read for Shard {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct ReShard(());
 

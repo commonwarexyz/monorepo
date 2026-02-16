@@ -2,7 +2,7 @@
 
 use crate::{Recipients, UnlimitedSender};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, IoBufMut, KeyedRateLimiter, Quota};
+use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::channel::ring;
 use futures::{lock::Mutex, Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
@@ -203,7 +203,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
 
     async fn send(
         self,
-        message: impl Into<IoBufMut> + Send,
+        message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         self.sender.send(self.recipients, message, priority).await
@@ -250,7 +250,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             let sent_to = match &recipients {
@@ -258,7 +258,7 @@ mod tests {
                 Recipients::Some(pks) => pks.clone(),
                 Recipients::All => Vec::new(),
             };
-            let message = message.into().freeze();
+            let message = message.into().coalesce();
             self.sent.lock().await.push((recipients, message, priority));
             Ok(sent_to)
         }

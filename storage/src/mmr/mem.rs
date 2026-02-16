@@ -1,5 +1,7 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
+#[cfg(any(feature = "std", test))]
+use crate::mmr::iterator::pos_to_height;
 use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, nodes_to_pin, PathIterator, PeakIterator},
@@ -437,7 +439,7 @@ impl<D: Digest> DirtyMmr<D> {
     }
 
     /// Add `digest` as a new leaf in the MMR, returning its position.
-    pub(super) fn add_leaf_digest(&mut self, digest: D) -> Position {
+    pub(crate) fn add_leaf_digest(&mut self, digest: D) -> Position {
         // Compute the new parent nodes, if any.
         let nodes_needing_parents = nodes_needing_parents(self.peak_iterator())
             .into_iter()
@@ -454,6 +456,25 @@ impl<D: Digest> DirtyMmr<D> {
         }
 
         leaf_pos
+    }
+
+    /// Overwrite the digest of an existing leaf and mark its ancestors as dirty.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn update_leaf_digest(&mut self, loc: Location, digest: D) -> Result<(), Error> {
+        let pos = Position::try_from(loc).map_err(|_| Error::LocationOverflow(loc))?;
+        if pos < self.pruned_to_pos {
+            return Err(Error::ElementPruned(pos));
+        }
+        if pos >= self.size() {
+            return Err(Error::InvalidPosition(pos));
+        }
+        if pos_to_height(pos) != 0 {
+            return Err(Error::PositionNotLeaf(pos));
+        }
+        let index = self.pos_to_index(pos);
+        self.nodes[index] = digest;
+        self.mark_dirty(pos);
+        Ok(())
     }
 
     /// Add `element` to the MMR and return its position.
@@ -1224,6 +1245,72 @@ mod tests {
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
             let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
             do_batch_update(&mut hasher, mmr, Some(pool));
+        });
+    }
+
+    #[test]
+    fn test_update_leaf_digest() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            const NUM_ELEMENTS: u64 = 200;
+            let mmr = CleanMmr::new(&mut hasher);
+            let mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
+            let root = *mmr.root();
+
+            let updated_digest = Sha256::fill(0xFF);
+
+            // Save the original leaf digest so we can restore it.
+            let loc = Location::new_unchecked(5);
+            let leaf_pos = Position::try_from(loc).unwrap();
+            let original_digest = mmr.get_node(leaf_pos).unwrap();
+
+            // Update a leaf via update_leaf_digest, merkleize, and confirm the root changes.
+            let mut dirty = mmr.into_dirty();
+            dirty.update_leaf_digest(loc, updated_digest).unwrap();
+            let mmr = dirty.merkleize(&mut hasher, None);
+            assert_ne!(*mmr.root(), root);
+
+            // Restore the original digest and confirm the root reverts.
+            let mut dirty = mmr.into_dirty();
+            dirty.update_leaf_digest(loc, original_digest).unwrap();
+            let mmr = dirty.merkleize(&mut hasher, None);
+            assert_eq!(*mmr.root(), root);
+
+            // Update multiple leaves before a single merkleize.
+            let mut dirty = mmr.into_dirty();
+            for i in [0u64, 1, 50, 100, 199] {
+                dirty
+                    .update_leaf_digest(Location::new_unchecked(i), updated_digest)
+                    .unwrap();
+            }
+            let mmr = dirty.merkleize(&mut hasher, None);
+            assert_ne!(*mmr.root(), root);
+        });
+    }
+
+    #[test]
+    fn test_update_leaf_digest_errors() {
+        let mut hasher: Standard<Sha256> = Standard::new();
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            {
+                // Out of bounds: location >= leaf count.
+                let mmr = CleanMmr::new(&mut hasher);
+                let mut mmr = build_test_mmr(&mut hasher, mmr, 100).into_dirty();
+                let result = mmr.update_leaf_digest(Location::new_unchecked(100), Sha256::fill(0));
+                assert!(matches!(result, Err(Error::InvalidPosition(_))));
+            }
+
+            {
+                // Pruned leaf.
+                let mmr = CleanMmr::new(&mut hasher);
+                let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
+                mmr.prune_to_pos(Position::new(50));
+                let mut dirty = mmr.into_dirty();
+                let result = dirty.update_leaf_digest(Location::new_unchecked(0), Sha256::fill(0));
+                assert!(matches!(result, Err(Error::ElementPruned(_))));
+            }
         });
     }
 

@@ -306,14 +306,14 @@ pub(crate) mod test {
                 db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Simulate a failed commit and test that the log replay doesn't leave behind old data.
             drop(db);
             let db = open_db(db_context.with_label("reopened")).await;
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(), root);
+            assert_eq!(db.root().await, root);
 
             db.destroy().await.unwrap();
         });
@@ -327,7 +327,7 @@ pub(crate) mod test {
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root_hash = db.root();
+            let root_hash = db.root().await;
             let original_op_count = db.bounds().await.end;
 
             // Historical proof should match "regular" proof when historical size == current database size
@@ -424,7 +424,7 @@ pub(crate) mod test {
                 .into_mutable();
             apply_ops(&mut single_db, ops[0..1].to_vec()).await;
             let single_db = single_db.into_merkleized();
-            let single_root = single_db.root();
+            let single_root = single_db.root().await;
 
             assert!(verify_proof(
                 &mut hasher,
@@ -510,7 +510,7 @@ pub(crate) mod test {
                 );
 
                 // Verify proof against reference root
-                let ref_root = ref_db.root();
+                let ref_root = ref_db.root().await;
                 assert!(verify_proof(
                     &mut hasher,
                     &historical_proof,
@@ -582,8 +582,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
+            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes().await;
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
@@ -598,12 +598,12 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
 
     async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        let cfg = fixed_db_config("unordered_partitioned_p1", &context);
+        let cfg = fixed_db_config("unordered-partitioned-p1", &context);
         PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        let cfg = fixed_db_config("unordered_partitioned_p2", &context);
+        let cfg = fixed_db_config("unordered-partitioned-p2", &context);
         PartitionedAnyTestP2::init(context, cfg).await.unwrap()
     }
 

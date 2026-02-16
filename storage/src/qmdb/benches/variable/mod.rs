@@ -39,10 +39,10 @@ enum Variant {
 impl Variant {
     pub const fn name(&self) -> &'static str {
         match self {
-            Self::AnyUnordered => "any_unordered",
-            Self::AnyOrdered => "any_ordered",
-            Self::CurrentUnordered => "current_unordered",
-            Self::CurrentOrdered => "current_ordered",
+            Self::AnyUnordered => "any-unordered",
+            Self::AnyOrdered => "any-ordered",
+            Self::CurrentUnordered => "current-unordered",
+            Self::CurrentOrdered => "current-ordered",
         }
     }
 }
@@ -55,7 +55,7 @@ const VARIANTS: [Variant; 4] = [
 ];
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-const PARTITION_SUFFIX: &str = "any_variable_bench_partition";
+const PARTITION_SUFFIX: &str = "any-variable-bench-partition";
 
 /// Chunk size for the current QMDB bitmap - must be a power of 2 (as assumed in
 /// current::grafting_height()) and a multiple of digest size.
@@ -89,11 +89,11 @@ fn any_cfg(
     context: &(impl BufferPooler + ThreadPooler),
 ) -> AConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     AConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -118,16 +118,16 @@ fn current_cfg(
     context: &(impl BufferPooler + ThreadPooler),
 ) -> CConfig<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
     CConfig::<EightCap, (commonware_codec::RangeCfg<usize>, ())> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
-        bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),

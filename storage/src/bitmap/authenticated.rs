@@ -615,7 +615,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
 impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<D>
     for MerkleizedBitMap<E, D, N>
 {
-    fn size(&self) -> Position {
+    async fn size(&self) -> Position {
         self.size()
     }
 
@@ -637,15 +637,6 @@ mod tests {
 
     type TestContext = deterministic::Context;
     type TestMerkleizedBitMap<const N: usize> = MerkleizedBitMap<TestContext, sha256::Digest, N>;
-
-    impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitMap<E, D, N, S> {
-        /// Convert a bit into the position of the Merkle tree leaf it belongs to.
-        pub(crate) fn leaf_pos(bit: u64) -> Position {
-            let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
-            let chunk = Location::new_unchecked(chunk as u64);
-            Position::try_from(chunk).expect("chunk should never overflow MAX_LOCATION")
-        }
-    }
 
     impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
         // Add a byte's worth of bits to the bitmap.
@@ -1115,7 +1106,7 @@ mod tests {
 
     #[test_traced]
     fn test_bitmap_persistence() {
-        const PARTITION: &str = "bitmap_test";
+        const PARTITION: &str = "bitmap-test";
         const FULL_CHUNK_COUNT: usize = 100;
 
         let executor = deterministic::Runner::default();

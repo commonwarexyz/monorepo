@@ -37,7 +37,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::journal::segmented::variable::{Config as JournalConfig, Journal};
 use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, ordered::Quorum};
@@ -63,7 +63,7 @@ struct Verify<C: PublicKey, D: Digest, E: Clock> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
+    E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
     C: Signer,
     S: SequencersProvider<PublicKey = C::PublicKey>,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D>>,
@@ -201,7 +201,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + CryptoRngCore + Storage + Metrics,
+        E: BufferPooler + Clock + Spawner + CryptoRngCore + Storage + Metrics,
         C: Signer,
         S: SequencersProvider<PublicKey = C::PublicKey>,
         P: Provider<Scope = Epoch, Scheme: scheme::Scheme<C::PublicKey, D, PublicKey = C::PublicKey>>,
@@ -289,7 +289,12 @@ impl<
     ) {
         let mut node_sender = chunk_network.0;
         let mut node_receiver = chunk_network.1;
-        let (mut ack_sender, mut ack_receiver) = wrap((), ack_network.0, ack_network.1);
+        let (mut ack_sender, mut ack_receiver) = wrap(
+            (),
+            self.context.network_buffer_pool().clone(),
+            ack_network.0,
+            ack_network.1,
+        );
 
         // Tracks if there is an outstanding proposal request to the automaton.
         let mut pending: Option<(Context<C::PublicKey>, oneshot::Receiver<D>)> = None;

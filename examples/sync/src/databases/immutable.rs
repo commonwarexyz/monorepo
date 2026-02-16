@@ -26,8 +26,8 @@ pub type Operation = immutable::Operation<Key, Value>;
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
     Config {
-        mmr_journal_partition: "mmr_journal".into(),
-        mmr_metadata_partition: "mmr_metadata".into(),
+        mmr_journal_partition: "mmr-journal".into(),
+        mmr_metadata_partition: "mmr-metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
         mmr_write_buffer: NZUsize!(1024),
         log_partition: "log".into(),
@@ -117,8 +117,8 @@ where
         unreachable!("operations must end with a commit");
     }
 
-    fn root(&self) -> Key {
-        self.root()
+    async fn root(&self) -> Key {
+        self.root().await
     }
 
     async fn size(&self) -> Location {

@@ -1,3 +1,9 @@
+#[cfg(any(test, feature = "test-traits"))]
+use crate::journal::contiguous::Persistable as JournalPersistable;
+#[cfg(any(test, feature = "test-traits"))]
+use crate::qmdb::any::states::{
+    CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny,
+};
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
@@ -13,11 +19,6 @@ use crate::{
         update_known_loc, DurabilityState, Durable, Error, MerkleizationState, Merkleized,
         NonDurable, Unmerkleized,
     },
-};
-#[cfg(any(test, feature = "test-traits"))]
-use crate::{
-    qmdb::any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
-    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -38,7 +39,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location>,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -222,7 +223,7 @@ impl<
         C: Contiguous<Item = Operation<K, V>>,
         I: Index<Value = Location> + Send + Sync + 'static,
         H: Hasher,
-        M: MerkleizationState<DigestOf<H>> + Send + Sync,
+        M: MerkleizationState<DigestOf<H>>,
         D: DurabilityState,
     > kv::Gettable for Db<E, C, I, H, Update<K, V>, M, D>
 where
@@ -263,7 +264,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: CodecShared,
@@ -282,7 +283,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -309,7 +310,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -328,7 +329,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
     I: Index<Value = Location> + Send + Sync + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -405,7 +406,7 @@ pub(super) mod test {
             Ok(())
         ));
         assert!(db.get_metadata().await.unwrap().is_none());
-        let empty_root = db.root();
+        let empty_root = db.root().await;
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(2u8);
@@ -417,7 +418,7 @@ pub(super) mod test {
         drop(db);
         let db = next_db().await;
         assert_eq!(db.bounds().await.end, 1);
-        assert_eq!(db.root(), empty_root);
+        assert_eq!(db.root().await, empty_root);
 
         // Test calling commit on an empty db.
         let metadata = Sha256::fill(3u8);
@@ -428,7 +429,7 @@ pub(super) mod test {
         assert_eq!(db.bounds().await.end, 2); // another commit op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         let mut db = db.into_merkleized().await.unwrap();
-        let root = db.root();
+        let root = db.root().await;
         assert!(matches!(
             db.prune(db.inactivity_floor_loc().await).await,
             Ok(())
@@ -439,27 +440,29 @@ pub(super) mod test {
         let db = next_db().await;
         assert_eq!(db.bounds().await.end, 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        assert_eq!(db.root(), root);
+        assert_eq!(db.root().await, root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits on a
         // non-empty db.
         let mut db = db.into_mutable();
         db.write_batch([(k1, Some(v1))]).await.unwrap();
         for _ in 1..100 {
-            let (clean_db, _) = db.commit(None).await.unwrap();
+            let (durable_db, _) = db.commit(None).await.unwrap();
+            let merkleized_db = durable_db.into_merkleized().await.unwrap();
             // Distance should equal 3 after the second commit, with inactivity_floor
             // referencing the previous commit operation.
-            assert!(clean_db.bounds().await.end - clean_db.inactivity_floor_loc().await <= 3);
-            db = clean_db.into_mutable();
-            assert!(db.bounds().await.end - db.inactivity_floor_loc().await <= 3);
+            assert!(
+                merkleized_db.bounds().await.end - merkleized_db.inactivity_floor_loc().await <= 3
+            );
+            db = merkleized_db.into_mutable();
         }
 
         // Confirm the inactivity floor is raised to tip when the db becomes empty.
         db.write_batch([(k1, None)]).await.unwrap();
-        let (db, _) = db.commit(None).await.unwrap();
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let db = durable_db.into_merkleized().await.unwrap();
         assert_eq!(db.bounds().await.end - 1, db.inactivity_floor_loc().await);
 
-        let db = db.into_merkleized().await.unwrap();
         db.destroy().await.unwrap();
     }
 
@@ -507,7 +510,6 @@ pub(super) mod test {
         }
 
         assert_eq!(db.bounds().await.end, Location::new_unchecked(1478));
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
 
         // Commit + sync with pruning raises inactivity floor.
         let (db, _) = db.commit(None).await.unwrap();
@@ -521,11 +523,11 @@ pub(super) mod test {
         );
 
         // Drop & reopen and ensure state matches.
-        let root = db.root();
+        let root = db.root().await;
         db.sync().await.unwrap();
         drop(db);
         let db = reopen_db(context.with_label("reopened")).await;
-        assert_eq!(root, db.root());
+        assert_eq!(root, db.root().await);
         assert_eq!(db.bounds().await.end, Location::new_unchecked(1957));
         assert_eq!(
             db.inactivity_floor_loc().await,
@@ -603,17 +605,21 @@ pub(super) mod test {
         assert_eq!(db.get(&d2).await.unwrap().unwrap(), v1);
 
         assert_eq!(db.bounds().await.end, 6); // 4 updates, 1 deletion + initial commit.
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
-        let (db, _) = db.commit(None).await.unwrap();
-        let mut db = db.into_mutable();
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let merkleized_db = durable_db.into_merkleized().await.unwrap();
+
+        // Should have moved 3 active operations to tip, leading to floor of 7.
+        assert_eq!(
+            merkleized_db.inactivity_floor_loc().await,
+            Location::new_unchecked(7)
+        );
+        // floor of 7 + 2 active keys + 1 commit = 10.
+        assert_eq!(merkleized_db.bounds().await.end, 10);
+        let mut db = merkleized_db.into_mutable();
 
         // Make sure create won't modify active keys.
         assert!(db.get(&d1).await.unwrap().is_some());
         assert_eq!(db.get(&d1).await.unwrap().unwrap(), v2);
-
-        // Should have moved 3 active operations to tip, leading to floor of 7.
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(7));
-        assert_eq!(db.bounds().await.end, 10); // floor of 7 + 2 active keys.
 
         // Delete all keys.
         assert!(db.get(&d1).await.unwrap().is_some());
@@ -623,12 +629,15 @@ pub(super) mod test {
         assert!(db.get(&d1).await.unwrap().is_none());
         assert!(db.get(&d2).await.unwrap().is_none());
         assert_eq!(db.bounds().await.end, 12); // 2 new delete ops.
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(7));
 
-        let (db, _) = db.commit(None).await.unwrap();
-        let db = db.into_mutable();
-        assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(12));
-        assert_eq!(db.bounds().await.end, 13); // only commit should remain.
+        let (durable_db, _) = db.commit(None).await.unwrap();
+        let merkleized_db = durable_db.into_merkleized().await.unwrap();
+        assert_eq!(
+            merkleized_db.inactivity_floor_loc().await,
+            Location::new_unchecked(12)
+        );
+        assert_eq!(merkleized_db.bounds().await.end, 13); // only commit should remain.
+        let db = merkleized_db.into_mutable();
 
         // Multiple deletions of the same key should be a no-op.
         assert!(db.get(&d1).await.unwrap().is_none());
@@ -649,11 +658,11 @@ pub(super) mod test {
             .await
             .unwrap();
         assert_eq!(db.bounds().await.end, 14);
-        let root = db.root();
+        let root = db.root().await;
         drop(db);
         let db = next_db().await;
         assert_eq!(db.bounds().await.end, 14);
-        assert_eq!(db.root(), root);
+        assert_eq!(db.root().await, root);
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
@@ -675,10 +684,10 @@ pub(super) mod test {
 
         // Confirm close/reopen gets us back to the same state.
         assert_eq!(db.bounds().await.end, 23);
-        let root = db.root();
+        let root = db.root().await;
         let db = next_db().await;
 
-        assert_eq!(db.root(), root);
+        assert_eq!(db.root().await, root);
         assert_eq!(db.bounds().await.end, 23);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
@@ -693,12 +702,12 @@ pub(super) mod test {
             .await
             .unwrap();
 
-        assert!(db.root() != root);
+        assert!(db.root().await != root);
 
         // Pruning inactive ops should not affect current state or root
-        let root = db.root();
+        let root = db.root().await;
         db.prune(db.inactivity_floor_loc().await).await.unwrap();
-        assert_eq!(db.root(), root);
+        assert_eq!(db.root().await, root);
 
         db.destroy().await.unwrap();
     }

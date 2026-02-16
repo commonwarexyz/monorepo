@@ -11,7 +11,7 @@
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_codec::{varint::UInt, Encode, Error as CodecError, ReadExt};
 use commonware_macros::select_loop;
-use commonware_runtime::{spawn_cell, BufMut, ContextCell, Handle, IoBuf, IoBufMut, Spawner};
+use commonware_runtime::{spawn_cell, ContextCell, Handle, IoBuf, IoBufs, Spawner};
 use commonware_utils::channel::{
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
@@ -299,7 +299,7 @@ impl<S: Sender> GlobalSender<S> {
         &mut self,
         subchannel: Channel,
         recipients: Recipients<S::PublicKey>,
-        payload: impl Into<IoBufMut> + Send,
+        payload: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<S::PublicKey>, <S::Checked<'_> as CheckedSender>::Error> {
         match self.check(recipients).await {
@@ -352,16 +352,13 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
 
     async fn send(
         self,
-        message: impl Into<IoBufMut> + Send,
+        message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
-        let subchannel_bytes = subchannel.encode();
-        let message = message.into();
-        let mut combined = IoBufMut::with_capacity(subchannel_bytes.len() + message.len());
-        combined.put_slice(subchannel_bytes.as_ref());
-        combined.put_slice(message.as_ref());
-        self.inner.send(combined, priority).await
+        let mut message = message.into();
+        message.prepend(subchannel.encode().into());
+        self.inner.send(message, priority).await
     }
 }
 

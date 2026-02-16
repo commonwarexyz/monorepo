@@ -10,7 +10,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use std::collections::{BTreeMap, VecDeque};
@@ -45,7 +45,11 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec> {
+pub struct Engine<
+    E: BufferPooler + Clock + Spawner + Metrics,
+    P: PublicKey,
+    M: Committable + Digestible + Codec,
+> {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -106,8 +110,11 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     metrics: metrics::Metrics,
 }
 
-impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec>
-    Engine<E, P, M>
+impl<
+        E: BufferPooler + Clock + Spawner + Metrics,
+        P: PublicKey,
+        M: Committable + Digestible + Codec,
+    > Engine<E, P, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
@@ -145,7 +152,12 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
+        let (mut sender, mut receiver) = wrap(
+            self.codec_config.clone(),
+            self.context.network_buffer_pool().clone(),
+            network.0,
+            network.1,
+        );
 
         select_loop! {
             self.context,

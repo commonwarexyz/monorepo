@@ -62,7 +62,6 @@ use crate::{
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
-    Persistable,
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{
@@ -854,11 +853,13 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
-    type Error = Error;
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Persistable for Journal<E, A> {
+    async fn commit(&self) -> Result<(), Error> {
+        self.sync().await
+    }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        Self::sync(self).await
+    async fn sync(&self) -> Result<(), Error> {
+        self.sync().await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -889,7 +890,7 @@ mod tests {
 
     fn test_cfg(pooler: &impl BufferPooler, items_per_blob: NonZeroU64) -> Config {
         Config {
-            partition: "test_partition".into(),
+            partition: "test-partition".into(),
             items_per_blob,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
@@ -1765,7 +1766,7 @@ mod tests {
 
             // Repeat with a different blob size (3 items per blob)
             let mut cfg = test_cfg(&context, NZU64!(3));
-            cfg.partition = "test_partition_2".into();
+            cfg.partition = "test-partition-2".into();
             let journal = Journal::init(context.with_label("second"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1902,7 +1903,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "single_item_per_blob".into(),
+                partition: "single-item-per-blob".into(),
                 items_per_blob: NZU64!(1),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),

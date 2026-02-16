@@ -30,7 +30,7 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_partition: "test_partition".to_string(),
+//!         log_partition: "test-partition".to_string(),
 //!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),
@@ -509,10 +509,6 @@ where
         self.bounds().await
     }
 
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
     async fn get_metadata(&self) -> Result<Option<V>, Error> {
         self.get_metadata().await
     }
@@ -528,6 +524,10 @@ where
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         Self::prune(self, prune_loc).await
+    }
+
+    async fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
     }
 }
 

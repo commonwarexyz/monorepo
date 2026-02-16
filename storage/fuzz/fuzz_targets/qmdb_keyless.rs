@@ -129,11 +129,11 @@ fn test_config(
     pooler: &impl BufferPooler,
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}-log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
@@ -148,7 +148,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let cfg = test_config("keyless_fuzz_test", &context);
+        let cfg = test_config("keyless-fuzz-test", &context);
         let mut db = CleanDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init keyless db")
@@ -211,7 +211,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     let merkleized_db = db.into_merkleized();
-                    let _ = merkleized_db.root();
+                    let _ = merkleized_db.root().await;
                     db = merkleized_db.into_mutable();
                 }
 
@@ -227,7 +227,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc).unwrap();
-                    let root = merkleized_db.root();
+                    let root = merkleized_db.root().await;
                     if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
@@ -252,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = (*start_offset as u64) % *size;
                     let start_loc = Location::new(start_loc).unwrap();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let root = merkleized_db.root();
+                    let root = merkleized_db.root().await;
                     if let Ok((proof, ops)) = merkleized_db
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
@@ -267,7 +267,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     drop(db);
 
-                    let cfg = test_config("keyless_fuzz_test", &context);
+                    let cfg = test_config("keyless-fuzz-test", &context);
                     db = CleanDb::init(
                         context.with_label("db").with_attribute("instance", restarts),
                         cfg,

@@ -89,14 +89,14 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
         let cfg = Config {
-            mmr_journal_partition: "fuzz_current_mmr_journal".into(),
-            mmr_metadata_partition: "fuzz_current_mmr_metadata".into(),
+            mmr_journal_partition: "fuzz-current-mmr-journal".into(),
+            mmr_metadata_partition: "fuzz-current-mmr-metadata".into(),
             mmr_items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
             mmr_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            log_journal_partition: "fuzz_current_log_journal".into(),
+            log_journal_partition: "fuzz-current-log-journal".into(),
             log_items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            bitmap_metadata_partition: "fuzz_current_bitmap_metadata".into(),
+            grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
             translator: TwoCap,
             page_cache: CacheRef::from_pooler(
                 &context,

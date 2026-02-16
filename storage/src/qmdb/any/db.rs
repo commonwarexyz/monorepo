@@ -7,8 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
-        Error as JournalError,
+        contiguous::{Contiguous, Mutable, Persistable as JournalPersistable, Reader},
     },
     mmr::{Location, Proof},
     qmdb::{
@@ -19,12 +18,12 @@ use crate::{
         DurabilityState, Durable, Error, FloorHelper, MerkleizationState, Merkleized, NonDurable,
         Unmerkleized,
     },
-    Persistable, UnmerkleizedBitMap,
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
@@ -123,14 +122,14 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    pub const fn root(&self) -> H::Digest {
-        self.log.root()
+    pub async fn root(&self) -> H::Digest {
+        self.log.root().await
     }
 
     pub async fn proof(
@@ -182,7 +181,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -240,7 +239,7 @@ where
     }
 
     /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -348,7 +347,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
@@ -421,14 +420,12 @@ where
     }
 
     /// Raises the inactivity floor by moving up to `steps + 1` active operations to tip, using the
-    /// provided bitmap to find the active operations without I/O.
-    pub(crate) async fn raise_floor_with_bitmap<
-        F: Storage + Clock + Metrics,
-        D: Digest,
-        const N: usize,
-    >(
+    /// provided bitmap to find the active operations without I/O. Calls `on_move(old_loc, new_loc)`
+    /// for each moved operation.
+    pub(crate) async fn raise_floor_with_bitmap<const N: usize>(
         &mut self,
-        status: &mut UnmerkleizedBitMap<F, D, N>,
+        status: &mut BitMap<N>,
+        on_move: &mut impl FnMut(Location, Location),
     ) -> Result<Location, Error> {
         let reader = self.log.reader().await;
         let tip = Location::new_unchecked(reader.bounds().end);
@@ -469,7 +466,9 @@ where
                 helper.move_op_if_active(op, loc).await?,
                 "op should be active based on status bitmap"
             );
+            let new_loc = Location::new_unchecked(status.len());
             status.push(true);
+            on_move(loc, new_loc);
         }
 
         self.inactivity_floor_loc = floor;
@@ -494,7 +493,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -507,11 +506,11 @@ where
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 
@@ -521,7 +520,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -530,8 +529,8 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    fn root(&self) -> H::Digest {
-        self.root()
+    async fn root(&self) -> H::Digest {
+        self.root().await
     }
 
     async fn historical_proof(
@@ -565,10 +564,6 @@ where
         Location::new_unchecked(bounds.start)..Location::new_unchecked(bounds.end)
     }
 
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-
     async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
         self.get_metadata().await
     }
@@ -580,7 +575,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<K, V, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     D: DurabilityState,
@@ -588,5 +583,9 @@ where
 {
     async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.prune(prune_loc).await
+    }
+
+    async fn inactivity_floor_loc(&self) -> Location {
+        self.inactivity_floor_loc()
     }
 }

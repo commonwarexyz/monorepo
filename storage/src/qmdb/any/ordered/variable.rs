@@ -203,11 +203,11 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("mmr_journal_{seed}"),
-            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
+            mmr_journal_partition: format!("mmr-journal-{seed}"),
+            mmr_metadata_partition: format!("mmr-metadata-{seed}"),
             mmr_items_per_blob: NZU64!(12), // intentionally small and janky size
             mmr_write_buffer: NZUsize!(64),
-            log_partition: format!("log_journal_{seed}"),
+            log_partition: format!("log-journal-{seed}"),
             log_items_per_blob: NZU64!(14), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
             log_compression: None,
@@ -290,7 +290,7 @@ pub(crate) mod test {
 
     /// Return a variable db with Digest keys and values for generic tests.
     async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
-        let cfg = variable_db_config("digest_partition", &context);
+        let cfg = variable_db_config("digest-partition", &context);
         DigestVariableDb::init(context, cfg).await.unwrap()
     }
 
@@ -325,7 +325,7 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config("fixed_bytes_var_partition", &context);
+        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
         VariableDb::init(context, cfg).await.unwrap()
     }
 
@@ -469,7 +469,7 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        let cfg = variable_db_config("ordered_partitioned_var_p1", &context);
+        let cfg = variable_db_config("ordered-partitioned-var-p1", &context);
         PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 
@@ -551,8 +551,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
+            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes().await;
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }

@@ -72,7 +72,7 @@ const VARIANTS: [Variant; 8] = [
 ];
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-const PARTITION_SUFFIX: &str = "any_fixed_bench_partition";
+const PARTITION_SUFFIX: &str = "any-fixed-bench-partition";
 
 /// Chunk size for the current QMDB bitmap - must be a power of 2 (as assumed in
 /// current::grafting_height()) and a multiple of digest size.
@@ -108,11 +108,11 @@ type OVCurrentDb = OVCurrent<Context, Digest, Digest, Sha256, EightCap, CHUNK_SI
 /// Configuration for any QMDB.
 fn any_cfg(context: &(impl BufferPooler + ThreadPooler)) -> AConfig<EightCap> {
     AConfig::<EightCap> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_journal_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         translator: EightCap,
@@ -124,14 +124,14 @@ fn any_cfg(context: &(impl BufferPooler + ThreadPooler)) -> AConfig<EightCap> {
 /// Configuration for current QMDB.
 fn current_cfg(context: &(impl BufferPooler + ThreadPooler)) -> CConfig<EightCap> {
     CConfig::<EightCap> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_journal_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_journal_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
-        bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -142,11 +142,11 @@ fn variable_any_cfg(
     context: &(impl BufferPooler + ThreadPooler),
 ) -> VariableAnyConfig<EightCap, ()> {
     VariableAnyConfig::<EightCap, ()> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_codec_config: (),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -162,16 +162,16 @@ fn variable_current_cfg(
     context: &(impl BufferPooler + ThreadPooler),
 ) -> VariableCurrentConfig<EightCap, ()> {
     VariableCurrentConfig::<EightCap, ()> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_codec_config: (),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
-        bitmap_metadata_partition: format!("bitmap_metadata_{PARTITION_SUFFIX}"),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_SUFFIX}"),
         translator: EightCap,
         thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),

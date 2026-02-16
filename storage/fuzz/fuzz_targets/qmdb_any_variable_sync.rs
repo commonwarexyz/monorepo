@@ -140,11 +140,11 @@ fn test_config(
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}-log"),
         log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
@@ -160,7 +160,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let cfg = test_config("qmdb_any_variable_fuzz_test", &context);
+        let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
         let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db")
@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
+                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root().await);
                     db = clean_db.into_mutable();
                 }
 
@@ -225,7 +225,7 @@ fn fuzz(input: FuzzInput) {
 
                     let clean_db = db.into_merkleized();
                     if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
-                        let root = clean_db.root();
+                        let root = clean_db.root().await;
                         assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                     }
                     db = clean_db.into_mutable();
@@ -260,7 +260,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Sync => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    let mut clean_db = durable_db.into_merkleized();
+                    let clean_db = durable_db.into_merkleized();
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_mutable();
                 }
@@ -275,7 +275,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     let clean_db = db.into_merkleized();
-                    let _ = clean_db.root();
+                    let _ = clean_db.root().await;
                     db = clean_db.into_mutable();
                 }
 
@@ -283,7 +283,7 @@ fn fuzz(input: FuzzInput) {
                     // Simulate unclean shutdown by dropping the db without committing
                     drop(db);
 
-                    let cfg = test_config("qmdb_any_variable_fuzz_test", &context);
+                    let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
                     db = Db::<_, Key, Vec<u8>, Sha256, TwoCap, _, _>::init(
                         context
                             .with_label("db")

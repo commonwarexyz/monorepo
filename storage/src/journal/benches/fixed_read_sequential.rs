@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Partition name to use in the journal config.
-const PARTITION: &str = "test_partition";
+const PARTITION: &str = "test-partition";
 
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);

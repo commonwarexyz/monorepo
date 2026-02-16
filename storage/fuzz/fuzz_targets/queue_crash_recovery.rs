@@ -380,7 +380,7 @@ fn fuzz(input: FuzzInput) {
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_name = format!("queue_crash_recovery_{}", input.seed);
+    let partition_name = format!("queue-crash-recovery-{}", input.seed);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;

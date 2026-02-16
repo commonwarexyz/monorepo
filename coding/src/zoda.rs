@@ -322,7 +322,7 @@ mod topology {
 use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Shard<D: Digest> {
     data_bytes: usize,
     root: D,
@@ -606,8 +606,7 @@ pub enum Error {
     FailedToCreateInclusionProof(BmtError),
 }
 
-// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
-const NAMESPACE: &[u8] = b"commonware-zoda";
+const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
 #[derive(Clone, Copy)]
 pub struct Zoda<H> {
@@ -790,9 +789,8 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodecConfig, Config};
-    use bytes::BytesMut;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+    use crate::Config;
+    use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
 
     const STRATEGY: Sequential = Sequential;
@@ -817,34 +815,6 @@ mod tests {
             provided >= required,
             "security invariant violated: provided {provided} < required {required}"
         );
-    }
-
-    #[test]
-    fn reshard_roundtrip_handles_field_packing() {
-        let config = Config {
-            minimum_shards: 3,
-            extra_shards: 2,
-        };
-        let data = vec![0xAA; 64];
-
-        let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-        let shard = shards.into_iter().next().unwrap();
-
-        let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
-
-        let mut buf = BytesMut::new();
-        reshard.write(&mut buf);
-        let mut bytes = buf.freeze();
-        let decoded = ReShard::<Sha256Digest>::read_cfg(
-            &mut bytes,
-            &CodecConfig {
-                maximum_shard_size: data.len(),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(decoded, reshard);
     }
 
     #[test]
@@ -877,6 +847,7 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Shard<Sha256Digest>>,

@@ -193,11 +193,11 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("journal_{seed}"),
-            mmr_metadata_partition: format!("metadata_{seed}"),
+            mmr_journal_partition: format!("journal-{seed}"),
+            mmr_metadata_partition: format!("metadata-{seed}"),
             mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{seed}"),
+            log_partition: format!("log-journal-{seed}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
@@ -229,7 +229,7 @@ pub(crate) mod test {
 
     /// Return a Digest-valued variable database for generic tests.
     async fn open_digest_db(context: Context) -> DigestAnyTest {
-        let cfg = variable_db_config("digest_partition", &context);
+        let cfg = variable_db_config("digest-partition", &context);
         DigestAnyTest::init(context, cfg).await.unwrap()
     }
 
@@ -318,7 +318,7 @@ pub(crate) mod test {
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
             let db = open_db(context.with_label("open1")).await;
-            let root = db.root();
+            let root = db.root().await;
             let mut db = db.into_mutable();
             db.write_batch((0..ELEMENTS).map(|i| {
                 (
@@ -332,7 +332,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open2")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
 
             // re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
@@ -342,7 +342,7 @@ pub(crate) mod test {
                 db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Update every 3rd key
             let mut db = db.into_mutable();
@@ -358,7 +358,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open3")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
 
             // Re-apply updates for every 3rd key and commit them this time.
             let mut db = db.into_mutable();
@@ -371,7 +371,7 @@ pub(crate) mod test {
                 db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root();
+            let root = db.root().await;
 
             // Delete every 7th key
             let mut db = db.into_mutable();
@@ -386,7 +386,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open4")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
 
             // Re-delete every 7th key and commit this time.
             let mut db = db.into_mutable();
@@ -399,10 +399,10 @@ pub(crate) mod test {
             }
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
-            let root = db.root();
+            let root = db.root().await;
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
-                Location::try_from(db.log.mmr.size()).ok(),
+                Location::try_from(db.log.mmr.size().await).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
@@ -416,10 +416,10 @@ pub(crate) mod test {
 
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
-            assert_eq!(root, db.root());
+            assert_eq!(root, db.root().await);
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
-                Location::try_from(db.log.mmr.size()).ok(),
+                Location::try_from(db.log.mmr.size().await).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
@@ -526,8 +526,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes();
+            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes().await;
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }
@@ -583,11 +583,11 @@ pub(crate) mod test {
 
     fn partitioned_config(suffix: &str, pooler: &impl BufferPooler) -> PartitionedVarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("pv_journal_{suffix}"),
-            mmr_metadata_partition: format!("pv_metadata_{suffix}"),
+            mmr_journal_partition: format!("pv-journal-{suffix}"),
+            mmr_metadata_partition: format!("pv-metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("pv_log_journal_{suffix}"),
+            log_partition: format!("pv-log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
@@ -611,12 +611,12 @@ pub(crate) mod test {
 
     #[inline]
     async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        let cfg = partitioned_config("partition_p1", &context);
+        let cfg = partitioned_config("partition-p1", &context);
         PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
-        let cfg = variable_db_config("unordered_partitioned_var_p1", &context);
+        let cfg = variable_db_config("unordered-partitioned-var-p1", &context);
         PartitionedAnyTestDigestP1::init(context, cfg)
             .await
             .unwrap()

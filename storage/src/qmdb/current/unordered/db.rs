@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
@@ -68,7 +68,7 @@ where
     ) -> bool {
         let op = Operation::Update(UnorderedUpdate(key, value));
 
-        proof.verify(hasher, Self::grafting_height(), op, root)
+        proof.verify(hasher, op, root)
     }
 }
 
@@ -103,10 +103,7 @@ where
         let Some((_, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
-        let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
-
-        OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await
+        self.operation_proof(hasher, loc).await
     }
 }
 
@@ -133,12 +130,18 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
+        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
         let status = &mut self.status;
+        let dirty_chunks = &mut self.state.dirty_chunks;
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
                 status.push(append);
                 if let Some(loc) = loc {
                     status.set_bit(*loc, false);
+                    let chunk = BitMap::<N>::to_chunk_index(*loc);
+                    if chunk < old_grafted_leaves {
+                        dirty_chunks.insert(chunk);
+                    }
                 }
             })
             .await

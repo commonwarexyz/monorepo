@@ -78,6 +78,9 @@ pub use verify::{
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("data corrupted: {0}")]
+    DataCorrupted(&'static str),
+
     #[error("mmr error: {0}")]
     Mmr(#[from] crate::mmr::Error),
 

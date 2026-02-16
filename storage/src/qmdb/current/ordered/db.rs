@@ -7,7 +7,7 @@ use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
     kv::{self, Batchable},
-    mmr::{grafting::Storage as GraftingStorage, Location},
+    mmr::Location,
     qmdb::{
         any::{
             ordered::{Operation, Update},
@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -77,9 +77,7 @@ where
             next_key: proof.next_key.clone(),
         });
 
-        proof
-            .proof
-            .verify(hasher, Self::grafting_height(), op, root)
+        proof.proof.verify(hasher, op, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -114,7 +112,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>, S::AnyState, D>::span_contains(
+                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>, S::MerkleizationState, D>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,
@@ -138,7 +136,7 @@ where
             }
         };
 
-        op_proof.verify(hasher, Self::grafting_height(), op, root)
+        op_proof.verify(hasher, op, root)
     }
 }
 
@@ -173,10 +171,7 @@ where
         let Some((data, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
-        let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
-        let proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await?;
+        let proof = self.operation_proof(hasher, loc).await?;
 
         Ok(KeyValueProof {
             proof,
@@ -194,10 +189,6 @@ where
         hasher: &mut H,
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
-        let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
-
         let span = self.any.get_span(key).await?;
         let loc = match &span {
             Some((loc, key_data)) => {
@@ -214,9 +205,7 @@ where
                 .expect("db shouldn't be empty"),
         };
 
-        let op_proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, &grafted_mmr, loc)
-                .await?;
+        let op_proof = self.operation_proof(hasher, loc).await?;
 
         Ok(match span {
             Some((_, key_data)) => super::ExclusionProof::KeyValue(op_proof, key_data),
@@ -254,12 +243,18 @@ where
         &mut self,
         iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
     ) -> Result<(), Error> {
+        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
         let status = &mut self.status;
+        let dirty_chunks = &mut self.state.dirty_chunks;
         self.any
             .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
                 status.push(append);
                 if let Some(loc) = loc {
                     status.set_bit(*loc, false);
+                    let chunk = BitMap::<N>::to_chunk_index(*loc);
+                    if chunk < old_grafted_leaves {
+                        dirty_chunks.insert(chunk);
+                    }
                 }
             })
             .await
