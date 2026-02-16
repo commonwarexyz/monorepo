@@ -664,6 +664,9 @@ impl crate::Metrics for Context {
     }
 
     fn with_scope(&self) -> Self {
+        if self.scope.is_some() {
+            return self.clone();
+        }
         let executor = self.executor.clone();
         let scope_id = executor.store.lock().unwrap().create_scope();
         let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {

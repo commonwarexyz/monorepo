@@ -1327,6 +1327,9 @@ impl crate::Metrics for Context {
     }
 
     fn with_scope(&self) -> Self {
+        if self.scope.is_some() {
+            return self.clone();
+        }
         let executor = self.executor();
         executor.auditor.event(b"with_scope", |_| {});
         let weak = self.executor.clone();

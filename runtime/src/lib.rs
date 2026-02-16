@@ -419,10 +419,14 @@ stability_scope!(BETA {
         /// namespaced).
         fn encode(&self) -> String;
 
-        /// Create a scoped context. All metrics registered through the returned context
-        /// (and child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`])
-        /// go into a separate registry that is automatically removed when all clones of
-        /// the scoped context are dropped.
+        /// Create a scoped context for metrics with a bounded lifetime (e.g., per-epoch
+        /// consensus engines). All metrics registered through the returned context (and
+        /// child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into
+        /// a separate registry that is automatically removed when all clones of the scoped
+        /// context are dropped.
+        ///
+        /// If the context is already scoped, returns a clone with the same scope (scopes
+        /// nest by inheritance, not by creating new independent scopes).
         ///
         /// # Example
         ///
@@ -2929,6 +2933,56 @@ mod tests {
     fn test_tokio_multiple_scopes() {
         let runner = tokio::Runner::default();
         test_multiple_scopes(runner);
+    }
+
+    fn test_with_scope_nested_inherits<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let scoped = context.with_label("engine").with_scope();
+
+            // Calling with_scope() on an already-scoped context inherits the scope
+            let nested = scoped.with_scope();
+            let counter = Counter::<u64>::default();
+            nested.register("votes", "vote count", counter.clone());
+            counter.inc();
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "nested scope should inherit parent scope: {buffer}"
+            );
+
+            // Dropping the nested context alone should NOT clean up metrics
+            // because the parent scoped context still holds the Arc
+            drop(nested);
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_votes_total 1"),
+                "metrics should survive as long as any scope clone exists: {buffer}"
+            );
+
+            // Dropping the parent scoped context cleans up
+            drop(scoped);
+            let buffer = context.encode();
+            assert!(
+                !buffer.contains("engine_votes"),
+                "metrics should be removed when all scope clones are dropped: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_with_scope_nested_inherits() {
+        let executor = deterministic::Runner::default();
+        test_with_scope_nested_inherits(executor);
+    }
+
+    #[test]
+    fn test_tokio_with_scope_nested_inherits() {
+        let runner = tokio::Runner::default();
+        test_with_scope_nested_inherits(runner);
     }
 
     #[test]
