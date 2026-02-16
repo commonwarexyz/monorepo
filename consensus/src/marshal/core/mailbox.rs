@@ -308,12 +308,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 impl<S: Scheme, V: Variant> BlockProvider for Mailbox<S, V> {
     type Block = V::ApplicationBlock;
 
-    async fn fetch_block(mut self, digest: <V::Block as Digestible>::Digest) -> Self::Block {
+    async fn fetch_block(mut self, digest: <V::Block as Digestible>::Digest) -> Option<Self::Block> {
         let subscription = self.subscribe_by_digest(None, digest).await;
-        let block = subscription
-            .await
-            .expect("marshal actor dropped before fulfilling subscription");
-        V::into_application_block(block)
+        subscription.await.ok().map(V::into_application_block)
     }
 }
 

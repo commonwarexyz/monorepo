@@ -76,12 +76,11 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::{
-            validation::{
-                has_contiguous_height, is_block_in_expected_epoch,
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
-            },
-            verification_tasks::VerificationTasks,
+        application::verification_tasks::VerificationTasks,
+        validation::{
+            CodedProposalValidationError, is_inferred_reproposal_at_certify,
+            is_valid_reproposal_at_verify, validate_coded_block_for_verification,
+            validate_coded_proposal,
         },
         coding::{
             shards,
@@ -359,82 +358,25 @@ where
                     }
                 };
 
-                // Validate that block commitments match what consensus expects.
-                if block.commitment() != commitment {
+                if let Err(err) = validate_coded_block_for_verification(
+                    &epocher,
+                    &block,
+                    &parent,
+                    &context,
+                    commitment,
+                    parent_commitment,
+                ) {
                     debug!(
+                        ?err,
                         expected_commitment = %commitment,
                         block_commitment = %block.commitment(),
-                        "block commitment does not match expected commitment"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-                if parent.commitment() != parent_commitment {
-                    debug!(
                         expected_parent_commitment = %parent_commitment,
                         parent_commitment = %parent.commitment(),
-                        "parent commitment does not match expected parent commitment"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Epoch boundary check
-                if !is_block_in_expected_epoch(&epocher, block.height(), context.epoch()) {
-                    debug!(
-                        height = %block.height(),
-                        "block height not covered by epoch strategy"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Validate that the block's parent digest matches what consensus expects.
-                if block.parent() != parent.digest() {
-                    debug!(
-                        block_parent = %block.parent(),
                         expected_parent = %parent.digest(),
-                        "block parent digest does not match expected parent"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Validate that heights are contiguous.
-                if !has_contiguous_height(parent.height(), block.height()) {
-                    debug!(
+                        block_parent = %block.parent(),
                         parent_height = %parent.height(),
                         block_height = %block.height(),
-                        "block height is not contiguous with parent height"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Ensure the block's embedded context matches the commitment's context digest.
-                let expected_context_hash = commitment.context::<Sha256Digest>();
-                let got_context_hash = hash_context(&block.context());
-                if expected_context_hash != got_context_hash {
-                    debug!(
-                        expected_context_hash = ?expected_context_hash,
-                        got_context_hash = ?got_context_hash,
-                        "block context digest does not match commitment"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-
-                // Ensure the block's embedded context matches the consensus context.
-                //
-                // We already checked the commitment's context digest against the block's embedded
-                // context above (and `verify()` ties the commitment hash to the consensus context).
-                // This check enforces full context equality for certification, rejecting any
-                // reconstructed block whose context does not exactly match the consensus context.
-                if block.context() != context {
-                    debug!(
-                        ?context,
-                        block_context = ?block.context(),
-                        "block-embedded context does not match consensus context"
+                        "block failed coded invariant validation"
                     );
                     tx.send_lossy(false);
                     return;
@@ -688,16 +630,33 @@ where
         let n_participants =
             u16::try_from(scheme.participants().len()).expect("too many participants");
         let coding_config = coding_config_for_participants(n_participants);
+        let is_reproposal = payload == context.parent.1;
 
-        // Short-circuit if the coding configuration does not match what it should be
-        // with the current scheme.
-        if coding_config != payload.config() {
-            warn!(
-                round = %context.round,
-                got = ?payload.config(),
-                expected = ?coding_config,
-                "rejected proposal with unexpected coding configuration"
-            );
+        // Validate proposal-level invariants:
+        // - coding config must match active participant set
+        // - context hash must match unless this is a re-proposal
+        let proposal_context = (!is_reproposal).then_some(&context);
+        if let Err(err) = validate_coded_proposal(payload, coding_config, proposal_context) {
+            match err {
+                CodedProposalValidationError::CodingConfig => {
+                    warn!(
+                        round = %context.round,
+                        got = ?payload.config(),
+                        expected = ?coding_config,
+                        "rejected proposal with unexpected coding configuration"
+                    );
+                }
+                CodedProposalValidationError::ContextHash => {
+                    let expected = hash_context(&context);
+                    let got = payload.context::<Sha256Digest>();
+                    warn!(
+                        round = %context.round,
+                        expected = ?expected,
+                        got = ?got,
+                        "rejected proposal with mismatched context digest"
+                    );
+                }
+            }
 
             let (tx, rx) = oneshot::channel();
             tx.send_lossy(false);
@@ -712,7 +671,6 @@ where
         // 1. The block was already verified when originally proposed
         // 2. The parent-child height check would fail (parent IS the block)
         // 3. Waiting for shards could stall if the leader doesn't rebroadcast
-        let is_reproposal = payload == context.parent.1;
         if is_reproposal {
             // Fetch the block to verify it's at the epoch boundary.
             // This should be fast since the parent block is typically already cached.
@@ -773,21 +731,6 @@ where
                     task_tx.send_lossy(true);
                     tx.send_lossy(true);
                 });
-            return rx;
-        }
-
-        let expected = hash_context(&context);
-        let got = payload.context::<Sha256Digest>();
-        if expected != got {
-            warn!(
-                round = %context.round,
-                expected = ?expected,
-                got = ?got,
-                "rejected proposal with mismatched context digest"
-            );
-
-            let (tx, rx) = oneshot::channel();
-            tx.send_lossy(false);
             return rx;
         }
 

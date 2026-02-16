@@ -199,22 +199,31 @@ where
     /// by the strategy's parallelism hint provided at construction.
     async fn run(mut self) {
         let mut decode_pool = Pool::default();
+        let mut receiver_closed = false;
 
         select_loop! {
             self.context,
             on_start => {
-                while decode_pool.len() >= self.max_concurrency {
+                while decode_pool.len() >= self.max_concurrency
+                    || (receiver_closed && !decode_pool.is_empty())
+                {
                     let Ok(result) = decode_pool.next_completed().await else {
                         break;
                     };
                     self.handle_decode_result(result).await;
+                }
+                if receiver_closed && decode_pool.is_empty() {
+                    break;
                 }
             },
             on_stopped => {},
             Ok(result) = decode_pool.next_completed() else break => {
                 self.handle_decode_result(result).await;
             },
-            Ok((peer, bytes)) = self.receiver.recv() else break => {
+            Ok((peer, bytes)) = self.receiver.recv() else {
+                receiver_closed = true;
+                continue;
+            } => {
                 let config = self.codec_config.clone();
                 let sender = self.sender.clone();
                 let handle = self.context.clone().shared(true).spawn(|_| async move {
@@ -256,9 +265,9 @@ mod tests {
         Signer,
     };
     use commonware_macros::test_traced;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner};
-    use std::{num::NonZeroU32, time::Duration};
+    use std::{io, num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
@@ -292,6 +301,73 @@ mod tests {
     ) {
         oracle.add_link(a.clone(), b.clone(), LINK).await.unwrap();
         oracle.add_link(b, a, LINK).await.unwrap();
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct HintStrategy(usize);
+
+    impl Strategy for HintStrategy {
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            _reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            let mut init_val = init();
+            iter.into_iter()
+                .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            (a(), b())
+        }
+
+        fn parallelism_hint(&self) -> usize {
+            self.0
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockReceiver<P: commonware_cryptography::PublicKey> {
+        receiver: mpsc::UnboundedReceiver<crate::Message<P>>,
+    }
+
+    impl<P: commonware_cryptography::PublicKey> crate::Receiver for MockReceiver<P> {
+        type Error = io::Error;
+        type PublicKey = P;
+
+        async fn recv(&mut self) -> Result<crate::Message<Self::PublicKey>, Self::Error> {
+            self.receiver
+                .recv()
+                .await
+                .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct NoopBlocker;
+
+    impl crate::Blocker for NoopBlocker {
+        type PublicKey = PublicKey;
+
+        async fn block(&mut self, _peer: Self::PublicKey) {}
     }
 
     #[test_traced]
@@ -535,6 +611,41 @@ mod tests {
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.contains(&(pk2.clone(), pk1.clone())));
             assert!(!blocked.contains(&(pk2.clone(), pk3.clone())));
+        });
+    }
+
+    #[test_traced]
+    fn test_drain_decode_pool_after_receiver_closure() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let sender = pk(0);
+            let (tx, receiver) = mpsc::unbounded_channel();
+            let count = 64u32;
+
+            for i in 0..count {
+                tx.send((sender.clone(), IoBuf::from(i.encode())))
+                    .expect("mock receiver should be open");
+            }
+            drop(tx);
+
+            let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32>::new(
+                context.with_label("bg"),
+                MockReceiver { receiver },
+                (),
+                NoopBlocker,
+                count as usize,
+                &HintStrategy(8),
+            );
+            let _handle = bg.start();
+
+            let mut values = Vec::new();
+            while let Some((from, value)) = rx.recv().await {
+                assert_eq!(from, sender);
+                values.push(value);
+            }
+            values.sort_unstable();
+
+            assert_eq!(values, (0..count).collect::<Vec<u32>>());
         });
     }
 }

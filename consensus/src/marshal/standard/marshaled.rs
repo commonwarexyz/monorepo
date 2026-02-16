@@ -73,12 +73,10 @@
 use crate::{
     marshal::{
         ancestry::AncestorStream,
-        application::{
-            validation::{
-                has_contiguous_height, is_block_in_expected_epoch,
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
-            },
-            verification_tasks::VerificationTasks,
+        application::verification_tasks::VerificationTasks,
+        validation::{
+            is_block_in_expected_epoch, is_inferred_reproposal_at_certify,
+            is_valid_reproposal_at_verify, validate_standard_block_for_verification,
         },
         core::Mailbox,
         standard::Standard,
@@ -236,21 +234,16 @@ where
                     },
                 };
 
-                // Validate parent digest and height contiguity.
-                if block.parent() != parent.digest() || parent.digest() != parent_digest {
+                if let Err(err) =
+                    validate_standard_block_for_verification(&block, &parent, parent_digest)
+                {
                     debug!(
-                        block_parent = %block.parent(),
+                        ?err,
                         expected_parent = %parent.digest(),
-                        "block parent digest does not match expected parent"
-                    );
-                    tx.send_lossy(false);
-                    return;
-                }
-                if !has_contiguous_height(parent.height(), block.height()) {
-                    debug!(
+                        block_parent = %block.parent(),
                         parent_height = %parent.height(),
                         block_height = %block.height(),
-                        "block height is not contiguous with parent height"
+                        "block failed standard invariant validation"
                     );
                     tx.send_lossy(false);
                     return;

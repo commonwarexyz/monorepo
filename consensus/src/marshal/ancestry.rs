@@ -25,10 +25,13 @@ pub trait BlockProvider: Clone + Send + 'static {
     /// If the block is not available locally, the request will be registered and the caller will
     /// be notified when the block is available. If the block is not finalized, it's possible that
     /// it may never become available.
+    ///
+    /// Returns `None` when the subscription is canceled or the provider can no longer deliver
+    /// the block.
     fn fetch_block(
         self,
         digest: <Self::Block as Digestible>::Digest,
-    ) -> impl Future<Output = Self::Block> + Send;
+    ) -> impl Future<Output = Option<Self::Block>> + Send;
 }
 
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
@@ -40,7 +43,7 @@ pub struct AncestorStream<M, B: Block> {
     buffered: Vec<B>,
     marshal: M,
     #[pin]
-    pending: OptionFuture<BoxFuture<'static, B>>,
+    pending: OptionFuture<BoxFuture<'static, Option<B>>>,
 }
 
 impl<M, B: Block> AncestorStream<M, B> {
@@ -100,8 +103,14 @@ where
 
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
                 // buffer it for the next poll.
-                if let Poll::Ready(Some(block)) = this.pending.as_mut().poll(cx) {
-                    this.buffered.push(block);
+                match this.pending.as_mut().poll(cx) {
+                    Poll::Ready(Some(Some(block))) => {
+                        this.buffered.push(block);
+                    }
+                    Poll::Ready(Some(None)) => {
+                        *this.pending.as_mut() = None.into();
+                    }
+                    Poll::Ready(None) | Poll::Pending => {}
                 }
             } else if !should_fetch_parent {
                 // No more parents to fetch; Finish the stream.
@@ -113,8 +122,11 @@ where
 
         match this.pending.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(block)) => {
+            Poll::Ready(None) | Poll::Ready(Some(None)) => {
+                *this.pending.as_mut() = None.into();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Some(block))) => {
                 let height = block.height();
                 let should_fetch_parent = height > END_BOUND;
                 if should_fetch_parent {
@@ -124,8 +136,14 @@ where
 
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
                     // buffer it for the next poll.
-                    if let Poll::Ready(Some(block)) = this.pending.as_mut().poll(cx) {
-                        this.buffered.push(block);
+                    match this.pending.as_mut().poll(cx) {
+                        Poll::Ready(Some(Some(block))) => {
+                            this.buffered.push(block);
+                        }
+                        Poll::Ready(Some(None)) => {
+                            *this.pending.as_mut() = None.into();
+                        }
+                        Poll::Ready(None) | Poll::Pending => {}
                     }
                 } else {
                     // No more parents to fetch; Finish the stream.
@@ -151,11 +169,8 @@ mod test {
     impl BlockProvider for MockProvider {
         type Block = Block<Sha256Digest, ()>;
 
-        async fn fetch_block(self, digest: Sha256Digest) -> Self::Block {
-            self.0
-                .into_iter()
-                .find(|b| b.digest() == digest)
-                .expect("block not found in mock provider")
+        async fn fetch_block(self, digest: Sha256Digest) -> Option<Self::Block> {
+            self.0.into_iter().find(|b| b.digest() == digest)
         }
     }
 
@@ -215,5 +230,18 @@ mod test {
 
         let results = stream.collect::<Vec<_>>().await;
         assert_eq!(results, vec![block3, block2, block1]);
+    }
+
+    #[test_async]
+    async fn test_missing_parent_ends_stream() {
+        let block1 = Block::new::<Sha256>((), Sha256Digest::EMPTY, Height::new(1), 1);
+        let block2 = Block::new::<Sha256>((), block1.digest(), Height::new(2), 2);
+        let block3 = Block::new::<Sha256>((), block2.digest(), Height::new(3), 3);
+
+        let provider = MockProvider(vec![block1]);
+        let stream = AncestorStream::new(provider, [block3.clone()]);
+
+        let results = stream.collect::<Vec<_>>().await;
+        assert_eq!(results, vec![block3]);
     }
 }

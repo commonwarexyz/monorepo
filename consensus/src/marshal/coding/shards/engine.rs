@@ -160,7 +160,12 @@ use super::{
     metrics::{Peer, ShardMetrics},
 };
 use crate::{
-    marshal::coding::types::{hash_context, CodedBlock, DistributionShard, Shard},
+    marshal::{
+        coding::types::{hash_context, CodedBlock, DistributionShard, Shard},
+        validation::{
+            validate_reconstruction, ReconstructionValidationError as InvariantError,
+        },
+    },
     types::{coding::Commitment, Epoch, Round},
     Block, CertifiableBlock, Heightable,
 };
@@ -565,33 +570,31 @@ where
         let (inner, config): (B, CodingConfig) =
             Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
-        // Verify the reconstructed block's digest matches the commitment's block digest.
-        if inner.digest() != commitment.block() {
-            return Err(Error::DigestMismatch);
-        }
-
-        // Verify the reconstructed block's coding config matches the commitment's coding config.
-        if config != commitment.config() {
-            warn!(
-                %commitment,
-                expected_config = ?commitment.config(),
-                actual_config = ?config,
-                "reconstructed block config does not match commitment config, but digest matches"
-            );
-            return Err(Error::ConfigMismatch);
-        }
-
-        // Verify the reconstructed block's embedded context hash matches the commitment.
-        let expected_context_hash = commitment.context::<Sha256Digest>();
-        let got_context_hash = hash_context(&inner.context());
-        if expected_context_hash != got_context_hash {
-            warn!(
-                %commitment,
-                expected_context_hash = ?expected_context_hash,
-                actual_context_hash = ?got_context_hash,
-                "reconstructed block context hash does not match commitment context hash"
-            );
-            return Err(Error::ContextMismatch);
+        match validate_reconstruction(&inner, config, commitment) {
+            Ok(()) => {}
+            Err(InvariantError::BlockDigest) => {
+                return Err(Error::DigestMismatch);
+            }
+            Err(InvariantError::CodingConfig) => {
+                warn!(
+                    %commitment,
+                    expected_config = ?commitment.config(),
+                    actual_config = ?config,
+                    "reconstructed block config does not match commitment config, but digest matches"
+                );
+                return Err(Error::ConfigMismatch);
+            }
+            Err(InvariantError::ContextHash) => {
+                let expected_context_hash = commitment.context::<Sha256Digest>();
+                let got_context_hash = hash_context(&inner.context());
+                warn!(
+                    %commitment,
+                    expected_context_hash = ?expected_context_hash,
+                    actual_context_hash = ?got_context_hash,
+                    "reconstructed block context hash does not match commitment context hash"
+                );
+                return Err(Error::ContextMismatch);
+            }
         }
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
