@@ -1,7 +1,7 @@
 //! Utility functions for interacting with any runtime.
 
 use futures::task::ArcWake;
-use prometheus_client::{encoding::text::encode, registry::Registry};
+use prometheus_client::{encoding::text::encode, registry::Registry as PrometheusRegistry};
 use std::{
     any::Any,
     collections::{BTreeMap, HashSet},
@@ -417,33 +417,33 @@ impl Drop for ScopeHandle {
 /// Holds a permanent root registry for long-lived metrics (runtime internals)
 /// and a collection of scoped registries that can be removed when the associated
 /// work (e.g., an epoch's consensus engine) is done.
-pub(crate) struct MetricStore {
-    root: Registry,
-    scopes: BTreeMap<u64, Registry>,
+pub(crate) struct Registry {
+    root: PrometheusRegistry,
+    scopes: BTreeMap<u64, PrometheusRegistry>,
     next_scope_id: u64,
 }
 
-impl MetricStore {
+impl Registry {
     pub fn new() -> Self {
         Self {
-            root: Registry::default(),
+            root: PrometheusRegistry::default(),
             scopes: BTreeMap::new(),
             next_scope_id: 0,
         }
     }
 
-    pub const fn root_mut(&mut self) -> &mut Registry {
+    pub fn root_mut(&mut self) -> &mut PrometheusRegistry {
         &mut self.root
     }
 
     pub fn create_scope(&mut self) -> u64 {
         let id = self.next_scope_id;
         self.next_scope_id += 1;
-        self.scopes.insert(id, Registry::default());
+        self.scopes.insert(id, PrometheusRegistry::default());
         id
     }
 
-    pub fn get_registry(&mut self, scope: Option<u64>) -> &mut Registry {
+    pub fn get_scope(&mut self, scope: Option<u64>) -> &mut PrometheusRegistry {
         match scope {
             None => &mut self.root,
             Some(id) => self

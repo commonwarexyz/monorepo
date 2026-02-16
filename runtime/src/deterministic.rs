@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricStore, Panicker, ScopeHandle,
+        Registry, Panicker, ScopeHandle,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
@@ -80,7 +80,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use pin_project::pin_project;
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry},
+    registry::{Metric, Registry as PrometheusRegistry},
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use rand_core::CryptoRngCore;
@@ -112,7 +112,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut Registry) -> Self {
+    pub fn init(registry: &mut PrometheusRegistry) -> Self {
         let metrics = Self {
             iterations: Counter::default(),
             task_polls: Family::default(),
@@ -347,7 +347,7 @@ type MetricKey = (String, Vec<(String, String)>, Option<u64>);
 
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
-    store: Mutex<MetricStore>,
+    store: Mutex<Registry>,
     registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
@@ -900,7 +900,7 @@ impl Clone for Context {
 impl Context {
     fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
         // Create a new metric store
-        let mut store = MetricStore::new();
+        let mut store = Registry::new();
         let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
@@ -993,7 +993,7 @@ impl Context {
     /// If either one of these conditions is violated, this method will panic.
     fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
         // Rebuild metrics
-        let mut store = MetricStore::new();
+        let mut store = Registry::new();
         let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
         let metrics = Arc::new(Metrics::init(runtime_registry));
 
@@ -1309,7 +1309,7 @@ impl crate::Metrics for Context {
 
         // Route to the appropriate registry (root or scoped)
         let mut store = executor.store.lock().unwrap();
-        let registry = store.get_registry(scope_id);
+        let registry = store.get_scope(scope_id);
         let sub_registry =
             self.attributes
                 .iter()

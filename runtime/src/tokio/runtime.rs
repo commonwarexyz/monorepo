@@ -18,7 +18,7 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        add_attribute, signal::Stopper, supervision::Tree, MetricStore, Panicker, ScopeHandle,
+        add_attribute, signal::Stopper, supervision::Tree, Registry, Panicker, ScopeHandle,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
@@ -30,7 +30,7 @@ use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry},
+    registry::{Metric, Registry as PrometheusRegistry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
@@ -62,7 +62,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut Registry) -> Self {
+    pub fn init(registry: &mut PrometheusRegistry) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
@@ -251,7 +251,7 @@ impl Default for Config {
 
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
-    store: Mutex<MetricStore>,
+    store: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
@@ -285,7 +285,7 @@ impl crate::Runner for Runner {
         Fut: Future,
     {
         // Create a new metric store
-        let mut store = MetricStore::new();
+        let mut store = Registry::new();
         let runtime_registry = store.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
@@ -642,7 +642,7 @@ impl crate::Metrics for Context {
 
         // Route to the appropriate registry (root or scoped)
         let mut store = self.executor.store.lock().unwrap();
-        let registry = store.get_registry(self.scope.as_ref().map(|s| s.scope_id()));
+        let registry = store.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
         let sub_registry =
             self.attributes
                 .iter()
