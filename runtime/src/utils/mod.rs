@@ -438,7 +438,7 @@ impl Registry {
 
     pub fn create_scope(&mut self) -> u64 {
         let id = self.next_scope_id;
-        self.next_scope_id += 1;
+        self.next_scope_id = self.next_scope_id.checked_add(1).expect("scope overflow");
         self.scopes.insert(id, PrometheusRegistry::default());
         id
     }
