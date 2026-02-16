@@ -59,6 +59,41 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
+/// Mark entries as verified by iteratively bisecting failed ranges.
+///
+/// `verify_range(start, end)` should return true when all items in `[start, end)`
+/// are valid. Failed ranges are split until singleton leaves.
+fn bisect_verified<F>(len: usize, mut verify_range: F) -> Vec<bool>
+where
+    F: FnMut(usize, usize) -> bool,
+{
+    let mut verified = vec![false; len];
+    if len == 0 {
+        return verified;
+    }
+
+    let mut stack = vec![(0usize, len)];
+    while let Some((start, end)) = stack.pop() {
+        let width = end - start;
+        if width == 0 {
+            continue;
+        }
+
+        if verify_range(start, end) {
+            verified[start..end].fill(true);
+            continue;
+        }
+
+        if width > 1 {
+            let mid = start + width / 2;
+            stack.push((mid, end));
+            stack.push((start, mid));
+        }
+    }
+
+    verified
+}
+
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 enum PendingVerification<S: CertificateScheme, B: Block> {
     Finalized {
@@ -678,10 +713,8 @@ where
                     }
                     let height = block.height();
                     let finalization = self.cache.get_finalization_for(commitment).await;
-                    self.store_finalization(
-                        height, commitment, block, finalization, application,
-                    )
-                    .await;
+                    self.store_finalization(height, commitment, block, finalization, application)
+                        .await;
                     debug!(?commitment, %height, "received block");
                     response.send_lossy(true);
                     true
@@ -769,31 +802,13 @@ where
 
         let mut wrote = false;
 
-        // Use the universal verifier for bisection when available. If a batch fails,
-        // recursively split it to salvage valid certificates and minimize per-item checks.
-        let mut verified = vec![false; pending.len()];
-        if let Some(scheme) = self.provider.all() {
-            let mut ranges = vec![(0usize, pending.len())];
-            while let Some((start, end)) = ranges.pop() {
-                let len = end - start;
-                if len == 0 {
-                    continue;
-                }
-
-                if self.verify_pending_batch(&scheme, &pending[start..end]) {
-                    for is_verified in &mut verified[start..end] {
-                        *is_verified = true;
-                    }
-                    continue;
-                }
-
-                if len > 1 {
-                    let mid = start + len / 2;
-                    ranges.push((mid, end));
-                    ranges.push((start, mid));
-                }
-            }
-        }
+        let verified = if let Some(scheme) = self.provider.all() {
+            bisect_verified(pending.len(), |start, end| {
+                self.verify_pending_batch(&scheme, &pending[start..end])
+            })
+        } else {
+            vec![false; pending.len()]
+        };
 
         for (index, item) in pending.drain(..).enumerate() {
             if verified[index] || self.verify_pending_item(&item) {
@@ -831,7 +846,11 @@ where
                 &notarization.certificate,
             ),
         });
-        scheme.verify_certificates::<_, B::Commitment, _, N3f1>(&mut self.context, certs, &self.strategy)
+        scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
+            &mut self.context,
+            certs,
+            &self.strategy,
+        )
     }
 
     /// Verify a single pending finalization/notarization certificate.
@@ -1278,5 +1297,41 @@ where
             }
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bisect_verified;
+
+    #[test]
+    fn test_bisect_verified_empty_input() {
+        let mut called = false;
+        let verified = bisect_verified(0, |_, _| {
+            called = true;
+            true
+        });
+        assert!(verified.is_empty());
+        assert!(!called);
+    }
+
+    #[test]
+    fn test_bisect_verified_root_success_short_circuit() {
+        let mut calls = Vec::new();
+        let verified = bisect_verified(8, |start, end| {
+            calls.push((start, end));
+            true
+        });
+        assert_eq!(verified, vec![true; 8]);
+        assert_eq!(calls, vec![(0, 8)]);
+    }
+
+    #[test]
+    fn test_bisect_verified_mixed_validity() {
+        let expected = vec![true, false, true, false, true, true, false, false];
+        let verified = bisect_verified(expected.len(), |start, end| {
+            expected[start..end].iter().all(|valid| *valid)
+        });
+        assert_eq!(verified, expected);
     }
 }
