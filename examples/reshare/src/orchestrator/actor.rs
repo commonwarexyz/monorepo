@@ -337,6 +337,8 @@ where
         let certificate = certificate_mux.register(epoch.get()).await.unwrap();
         let resolver = resolver_mux.register(epoch.get()).await.unwrap();
 
+        // Retain the scoped context so its metrics registry stays alive
+        // until the epoch is exited and the engine is aborted.
         (engine.start(vote, certificate, resolver), scope)
     }
 }
