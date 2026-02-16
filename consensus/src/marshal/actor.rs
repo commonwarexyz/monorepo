@@ -59,6 +59,10 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
+/// Maximum number of blocks to process before forcing a sync during catchup.
+/// Limits data loss on crash to at most this many blocks of re-processing.
+const SYNC_BATCH_SIZE: u64 = 1024;
+
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
@@ -144,6 +148,8 @@ where
     tip: Height,
     // Whether the finalization archives have unsynced writes
     finalization_archives_dirty: bool,
+    // Number of blocks processed since the last durable sync
+    blocks_since_last_sync: u64,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<B::Commitment, BlockSubscription<B>>,
 
@@ -246,6 +252,7 @@ where
                 pending_ack: None.into(),
                 tip: Height::zero(),
                 finalization_archives_dirty: false,
+                blocks_since_last_sync: 0,
                 block_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
@@ -333,13 +340,8 @@ where
 
                 match ack {
                     Ok(()) => {
-                        if let Err(e) = self
-                            .handle_block_processed(height, commitment, &mut resolver)
-                            .await
-                        {
-                            error!(?e, %height, "failed to update application progress");
-                            return;
-                        }
+                        self.handle_block_processed(height, commitment, &mut resolver)
+                            .await;
                         self.try_dispatch_block(&mut application).await;
                     }
                     Err(e) => {
@@ -824,10 +826,6 @@ where
     // -------------------- Application Dispatch --------------------
 
     /// Attempt to dispatch the next finalized block to the application if ready.
-    ///
-    /// If there are dirty (unsynced) finalization archives, they are flushed after
-    /// reporting the block but before the acknowledgement can be processed. This
-    /// allows the application to begin work on the block while the sync happens.
     async fn try_dispatch_block(
         &mut self,
         application: &mut impl Reporter<Activity = Update<B, A>>,
@@ -850,10 +848,6 @@ where
         let (ack, ack_waiter) = A::handle();
         application.report(Update::Block(block, ack)).await;
 
-        if self.finalization_archives_dirty {
-            self.sync_finalization_archives().await;
-        }
-
         self.pending_ack.replace(PendingAck {
             height,
             commitment,
@@ -862,16 +856,44 @@ where
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
+    ///
+    /// Syncs are batched during catchup: when behind tip, we only flush to disk
+    /// every [SYNC_BATCH_SIZE] blocks. When caught up, every block is synced.
+    /// Archives are always synced before metadata so that on crash recovery the
+    /// cursor never points beyond durable archive data.
     async fn handle_block_processed(
         &mut self,
         height: Height,
         commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
-    ) -> Result<(), metadata::Error> {
-        // Update the processed height
-        self.set_processed_height(height, resolver).await?;
+    ) {
+        // Buffer metadata update (in-memory only)
+        self.application_metadata.put(LATEST_KEY.clone(), height);
+        self.blocks_since_last_sync += 1;
 
-        // Cancel any useless requests
+        // Sync when caught up to tip or when enough blocks have accumulated
+        if height >= self.tip || self.blocks_since_last_sync >= SYNC_BATCH_SIZE {
+            // Sync archives first so that on crash, metadata never points
+            // beyond durable archive data (at-least-once reprocessing).
+            if self.finalization_archives_dirty {
+                self.sync_finalization_archives().await;
+            }
+            if let Err(e) = self.application_metadata.sync().await {
+                panic!("failed to sync application metadata: {e}");
+            }
+            self.blocks_since_last_sync = 0;
+        }
+
+        // Update in-memory state
+        self.last_processed_height = height;
+        let _ = self
+            .processed_height
+            .try_set(self.last_processed_height.get());
+
+        // Cancel any existing requests below the new floor
+        resolver
+            .retain(Request::<B>::Finalized { height }.predicate())
+            .await;
         resolver.cancel(Request::<B>::Block(commitment)).await;
 
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -894,8 +916,6 @@ where
                 .retain(Request::<B>::Notarized { round }.predicate())
                 .await;
         }
-
-        Ok(())
     }
 
     // -------------------- Prunable Storage --------------------
@@ -966,7 +986,7 @@ where
     ///
     /// When `sync` is true, the archives are durably synced immediately after the
     /// write. When false, writes are buffered and synced lazily in
-    /// [Self::try_dispatch_block].
+    /// [Self::handle_block_processed].
     #[allow(clippy::too_many_arguments)]
     async fn finalize(
         &mut self,
@@ -990,7 +1010,7 @@ where
     ///
     /// When `sync` is true, the archives are durably synced immediately after
     /// the write. When false, writes are buffered and synced lazily in
-    /// [Self::try_dispatch_block].
+    /// [Self::handle_block_processed].
     async fn store_finalization(
         &mut self,
         height: Height,
