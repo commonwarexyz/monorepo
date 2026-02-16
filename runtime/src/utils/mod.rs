@@ -335,6 +335,8 @@ struct MetricFamily {
 }
 
 /// OpenMetrics suffixes appended to data lines but absent from HELP/TYPE headers.
+///
+/// See: https://github.com/OpenObservability/OpenMetrics/blob/main/specification/OpenMetrics.md
 const OPENMETRICS_SUFFIXES: &[&str] = &["_total", "_bucket", "_count", "_sum", "_created", "_info"];
 
 fn extract_metric_name(line: &str) -> &str {
@@ -381,17 +383,19 @@ impl MetricEncoder {
     /// family, that family is returned. Otherwise a new family is created
     /// under the literal metric name.
     fn resolve_data_family(&mut self, name: &str) -> &mut MetricFamily {
-        if self.families.contains_key(name) {
-            return self.families.get_mut(name).unwrap();
-        }
-        for suffix in OPENMETRICS_SUFFIXES {
-            if let Some(base) = name.strip_suffix(suffix) {
-                if self.families.contains_key(base) {
-                    return self.families.get_mut(base).unwrap();
-                }
-            }
-        }
-        self.families.entry(name.to_string()).or_insert(MetricFamily {
+        // Find the key to use: exact match, suffix-stripped match, or the name itself.
+        let key = if self.families.contains_key(name) {
+            name
+        } else {
+            OPENMETRICS_SUFFIXES
+                .iter()
+                .find_map(|suffix| {
+                    let base = name.strip_suffix(suffix)?;
+                    self.families.contains_key(base).then_some(base)
+                })
+                .unwrap_or(name)
+        };
+        self.families.entry(key.to_string()).or_insert(MetricFamily {
             help: None,
             type_line: None,
             data: Vec::new(),
