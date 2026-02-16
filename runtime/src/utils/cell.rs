@@ -165,8 +165,8 @@ where
         Self::Present(self.as_present().with_attribute(key, value))
     }
 
-    fn scoped(&self) -> Self {
-        Self::Present(self.as_present().scoped())
+    fn with_scope(&self) -> Self {
+        Self::Present(self.as_present().with_scope())
     }
 }
 

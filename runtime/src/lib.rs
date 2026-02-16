@@ -419,34 +419,26 @@ stability_scope!(BETA {
         /// namespaced).
         fn encode(&self) -> String;
 
-        /// Create a scoped context. All metrics registered through this context
-        /// (and child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`]) go into a
-        /// separate registry that is automatically removed when all references to the scope are
-        /// dropped.
-        ///
-        /// The scope is reference-counted: cloning a scoped context (or deriving children via
-        /// `with_label`/`with_attribute`) shares the same scope. When the last context holding the
-        /// scope is dropped, the scope's metrics are automatically removed from
-        /// [`Metrics::encode`] output.
-        ///
-        /// If the context is already scoped, returns a clone with the same scope.
+        /// Create a scoped context. All metrics registered through the returned context
+        /// (and child contexts via [`Metrics::with_label`]/[`Metrics::with_attribute`])
+        /// go into a separate registry that is automatically removed when all clones of
+        /// the scoped context are dropped.
         ///
         /// # Example
         ///
         /// ```ignore
-        /// let ctx = context
+        /// let scoped = context
         ///     .with_label("engine")
         ///     .with_attribute("epoch", epoch)
-        ///     .scoped();
+        ///     .with_scope();
         ///
         /// // Register metrics into the scope
         /// let counter = Counter::default();
-        /// ctx.register("votes", "vote count", counter.clone());
+        /// scoped.register("votes", "vote count", counter.clone());
         ///
-        /// // Metrics are automatically removed when ctx (and all clones) are dropped.
-        /// drop(ctx);
+        /// // Metrics are removed when all clones of `scoped` are dropped.
         /// ```
-        fn scoped(&self) -> Self;
+        fn with_scope(&self) -> Self;
 
     }
 
@@ -2712,12 +2704,12 @@ mod tests {
         test_metrics_family_with_attributes(runner);
     }
 
-    fn test_scoped_register_and_encode<R: Runner>(runner: R)
+    fn test_with_scope_register_and_encode<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").scoped();
+            let scoped = context.with_label("engine").with_scope();
             let counter = Counter::<u64>::default();
             scoped.register("votes", "vote count", counter.clone());
             counter.inc();
@@ -2731,18 +2723,18 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_scoped_register_and_encode() {
+    fn test_deterministic_with_scope_register_and_encode() {
         let executor = deterministic::Runner::default();
-        test_scoped_register_and_encode(executor);
+        test_with_scope_register_and_encode(executor);
     }
 
     #[test]
-    fn test_tokio_scoped_register_and_encode() {
+    fn test_tokio_with_scope_register_and_encode() {
         let runner = tokio::Runner::default();
-        test_scoped_register_and_encode(runner);
+        test_with_scope_register_and_encode(runner);
     }
 
-    fn test_scoped_drop_removes_metrics<R: Runner>(runner: R)
+    fn test_with_scope_drop_removes_metrics<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -2757,7 +2749,7 @@ mod tests {
             permanent.inc();
 
             // Register a scoped metric
-            let scoped = context.with_label("engine").scoped();
+            let scoped = context.with_label("engine").with_scope();
             let ephemeral = Counter::<u64>::default();
             scoped.register("votes", "vote count", ephemeral.clone());
             ephemeral.inc();
@@ -2767,35 +2759,35 @@ mod tests {
             assert!(buffer.contains("permanent_counter_total 1"));
             assert!(buffer.contains("engine_votes_total 1"));
 
-            // Drop the scope
+            // Drop the scoped context
             drop(scoped);
 
             // Only permanent metric should remain
             let buffer = context.encode();
             assert!(
                 buffer.contains("permanent_counter_total 1"),
-                "permanent metric should survive drop: {buffer}"
+                "permanent metric should survive scope drop: {buffer}"
             );
             assert!(
                 !buffer.contains("engine_votes"),
-                "scoped metric should be removed after drop: {buffer}"
+                "scoped metric should be removed after scope drop: {buffer}"
             );
         });
     }
 
     #[test]
-    fn test_deterministic_scoped_drop_removes_metrics() {
+    fn test_deterministic_with_scope_drop_removes_metrics() {
         let executor = deterministic::Runner::default();
-        test_scoped_drop_removes_metrics(executor);
+        test_with_scope_drop_removes_metrics(executor);
     }
 
     #[test]
-    fn test_tokio_scoped_drop_removes_metrics() {
+    fn test_tokio_with_scope_drop_removes_metrics() {
         let runner = tokio::Runner::default();
-        test_scoped_drop_removes_metrics(runner);
+        test_with_scope_drop_removes_metrics(runner);
     }
 
-    fn test_scoped_with_attributes<R: Runner>(runner: R)
+    fn test_with_scope_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -2804,7 +2796,7 @@ mod tests {
             let epoch1 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .scoped();
+                .with_scope();
             let c1 = Counter::<u64>::default();
             epoch1.register("votes", "vote count", c1.clone());
             c1.inc();
@@ -2812,7 +2804,7 @@ mod tests {
             let epoch2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 2)
-                .scoped();
+                .with_scope();
             let c2 = Counter::<u64>::default();
             epoch2.register("votes", "vote count", c2.clone());
             c2.inc();
@@ -2823,7 +2815,7 @@ mod tests {
             assert!(buffer.contains("engine_votes_total{epoch=\"1\"} 1"));
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
-            // Drop epoch 1
+            // Drop epoch 1 context
             drop(epoch1);
             let buffer = context.encode();
             assert!(
@@ -2832,7 +2824,7 @@ mod tests {
             );
             assert!(buffer.contains("engine_votes_total{epoch=\"2\"} 2"));
 
-            // Drop epoch 2
+            // Drop epoch 2 context
             drop(epoch2);
             let buffer = context.encode();
             assert!(
@@ -2843,23 +2835,23 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_scoped_with_attributes() {
+    fn test_deterministic_with_scope_attributes() {
         let executor = deterministic::Runner::default();
-        test_scoped_with_attributes(executor);
+        test_with_scope_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_scoped_with_attributes() {
+    fn test_tokio_with_scope_attributes() {
         let runner = tokio::Runner::default();
-        test_scoped_with_attributes(runner);
+        test_with_scope_attributes(runner);
     }
 
-    fn test_scoped_inherits_on_with_label<R: Runner>(runner: R)
+    fn test_with_scope_inherits_on_with_label<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scoped = context.with_label("engine").scoped();
+            let scoped = context.with_label("engine").with_scope();
 
             // Child context inherits scope
             let child = scoped.with_label("batcher");
@@ -2870,27 +2862,27 @@ mod tests {
             let buffer = context.encode();
             assert!(buffer.contains("engine_batcher_msgs_total 1"));
 
-            // Dropping parent and child removes the scope's metrics
+            // Dropping all scoped contexts removes all metrics in the scope
             drop(child);
             drop(scoped);
             let buffer = context.encode();
             assert!(
                 !buffer.contains("engine_batcher_msgs"),
-                "child metric should be removed with parent scope: {buffer}"
+                "child metric should be removed with scope: {buffer}"
             );
         });
     }
 
     #[test]
-    fn test_deterministic_scoped_inherits_on_with_label() {
+    fn test_deterministic_with_scope_inherits_on_with_label() {
         let executor = deterministic::Runner::default();
-        test_scoped_inherits_on_with_label(executor);
+        test_with_scope_inherits_on_with_label(executor);
     }
 
     #[test]
-    fn test_tokio_scoped_inherits_on_with_label() {
+    fn test_tokio_with_scope_inherits_on_with_label() {
         let runner = tokio::Runner::default();
-        test_scoped_inherits_on_with_label(runner);
+        test_with_scope_inherits_on_with_label(runner);
     }
 
     fn test_multiple_scopes<R: Runner>(runner: R)
@@ -2898,15 +2890,15 @@ mod tests {
         R::Context: Metrics,
     {
         runner.start(|context| async move {
-            let scope_a = context.with_label("a").scoped();
-            let scope_b = context.with_label("b").scoped();
+            let ctx_a = context.with_label("a").with_scope();
+            let ctx_b = context.with_label("b").with_scope();
 
             let ca = Counter::<u64>::default();
-            scope_a.register("counter", "a counter", ca.clone());
+            ctx_a.register("counter", "a counter", ca.clone());
             ca.inc();
 
             let cb = Counter::<u64>::default();
-            scope_b.register("counter", "b counter", cb.clone());
+            ctx_b.register("counter", "b counter", cb.clone());
             cb.inc();
             cb.inc();
 
@@ -2914,14 +2906,14 @@ mod tests {
             assert!(buffer.contains("a_counter_total 1"));
             assert!(buffer.contains("b_counter_total 2"));
 
-            // Drop only scope_a
-            drop(scope_a);
+            // Drop only scope a
+            drop(ctx_a);
             let buffer = context.encode();
             assert!(!buffer.contains("a_counter"));
             assert!(buffer.contains("b_counter_total 2"));
 
-            // Drop scope_b
-            drop(scope_b);
+            // Drop scope b
+            drop(ctx_b);
             let buffer = context.encode();
             assert!(!buffer.contains("b_counter"));
         });
@@ -2940,14 +2932,14 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_reregister_after_drop() {
+    fn test_deterministic_reregister_after_scope_drop() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Register in scope, drop, then re-register with same name/attributes
+            // Register in scope, drop it, then re-register with same name/attributes
             let scoped = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .scoped();
+                .with_scope();
             let c1 = Counter::<u64>::default();
             scoped.register("votes", "vote count", c1.clone());
             c1.inc();
@@ -2957,7 +2949,7 @@ mod tests {
             let scoped2 = context
                 .with_label("engine")
                 .with_attribute("epoch", 1)
-                .scoped();
+                .with_scope();
             let c2 = Counter::<u64>::default();
             scoped2.register("votes", "vote count", c2.clone());
             c2.inc();
@@ -2971,7 +2963,7 @@ mod tests {
         });
     }
 
-    fn test_scoped_family_with_attributes<R: Runner>(runner: R)
+    fn test_with_scope_family_with_attributes<R: Runner>(runner: R)
     where
         R::Context: Metrics,
     {
@@ -3000,7 +2992,7 @@ mod tests {
             let scoped = context
                 .with_label("batcher")
                 .with_attribute("epoch", 1)
-                .scoped();
+                .with_scope();
 
             let family: Family<Peer, Counter> = Family::default();
             scoped.register("votes", "votes per peer", family.clone());
@@ -3031,15 +3023,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_scoped_family_with_attributes() {
+    fn test_deterministic_with_scope_family_with_attributes() {
         let executor = deterministic::Runner::default();
-        test_scoped_family_with_attributes(executor);
+        test_with_scope_family_with_attributes(executor);
     }
 
     #[test]
-    fn test_tokio_scoped_family_with_attributes() {
+    fn test_tokio_with_scope_family_with_attributes() {
         let runner = tokio::Runner::default();
-        test_scoped_family_with_attributes(runner);
+        test_with_scope_family_with_attributes(runner);
     }
 
     #[test]

@@ -305,7 +305,7 @@ where
             .context
             .with_label("consensus_engine")
             .with_attribute("epoch", epoch)
-            .scoped();
+            .with_scope();
         let engine = simplex::Engine::new(
             context.clone(),
             simplex::Config {

@@ -17,7 +17,7 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricStore, Panicker, ScopeGuard},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricStore, Panicker, ScopeHandle},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -440,7 +440,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
+    scope: Option<Arc<ScopeHandle>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -639,9 +639,8 @@ impl crate::Metrics for Context {
         };
 
         // Route to the appropriate registry (root or scoped)
-        let scope_id = self.scope.as_ref().map(|g| g.scope_id());
         let mut store = self.executor.store.lock().unwrap();
-        let registry = store.get_registry(scope_id);
+        let registry = store.get_registry(self.scope.as_ref().map(|s| s.scope_id()));
         let sub_registry =
             self.attributes
                 .iter()
@@ -664,18 +663,14 @@ impl crate::Metrics for Context {
         }
     }
 
-    fn scoped(&self) -> Self {
-        let scope = if self.scope.is_some() {
-            self.scope.clone()
-        } else {
-            let executor = self.executor.clone();
-            let scope_id = executor.store.lock().unwrap().create_scope();
-            Some(Arc::new(ScopeGuard::new(scope_id, move |id| {
-                executor.store.lock().unwrap().remove_scope(id);
-            })))
-        };
+    fn with_scope(&self) -> Self {
+        let executor = self.executor.clone();
+        let scope_id = executor.store.lock().unwrap().create_scope();
+        let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
+            executor.store.lock().unwrap().remove_scope(id);
+        }));
         Self {
-            scope,
+            scope: Some(handle),
             ..self.clone()
         }
     }

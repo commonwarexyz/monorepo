@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        MetricStore, Panicker, ScopeGuard,
+        MetricStore, Panicker, ScopeHandle,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
@@ -866,7 +866,7 @@ type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
-    scope: Option<Arc<ScopeGuard>>,
+    scope: Option<Arc<ScopeHandle>>,
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
@@ -1294,7 +1294,7 @@ impl crate::Metrics for Context {
         };
 
         // Check for duplicate registration (O(1) lookup)
-        let scope_id = self.scope.as_ref().map(|g| g.scope_id());
+        let scope_id = self.scope.as_ref().map(|s| s.scope_id());
         let metric_key = (prefixed_name.clone(), self.attributes.clone(), scope_id);
         let is_new = executor
             .registered_metrics
@@ -1326,27 +1326,23 @@ impl crate::Metrics for Context {
         result
     }
 
-    fn scoped(&self) -> Self {
+    fn with_scope(&self) -> Self {
         let executor = self.executor();
-        executor.auditor.event(b"scoped", |_| {});
-        let scope = if self.scope.is_some() {
-            self.scope.clone()
-        } else {
-            let weak = self.executor.clone();
-            let scope_id = executor.store.lock().unwrap().create_scope();
-            Some(Arc::new(ScopeGuard::new(scope_id, move |id| {
-                if let Some(executor) = weak.upgrade() {
-                    executor.store.lock().unwrap().remove_scope(id);
-                    executor
-                        .registered_metrics
-                        .lock()
-                        .unwrap()
-                        .retain(|(_, _, scope)| *scope != Some(id));
-                }
-            })))
-        };
+        executor.auditor.event(b"with_scope", |_| {});
+        let weak = self.executor.clone();
+        let scope_id = executor.store.lock().unwrap().create_scope();
+        let handle = Arc::new(ScopeHandle::new(scope_id, move |id| {
+            if let Some(executor) = weak.upgrade() {
+                executor.store.lock().unwrap().remove_scope(id);
+                executor
+                    .registered_metrics
+                    .lock()
+                    .unwrap()
+                    .retain(|(_, _, scope)| *scope != Some(id));
+            }
+        }));
         Self {
-            scope,
+            scope: Some(handle),
             ..self.clone()
         }
     }

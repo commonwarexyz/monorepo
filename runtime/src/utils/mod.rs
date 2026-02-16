@@ -379,32 +379,33 @@ impl std::fmt::Write for MetricEncoder {
     }
 }
 
-/// Guard that automatically deregisters a metric scope when all references are dropped.
+/// Internal handle that deregisters a metric scope when dropped.
 ///
-/// Created by [`crate::Metrics::scoped`]. Shared via `Arc` across all contexts derived from
-/// the same scope (via `with_label`, `with_attribute`, or `Clone`). When the last `Arc` drops,
-/// the scope's registry is removed from the store.
-pub(crate) struct ScopeGuard {
+/// Stored inside contexts via `Arc<ScopeHandle>`. When the last context clone
+/// holding this handle is dropped, the scope's metrics are automatically removed.
+pub(crate) struct ScopeHandle {
     scope_id: u64,
-    cleanup: Box<dyn Fn(u64) + Send + Sync>,
+    cleanup: Mutex<Option<Box<dyn FnOnce(u64) + Send + Sync>>>,
 }
 
-impl ScopeGuard {
-    pub fn new(scope_id: u64, cleanup: impl Fn(u64) + Send + Sync + 'static) -> Self {
+impl ScopeHandle {
+    pub(crate) fn new(scope_id: u64, cleanup: impl FnOnce(u64) + Send + Sync + 'static) -> Self {
         Self {
             scope_id,
-            cleanup: Box::new(cleanup),
+            cleanup: Mutex::new(Some(Box::new(cleanup))),
         }
     }
 
-    pub fn scope_id(&self) -> u64 {
+    pub(crate) fn scope_id(&self) -> u64 {
         self.scope_id
     }
 }
 
-impl Drop for ScopeGuard {
+impl Drop for ScopeHandle {
     fn drop(&mut self) {
-        (self.cleanup)(self.scope_id);
+        if let Some(cleanup) = self.cleanup.lock().unwrap().take() {
+            cleanup(self.scope_id);
+        }
     }
 }
 

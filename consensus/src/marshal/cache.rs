@@ -213,7 +213,7 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
             self.context
                 .with_label(&format!("cache_{name}"))
                 .with_attribute("epoch", epoch)
-                .scoped(),
+                .with_scope(),
             cfg,
         )
         .await
