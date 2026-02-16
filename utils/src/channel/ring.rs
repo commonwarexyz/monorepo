@@ -27,12 +27,13 @@
 //! });
 //! ```
 
+use crate::sync::Mutex;
 use core::num::NonZeroUsize;
 use futures::{stream::FusedStream, Sink, Stream};
 use std::{
     collections::VecDeque,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 use thiserror::Error;
@@ -67,14 +68,14 @@ impl<T: Send + Sync> Sender<T> {
     ///
     /// If this returns `true`, subsequent sends will fail with [`ChannelClosed`].
     pub fn is_closed(&self) -> bool {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock();
         shared.receiver_dropped
     }
 }
 
 impl<T: Send + Sync> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         shared.sender_count += 1;
         drop(shared);
 
@@ -86,9 +87,7 @@ impl<T: Send + Sync> Clone for Sender<T> {
 
 impl<T: Send + Sync> Drop for Sender<T> {
     fn drop(&mut self) {
-        let Ok(mut shared) = self.shared.lock() else {
-            return;
-        };
+        let mut shared = self.shared.lock();
         shared.sender_count -= 1;
         let waker = if shared.sender_count == 0 {
             shared.receiver_waker.take()
@@ -107,7 +106,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
     type Error = ChannelClosed;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock();
         if shared.receiver_dropped {
             return Poll::Ready(Err(ChannelClosed));
         }
@@ -116,7 +115,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
 
         if shared.receiver_dropped {
             return Err(ChannelClosed);
@@ -169,7 +168,7 @@ impl<T: Send + Sync> Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
 
         if let Some(item) = shared.buffer.pop_front() {
             return Poll::Ready(Some(item));
@@ -192,16 +191,14 @@ impl<T: Send + Sync> Stream for Receiver<T> {
 
 impl<T: Send + Sync> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock();
         shared.sender_count == 0 && shared.buffer.is_empty()
     }
 }
 
 impl<T: Send + Sync> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let Ok(mut shared) = self.shared.lock() else {
-            return;
-        };
+        let mut shared = self.shared.lock();
         shared.receiver_dropped = true;
     }
 }
