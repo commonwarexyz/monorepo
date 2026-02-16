@@ -261,7 +261,7 @@ mod tests {
 
     fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
         Config {
-            partition: partition.to_string(),
+            partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),

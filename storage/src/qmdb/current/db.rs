@@ -862,7 +862,7 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {
     let metadata_cfg = MConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         codec_config: ((0..).into(), ()),
     };
     let metadata =

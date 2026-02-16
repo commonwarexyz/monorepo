@@ -51,7 +51,7 @@ struct DummyMetrics;
 
 impl Metrics for DummyMetrics {
     fn label(&self) -> String {
-        "".to_string()
+        "".into()
     }
 
     fn with_label(&self, _: &str) -> Self {
@@ -59,7 +59,7 @@ impl Metrics for DummyMetrics {
     }
 
     fn encode(&self) -> String {
-        "".to_string()
+        "".into()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
