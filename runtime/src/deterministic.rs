@@ -1294,7 +1294,6 @@ impl crate::Metrics for Context {
         };
 
         // Check for duplicate registration (O(1) lookup)
-        let scope_id = self.scope.as_ref().map(|s| s.scope_id());
         let metric_key = (prefixed_name.clone(), self.attributes.clone());
         let is_new = executor
             .registered_metrics
@@ -1309,7 +1308,7 @@ impl crate::Metrics for Context {
 
         // Route to the appropriate registry (root or scoped)
         let mut registry = executor.registry.lock().unwrap();
-        let scoped = registry.get_scope(scope_id);
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
         let sub_registry = self
             .attributes
             .iter()
