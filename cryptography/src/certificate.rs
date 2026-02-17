@@ -65,7 +65,7 @@ pub use crate::{
 };
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     types::lazy::Lazy, Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write,

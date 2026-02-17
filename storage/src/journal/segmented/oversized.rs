@@ -411,15 +411,15 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
     /// Get the value size for a section, derived from the last entry's location.
     pub async fn value_size(&self, section: u64) -> Result<u64, Error> {
-        match self.index.last(section).await? {
-            Some(entry) => {
+        self.index.last(section).await?.map_or_else(
+            || Ok(0),
+            |entry| {
                 let (offset, size) = entry.value_location();
                 offset
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)
-            }
-            None => Ok(0),
-        }
+            },
+        )
     }
 
     /// Returns the oldest section number, if any exist.
