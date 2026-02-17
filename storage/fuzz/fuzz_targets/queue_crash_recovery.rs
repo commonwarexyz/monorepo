@@ -123,7 +123,7 @@ struct RecoveryState {
     /// After mutable errors, the queue may be left in an inconsistent state until
     /// restart. In that case recovery checks should only assert basic liveness,
     /// not exact durability/accounting bounds.
-    tainted: bool,
+    saw_mutable_error: bool,
 }
 
 impl RecoveryState {
@@ -133,16 +133,16 @@ impl RecoveryState {
             pending: Vec::new(),
             current_ack_floor: 0,
             uncommitted: BTreeMap::new(),
-            tainted: false,
+            saw_mutable_error: false,
         }
     }
 
-    fn mark_tainted(&mut self) {
-        self.tainted = true;
+    fn mark_mutable_error(&mut self) {
+        self.saw_mutable_error = true;
     }
 
-    fn is_tainted(&self) -> bool {
-        self.tainted
+    fn saw_mutable_error(&self) -> bool {
+        self.saw_mutable_error
     }
 
     fn enqueue_succeeded(&mut self, pos: u64, value: u8) {
@@ -231,7 +231,7 @@ async fn run_operations(
                     }
                     Err(_) => {
                         state.enqueue_failed(*value);
-                        state.mark_tainted();
+                        state.mark_mutable_error();
                         return state;
                     }
                 }
@@ -245,7 +245,7 @@ async fn run_operations(
                     }
                     Err(_) => {
                         state.append_failed(*value);
-                        state.mark_tainted();
+                        state.mark_mutable_error();
                         return state;
                     }
                 }
@@ -257,7 +257,7 @@ async fn run_operations(
                 }
                 Err(_) => {
                     state.commit_failed();
-                    state.mark_tainted();
+                    state.mark_mutable_error();
                     return state;
                 }
             },
@@ -286,7 +286,7 @@ async fn run_operations(
                             state.update_ack_floor(queue.ack_floor());
                         }
                         Err(_) => {
-                            state.mark_tainted();
+                            state.mark_mutable_error();
                             return state;
                         }
                     }
@@ -301,7 +301,7 @@ async fn run_operations(
                         state.update_ack_floor(queue.ack_floor());
                     }
                     Err(_) => {
-                        state.mark_tainted();
+                        state.mark_mutable_error();
                         return state;
                     }
                 }
@@ -317,7 +317,7 @@ async fn run_operations(
                     }
                     Err(_) => {
                         state.commit_failed();
-                        state.mark_tainted();
+                        state.mark_mutable_error();
                         return state;
                     }
                 }
@@ -366,7 +366,7 @@ async fn verify_recovery(
     queue: &mut Queue<deterministic::Context, Vec<u8>>,
     state: &RecoveryState,
 ) {
-    if state.is_tainted() {
+    if state.saw_mutable_error() {
         verify_recovery_after_mutable_error(queue).await;
         return;
     }
