@@ -19,6 +19,7 @@ use crate::{
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
 };
+use bytes::Bytes;
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
@@ -596,23 +597,32 @@ where
                 let mut needs_sync = false;
                 let mut remaining = self.max_repair.get();
                 let mut pending = Vec::with_capacity(remaining);
+                let mut produces = Vec::new();
                 let mut message = Some(message);
 
                 // Drain up to max_repair messages from the resolver channel.
-                // Produce and Block deliveries are handled immediately.
+                // Block deliveries are handled immediately.
                 // Finalized/Notarized deliveries are collected into pending
                 // for batch certificate verification.
+                // Produce requests are deferred until after pending items
+                // are processed so they can find recently delivered data.
                 while remaining > 0 {
                     let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) else {
                         break;
                     };
                     remaining -= 1;
-                    needs_sync |= self.handle_resolver_message(
-                        msg,
-                        &mut pending,
-                        &mut application,
-                        &mut buffer,
-                    ).await;
+                    match msg {
+                        handler::Message::Produce { key, response } => {
+                            produces.push((key, response));
+                        }
+                        deliver => {
+                            needs_sync |= self.handle_resolver_deliver(
+                                deliver,
+                                &mut pending,
+                                &mut application,
+                            ).await;
+                        }
+                    }
                 }
 
                 // Batch verify and process all pending certificates
@@ -620,6 +630,11 @@ where
                     pending,
                     &mut application,
                 ).await;
+
+                // Handle produce requests in parallel after pending items are stored
+                futures::future::join_all(produces.into_iter().map(|(key, response)| {
+                    self.handle_produce(key, response, &buffer)
+                })).await;
 
                 // If any blocks were stored, attempt to fill gaps and sync
                 if needs_sync {
@@ -632,158 +647,156 @@ where
         }
     }
 
-    /// Handle a single resolver message. Produce and Block deliveries are handled
+    /// Handle a produce request from a remote peer.
+    async fn handle_produce<K: PublicKey>(
+        &self,
+        key: Request<B>,
+        response: oneshot::Sender<Bytes>,
+        buffer: &buffered::Mailbox<K, B>,
+    ) {
+        match key {
+            Request::Block(commitment) => {
+                let Some(block) = self.find_block(buffer, commitment).await else {
+                    debug!(?commitment, "block missing on request");
+                    return;
+                };
+                response.send_lossy(block.encode());
+            }
+            Request::Finalized { height } => {
+                let Some(finalization) = self.get_finalization_by_height(height).await else {
+                    debug!(%height, "finalization missing on request");
+                    return;
+                };
+                let Some(block) = self.get_finalized_block(height).await else {
+                    debug!(%height, "finalized block missing on request");
+                    return;
+                };
+                response.send_lossy((finalization, block).encode());
+            }
+            Request::Notarized { round } => {
+                let Some(notarization) = self.cache.get_notarization(round).await else {
+                    debug!(?round, "notarization missing on request");
+                    return;
+                };
+                let commitment = notarization.proposal.payload;
+                let Some(block) = self.find_block(buffer, commitment).await else {
+                    debug!(?commitment, "block missing on request");
+                    return;
+                };
+                response.send_lossy((notarization, block).encode());
+            }
+        }
+    }
+
+    /// Handle a deliver message from the resolver. Block deliveries are handled
     /// immediately. Finalized/Notarized deliveries are parsed and structurally
     /// validated, then collected into `pending` for batch certificate verification.
     /// Returns true if finalization archives were written and need syncing.
-    async fn handle_resolver_message<K: PublicKey>(
+    async fn handle_resolver_deliver(
         &mut self,
         message: handler::Message<B>,
         pending: &mut Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-        buffer: &mut buffered::Mailbox<K, B>,
     ) -> bool {
-        match message {
-            handler::Message::Produce { key, response } => {
-                match key {
-                    Request::Block(commitment) => {
-                        // Check for block locally
-                        let Some(block) = self.find_block(buffer, commitment).await else {
-                            debug!(?commitment, "block missing on request");
-                            return false;
-                        };
-                        response.send_lossy(block.encode());
-                    }
-                    Request::Finalized { height } => {
-                        // Get finalization and block
-                        let Some(finalization) = self.get_finalization_by_height(height).await
-                        else {
-                            debug!(%height, "finalization missing on request");
-                            return false;
-                        };
-                        let Some(block) = self.get_finalized_block(height).await else {
-                            debug!(%height, "finalized block missing on request");
-                            return false;
-                        };
-                        response.send_lossy((finalization, block).encode());
-                    }
-                    Request::Notarized { round } => {
-                        // Get notarization and block
-                        let Some(notarization) = self.cache.get_notarization(round).await else {
-                            debug!(?round, "notarization missing on request");
-                            return false;
-                        };
-                        let commitment = notarization.proposal.payload;
-                        let Some(block) = self.find_block(buffer, commitment).await else {
-                            debug!(?commitment, "block missing on request");
-                            return false;
-                        };
-                        response.send_lossy((notarization, block).encode());
-                    }
+        let handler::Message::Deliver {
+            key,
+            value,
+            response,
+        } = message
+        else {
+            unreachable!();
+        };
+        match key {
+            Request::Block(commitment) => {
+                let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
+                    response.send_lossy(false);
+                    return false;
+                };
+                if block.commitment() != commitment {
+                    response.send_lossy(false);
+                    return false;
                 }
+
+                let height = block.height();
+                let finalization = self.cache.get_finalization_for(commitment).await;
+                self.store_finalization(height, commitment, block, finalization, application)
+                    .await;
+                debug!(?commitment, %height, "received block");
+                response.send_lossy(true);
+                true
+            }
+            Request::Finalized { height } => {
+                let Some(bounds) = self.epocher.containing(height) else {
+                    response.send_lossy(false);
+                    return false;
+                };
+                let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
+                let Ok((finalization, block)) =
+                    <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
+                        value,
+                        &(
+                            scheme.certificate_codec_config(),
+                            self.block_codec_config.clone(),
+                        ),
+                    )
+                else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
+                if block.height() != height
+                    || finalization.proposal.payload != block.commitment()
+                    || finalization.proposal.round.epoch() != bounds.epoch()
+                {
+                    response.send_lossy(false);
+                    return false;
+                }
+                pending.push(PendingVerification::Finalized {
+                    round: finalization.proposal.round,
+                    height,
+                    finalization,
+                    block,
+                    response,
+                });
                 false
             }
-            handler::Message::Deliver {
-                key,
-                value,
-                response,
-            } => match key {
-                Request::Block(commitment) => {
-                    // Parse block
-                    let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
-                        response.send_lossy(false);
-                        return false;
-                    };
-                    if block.commitment() != commitment {
-                        response.send_lossy(false);
-                        return false;
-                    }
+            Request::Notarized { round } => {
+                let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
+                    response.send_lossy(false);
+                    return false;
+                };
 
-                    // Persist the block, also persisting the finalization if we have it
-                    let height = block.height();
-                    let finalization = self.cache.get_finalization_for(commitment).await;
-                    self.store_finalization(height, commitment, block, finalization, application)
-                        .await;
-                    debug!(?commitment, %height, "received block");
-                    response.send_lossy(true);
-                    true
+                let Ok((notarization, block)) =
+                    <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
+                        value,
+                        &(
+                            scheme.certificate_codec_config(),
+                            self.block_codec_config.clone(),
+                        ),
+                    )
+                else {
+                    response.send_lossy(false);
+                    return false;
+                };
+
+                if notarization.round() != round
+                    || notarization.proposal.payload != block.commitment()
+                {
+                    response.send_lossy(false);
+                    return false;
                 }
-                Request::Finalized { height } => {
-                    let Some(bounds) = self.epocher.containing(height) else {
-                        response.send_lossy(false);
-                        return false;
-                    };
-                    let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
-                        response.send_lossy(false);
-                        return false;
-                    };
-
-                    // Parse finalization
-                    let Ok((finalization, block)) =
-                        <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
-                            value,
-                            &(
-                                scheme.certificate_codec_config(),
-                                self.block_codec_config.clone(),
-                            ),
-                        )
-                    else {
-                        response.send_lossy(false);
-                        return false;
-                    };
-
-                    // Structural validation
-                    if block.height() != height
-                        || finalization.proposal.payload != block.commitment()
-                    {
-                        response.send_lossy(false);
-                        return false;
-                    }
-                    pending.push(PendingVerification::Finalized {
-                        round: finalization.proposal.round,
-                        height,
-                        finalization,
-                        block,
-                        response,
-                    });
-                    false
-                }
-                Request::Notarized { round } => {
-                    let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
-                        response.send_lossy(false);
-                        return false;
-                    };
-
-                    // Parse notarization
-                    let Ok((notarization, block)) =
-                        <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
-                            value,
-                            &(
-                                scheme.certificate_codec_config(),
-                                self.block_codec_config.clone(),
-                            ),
-                        )
-                    else {
-                        response.send_lossy(false);
-                        return false;
-                    };
-
-                    // Structural validation
-                    if notarization.round() != round
-                        || notarization.proposal.payload != block.commitment()
-                    {
-                        response.send_lossy(false);
-                        return false;
-                    }
-                    pending.push(PendingVerification::Notarized {
-                        round,
-                        notarization,
-                        block,
-                        response,
-                    });
-                    false
-                }
-            },
+                pending.push(PendingVerification::Notarized {
+                    round,
+                    notarization,
+                    block,
+                    response,
+                });
+                false
+            }
         }
     }
 
@@ -1176,11 +1189,10 @@ where
 
     /// Looks for a block anywhere in local storage.
     async fn find_block<K: PublicKey>(
-        &mut self,
-        buffer: &mut buffered::Mailbox<K, B>,
+        &self,
+        buffer: &buffered::Mailbox<K, B>,
         commitment: B::Commitment,
     ) -> Option<B> {
-        // Check buffer.
         if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
             return Some(block);
         }
