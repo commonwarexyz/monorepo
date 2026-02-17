@@ -371,10 +371,9 @@ where
 
     // Spawn a dedicated recv task so recv_frame is never cancelled.
     let recv_handle = context.with_label("recv").spawn({
-        let context = context.with_label("recv");
         let state = state.clone();
         let response_sender = response_sender.clone();
-        move |_| recv_loop::<DB, E>(context, state, stream, response_sender, client_addr)
+        move |context| recv_loop::<DB, E>(context, state, stream, response_sender, client_addr)
     });
 
     // Drop our copy so the channel closes when the recv task's senders are all dropped.
