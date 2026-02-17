@@ -14,7 +14,7 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{Finalization, Notarization, Subject},
+        types::{verify_certificates_bisect, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
@@ -42,7 +42,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
     futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
-    Acknowledgement, BoxedError, N3f1,
+    Acknowledgement, BoxedError,
 };
 use futures::try_join;
 use pin_project::pin_project;
@@ -805,8 +805,9 @@ where
             self.provider.all().map_or_else(
                 || vec![false; pending_certs.len()],
                 |scheme| {
-                    scheme.verify_certificates_bisect::<_, B::Commitment, N3f1>(
+                    verify_certificates_bisect(
                         &mut self.context,
+                        scheme.as_ref(),
                         &pending_certs,
                         &self.strategy,
                     )
