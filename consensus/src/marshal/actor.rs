@@ -67,14 +67,11 @@ type CertificatePair<'a, S, D> = (Subject<'a, D>, &'a <S as CertificateScheme>::
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 enum PendingVerification<S: CertificateScheme, B: Block> {
     Notarized {
-        round: Round,
         notarization: Notarization<S, B::Commitment>,
         block: B,
         response: oneshot::Sender<bool>,
     },
     Finalized {
-        round: Round,
-        height: Height,
         finalization: Finalization<S, B::Commitment>,
         block: B,
         response: oneshot::Sender<bool>,
@@ -760,8 +757,6 @@ where
                     return false;
                 }
                 pending.push(PendingVerification::Finalized {
-                    round: finalization.round(),
-                    height,
                     finalization,
                     block,
                     response,
@@ -794,7 +789,6 @@ where
                     return false;
                 }
                 pending.push(PendingVerification::Notarized {
-                    round,
                     notarization,
                     block,
                     response,
@@ -876,11 +870,11 @@ where
         // Group indices by epoch
         let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
         for (i, item) in pending.iter().enumerate() {
-            let round = match item {
-                PendingVerification::Notarized { round, .. }
-                | PendingVerification::Finalized { round, .. } => round,
+            let epoch = match item {
+                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
+                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
             };
-            by_epoch.entry(round.epoch()).or_default().push(i);
+            by_epoch.entry(epoch).or_default().push(i);
         }
 
         // Batch verify each epoch group
@@ -908,14 +902,14 @@ where
     ) -> bool {
         match item {
             PendingVerification::Finalized {
-                round,
-                height,
                 finalization,
                 block,
                 response,
             } => {
                 // Valid finalization received
                 response.send_lossy(true);
+                let round = finalization.round();
+                let height = block.height();
                 debug!(?round, %height, "received finalization");
 
                 // Store the finalization
@@ -930,13 +924,13 @@ where
                 true
             }
             PendingVerification::Notarized {
-                round,
                 notarization,
                 block,
                 response,
             } => {
                 // Valid notarization received
                 response.send_lossy(true);
+                let round = notarization.round();
                 let commitment = block.commitment();
                 debug!(?round, ?commitment, "received notarization");
 
