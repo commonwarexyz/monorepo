@@ -116,7 +116,7 @@ mod tests {
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
+        Automaton, CertifiableAutomaton, Heightable, Reporter, Viewable, VerifyingApplication,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -1668,7 +1668,7 @@ mod tests {
                 .expect("missing finalization by height");
             assert_eq!(finalization.proposal.parent, View::new(0));
             assert_eq!(
-                finalization.proposal.round,
+                finalization.round(),
                 Round::new(Epoch::new(0), View::new(1))
             );
             assert_eq!(finalization.proposal.payload, commitment);
@@ -1759,7 +1759,7 @@ mod tests {
                 .get_finalization(Height::new(5))
                 .await
                 .expect("finalization should be fetched");
-            assert_eq!(finalization.proposal.round.view(), View::new(5));
+            assert_eq!(finalization.view(), View::new(5));
         })
     }
 

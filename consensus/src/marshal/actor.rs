@@ -17,6 +17,7 @@ use crate::{
         types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
+    Epochable,
     Block, Reporter,
 };
 use bytes::Bytes;
@@ -753,13 +754,13 @@ where
 
                 if block.height() != height
                     || finalization.proposal.payload != block.commitment()
-                    || finalization.proposal.round.epoch() != bounds.epoch()
+                    || finalization.epoch() != bounds.epoch()
                 {
                     response.send_lossy(false);
                     return false;
                 }
                 pending.push(PendingVerification::Finalized {
-                    round: finalization.proposal.round,
+                    round: finalization.round(),
                     height,
                     finalization,
                     block,
