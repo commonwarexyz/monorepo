@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Mutable, Persistable, Reader},
+        contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     mmr::{
@@ -15,6 +15,7 @@ use crate::{
         mem::{Clean, Dirty, State},
         Error as MmrError, Location, Position, Proof, StandardHasher,
     },
+    Persistable,
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -71,7 +72,7 @@ where
 impl<E, C, H, S> Journal<E, C, H, S>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
     S: State<DigestOf<H>>,
 {
@@ -120,7 +121,7 @@ where
         // Pop any MMR elements that are ahead of the journal.
         // Note mmr_size is the size of the MMR in leaves, not positions.
         let journal_size = journal.size().await;
-        let mut mmr_size = mmr.leaves().await;
+        let mut mmr_size = mmr.leaves();
         if mmr_size > journal_size {
             let pop_count = mmr_size - journal_size;
             warn!(journal_size, ?pop_count, "popping MMR items");
@@ -152,7 +153,7 @@ where
         }
 
         // At this point the MMR and journal should be consistent.
-        assert_eq!(journal.size().await, *mmr.leaves().await);
+        assert_eq!(journal.size().await, *mmr.leaves());
 
         Ok(mmr.merkleize(hasher))
     }
@@ -162,7 +163,7 @@ where
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
     pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
-        if self.mmr.size().await == 0 {
+        if self.mmr.size() == 0 {
             // DB is empty, nothing to prune.
             return Ok(Location::new_unchecked(self.reader().await.bounds().start));
         }
@@ -265,8 +266,8 @@ where
     }
 
     /// Return the root of the MMR.
-    pub async fn root(&self) -> H::Digest {
-        self.mmr.root().await
+    pub fn root(&self) -> H::Digest {
+        self.mmr.root()
     }
 
     /// Convert this journal into its dirty counterpart for batched updates.
@@ -282,7 +283,7 @@ where
 impl<E, C, H> Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     /// Destroy the authenticated journal, removing all data from disk.
@@ -299,7 +300,7 @@ where
     pub async fn sync(&self) -> Result<(), Error> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync().map_err(Into::into)
+            self.mmr.sync().map_err(Error::Mmr)
         )?;
 
         Ok(())
@@ -336,7 +337,7 @@ where
     pub async fn append(&mut self, item: C::Item) -> Result<Location, Error> {
         let encoded_item = item.encode();
 
-        // Append item to the journal and update the MMR.
+        // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
         self.mmr
             .add(&mut self.hasher, &encoded_item)
@@ -485,7 +486,7 @@ where
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
         self.journal.rewind(size).await?;
 
-        let leaves = *self.mmr.leaves().await;
+        let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
                 .pop((leaves - size) as usize)
@@ -500,9 +501,11 @@ where
 impl<E, C, H> Persistable for Journal<E, C, H, Clean<H::Digest>>
 where
     E: Storage + Clock + Metrics,
-    C: Contiguous<Item: EncodeShared> + Persistable,
+    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
+    type Error = JournalError;
+
     async fn commit(&self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
@@ -711,7 +714,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(mmr.leaves().await, Location::new_unchecked(0));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(0));
             assert_eq!(journal.size().await, 0);
         });
     }
@@ -744,7 +747,7 @@ mod tests {
                 .unwrap();
 
             // MMR should have been popped to match journal
-            assert_eq!(mmr.leaves().await, Location::new_unchecked(21));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
             assert_eq!(journal.size().await, 21);
         });
     }
@@ -773,7 +776,7 @@ mod tests {
                 .unwrap();
 
             // MMR should have been replayed to match journal
-            assert_eq!(mmr.leaves().await, Location::new_unchecked(21));
+            assert_eq!(mmr.leaves(), Location::new_unchecked(21));
             assert_eq!(journal.size().await, 21);
         });
     }
@@ -1021,8 +1024,8 @@ mod tests {
                 let mut journal = journal.into_dirty();
                 journal.rewind(2).await.unwrap();
                 assert_eq!(journal.size().await, 2);
-                assert_eq!(journal.mmr.leaves().await, 2);
-                assert_eq!(journal.mmr.size().await, 3);
+                assert_eq!(journal.mmr.leaves(), 2);
+                assert_eq!(journal.mmr.size(), 3);
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.start, 0);
                 assert!(!bounds.is_empty());
@@ -1035,8 +1038,8 @@ mod tests {
                 journal.rewind(0).await.unwrap();
                 let journal = journal.merkleize();
                 assert_eq!(journal.size().await, 0);
-                assert_eq!(journal.mmr.leaves().await, 0);
-                assert_eq!(journal.mmr.size().await, 0);
+                assert_eq!(journal.mmr.leaves(), 0);
+                assert_eq!(journal.mmr.size(), 0);
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.start, 0);
                 assert!(bounds.is_empty());
@@ -1055,7 +1058,7 @@ mod tests {
                 journal.rewind(98).await.unwrap();
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.end, 98);
-                assert_eq!(journal.mmr.leaves().await, 98);
+                assert_eq!(journal.mmr.leaves(), 98);
                 assert_eq!(bounds.start, 98);
                 assert!(bounds.is_empty());
             }
@@ -1443,7 +1446,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root().await;
+            let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1475,7 +1478,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root().await;
+            let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1508,7 +1511,7 @@ mod tests {
 
             // Verify the proof is valid
             let mut hasher = StandardHasher::new();
-            let root = journal.root().await;
+            let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
@@ -1570,7 +1573,7 @@ mod tests {
 
             // Capture root at historical state
             let mut hasher = StandardHasher::new();
-            let historical_root = journal.root().await;
+            let historical_root = journal.root();
             let historical_size = journal.size().await;
 
             // Add more operations after the historical state

@@ -1,7 +1,7 @@
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::{channel::mpsc, hex};
+use commonware_utils::{channel::mpsc, hex, sync::Mutex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -15,12 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
-use std::{
-    io::stdout,
-    str::FromStr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io::stdout, str::FromStr, sync::Arc, time::Duration};
 use tracing::{debug, warn};
 
 pub const CHANNEL: u64 = 0;
@@ -171,7 +166,7 @@ pub async fn run(
 
                 // Display logs
                 let logs_height = chunks[1].height - HEIGHT_OFFSET;
-                let logs = logs.lock().unwrap();
+                let logs = logs.lock();
                 let logs_len = logs.len() as u16;
                 let logs_max_scroll = logs_len.saturating_sub(logs_height);
                 if focused_window != Focus::Logs {

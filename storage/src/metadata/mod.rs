@@ -46,7 +46,7 @@
 //! executor.start(|context| async move {
 //!     // Create a store
 //!     let mut metadata = Metadata::init(context, Config {
-//!         partition: "partition".to_string(),
+//!         partition: "partition".into(),
 //!         codec_config: ((0..).into(), ()),
 //!     }).await.unwrap();
 //!
@@ -99,7 +99,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
@@ -143,7 +143,7 @@ mod tests {
             // Reopen the metadata store
             drop(metadata);
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -180,7 +180,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
@@ -214,7 +214,7 @@ mod tests {
             drop(metadata);
 
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -236,7 +236,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
@@ -276,7 +276,7 @@ mod tests {
             // Reopen the metadata store
             drop(metadata);
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -310,7 +310,7 @@ mod tests {
             // Reopen the metadata store
             drop(metadata);
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("third"), cfg)
@@ -340,7 +340,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
@@ -373,7 +373,7 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -395,7 +395,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
@@ -431,7 +431,7 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -459,7 +459,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.with_label("first"), cfg)
@@ -492,7 +492,7 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -514,7 +514,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.with_label("first"), cfg)
@@ -547,7 +547,7 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -572,7 +572,7 @@ mod tests {
             {
                 // Create a metadata store
                 let cfg = Config {
-                    partition: "test".to_string(),
+                    partition: "test".into(),
                     codec_config: ((0..).into(), ()),
                 };
                 let mut metadata = Metadata::init(context.with_label("first"), cfg)
@@ -587,7 +587,7 @@ mod tests {
 
             // Reopen the metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)
@@ -616,7 +616,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -637,7 +637,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
@@ -742,7 +742,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
@@ -781,7 +781,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
@@ -825,7 +825,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
@@ -872,7 +872,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
@@ -940,7 +940,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
@@ -1001,7 +1001,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata =
@@ -1051,7 +1051,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let cfg = Config {
-                partition: "test-determinism".to_string(),
+                partition: "test-determinism".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg.clone())
@@ -1121,7 +1121,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.clone(), cfg)
@@ -1186,7 +1186,7 @@ mod tests {
         executor.start(|context| async move {
             // Create a metadata store
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("first"), cfg)
@@ -1225,7 +1225,7 @@ mod tests {
             metadata.sync().await.unwrap();
             drop(metadata);
             let cfg = Config {
-                partition: "test".to_string(),
+                partition: "test".into(),
                 codec_config: ((0..).into(), ()),
             };
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.with_label("second"), cfg)

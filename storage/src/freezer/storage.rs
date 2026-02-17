@@ -3,7 +3,7 @@ use crate::{
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    kv, Persistable,
+    kv,
 };
 use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
@@ -1078,6 +1078,8 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Free
     /// to avoid a large latency spike (or unexpected long latency for [Freezer::put]).
     /// Each sync will process up to `table_resize_chunk_size` entries until the resize
     /// is complete.
+    //
+    // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
         // Sync all modified sections for oversized journal
         let syncs: Vec<_> = self
@@ -1174,27 +1176,6 @@ impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> kv::
 {
     async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.put(key, value).await?;
-        Ok(())
-    }
-}
-
-impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Persistable
-    for Freezer<E, K, V>
-{
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Self::Error> {
-        self.sync().await?;
-        Ok(())
-    }
-
-    async fn sync(&mut self) -> Result<(), Self::Error> {
-        self.sync().await?;
-        Ok(())
-    }
-
-    async fn destroy(self) -> Result<(), Self::Error> {
-        self.destroy().await?;
         Ok(())
     }
 }

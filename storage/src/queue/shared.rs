@@ -10,8 +10,7 @@ use super::{Config, Error, Queue};
 use crate::Persistable;
 use commonware_codec::CodecShared;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::channel::mpsc;
-use futures::lock::Mutex;
+use commonware_utils::{channel::mpsc, sync::AsyncMutex};
 use std::{ops::Range, sync::Arc};
 use tracing::debug;
 
@@ -20,7 +19,7 @@ use tracing::debug;
 /// This handle can be cloned to allow multiple tasks to enqueue items concurrently.
 /// All clones share the same underlying queue and notification channel.
 pub struct Writer<E: Clock + Storage + Metrics, V: CodecShared> {
-    queue: Arc<Mutex<Queue<E, V>>>,
+    queue: Arc<AsyncMutex<Queue<E, V>>>,
     notify: mpsc::Sender<()>,
 }
 
@@ -117,7 +116,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
 ///
 /// There should only be one reader per shared queue.
 pub struct Reader<E: Clock + Storage + Metrics, V: CodecShared> {
-    queue: Arc<Mutex<Queue<E, V>>>,
+    queue: Arc<AsyncMutex<Queue<E, V>>>,
     notify: mpsc::Receiver<()>,
 }
 
@@ -229,7 +228,7 @@ pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
     context: E,
     cfg: Config<V::Cfg>,
 ) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
-    let queue = Arc::new(Mutex::new(Queue::init(context, cfg).await?));
+    let queue = Arc::new(AsyncMutex::new(Queue::init(context, cfg).await?));
     let (notify_tx, notify_rx) = mpsc::channel(1);
 
     let writer = Writer {
@@ -261,7 +260,7 @@ mod tests {
 
     fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
         Config {
-            partition: partition.to_string(),
+            partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
@@ -435,7 +434,9 @@ mod tests {
             assert!(result.is_none());
 
             drop(reader);
-            let _ = Arc::try_unwrap(queue).unwrap().into_inner();
+            let _ = Arc::try_unwrap(queue)
+                .unwrap_or_else(|_| panic!("queue should have a single reference"))
+                .into_inner();
         });
     }
 

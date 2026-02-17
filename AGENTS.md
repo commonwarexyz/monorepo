@@ -272,7 +272,7 @@ rational::log2_ceil/value=1:2 precision=4
 4. Run `just lint` before committing (or `just fix-fmt` to auto-fix)
 5. Run `just pre-pr` before creating a PR
 
-_Avoid running tests for the entire workspace unless absolutely necessary. This can take a LONG time to run._
+_Avoid building or testing the entire workspace unless absolutely necessary. The repository is large and full workspace builds/tests can take a VERY long time. Prefer targeting specific crates (e.g., `cargo build -p commonware-runtime`, `just test -p commonware-runtime`)._
 
 ## Reviewing PRs
 

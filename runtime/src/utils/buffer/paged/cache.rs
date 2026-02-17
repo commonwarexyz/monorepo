@@ -2,7 +2,8 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, RwLock};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -150,14 +151,14 @@ impl CacheRef {
 
     /// Try to read the specified bytes from the page cache only. Returns the number of bytes
     /// successfully read from cache and copied to `buf` before a page fault, if any.
-    pub(super) async fn read_cached(
+    pub(super) fn read_cached(
         &self,
         blob_id: u64,
         mut buf: &mut [u8],
         mut logical_offset: u64,
     ) -> usize {
         let original_len = buf.len();
-        let page_cache = self.cache.read().await;
+        let page_cache = self.cache.read();
         while !buf.is_empty() {
             let count = page_cache.read_at(blob_id, buf, logical_offset);
             if count == 0 {
@@ -184,7 +185,7 @@ impl CacheRef {
         while !buf.is_empty() {
             // Read lock the page cache and see if we can get (some of) the data from it.
             {
-                let page_cache = self.cache.read().await;
+                let page_cache = self.cache.read();
                 let count = page_cache.read_at(blob_id, buf, offset);
                 if count != 0 {
                     offset += count as u64;
@@ -224,7 +225,7 @@ impl CacheRef {
         // requires a write lock on the page cache since we may need to modify `page_fetches` if
         // this is the first fetcher.
         let (fetch_future, is_first_fetcher) = {
-            let mut cache = self.cache.write().await;
+            let mut cache = self.cache.write();
 
             // There's a (small) chance the page was fetched & buffered by another task before we
             // were able to acquire the write lock, so check the cache before doing anything else.
@@ -290,7 +291,7 @@ impl CacheRef {
         // This is the task that initiated the fetch, so it is responsible for cleaning up the
         // inserted entry, and caching the page in the page cache if the fetch didn't error out.
         // This requires a write lock on the page cache to modify `page_fetches` and cache the page.
-        let mut cache = self.cache.write().await;
+        let mut cache = self.cache.write();
 
         // Remove the entry from `page_fetches`.
         let _ = cache.page_fetches.remove(&(blob_id, page_num));
@@ -321,13 +322,13 @@ impl CacheRef {
     ///
     /// - Panics if `offset` is not page aligned.
     /// - If the buffer is not the size of a page.
-    pub async fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
+    pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
         {
             // Write lock the page cache.
             let page_size = self.page_size as usize;
-            let mut page_cache = self.cache.write().await;
+            let mut page_cache = self.cache.write();
             while buf.len() >= page_size {
                 page_cache.cache(blob_id, &buf[..page_size], page_num);
                 buf = &buf[page_size..];
@@ -596,14 +597,12 @@ mod tests {
             let logical_data = vec![42u8; PAGE_SIZE.get() as usize];
 
             // Caching exactly one page at the maximum offset should succeed.
-            let remaining = cache_ref
-                .cache(0, logical_data.as_slice(), aligned_max_offset)
-                .await;
+            let remaining = cache_ref.cache(0, logical_data.as_slice(), aligned_max_offset);
             assert_eq!(remaining, 0);
 
             // Reading from the cache should return the logical bytes.
             let mut buf = vec![0u8; PAGE_SIZE.get() as usize];
-            let page_cache = cache_ref.cache.read().await;
+            let page_cache = cache_ref.cache.read();
             let bytes_read = page_cache.read_at(0, &mut buf, aligned_max_offset);
             assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
             assert!(buf.iter().all(|b| *b == 42));
@@ -627,13 +626,13 @@ mod tests {
             // Use an offset that's a few pages below max to avoid overflow when verifying.
             let aligned_max_offset = u64::MAX - (u64::MAX % MIN_PAGE_SIZE);
             let high_offset = aligned_max_offset - (MIN_PAGE_SIZE * 2);
-            let remaining = cache_ref.cache(0, &data, high_offset).await;
+            let remaining = cache_ref.cache(0, &data, high_offset);
             // Both pages should be cached.
             assert_eq!(remaining, 0);
 
             // Verify the first page was cached correctly.
             let mut buf = vec![0u8; MIN_PAGE_SIZE as usize];
-            let page_cache = cache_ref.cache.read().await;
+            let page_cache = cache_ref.cache.read();
             assert_eq!(
                 page_cache.read_at(0, &mut buf, high_offset),
                 MIN_PAGE_SIZE as usize

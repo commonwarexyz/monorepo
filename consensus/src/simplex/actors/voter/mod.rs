@@ -80,11 +80,11 @@ mod tests {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
-    use commonware_utils::{channel::mpsc, NZUsize, NZU16};
+    use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
     use tracing::Level;
@@ -876,7 +876,7 @@ mod tests {
             // Wait for a finalization to be recorded
             loop {
                 {
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock();
                     // Finalization must match the signatures recovered from finalize votes
                     if matches!(
                         finalizations.get(&view),
@@ -889,7 +889,7 @@ mod tests {
             }
 
             // Verify no notarization certificate was recorded
-            let notarizations = reporter.notarizations.lock().unwrap();
+            let notarizations = reporter.notarizations.lock();
             assert!(notarizations.is_empty());
         });
     }
@@ -1013,7 +1013,7 @@ mod tests {
             // Wait for notarization B to be recorded (not A)
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     if matches!(
                         notarizations.get(&view),
                         Some(notarization) if notarization == &notarization_b
@@ -1137,7 +1137,7 @@ mod tests {
             // Wait for notarization A to be recorded
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     if matches!(
                         notarizations.get(&view),
                         Some(notarization) if notarization == &notarization_a
@@ -1319,7 +1319,7 @@ mod tests {
             // Wait for notarization to be recorded
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     if matches!(
                         notarizations.get(&view),
                         Some(n) if n == &notarization
@@ -1893,7 +1893,7 @@ mod tests {
             }
 
             // Verify finalization was recorded by checking reporter
-            let finalizations = reporter.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock();
             let recorded = finalizations
                 .get(&view)
                 .expect("finalization should be recorded");
@@ -2008,7 +2008,7 @@ mod tests {
             }
 
             // Verify finalization was recorded
-            let finalizations = reporter.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock();
             let recorded = finalizations
                 .get(&view)
                 .expect("finalization should be recorded");
@@ -2317,7 +2317,7 @@ mod tests {
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
-                    tracker.lock().unwrap().push(d);
+                    tracker.lock().push(d);
                     true
                 })),
             };
@@ -2397,7 +2397,7 @@ mod tests {
             }
 
             assert_eq!(
-                certify_calls.lock().unwrap().len(),
+                certify_calls.lock().len(),
                 0,
                 "certify should not be called for finalization"
             );
@@ -2432,7 +2432,7 @@ mod tests {
             }
 
             assert_eq!(
-                certify_calls.lock().unwrap().len(),
+                certify_calls.lock().len(),
                 1,
                 "certify should be called once for notarization"
             );
@@ -2450,7 +2450,7 @@ mod tests {
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
-                    tracker.lock().unwrap().push(d);
+                    tracker.lock().push(d);
                     true
                 })),
             };
@@ -2509,7 +2509,7 @@ mod tests {
 
             // Verify no additional certify calls after replay
             assert_eq!(
-                certify_calls.lock().unwrap().len(),
+                certify_calls.lock().len(),
                 1,
                 "certify should not be called again after replay"
             );

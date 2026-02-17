@@ -184,7 +184,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build-small".to_string();
+            let partition = "build-small".into();
             let mut db = open_db(context, partition).await.into_mutable();
 
             // Add one key.
@@ -348,7 +348,7 @@ mod test {
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range-proofs".to_string();
+            let partition = "range-proofs".into();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition).await;
             let root = db.root();
@@ -512,7 +512,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build-small".to_string();
+            let partition = "build-small".into();
             let mut db = open_db(context, partition).await;
 
             // Add one key.
@@ -567,7 +567,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion-proofs".to_string();
+            let partition = "exclusion-proofs".into();
             let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
@@ -734,7 +734,7 @@ mod test {
             db.write_batch([(key_exists_1, None)]).await.unwrap();
             db.write_batch([(key_exists_2, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
