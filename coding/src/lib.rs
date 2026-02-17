@@ -14,8 +14,7 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
-    use std::fmt::Debug;
-    use std::num::NonZeroU16;
+    use std::{fmt::Debug, num::NonZeroU16};
 
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};

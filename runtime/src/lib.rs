@@ -434,7 +434,6 @@ stability_scope!(BETA {
         /// // Metrics are removed when all clones of `scoped` are dropped.
         /// ```
         fn with_scope(&self) -> Self;
-
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.

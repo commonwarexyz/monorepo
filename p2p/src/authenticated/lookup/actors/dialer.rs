@@ -28,6 +28,10 @@ use rand_core::CryptoRngCore;
 use std::time::Duration;
 use tracing::debug;
 
+// Mailbox for the spawner actor.
+type SupervisorMailbox<E, C> =
+    Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, <C as Signer>::PublicKey>>;
+
 /// Configuration for the dialer actor.
 pub struct Config<C: Signer> {
     /// Configuration for the stream.
@@ -92,12 +96,11 @@ impl<
     }
 
     /// Dial a peer for which we have a reservation.
-    #[allow(clippy::type_complexity)]
     fn dial_peer(
         &mut self,
         reservation: Reservation<C::PublicKey>,
         ingress: Ingress,
-        supervisor: &mut Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: &mut SupervisorMailbox<E, C>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer) = reservation.metadata().clone() else {
@@ -153,20 +156,18 @@ impl<
     }
 
     /// Start the dialer actor.
-    #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
         tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        supervisor: SupervisorMailbox<E, C>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor).await)
     }
 
-    #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
         mut tracker: UnboundedMailbox<tracker::Message<C::PublicKey>>,
-        mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        mut supervisor: SupervisorMailbox<E, C>,
     ) {
         let mut dial_deadline = self.context.current();
         let mut query_deadline = self.context.current();
