@@ -16,7 +16,7 @@ use std::{collections::VecDeque, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
-/// Backed by either `Bytes` or a pooled aligned allocation.
+/// Backed by either [`Bytes`] or a pooled aligned allocation.
 ///
 /// Use this for immutable payloads. To build or mutate data, use
 /// [`IoBufMut`] and then [`IoBufMut::freeze`].
@@ -44,7 +44,7 @@ impl IoBuf {
     /// Create a buffer by copying data from a slice.
     ///
     /// Use this when you have a non-static `&[u8]` that needs to be converted to an
-    /// `IoBuf`. For static slices, prefer `IoBuf::from(b"...")` which is zero-copy.
+    /// [`IoBuf`]. For static slices, prefer [`IoBuf::from`] which is zero-copy.
     pub fn copy_from_slice(data: &[u8]) -> Self {
         Self {
             inner: IoBufInner::Bytes(Bytes::copy_from_slice(data)),
@@ -60,10 +60,10 @@ impl IoBuf {
 
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when the final reference is dropped.
     ///
-    /// Buffers backed by `Bytes`, and untracked fallback allocations from
+    /// Buffers backed by [`Bytes`], and untracked fallback allocations from
     /// [`BufferPool::alloc`], return `false`.
     #[inline]
     pub fn is_pooled(&self) -> bool {
@@ -97,7 +97,7 @@ impl IoBuf {
     /// Returns a slice of self for the provided range (zero-copy).
     ///
     /// For pooled buffers, empty ranges return an empty detached buffer
-    /// (`IoBuf::default()`) so the underlying pooled allocation is not retained.
+    /// ([`IoBuf::default`]) so the underlying pooled allocation is not retained.
     #[inline]
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         match &self.inner {
@@ -108,17 +108,17 @@ impl IoBuf {
         }
     }
 
-    /// Try to convert this buffer into `IoBufMut` without copying.
+    /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
     /// Succeeds when `self` holds exclusive ownership of the backing storage
-    /// and returns an `IoBufMut` with the same contents. Fails and returns
+    /// and returns an [`IoBufMut`] with the same contents. Fails and returns
     /// `self` unchanged when ownership is shared.
     ///
-    /// For `Bytes`-backed buffers, this matches `Bytes::try_into_mut`
+    /// For [`Bytes`]-backed buffers, this matches [`Bytes::try_into_mut`]
     /// semantics: succeeds only for uniquely-owned full buffers, and always
-    /// fails for `from_owner` and `from_static` buffers. For pooled buffers,
-    /// this succeeds for any uniquely-owned view (including slices) and fails
-    /// when shared.
+    /// fails for [`Bytes::from_owner`] and [`Bytes::from_static`] buffers. For
+    /// pooled buffers, this succeeds for any uniquely-owned view (including
+    /// slices) and fails when shared.
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
         match self.inner {
             IoBufInner::Bytes(bytes) => bytes
@@ -274,11 +274,11 @@ impl From<&'static [u8]> for IoBuf {
     }
 }
 
-/// Convert an `IoBuf` into a `Vec<u8>`.
+/// Convert an [`IoBuf`] into a [`Vec<u8>`].
 ///
 /// This conversion may copy:
-/// - `Bytes`-backed buffers may reuse allocation when possible
-/// - pooled buffers copy readable bytes into a new `Vec<u8>`
+/// - [`Bytes`]-backed buffers may reuse allocation when possible
+/// - pooled buffers copy readable bytes into a new [`Vec<u8>`]
 impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
@@ -288,9 +288,9 @@ impl From<IoBuf> for Vec<u8> {
     }
 }
 
-/// Convert an `IoBuf` into `Bytes` without copying readable data.
+/// Convert an [`IoBuf`] into [`Bytes`] without copying readable data.
 ///
-/// For pooled buffers, this wraps the pooled owner using `Bytes::from_owner`.
+/// For pooled buffers, this wraps the pooled owner using [`Bytes::from_owner`].
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
@@ -337,7 +337,7 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 
 /// Mutable byte buffer.
 ///
-/// Backed by either `BytesMut` or a pooled aligned allocation.
+/// Backed by either [`BytesMut`] or a pooled aligned allocation.
 ///
 /// Use this to build or mutate payloads before freezing into [`IoBuf`].
 ///
@@ -391,10 +391,10 @@ impl IoBufMut {
 
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when dropped.
     ///
-    /// Buffers backed by `BytesMut`, and untracked fallback allocations from
+    /// Buffers backed by [`BytesMut`], and untracked fallback allocations from
     /// [`BufferPool::alloc`], return `false`.
     #[inline]
     pub fn is_pooled(&self) -> bool {
@@ -446,7 +446,7 @@ impl IoBufMut {
         }
     }
 
-    /// Freeze into immutable `IoBuf`.
+    /// Freeze into immutable [`IoBuf`].
     #[inline]
     pub fn freeze(self) -> IoBuf {
         match self.inner {
@@ -653,8 +653,8 @@ impl From<BytesMut> for IoBufMut {
 
 impl From<Bytes> for IoBufMut {
     /// Zero-copy if `bytes` is unique for the entire original buffer (refcount is 1),
-    /// copies otherwise. Always copies if the `Bytes` was constructed via `from_owner` or
-    /// `from_static`.
+    /// copies otherwise. Always copies if the [`Bytes`] was constructed via
+    /// [`Bytes::from_owner`] or [`Bytes::from_static`].
     fn from(bytes: Bytes) -> Self {
         Self {
             inner: IoBufMutInner::Bytes(BytesMut::from(bytes)),
@@ -852,7 +852,7 @@ impl IoBufs {
         };
     }
 
-    /// Coalesce all remaining bytes into a single contiguous `IoBuf`.
+    /// Coalesce all remaining bytes into a single contiguous [`IoBuf`].
     ///
     /// Zero-copy if only one buffer. Copies if multiple buffers.
     #[inline]
@@ -863,7 +863,7 @@ impl IoBufs {
         }
     }
 
-    /// Coalesce all remaining bytes into a single contiguous `IoBuf`, using the pool
+    /// Coalesce all remaining bytes into a single contiguous [`IoBuf`], using the pool
     /// for allocation if multiple buffers need to be merged.
     ///
     /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
@@ -1215,7 +1215,7 @@ impl IoBufsMut {
         matches!(self.inner, IoBufsMutInner::Single(_))
     }
 
-    /// Freeze into immutable `IoBufs`.
+    /// Freeze into immutable [`IoBufs`].
     pub fn freeze(self) -> IoBufs {
         match self.inner {
             IoBufsMutInner::Single(buf) => IoBufs::from(buf.freeze()),
@@ -1261,14 +1261,14 @@ impl IoBufsMut {
         }
     }
 
-    /// Coalesce all buffers into a single contiguous `IoBufMut`.
+    /// Coalesce all buffers into a single contiguous [`IoBufMut`].
     ///
     /// Zero-copy if only one buffer. Copies if multiple buffers.
     pub fn coalesce(self) -> IoBufMut {
         self.coalesce_with(IoBufMut::with_capacity)
     }
 
-    /// Coalesce all buffers into a single contiguous `IoBufMut`, using the pool
+    /// Coalesce all buffers into a single contiguous [`IoBufMut`], using the pool
     /// for allocation if multiple buffers need to be merged.
     ///
     /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
@@ -1276,7 +1276,7 @@ impl IoBufsMut {
         self.coalesce_with(|len| pool.alloc(len))
     }
 
-    /// Coalesce all buffers into a single contiguous `IoBufMut` with extra
+    /// Coalesce all buffers into a single contiguous [`IoBufMut`] with extra
     /// capacity, using the pool for allocation.
     ///
     /// Zero-copy if single buffer with sufficient spare capacity.
@@ -1334,7 +1334,7 @@ impl IoBufsMut {
     /// while preserving the current chunk layout.
     ///
     /// This is useful for APIs that must fill caller-provided buffer structure
-    /// in place (for example `Blob::read_at_buf`).
+    /// in place (for example [`Blob::read_at_buf`](crate::Blob::read_at_buf)).
     ///
     /// # Safety
     ///
@@ -1677,7 +1677,7 @@ fn copy_to_bytes_chunked<B: Buf>(
     (out.freeze(), bufs.len() <= 3)
 }
 
-/// Advance across a `VecDeque` of chunks by consuming from the front.
+/// Advance across a [`VecDeque`] of chunks by consuming from the front.
 #[inline]
 fn advance_chunked_front<B: Buf>(bufs: &mut VecDeque<B>, mut cnt: usize) {
     while cnt > 0 {
@@ -1736,7 +1736,7 @@ fn advance_small_chunks<B: Buf>(chunks: &mut [B], mut cnt: usize) -> bool {
 /// # Safety
 ///
 /// Forwards to [`BufMut::advance_mut`], so callers must ensure the advanced
-/// region has been initialized according to `BufMut`'s contract.
+/// region has been initialized according to [`BufMut`]'s contract.
 #[inline]
 unsafe fn advance_mut_in_chunks<B: BufMut>(chunks: &mut [B], remaining: &mut usize) -> bool {
     if *remaining == 0 {

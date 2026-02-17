@@ -122,6 +122,8 @@ impl<B: Blob> Blob for Write<B> {
                     .blob
                     .read_at_buf(offset, remaining, self.pool.alloc(remaining))
                     .await?;
+                // `remaining` starts at `len` and only decreases, so this prefix slice
+                // is always in-bounds and exactly matches the blob bytes we just read.
                 buf.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
             }
             Ok(bufs)

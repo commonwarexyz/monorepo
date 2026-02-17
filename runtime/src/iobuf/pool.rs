@@ -123,7 +123,7 @@ pub struct BufferPoolConfig {
     /// Whether to pre-allocate all buffers on pool creation.
     pub prefill: bool,
     /// Buffer alignment. Must be a power of two.
-    /// Use `page_size()` for storage I/O, `cache_line_size()` for network I/O.
+    /// Use `page_size()` for storage I/O and `cache_line_size()` for network I/O.
     pub alignment: NonZeroUsize,
 }
 
@@ -500,7 +500,7 @@ impl BufferPoolInner {
 /// # Alignment
 ///
 /// Buffer alignment is guaranteed only at the base pointer (when `cursor == 0`).
-/// After calling `Buf::advance()`, the pointer returned by `as_mut_ptr()` may
+/// After calling [`Buf::advance`], the pointer returned by `as_mut_ptr()` may
 /// no longer be aligned. For direct I/O operations that require alignment,
 /// do not advance the buffer before use.
 #[derive(Clone)]
@@ -564,8 +564,8 @@ impl BufferPool {
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
     /// matching the semantics of [`IoBufMut::with_capacity`] and
-    /// `BytesMut::with_capacity`. Use `put_slice` or other `BufMut` methods
-    /// to write data to the buffer.
+    /// [`bytes::BytesMut::with_capacity`]. Use [`BufMut::put_slice`] or other
+    /// [`BufMut`] methods to write data to the buffer.
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
@@ -591,7 +591,7 @@ impl BufferPool {
     /// Allocates a buffer and sets its readable length to `len` without
     /// initializing bytes.
     ///
-    /// Equivalent to `alloc(len)` followed by `set_len(len)`.
+    /// Equivalent to [`Self::alloc`] followed by [`IoBufMut::set_len`].
     ///
     /// # Safety
     ///
@@ -605,11 +605,11 @@ impl BufferPool {
 
     /// Allocates a zero-initialized buffer with readable length `len`.
     ///
-    /// Equivalent to `alloc(len)` followed by `put_bytes(0, len)`.
+    /// Equivalent to [`Self::alloc`] followed by [`BufMut::put_bytes`].
     ///
     /// Use this for read APIs that require an initialized `&mut [u8]`.
-    /// This avoids `unsafe set_len` at callsites, at the cost of zero-filling
-    /// `len` bytes before the read.
+    /// This avoids unsafe [`IoBufMut::set_len`] at callsites, at the cost of
+    /// zero-filling `len` bytes before the read.
     pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
         let mut buf = self.alloc(len);
         buf.put_bytes(0, len);
@@ -728,7 +728,7 @@ impl std::fmt::Debug for PooledBuf {
 impl PooledBuf {
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to their pool when dropped.
     ///
     /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
@@ -802,9 +802,9 @@ impl PooledBuf {
         }
     }
 
-    /// Converts this pooled view into `Bytes` without copying.
+    /// Converts this pooled view into [`Bytes`] without copying.
     ///
-    /// Empty views return detached `Bytes::new()` so pooled memory is not
+    /// Empty views return detached [`Bytes::new`] so pooled memory is not
     /// retained by an empty owner.
     pub fn into_bytes(self) -> Bytes {
         if self.len == 0 {
@@ -880,7 +880,7 @@ impl Buf for PooledBuf {
 ///
 /// - `cursor <= len <= raw_capacity`
 /// - Bytes in `0..len` have been initialized (safe to read)
-/// - Bytes in `len..raw_capacity` are uninitialized (write-only via `BufMut`)
+/// - Bytes in `len..raw_capacity` are uninitialized (write-only via [`BufMut`])
 ///
 /// # Computed Values
 ///
@@ -888,13 +888,14 @@ impl Buf for PooledBuf {
 /// - `capacity()` = view capacity = `raw_capacity - cursor` (shrinks after advance)
 /// - `remaining_mut()` = writable bytes = `raw_capacity - self.len`
 ///
-/// This matches `BytesMut` semantics.
+/// This matches [`bytes::BytesMut`] semantics.
 ///
 /// # Fixed Capacity
 ///
-/// Unlike `BytesMut`, pooled buffers have **fixed capacity** and do NOT grow
-/// automatically. Calling `put_slice()` or other `BufMut` methods that would
-/// exceed capacity will panic (per the `BufMut` trait contract).
+/// Unlike [`bytes::BytesMut`], pooled buffers have **fixed capacity** and do
+/// NOT grow automatically. Calling [`BufMut::put_slice`] or other [`BufMut`]
+/// methods that would exceed capacity will panic (per the [`BufMut`] trait
+/// contract).
 ///
 /// Always check `remaining_mut()` before writing variable-length data.
 pub(crate) struct PooledBufMut {
@@ -926,7 +927,7 @@ impl PooledBufMut {
 
     /// Returns `true` if this buffer is tracked by a pool.
     ///
-    /// Tracked buffers originate from `BufferPool` allocations and are
+    /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to their pool when dropped.
     ///
     /// Untracked fallback allocations from [`BufferPool::alloc`] return `false`.
@@ -937,7 +938,7 @@ impl PooledBufMut {
 
     /// Returns the number of readable bytes remaining in the buffer.
     ///
-    /// This is `len - cursor`, matching `BytesMut` semantics.
+    /// This is `len - cursor`, matching [`bytes::BytesMut`] semantics.
     #[inline]
     pub const fn len(&self) -> usize {
         self.len - self.cursor
@@ -975,7 +976,7 @@ impl PooledBufMut {
     /// has been initialized.
     ///
     /// The `len` parameter is relative to the current view (after any `advance`
-    /// calls), matching `BytesMut::set_len` semantics.
+    /// calls), matching [`bytes::BytesMut::set_len`] semantics.
     ///
     /// # Safety
     ///
@@ -996,8 +997,8 @@ impl PooledBufMut {
     /// Truncates the buffer to at most `len` readable bytes.
     ///
     /// If `len` is greater than the current readable length, this has no effect.
-    /// This operates on readable bytes (after cursor), matching `BytesMut::truncate`
-    /// semantics for buffers that have been advanced.
+    /// This operates on readable bytes (after cursor), matching
+    /// [`bytes::BytesMut::truncate`] semantics for buffers that have been advanced.
     #[inline]
     pub const fn truncate(&mut self, len: usize) {
         if len < self.len() {
@@ -1020,18 +1021,18 @@ impl PooledBufMut {
         }
     }
 
-    /// Freezes the buffer into an immutable `IoBuf`.
+    /// Freezes the buffer into an immutable [`IoBuf`].
     ///
     /// Only the readable portion (`cursor..len`) is included in the result.
     /// The underlying buffer will be returned to the pool when all references
-    /// to the `IoBuf` (including slices) are dropped.
+    /// to the [`IoBuf`] (including slices) are dropped.
     pub fn freeze(self) -> IoBuf {
         IoBuf::from_pooled(self.into_pooled())
     }
 
-    /// Converts the current readable window into `Bytes` without copying.
+    /// Converts the current readable window into [`Bytes`] without copying.
     ///
-    /// Empty buffers return detached `Bytes::new()` so pooled memory is not
+    /// Empty buffers return detached [`Bytes::new`] so pooled memory is not
     /// retained by an empty owner.
     pub fn into_bytes(self) -> Bytes {
         if self.is_empty() {
