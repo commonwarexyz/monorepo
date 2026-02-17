@@ -59,6 +59,9 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
+/// A (subject, certificate) pair for batch verification.
+type CertificatePair<'a, S, D> = (Subject<'a, D>, &'a <S as CertificateScheme>::Certificate);
+
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 enum PendingVerification<S: CertificateScheme, B: Block> {
     Notarized {
@@ -68,6 +71,7 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
         response: oneshot::Sender<bool>,
     },
     Finalized {
+        round: Round,
         height: Height,
         finalization: Finalization<S, B::Commitment>,
         block: B,
@@ -727,6 +731,7 @@ where
                         return false;
                     }
                     pending.push(PendingVerification::Finalized {
+                        round: finalization.proposal.round,
                         height,
                         finalization,
                         block,
@@ -838,25 +843,18 @@ where
     fn verify_pending_by_epoch(
         &mut self,
         pending: &[PendingVerification<P::Scheme, B>],
-        pending_certs: &[(
-            Subject<'_, B::Commitment>,
-            &<P::Scheme as CertificateScheme>::Certificate,
-        )],
+        pending_certs: &[CertificatePair<'_, P::Scheme, B::Commitment>],
     ) -> Vec<bool> {
         let mut verified = vec![false; pending.len()];
 
         // Group indices by epoch
         let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
         for (i, item) in pending.iter().enumerate() {
-            let epoch = match item {
-                PendingVerification::Notarized { round, .. } => Some(round.epoch()),
-                PendingVerification::Finalized { height, .. } => {
-                    self.epocher.containing(*height).map(|b| b.epoch())
-                }
+            let round = match item {
+                PendingVerification::Notarized { round, .. }
+                | PendingVerification::Finalized { round, .. } => round,
             };
-            if let Some(epoch) = epoch {
-                by_epoch.entry(epoch).or_default().push(i);
-            }
+            by_epoch.entry(round.epoch()).or_default().push(i);
         }
 
         // Batch verify each epoch group
@@ -884,13 +882,17 @@ where
     ) -> bool {
         match item {
             PendingVerification::Finalized {
+                round,
                 height,
                 finalization,
                 block,
                 response,
             } => {
-                debug!(%height, "received finalization");
+                // Valid finalization received
                 response.send_lossy(true);
+                debug!(?round, %height, "received finalization");
+
+                // Store the finalization
                 self.store_finalization(
                     height,
                     block.commitment(),
@@ -907,6 +909,7 @@ where
                 block,
                 response,
             } => {
+                // Valid notarization received
                 response.send_lossy(true);
                 let commitment = block.commitment();
                 debug!(?round, ?commitment, "received notarization");
