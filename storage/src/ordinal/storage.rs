@@ -8,13 +8,12 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Buf, BufMut, BufferPooler, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{bitmap::BitMap, hex};
+use commonware_utils::{bitmap::BitMap, hex, sync::Mutex};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
-    sync::Mutex,
 };
 use tracing::{debug, warn};
 
@@ -277,10 +276,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(offset, record.encode_mut()).await?;
-        self.pending
-            .lock()
-            .expect("pending sections lock poisoned")
-            .insert(section);
+        self.pending.lock().insert(section);
 
         // Add to intervals
         self.intervals.insert(index);
@@ -385,7 +381,6 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         // Clean pending entries that fall into pruned sections.
         self.pending
             .lock()
-            .expect("pending sections lock poisoned")
             .retain(|&section| section >= min_section);
 
         Ok(())
@@ -397,7 +392,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
 
         // Take all pending sections then release the lock to avoid blocking reads.
         let sections: BTreeSet<u64> = {
-            let mut pending = self.pending.lock().expect("pending sections lock poisoned");
+            let mut pending = self.pending.lock();
             std::mem::take(&mut *pending)
         };
         if sections.is_empty() {
