@@ -787,44 +787,39 @@ where
         let mut wrote = false;
 
         // Extract (subject, certificate) pairs for batch verification
-        let verified = {
-            let pending_certs = pending
-                .iter()
-                .map(|item| match item {
-                    PendingVerification::Finalized { finalization, .. } => (
-                        Subject::Finalize {
-                            proposal: &finalization.proposal,
-                        },
-                        &finalization.certificate,
-                    ),
-                    PendingVerification::Notarized { notarization, .. } => (
-                        Subject::Notarize {
-                            proposal: &notarization.proposal,
-                        },
-                        &notarization.certificate,
-                    ),
-                })
-                .collect::<Vec<_>>();
+        let pending_certs: Vec<_> = pending
+            .iter()
+            .map(|item| match item {
+                PendingVerification::Finalized { finalization, .. } => (
+                    Subject::Finalize {
+                        proposal: &finalization.proposal,
+                    },
+                    &finalization.certificate,
+                ),
+                PendingVerification::Notarized { notarization, .. } => (
+                    Subject::Notarize {
+                        proposal: &notarization.proposal,
+                    },
+                    &notarization.certificate,
+                ),
+            })
+            .collect();
 
-            // Batch verify using the all-epoch verifier if available,
-            // otherwise mark all as unverified for per-epoch fallback
-            self.provider.all().map_or_else(
-                || vec![false; pending_certs.len()],
-                |scheme| {
-                    verify_certificates(
-                        &mut self.context,
-                        scheme.as_ref(),
-                        &pending_certs,
-                        &self.strategy,
-                    )
-                },
+        // Batch verify using the all-epoch verifier if available,
+        // otherwise batch verify per epoch using scoped verifiers
+        let verified = if let Some(scheme) = self.provider.all() {
+            verify_certificates(
+                &mut self.context,
+                scheme.as_ref(),
+                &pending_certs,
+                &self.strategy,
             )
+        } else {
+            self.verify_pending_by_epoch(&pending, &pending_certs)
         };
 
-        // Process each item: try per-epoch verification as fallback
-        // for items that failed batch verification
         for (index, item) in pending.drain(..).enumerate() {
-            if verified[index] || self.verify_pending_item(&item) {
+            if verified[index] {
                 wrote |= self.process_verified(item, application).await;
             } else {
                 match item {
@@ -839,28 +834,45 @@ where
         wrote
     }
 
-    /// Verify a single pending finalization/notarization certificate.
-    fn verify_pending_item(&mut self, item: &PendingVerification<P::Scheme, B>) -> bool {
-        match item {
-            PendingVerification::Finalized {
-                height,
-                finalization,
-                ..
-            } => self
-                .epocher
-                .containing(*height)
-                .and_then(|b| self.get_scheme_certificate_verifier(b.epoch()))
-                .map(|scheme| finalization.verify(&mut self.context, &scheme, &self.strategy))
-                .unwrap_or(false),
-            PendingVerification::Notarized {
-                round,
-                notarization,
-                ..
-            } => self
-                .get_scheme_certificate_verifier(round.epoch())
-                .map(|scheme| notarization.verify(&mut self.context, &scheme, &self.strategy))
-                .unwrap_or(false),
+    /// Batch verify pending items grouped by epoch using scoped verifiers.
+    fn verify_pending_by_epoch(
+        &mut self,
+        pending: &[PendingVerification<P::Scheme, B>],
+        pending_certs: &[(
+            Subject<'_, B::Commitment>,
+            &<P::Scheme as CertificateScheme>::Certificate,
+        )],
+    ) -> Vec<bool> {
+        let mut verified = vec![false; pending.len()];
+
+        // Group indices by epoch
+        let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
+        for (i, item) in pending.iter().enumerate() {
+            let epoch = match item {
+                PendingVerification::Notarized { round, .. } => Some(round.epoch()),
+                PendingVerification::Finalized { height, .. } => {
+                    self.epocher.containing(*height).map(|b| b.epoch())
+                }
+            };
+            if let Some(epoch) = epoch {
+                by_epoch.entry(epoch).or_default().push(i);
+            }
         }
+
+        // Batch verify each epoch group
+        for (epoch, indices) in &by_epoch {
+            let Some(scheme) = self.provider.scoped(*epoch) else {
+                continue;
+            };
+            let group: Vec<_> = indices.iter().map(|&i| pending_certs[i]).collect();
+            let results =
+                verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
+            for (j, &idx) in indices.iter().enumerate() {
+                verified[idx] = results[j];
+            }
+        }
+
+        verified
     }
 
     /// Process a verified pending item (finalization or notarization).
