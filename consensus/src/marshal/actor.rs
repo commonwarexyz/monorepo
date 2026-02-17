@@ -824,12 +824,7 @@ where
         // Batch verify using the all-epoch verifier if available,
         // otherwise batch verify per epoch using scoped verifiers
         let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(
-                &mut self.context,
-                scheme.as_ref(),
-                &certs,
-                &self.strategy,
-            )
+            verify_certificates(&mut self.context, scheme.as_ref(), &certs, &self.strategy)
         } else {
             let mut verified = vec![false; deliveries.len()];
 
@@ -908,9 +903,7 @@ where
                     // a notarization then a finalization are received via consensus
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
-                    if let Some(finalization) =
-                        self.cache.get_finalization_for(commitment).await
-                    {
+                    if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
                         self.store_finalization(
                             height,
                             commitment,
