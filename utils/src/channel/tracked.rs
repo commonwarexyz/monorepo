@@ -50,12 +50,13 @@ use super::mpsc::{
     self,
     error::{SendError, TryRecvError, TrySendError},
 };
+use crate::sync::Mutex;
 use futures::Stream;
 use std::{
     collections::HashMap,
     hash::Hash,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -71,7 +72,7 @@ pub struct Guard<B: Eq + Hash + Clone> {
 impl<B: Eq + Hash + Clone> Drop for Guard<B> {
     fn drop(&mut self) {
         // Get the state
-        let mut state = self.tracker.lock().unwrap();
+        let mut state = self.tracker.lock();
 
         // Mark the message as delivered
         *state.pending.get_mut(&self.sequence).unwrap() = true;
@@ -151,7 +152,7 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
 
     fn guard(&self, batch: Option<B>) -> Guard<B> {
         // Get state
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
 
         // Get the next sequence
         let sequence = state.next;
@@ -210,7 +211,7 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
 
     /// Returns the current delivery watermark (highest sequence number where all messages up to and including it have been delivered).
     pub fn watermark(&self) -> u64 {
-        self.tracker.state.lock().unwrap().watermark
+        self.tracker.state.lock().watermark
     }
 
     /// Returns the number of pending messages for a specific batch.
@@ -218,7 +219,6 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
         self.tracker
             .state
             .lock()
-            .unwrap()
             .batches
             .get(&batch)
             .copied()

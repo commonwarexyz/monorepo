@@ -318,7 +318,7 @@ pub(crate) mod test {
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
             let db = open_db(context.with_label("open1")).await;
-            let root = db.root().await;
+            let root = db.root();
             let mut db = db.into_mutable();
             db.write_batch((0..ELEMENTS).map(|i| {
                 (
@@ -332,7 +332,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open2")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
 
             // re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
@@ -342,7 +342,7 @@ pub(crate) mod test {
                 db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root().await;
+            let root = db.root();
 
             // Update every 3rd key
             let mut db = db.into_mutable();
@@ -358,7 +358,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open3")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
 
             // Re-apply updates for every 3rd key and commit them this time.
             let mut db = db.into_mutable();
@@ -371,7 +371,7 @@ pub(crate) mod test {
                 db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
-            let root = db.root().await;
+            let root = db.root();
 
             // Delete every 7th key
             let mut db = db.into_mutable();
@@ -386,7 +386,7 @@ pub(crate) mod test {
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
             let db = open_db(context.with_label("open4")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
 
             // Re-delete every 7th key and commit this time.
             let mut db = db.into_mutable();
@@ -399,10 +399,10 @@ pub(crate) mod test {
             }
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
-            let root = db.root().await;
+            let root = db.root();
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
-                Location::try_from(db.log.mmr.size().await).ok(),
+                Location::try_from(db.log.mmr.size()).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
@@ -416,10 +416,10 @@ pub(crate) mod test {
 
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
             assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
-                Location::try_from(db.log.mmr.size().await).ok(),
+                Location::try_from(db.log.mmr.size()).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
@@ -526,8 +526,8 @@ pub(crate) mod test {
                     .collect()
             }
 
-            async fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
-                let map = self.log.mmr.get_pinned_nodes().await;
+            fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Digest> {
+                let map = self.log.mmr.get_pinned_nodes();
                 nodes_to_pin(pos).map(|p| *map.get(&p).unwrap()).collect()
             }
         }

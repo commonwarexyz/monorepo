@@ -24,6 +24,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
+use commonware_utils::sync::Mutex;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -40,7 +41,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime},
 };
@@ -562,7 +563,7 @@ impl crate::Spawner for Context {
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            let mut shutdown = self.executor.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -581,7 +582,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.shutdown.lock().unwrap().stopped()
+        self.executor.shutdown.lock().stopped()
     }
 }
 
@@ -639,7 +640,7 @@ impl crate::Metrics for Context {
         };
 
         // Route to the appropriate registry (root or scoped)
-        let mut registry = self.executor.registry.lock().unwrap();
+        let mut registry = self.executor.registry.lock();
         let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
         let sub_registry = self
             .attributes
@@ -651,7 +652,7 @@ impl crate::Metrics for Context {
     }
 
     fn encode(&self) -> String {
-        self.executor.registry.lock().unwrap().encode()
+        self.executor.registry.lock().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
@@ -672,11 +673,9 @@ impl crate::Metrics for Context {
         // RAII guard removes the scoped registry when all clones drop.
         // Closure is infallible to avoid panicking in Drop.
         let executor = self.executor.clone();
-        let scope_id = executor.registry.lock().unwrap().create_scope();
+        let scope_id = executor.registry.lock().create_scope();
         let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
-            if let Ok(mut registry) = executor.registry.lock() {
-                registry.remove_scope(id);
-            }
+            executor.registry.lock().remove_scope(id);
         }));
         Self {
             scope: Some(guard),

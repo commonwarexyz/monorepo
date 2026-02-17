@@ -1,5 +1,6 @@
 //! Utility functions for interacting with any runtime.
 
+use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
 use prometheus_client::{encoding::text::encode, registry::Registry as PrometheusRegistry};
 use std::{
@@ -7,7 +8,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::{Arc, Condvar, Mutex},
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -74,101 +75,6 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     )
 }
 
-/// Async reader–writer lock.
-///
-/// Powered by [async_lock::RwLock], `RwLock` provides both fair writer acquisition
-/// and `try_read` / `try_write` without waiting (without any runtime-specific dependencies).
-///
-/// Usage:
-/// ```rust
-/// use commonware_runtime::{Spawner, Runner, deterministic, RwLock};
-///
-/// let executor = deterministic::Runner::default();
-/// executor.start(|context| async move {
-///     // Create a new RwLock
-///     let lock = RwLock::new(2);
-///
-///     // many concurrent readers
-///     let r1 = lock.read().await;
-///     let r2 = lock.read().await;
-///     assert_eq!(*r1 + *r2, 4);
-///
-///     // exclusive writer
-///     drop((r1, r2));
-///     let mut w = lock.write().await;
-///     *w += 1;
-/// });
-/// ```
-pub struct RwLock<T>(async_lock::RwLock<T>);
-
-/// Shared guard returned by [RwLock::read].
-pub type RwLockReadGuard<'a, T> = async_lock::RwLockReadGuard<'a, T>;
-
-/// Upgradable shared guard returned by [RwLock::upgradable_read].
-pub type RwLockUpgradableReadGuard<'a, T> = async_lock::RwLockUpgradableReadGuard<'a, T>;
-
-/// Exclusive guard returned by [RwLock::write].
-pub type RwLockWriteGuard<'a, T> = async_lock::RwLockWriteGuard<'a, T>;
-
-impl<T> RwLock<T> {
-    /// Create a new lock.
-    #[inline]
-    pub const fn new(value: T) -> Self {
-        Self(async_lock::RwLock::new(value))
-    }
-
-    /// Acquire a shared read guard.
-    #[inline]
-    pub async fn read(&self) -> RwLockReadGuard<'_, T> {
-        self.0.read().await
-    }
-
-    /// Acquire an upgradable shared guard.
-    ///
-    /// While this guard is held, readers may proceed but no other upgradable reader
-    /// or writer can be acquired. The guard can be upgraded into an exclusive writer.
-    #[inline]
-    pub async fn upgradable_read(&self) -> RwLockUpgradableReadGuard<'_, T> {
-        self.0.upgradable_read().await
-    }
-
-    /// Acquire an exclusive write guard.
-    #[inline]
-    pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
-        self.0.write().await
-    }
-
-    /// Try to get a read guard without waiting.
-    #[inline]
-    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
-        self.0.try_read()
-    }
-
-    /// Try to get a write guard without waiting.
-    #[inline]
-    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
-        self.0.try_write()
-    }
-
-    /// Try to get an upgradable shared guard without waiting.
-    #[inline]
-    pub fn try_upgradable_read(&self) -> Option<RwLockUpgradableReadGuard<'_, T>> {
-        self.0.try_upgradable_read()
-    }
-
-    /// Get mutable access without locking (requires `&mut self`).
-    #[inline]
-    pub fn get_mut(&mut self) -> &mut T {
-        self.0.get_mut()
-    }
-
-    /// Consume the lock, returning the inner value.
-    #[inline]
-    pub fn into_inner(self) -> T {
-        self.0.into_inner()
-    }
-}
-
 /// Synchronization primitive that enables a thread to block until a waker delivers a signal.
 pub struct Blocker {
     /// Tracks whether a wake-up signal has been delivered (even if wait has not started yet).
@@ -189,9 +95,9 @@ impl Blocker {
     /// Block the current thread until a waker delivers a signal.
     pub fn wait(&self) {
         // Use a loop to tolerate spurious wake-ups and only proceed once a real signal arrives.
-        let mut signaled = self.state.lock().unwrap();
+        let mut signaled = self.state.lock();
         while !*signaled {
-            signaled = self.cv.wait(signaled).unwrap();
+            self.cv.wait(&mut signaled);
         }
 
         // Reset the flag so subsequent waits park again until the next wake signal.
@@ -203,7 +109,7 @@ impl ArcWake for Blocker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Mark as signaled (and release lock before notifying).
         {
-            let mut signaled = arc_self.state.lock().unwrap();
+            let mut signaled = arc_self.state.lock();
             *signaled = true;
         }
 
@@ -937,28 +843,6 @@ a_total 1
 b_total 2
 "#;
         assert_eq!(encode_dedup(input), expected);
-    }
-
-    #[test_traced]
-    fn test_rwlock() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            // Create a new RwLock
-            let lock = RwLock::new(100);
-
-            // many concurrent readers
-            let r1 = lock.read().await;
-            let r2 = lock.read().await;
-            assert_eq!(*r1 + *r2, 200);
-
-            // exclusive writer
-            drop((r1, r2)); // all readers must go away
-            let mut w = lock.write().await;
-            *w += 1;
-
-            // Check the value
-            assert_eq!(*w, 101);
-        });
     }
 
     #[test]

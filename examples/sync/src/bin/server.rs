@@ -5,8 +5,8 @@ use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, RwLock,
-    SinkOf, Spawner, Storage, StreamOf,
+    tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
+    Spawner, Storage, StreamOf,
 };
 use commonware_storage::qmdb::sync::Target;
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -18,7 +18,11 @@ use commonware_sync::{
     net::{wire, ErrorCode, ErrorResponse, MAX_MESSAGE_SIZE},
     Error, Key,
 };
-use commonware_utils::{channel::mpsc, DurationExt};
+use commonware_utils::{
+    channel::mpsc,
+    sync::{AsyncRwLock, Mutex},
+    DurationExt,
+};
 use prometheus_client::metrics::counter::Counter;
 use rand::{Rng, RngCore};
 use std::{
@@ -56,8 +60,8 @@ struct Config {
 
 /// Server state containing the database and metrics.
 struct State<DB> {
-    /// The database wrapped in async mutex with Option to allow ownership transfers.
-    database: RwLock<Option<DB>>,
+    /// The database wrapped in async rwlock with Option to allow ownership transfers.
+    database: AsyncRwLock<Option<DB>>,
     /// Request counter for metrics.
     request_counter: Counter,
     /// Error counter for metrics.
@@ -65,7 +69,7 @@ struct State<DB> {
     /// Counter for operations added.
     ops_counter: Counter,
     /// Last time we added operations.
-    last_operation_time: RwLock<SystemTime>,
+    last_operation_time: Mutex<SystemTime>,
 }
 
 impl<DB> State<DB> {
@@ -74,11 +78,11 @@ impl<DB> State<DB> {
         E: Metrics,
     {
         let state = Self {
-            database: RwLock::new(Some(database)),
+            database: AsyncRwLock::new(Some(database)),
             request_counter: Counter::default(),
             error_counter: Counter::default(),
             ops_counter: Counter::default(),
-            last_operation_time: RwLock::new(SystemTime::now()),
+            last_operation_time: Mutex::new(SystemTime::now()),
         };
         context.register(
             "requests",
@@ -105,10 +109,17 @@ where
     DB: Syncable,
     E: Storage + Clock + Metrics + RngCore,
 {
-    let mut last_time = state.last_operation_time.write().await;
     let now = context.current();
-    if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
-        *last_time = now;
+    let should_add = {
+        let mut last_time = state.last_operation_time.lock();
+        if now.duration_since(*last_time).unwrap_or(Duration::ZERO) >= config.op_interval {
+            *last_time = now;
+            true
+        } else {
+            false
+        }
+    };
+    if should_add {
         // Generate new operations
         let new_operations =
             DB::create_test_operations(config.ops_per_interval, context.next_u64());
@@ -119,7 +130,7 @@ where
             let database = db_opt.take().expect("database should exist");
             match database.add_operations(new_operations).await {
                 Ok(database) => {
-                    let root = database.root().await;
+                    let root = database.root();
                     *db_opt = Some(database);
                     root
                 }
@@ -160,7 +171,7 @@ where
         let db_opt = state.database.read().await;
         let database = db_opt.as_ref().expect("database should exist");
         (
-            database.root().await,
+            database.root(),
             database.inactivity_floor().await,
             database.size().await,
         )
@@ -384,7 +395,7 @@ where
     let database = database.add_operations(initial_ops).await?;
 
     // Display database state
-    let root = database.root().await;
+    let root = database.root();
     let root_hex = root
         .as_ref()
         .iter()
