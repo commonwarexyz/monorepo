@@ -17,8 +17,7 @@ use crate::{
         types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Epochable,
-    Block, Reporter,
+    Block, Epochable, Reporter,
 };
 use bytes::Bytes;
 use commonware_broadcast::{buffered, Broadcaster};
@@ -746,10 +745,7 @@ where
                     return false;
                 };
 
-                if block.height() != height
-                    || finalization.proposal.payload != block.commitment()
-                    || finalization.epoch() != bounds.epoch()
-                {
+                if block.height() != height || finalization.proposal.payload != block.commitment() {
                     response.send_lossy(false);
                     return false;
                 }

@@ -312,8 +312,7 @@ mod tests {
         drop(rx);
 
         let result: Option<String> =
-            AsyncFallibleExt::request(&tx, |responder| TestMessage::Request { responder })
-                .await;
+            AsyncFallibleExt::request(&tx, |responder| TestMessage::Request { responder }).await;
 
         assert_eq!(result, None);
     }
