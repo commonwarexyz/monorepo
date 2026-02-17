@@ -316,7 +316,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     where
         R: CryptoRngCore,
         D: Digest,
-        Self::Subject<'a, D>: Clone,
+        Self::Subject<'a, D>: Copy,
         Self::Certificate: 'a,
         M: Faults,
     {
@@ -331,7 +331,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         if !Self::is_batchable() {
             for (i, (subject, certificate)) in certificates.iter().enumerate() {
                 verified[i] =
-                    self.verify_certificate::<_, _, M>(rng, subject.clone(), certificate, strategy);
+                    self.verify_certificate::<_, _, M>(rng, *subject, certificate, strategy);
             }
             return verified;
         }
@@ -351,7 +351,7 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         while let Some((start, end)) = stack.pop() {
             if self.verify_certificates::<_, D, _, M>(
                 rng,
-                certificates[start..end].iter().cloned(),
+                certificates[start..end].iter().copied(),
                 strategy,
             ) {
                 verified[start..end].fill(true);
@@ -621,9 +621,9 @@ mod tests {
         use crate::{certificate::Subject, impl_certificate_ed25519};
 
         /// Test subject for certificate verification tests.
-        #[derive(Clone, Debug)]
+        #[derive(Copy, Clone, Debug)]
         pub struct TestSubject {
-            pub message: bytes::Bytes,
+            pub message: &'static [u8],
         }
 
         impl Subject for TestSubject {
@@ -634,7 +634,7 @@ mod tests {
             }
 
             fn message(&self) -> bytes::Bytes {
-                self.message.clone()
+                bytes::Bytes::from_static(self.message)
             }
         }
 
@@ -651,12 +651,6 @@ mod tests {
     const NAMESPACE: &[u8] = b"test-bisect";
     const MESSAGE: &[u8] = b"good message";
     const BAD_MESSAGE: &[u8] = b"bad message";
-
-    fn subject(message: &'static [u8]) -> TestSubject {
-        TestSubject {
-            message: Bytes::from_static(message),
-        }
-    }
 
     fn make_certificate(
         schemes: &[Ed25519Scheme],
@@ -704,7 +698,7 @@ mod tests {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
-        let good = subject(MESSAGE);
+        let good = TestSubject { message: MESSAGE };
         let pairs: Vec<_> = (0..5).map(|_| (good.clone(), &cert)).collect();
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
             &mut rng,
@@ -719,8 +713,10 @@ mod tests {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
-        let good = subject(MESSAGE);
-        let bad = subject(BAD_MESSAGE);
+        let good = TestSubject { message: MESSAGE };
+        let bad = TestSubject {
+            message: BAD_MESSAGE,
+        };
         let pairs = vec![
             (good.clone(), &cert),
             (bad.clone(), &cert),
@@ -745,7 +741,9 @@ mod tests {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
-        let bad = subject(BAD_MESSAGE);
+        let bad = TestSubject {
+            message: BAD_MESSAGE,
+        };
         let pairs: Vec<_> = (0..4).map(|_| (bad.clone(), &cert)).collect();
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
             &mut rng,
@@ -760,7 +758,7 @@ mod tests {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
-        let pairs = vec![(subject(MESSAGE), &cert)];
+        let pairs = vec![(TestSubject { message: MESSAGE }, &cert)];
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
             &mut rng,
             &pairs,
@@ -774,7 +772,12 @@ mod tests {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
-        let pairs = vec![(subject(BAD_MESSAGE), &cert)];
+        let pairs = vec![(
+            TestSubject {
+                message: BAD_MESSAGE,
+            },
+            &cert,
+        )];
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
             &mut rng,
             &pairs,
