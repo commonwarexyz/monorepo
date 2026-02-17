@@ -252,14 +252,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         }
                     };
 
-                    // Update metrics
+                    // Update metrics for non-Data messages (bounded label cardinality).
+                    // Data metrics are deferred until after channel validation to avoid
+                    // unbounded cardinality from attacker-controlled channel values.
                     let metric = match &msg {
-                        types::Payload::Data(data) => &metrics::Message::new_data(&peer, data.channel),
-                        types::Payload::Greeting(_) => &metrics::Message::new_greeting(&peer),
-                        types::Payload::BitVec(_) => &metrics::Message::new_bit_vec(&peer),
-                        types::Payload::Peers(_) => &metrics::Message::new_peers(&peer),
+                        types::Payload::Data(_) => None,
+                        types::Payload::Greeting(_) => Some(metrics::Message::new_greeting(&peer)),
+                        types::Payload::BitVec(_) => Some(metrics::Message::new_bit_vec(&peer)),
+                        types::Payload::Peers(_) => Some(metrics::Message::new_peers(&peer)),
                     };
-                    self.received_messages.get_or_create(metric).inc();
+                    if let Some(ref metric) = metric {
+                        self.received_messages.get_or_create(metric).inc();
+                    }
 
                     // Ensure we start with a greeting message and then never receive another
                     if let types::Payload::Greeting(info) = msg {
@@ -286,15 +290,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         return Err(Error::MissingGreeting);
                     }
 
-                    // Wait until rate limiter allows us to process the message
+                    // Validate channel for Data messages and resolve rate limiter.
                     //
                     // We skip rate limiting for the first BitVec and first Peers message
                     // because they are expected immediately after the greeting exchange
                     // (we send BitVec right after our greeting, and they respond with Peers).
-                    let rate_limiter = match &msg {
+                    let (metric, rate_limiter) = match &msg {
                         types::Payload::Data(data) => {
                             match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => Some(rate_limit),
+                                Some(rate_limit) => {
+                                    let m = metrics::Message::new_data(&peer, data.channel);
+                                    self.received_messages.get_or_create(&m).inc();
+                                    (m, Some(rate_limit))
+                                }
                                 None => {
                                     debug!(?peer, channel = data.channel, "invalid channel");
                                     self.received_messages
@@ -306,25 +314,27 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         }
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(_) => {
-                            if first_bit_vec_received {
+                            let rate_limiter = if first_bit_vec_received {
                                 Some(&bit_vec_rate_limiter)
                             } else {
                                 first_bit_vec_received = true;
                                 None
-                            }
+                            };
+                            (metric.unwrap(), rate_limiter)
                         }
                         types::Payload::Peers(_) => {
-                            if first_peers_received {
+                            let rate_limiter = if first_peers_received {
                                 Some(&peers_rate_limiter)
                             } else {
                                 first_peers_received = true;
                                 None
-                            }
+                            };
+                            (metric.unwrap(), rate_limiter)
                         }
                     };
                     if let Some(rate_limiter) = rate_limiter {
                         if let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(metric).inc();
+                            self.rate_limited.get_or_create(&metric).inc();
                             let wait_duration = wait_until.wait_time_from(context.now());
                             context.sleep(wait_duration).await;
                         }
@@ -901,6 +911,127 @@ mod tests {
                 dropped_count > 0,
                 "Expected dropped_messages to be incremented when buffer is full, got {dropped_count}"
             );
+        });
+    }
+
+    #[test]
+    fn test_invalid_channel_no_unbounded_metric_cardinality() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.clone().spawn({
+                move |ctx| async move {
+                    commonware_stream::encrypted::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
+                context.clone(),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let received_messages = Family::<metrics::Message, Counter>::default();
+            let cfg = Config {
+                received_messages: received_messages.clone(),
+                ..default_peer_config(remote_pk)
+            };
+            let (peer_actor, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+
+            let greeting = types::Info::sign(
+                &local_key,
+                IP_NAMESPACE,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch().as_millis() as u64,
+            );
+
+            let (tracker_mailbox, _tracker_receiver) =
+                UnboundedMailbox::<tracker::Message<PublicKey>>::new();
+
+            // Register channel 0 only
+            let mut channels = create_channels(&context);
+            let quota =
+                commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
+            let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
+
+            let local_pk_clone = local_pk.clone();
+            context.clone().spawn(move |_ctx| async move {
+                // Send valid greeting first
+                let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
+                    &local_key,
+                    IP_NAMESPACE,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                    0,
+                ));
+                local_sender
+                    .send(greeting_payload.encode())
+                    .await
+                    .expect("send greeting failed");
+
+                // Send data on an invalid channel
+                let data = types::Payload::<PublicKey>::Data(crate::authenticated::data::Data {
+                    channel: 99999,
+                    message: IoBuf::from(b"attack"),
+                });
+                local_sender.send(data.encode()).await.expect("send failed");
+            });
+
+            let result = peer_actor
+                .run(
+                    local_pk_clone.clone(),
+                    greeting,
+                    (remote_sender, remote_receiver),
+                    tracker_mailbox,
+                    channels,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(Error::InvalidChannel)),
+                "Expected InvalidChannel error, got: {result:?}"
+            );
+
+            let attacker_metric = metrics::Message::new_data(&local_pk_clone, 99999);
+            let attacker_count = received_messages.get_or_create(&attacker_metric).get();
+            assert_eq!(
+                attacker_count, 0,
+                "metric was created for attacker-controlled channel, unbounded cardinality bug"
+            );
+
+            let invalid_metric = metrics::Message::new_invalid(&local_pk_clone);
+            let invalid_count = received_messages.get_or_create(&invalid_metric).get();
+            assert_eq!(invalid_count, 1);
         });
     }
 }
