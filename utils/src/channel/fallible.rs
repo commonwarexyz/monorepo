@@ -290,7 +290,7 @@ mod tests {
 
     #[test_async]
     async fn test_async_send_lossy_success() {
-        let (mut tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
         assert!(tx.send_lossy(TestMessage::FireAndForget(42)).await);
 
         // Message should be received
@@ -299,7 +299,7 @@ mod tests {
 
     #[test_async]
     async fn test_async_send_lossy_disconnected() {
-        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
         // Should not panic, returns false
@@ -308,11 +308,11 @@ mod tests {
 
     #[test_async]
     async fn test_async_request_send_disconnected() {
-        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
         let result: Option<String> =
-            AsyncFallibleExt::request(&mut tx, |responder| TestMessage::Request { responder })
+            AsyncFallibleExt::request(&tx, |responder| TestMessage::Request { responder })
                 .await;
 
         assert_eq!(result, None);
@@ -320,11 +320,11 @@ mod tests {
 
     #[test_async]
     async fn test_async_request_or_disconnected() {
-        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
         let result = AsyncFallibleExt::request_or(
-            &mut tx,
+            &tx,
             |responder| TestMessage::RequestBool { responder },
             false,
         )
@@ -335,10 +335,10 @@ mod tests {
 
     #[test_async]
     async fn test_async_request_or_default_disconnected() {
-        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
-        let result: Vec<u32> = AsyncFallibleExt::request_or_default(&mut tx, |responder| {
+        let result: Vec<u32> = AsyncFallibleExt::request_or_default(&tx, |responder| {
             TestMessage::RequestVec { responder }
         })
         .await;
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_try_send_lossy_success() {
-        let (mut tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
         assert!(tx.try_send_lossy(TestMessage::FireAndForget(42)));
 
         // Message should be received
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_try_send_lossy_disconnected() {
-        let (mut tx, rx) = mpsc::channel::<TestMessage>(1);
+        let (tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
         // Should not panic, returns false
