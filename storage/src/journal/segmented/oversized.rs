@@ -307,11 +307,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
     /// Get the last entry for a section, if any.
     ///
-    /// Returns `Ok(None)` if the section doesn't exist or is empty.
+    /// Returns `Ok(None)` if the section is empty.
     ///
     /// # Errors
     ///
     /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    /// - [Error::SectionOutOfRange] if the section doesn't exist.
     pub async fn last(&self, section: u64) -> Result<Option<I>, Error> {
         self.index.last(section).await
     }
@@ -370,15 +371,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Rewind index first (this also removes sections after `section`)
         self.index.rewind(section, index_size).await?;
 
-        // Derive value size from last entry
-        let value_size = match self.index.last(section).await? {
-            Some(entry) => {
+        // Derive value size from last entry (section may not exist if empty)
+        let value_size = match self.index.last(section).await {
+            Ok(Some(entry)) => {
                 let (offset, size) = entry.value_location();
                 offset
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)?
             }
-            None => 0,
+            Ok(None) | Err(Error::SectionOutOfRange(_)) => 0,
+            Err(e) => return Err(e),
         };
 
         // Rewind values (this also removes sections after `section`)
@@ -393,15 +395,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Rewind index first
         self.index.rewind_section(section, index_size).await?;
 
-        // Derive value size from last entry
-        let value_size = match self.index.last(section).await? {
-            Some(entry) => {
+        // Derive value size from last entry (section may not exist if empty)
+        let value_size = match self.index.last(section).await {
+            Ok(Some(entry)) => {
                 let (offset, size) = entry.value_location();
                 offset
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)?
             }
-            None => 0,
+            Ok(None) | Err(Error::SectionOutOfRange(_)) => 0,
+            Err(e) => return Err(e),
         };
 
         // Rewind values
@@ -417,15 +420,16 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
     /// Get the value size for a section, derived from the last entry's location.
     pub async fn value_size(&self, section: u64) -> Result<u64, Error> {
-        self.index.last(section).await?.map_or_else(
-            || Ok(0),
-            |entry| {
+        match self.index.last(section).await {
+            Ok(Some(entry)) => {
                 let (offset, size) = entry.value_location();
                 offset
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)
-            },
-        )
+            }
+            Ok(None) | Err(Error::SectionOutOfRange(_)) => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 
     /// Returns the oldest section number, if any exist.
@@ -3008,7 +3012,10 @@ mod tests {
                 .await
                 .expect("rewind on missing section must not fail");
 
-            assert_eq!(oversized.last(0).await.unwrap(), None);
+            assert!(matches!(
+                oversized.last(0).await,
+                Err(Error::SectionOutOfRange(0))
+            ));
             assert_eq!(oversized.value_size(0).await.unwrap(), 0);
 
             oversized.destroy().await.expect("Failed to destroy");

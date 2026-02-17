@@ -163,15 +163,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Read the last item in a section, if any.
     ///
-    /// Returns `Ok(None)` if the section doesn't exist or is empty.
+    /// Returns `Ok(None)` if the section is empty.
     ///
     /// # Errors
     ///
     /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    /// - [Error::SectionOutOfRange] if the section doesn't exist.
     pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
-        let Some(blob) = self.manager.get(section)? else {
-            return Ok(None);
-        };
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
 
         let size = blob.size().await;
         if size < Self::CHUNK_SIZE_U64 {
@@ -1228,7 +1230,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_last_missing_section_returns_none() {
+    fn test_last_missing_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1236,8 +1238,14 @@ mod tests {
                 .await
                 .expect("failed to init");
 
-            assert_eq!(journal.last(0).await.unwrap(), None);
-            assert_eq!(journal.last(99).await.unwrap(), None);
+            assert!(matches!(
+                journal.last(0).await,
+                Err(Error::SectionOutOfRange(0))
+            ));
+            assert!(matches!(
+                journal.last(99).await,
+                Err(Error::SectionOutOfRange(99))
+            ));
 
             journal.destroy().await.unwrap();
         });
