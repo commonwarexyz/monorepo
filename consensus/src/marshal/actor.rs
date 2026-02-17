@@ -75,9 +75,6 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
     },
 }
 
-/// A subject-certificate pair for batch verification.
-type CertificateSubject<'a, S, D> = (Subject<'a, D>, &'a <S as CertificateScheme>::Certificate);
-
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
@@ -797,9 +794,11 @@ where
             self.provider.all().map_or_else(
                 || vec![false; pending_certs.len()],
                 |scheme| {
-                    bisect_verified(pending_certs.len(), |start, end| {
-                        self.verify_pending_batch(&scheme, &pending_certs[start..end])
-                    })
+                    scheme.verify_certificates_bisect::<_, B::Commitment, N3f1>(
+                        &mut self.context,
+                        &pending_certs,
+                        &self.strategy,
+                    )
                 },
             )
         };
@@ -818,19 +817,6 @@ where
         }
 
         wrote
-    }
-
-    /// Verify a batch of pending finalization/notarization certificates.
-    fn verify_pending_batch<'a>(
-        &mut self,
-        scheme: &P::Scheme,
-        batch: &[CertificateSubject<'a, P::Scheme, B::Commitment>],
-    ) -> bool {
-        scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
-            &mut self.context,
-            batch.iter().copied(),
-            &self.strategy,
-        )
     }
 
     /// Verify a single pending finalization/notarization certificate.
@@ -1280,76 +1266,5 @@ where
             }
         )?;
         Ok(())
-    }
-}
-
-/// Mark entries as verified by iteratively bisecting failed ranges.
-///
-/// `verify_range(start, end)` should return true when all items in `[start, end)`
-/// are valid. Failed ranges are split until singleton leaves.
-fn bisect_verified<F>(len: usize, mut verify_range: F) -> Vec<bool>
-where
-    F: FnMut(usize, usize) -> bool,
-{
-    let mut verified = vec![false; len];
-    if len == 0 {
-        return verified;
-    }
-
-    let mut stack = vec![(0usize, len)];
-    while let Some((start, end)) = stack.pop() {
-        let width = end - start;
-        if width == 0 {
-            continue;
-        }
-
-        if verify_range(start, end) {
-            verified[start..end].fill(true);
-            continue;
-        }
-
-        if width > 1 {
-            let mid = start + width / 2;
-            stack.push((mid, end));
-            stack.push((start, mid));
-        }
-    }
-
-    verified
-}
-
-#[cfg(test)]
-mod tests {
-    use super::bisect_verified;
-
-    #[test]
-    fn test_bisect_verified_empty_input() {
-        let mut called = false;
-        let verified = bisect_verified(0, |_, _| {
-            called = true;
-            true
-        });
-        assert!(verified.is_empty());
-        assert!(!called);
-    }
-
-    #[test]
-    fn test_bisect_verified_root_success_short_circuit() {
-        let mut calls = Vec::new();
-        let verified = bisect_verified(8, |start, end| {
-            calls.push((start, end));
-            true
-        });
-        assert_eq!(verified, vec![true; 8]);
-        assert_eq!(calls, vec![(0, 8)]);
-    }
-
-    #[test]
-    fn test_bisect_verified_mixed_validity() {
-        let expected = vec![true, false, true, false, true, true, false, false];
-        let verified = bisect_verified(expected.len(), |start, end| {
-            expected[start..end].iter().all(|valid| *valid)
-        });
-        assert_eq!(verified, expected);
     }
 }

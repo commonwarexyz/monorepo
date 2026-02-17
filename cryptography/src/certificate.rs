@@ -302,6 +302,69 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         true
     }
 
+    /// Batch-verifies certificates and returns a per-item result.
+    ///
+    /// For batchable schemes, attempts batch verification first and bisects
+    /// on failure to efficiently identify invalid certificates. For
+    /// non-batchable schemes, verifies each certificate individually.
+    fn verify_certificates_bisect<'a, R, D, M>(
+        &self,
+        rng: &mut R,
+        certificates: &[(Self::Subject<'a, D>, &'a Self::Certificate)],
+        strategy: &impl Strategy,
+    ) -> Vec<bool>
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        Self::Subject<'a, D>: Copy,
+        Self::Certificate: 'a,
+        M: Faults,
+    {
+        let len = certificates.len();
+        let mut verified = vec![false; len];
+        if len == 0 {
+            return verified;
+        }
+
+        // Non-batchable schemes (e.g. secp256r1) gain nothing from bisection
+        // since verify_certificates already checks one-by-one.
+        if !Self::is_batchable() {
+            for (i, (subject, certificate)) in certificates.iter().enumerate() {
+                verified[i] =
+                    self.verify_certificate::<_, _, M>(rng, *subject, certificate, strategy);
+            }
+            return verified;
+        }
+
+        // Iterative bisection: try the full range first. If batch verification
+        // passes, mark the entire range valid. If it fails, split in half and
+        // retry each half. Singletons that fail remain false.
+        //
+        //       [0..8) fail
+        //      /            \
+        //   [0..4) pass   [4..8) fail
+        //                /          \
+        //            [4..6) pass  [6..8) fail
+        //                        /        \
+        //                    [6..7) pass  [7..8) fail
+        let mut stack = vec![(0, len)];
+        while let Some((start, end)) = stack.pop() {
+            if self.verify_certificates::<_, D, _, M>(
+                rng,
+                certificates[start..end].iter().copied(),
+                strategy,
+            ) {
+                verified[start..end].fill(true);
+            } else if end - start > 1 {
+                let mid = start + (end - start) / 2;
+                stack.push((mid, end));
+                stack.push((start, mid));
+            }
+        }
+
+        verified
+    }
+
     /// Returns whether per-participant fault evidence can be safely exposed.
     ///
     /// Schemes where individual signatures can be safely reported as fault evidence should
@@ -554,32 +617,177 @@ mod tests {
         assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
 
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-        use crate::impl_certificate_ed25519;
-        use commonware_codec::conformance::CodecConformance;
+    mod ed25519_fixture {
+        use crate::{certificate::Subject, impl_certificate_ed25519};
 
-        /// Test subject for generic scheme conformance tests.
-        #[derive(Clone, Debug)]
-        pub struct TestSubject {
-            pub message: Bytes,
+        #[derive(Clone, Copy, Debug)]
+        pub struct Subj {
+            pub message: &'static [u8],
         }
 
-        impl Subject for TestSubject {
+        impl Subject for Subj {
             type Namespace = Vec<u8>;
 
             fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
                 derived
             }
 
-            fn message(&self) -> Bytes {
-                self.message.clone()
+            fn message(&self) -> bytes::Bytes {
+                bytes::Bytes::from_static(self.message)
             }
         }
 
-        // Use the macro to generate the test scheme (signer/verifier are unused in conformance tests)
-        impl_certificate_ed25519!(TestSubject, Vec<u8>);
+        impl_certificate_ed25519!(Subj, Vec<u8>);
+    }
+
+    use crate::{ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer as _};
+    use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
+    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
+    use ed25519_fixture::{Scheme as Ed25519Scheme, Subj};
+
+    const NAMESPACE: &[u8] = b"test-bisect";
+    const MESSAGE: &[u8] = b"good message";
+    const BAD_MESSAGE: &[u8] = b"bad message";
+
+    fn make_certificate(
+        schemes: &[Ed25519Scheme],
+        message: &'static [u8],
+    ) -> <Ed25519Scheme as Scheme>::Certificate {
+        let subject = Subj { message };
+        let attestations: Vec<_> = schemes
+            .iter()
+            .filter_map(|s| s.sign::<Sha256Digest>(subject))
+            .collect();
+        schemes[0]
+            .assemble::<_, N3f1>(attestations, &Sequential)
+            .expect("assembly failed")
+    }
+
+    fn setup_ed25519(n: u32) -> (Vec<Ed25519Scheme>, Ed25519Scheme) {
+        let mut rng = test_rng();
+        let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut rng)).collect();
+        let participants: Set<crate::ed25519::PublicKey> = private_keys
+            .iter()
+            .map(|sk| sk.public_key())
+            .try_collect()
+            .unwrap();
+        let signers: Vec<_> = private_keys
+            .into_iter()
+            .map(|sk| Ed25519Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
+            .collect();
+        let verifier = Ed25519Scheme::verifier(NAMESPACE, participants);
+        (signers, verifier)
+    }
+
+    #[test]
+    fn test_bisect_empty() {
+        let mut rng = test_rng();
+        let (_, verifier) = setup_ed25519(4);
+        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &[],
+            &Sequential,
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_bisect_all_valid() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let cert = make_certificate(&schemes, MESSAGE);
+        let subject = Subj { message: MESSAGE };
+        let pairs: Vec<_> = (0..5).map(|_| (subject, &cert)).collect();
+        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &pairs,
+            &Sequential,
+        );
+        assert_eq!(result, vec![true; 5]);
+    }
+
+    #[test]
+    fn test_bisect_mixed() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let good_cert = make_certificate(&schemes, MESSAGE);
+        let good = Subj { message: MESSAGE };
+        let bad = Subj {
+            message: BAD_MESSAGE,
+        };
+        let pairs = vec![
+            (good, &good_cert),
+            (bad, &good_cert),
+            (good, &good_cert),
+            (bad, &good_cert),
+            (good, &good_cert),
+            (good, &good_cert),
+            (bad, &good_cert),
+            (bad, &good_cert),
+        ];
+        let expected = vec![true, false, true, false, true, true, false, false];
+        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &pairs,
+            &Sequential,
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_bisect_all_invalid() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let cert = make_certificate(&schemes, MESSAGE);
+        let bad = Subj {
+            message: BAD_MESSAGE,
+        };
+        let pairs: Vec<_> = (0..4).map(|_| (bad, &cert)).collect();
+        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &pairs,
+            &Sequential,
+        );
+        assert_eq!(result, vec![false; 4]);
+    }
+
+    #[test]
+    fn test_bisect_single_valid() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let cert = make_certificate(&schemes, MESSAGE);
+        let subject = Subj { message: MESSAGE };
+        let pairs = vec![(subject, &cert)];
+        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &pairs,
+            &Sequential,
+        );
+        assert_eq!(result, vec![true]);
+    }
+
+    #[test]
+    fn test_bisect_single_invalid() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let cert = make_certificate(&schemes, MESSAGE);
+        let bad = Subj {
+            message: BAD_MESSAGE,
+        };
+        let pairs = vec![(bad, &cert)];
+        let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            &pairs,
+            &Sequential,
+        );
+        assert_eq!(result, vec![false]);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::{ed25519_fixture::Scheme, *};
+        use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Signers>,
