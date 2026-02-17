@@ -40,7 +40,10 @@ where
             })
             .collect();
 
-        if let Ok(map) = pairs.into_iter().try_collect::<Map<PublicKey, PrivateKey>>() {
+        if let Ok(map) = pairs
+            .into_iter()
+            .try_collect::<Map<PublicKey, PrivateKey>>()
+        {
             return map;
         }
     }
