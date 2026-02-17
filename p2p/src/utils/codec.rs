@@ -204,6 +204,9 @@ where
         select_loop! {
             self.context,
             on_start => {
+                // Drain completed decode tasks when:
+                // - the pool is at capacity (backpressure), or
+                // - the network receiver closed and we're flushing remaining tasks
                 let mut saw_error = false;
                 while decode_pool.len() >= self.max_concurrency
                     || (receiver_closed && !decode_pool.is_empty())
@@ -219,9 +222,11 @@ where
                 }
             },
             on_stopped => {},
+            // Process decode completions as they arrive
             Ok(result) = decode_pool.next_completed() else break => {
                 Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
             },
+            // Receive raw bytes and spawn a decode task on a shared (CPU) thread
             Ok((peer, bytes)) = self.receiver.recv() else {
                 receiver_closed = true;
                 continue;
