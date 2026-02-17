@@ -61,15 +61,15 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 enum PendingVerification<S: CertificateScheme, B: Block> {
-    Finalized {
-        height: Height,
-        finalization: Finalization<S, B::Commitment>,
-        block: B,
-        response: oneshot::Sender<bool>,
-    },
     Notarized {
         round: Round,
         notarization: Notarization<S, B::Commitment>,
+        block: B,
+        response: oneshot::Sender<bool>,
+    },
+    Finalized {
+        height: Height,
+        finalization: Finalization<S, B::Commitment>,
         block: B,
         response: oneshot::Sender<bool>,
     },
