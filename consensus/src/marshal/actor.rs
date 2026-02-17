@@ -411,7 +411,7 @@ where
                             .await;
 
                         // Search for block locally, otherwise fetch it remotely
-                        if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                        if let Some(block) = self.find_block(&buffer, commitment).await {
                             // If found, persist the block
                             self.cache_block(round, commitment, block).await;
                         } else {
@@ -428,7 +428,7 @@ where
                             .await;
 
                         // Search for block locally, otherwise fetch it remotely
-                        if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                        if let Some(block) = self.find_block(&buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
                             self.store_finalization(
@@ -455,7 +455,7 @@ where
                         response,
                     } => match identifier {
                         BlockID::Commitment(commitment) => {
-                            let result = self.find_block(&mut buffer, commitment).await;
+                            let result = self.find_block(&buffer, commitment).await;
                             response.send_lossy(result);
                         }
                         BlockID::Height(height) => {
@@ -465,7 +465,7 @@ where
                         BlockID::Latest => {
                             let block = match self.get_latest().await {
                                 Some((_, commitment, _)) => {
-                                    self.find_block(&mut buffer, commitment).await
+                                    self.find_block(&buffer, commitment).await
                                 }
                                 None => None,
                             };
@@ -497,7 +497,7 @@ where
                         response,
                     } => {
                         // Check for block locally
-                        if let Some(block) = self.find_block(&mut buffer, commitment).await {
+                        if let Some(block) = self.find_block(&buffer, commitment).await {
                             response.send_lossy(block);
                             continue;
                         }
