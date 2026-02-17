@@ -403,9 +403,11 @@ where
         // Prune the ops log.
         self.any.prune(prune_loc).await?;
 
-        // Discard historical bitmap commits fully before the prune point.
-        // Historical proofs for sizes below prune_loc are impossible.
-        self.status.prune_commits_before(*prune_loc);
+        // Discard historical bitmap commits at or before the prune point.
+        // A commit at `prune_loc` represents the bitmap when the log had
+        // `prune_loc` operations (locations `0..prune_loc`), all of which are
+        // now pruned from the ops log, making that commit unreachable.
+        self.status.prune_commits_before(*prune_loc + 1);
 
         // Advance the grafted MMR's pruning boundary to the oldest surviving
         // commit's pruned_chunks. Peaks needed by surviving commits remain
