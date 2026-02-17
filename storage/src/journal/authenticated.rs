@@ -79,7 +79,7 @@ where
     /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
     /// meaning recovery will be required on startup if we crash before `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
-        self.journal.commit().await.map_err(Into::into)
+        self.journal.commit().await.map_err(Error::Journal)
     }
 }
 

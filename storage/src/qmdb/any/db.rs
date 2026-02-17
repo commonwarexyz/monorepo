@@ -241,12 +241,12 @@ where
 
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error> {
-        self.log.sync().await.map_err(|e| e.into())
+        self.log.sync().await.map_err(Into::into)
     }
 
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(|e| e.into())
+        self.log.destroy().await.map_err(Into::into)
     }
 
     /// Convert this database into a mutable state.
