@@ -631,16 +631,19 @@ where
                     &mut application,
                 ).await;
 
+                // Attempt to fill gaps before handling produce requests
+                // so that produce can find recently repaired data
+                needs_sync |= self
+                    .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                    .await;
+
                 // Handle produce requests in parallel after pending items are stored
                 futures::future::join_all(produces.into_iter().map(|(key, response)| {
                     self.handle_produce(key, response, &buffer)
                 })).await;
 
-                // If any blocks were stored, attempt to fill gaps and sync
+                // Sync archives if any blocks were stored or gaps repaired
                 if needs_sync {
-                    let _ = self
-                        .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-                        .await;
                     self.sync_finalization_archives().await;
                 }
             },
