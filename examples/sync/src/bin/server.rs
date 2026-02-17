@@ -300,12 +300,63 @@ where
     }
 }
 
+/// Receive loop: reads frames from the stream, dispatches handlers, and exits
+/// when the stream closes. Runs as a dedicated task so that `recv_frame` is
+/// never cancelled by `select!` (cancelling a partially-read frame corrupts
+/// the stream).
+async fn recv_loop<DB, E>(
+    context: E,
+    state: Arc<State<DB>>,
+    mut stream: StreamOf<E>,
+    response_sender: mpsc::Sender<wire::Message<DB::Operation, Key>>,
+    client_addr: SocketAddr,
+) where
+    DB: Syncable + Send + Sync + 'static,
+    DB::Operation: Read<Cfg = ()> + Send,
+    E: Metrics + Network + Spawner,
+{
+    loop {
+        let message_data = match recv_frame(&mut stream, MAX_MESSAGE_SIZE).await {
+            Ok(data) => data,
+            Err(err) => {
+                debug!(?err, client_addr = %client_addr, "client disconnected");
+                return;
+            }
+        };
+
+        let message = match wire::Message::decode(message_data.coalesce()) {
+            Ok(msg) => msg,
+            Err(err) => {
+                warn!(client_addr = %client_addr, ?err, "failed to parse message");
+                state.error_counter.inc();
+                continue;
+            }
+        };
+
+        context.with_label("request_handler").spawn({
+            let state = state.clone();
+            let response_sender = response_sender.clone();
+            move |_| async move {
+                let response = handle_message::<DB>(&state, message).await;
+                if let Err(err) = response_sender.send(response).await {
+                    warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
+                }
+            }
+        });
+    }
+}
+
 /// Handle a client connection with concurrent request processing.
+///
+/// Splits into a recv task and a send loop. The recv task reads frames from the
+/// stream without cancellation (avoiding BufReader corruption from `select!`
+/// dropping an in-progress `recv_frame`). The send loop reads responses from
+/// the handler channel and writes them to the sink.
 async fn handle_client<DB, E>(
     context: E,
     state: Arc<State<DB>>,
     mut sink: SinkOf<E>,
-    mut stream: StreamOf<E>,
+    stream: StreamOf<E>,
     client_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -315,62 +366,31 @@ where
 {
     info!(client_addr = %client_addr, "client connected");
 
-    // Wait until we receive a message from the client or we have a response to send.
     let (response_sender, mut response_receiver) =
         mpsc::channel::<wire::Message<DB::Operation, Key>>(RESPONSE_BUFFER_SIZE);
-    select_loop! {
-        context,
-        on_stopped => {
-            debug!("context shutdown, closing client connection");
-        },
-        incoming = recv_frame(&mut stream, MAX_MESSAGE_SIZE) => {
-            match incoming {
-                Ok(message_data) => {
-                    // Parse the message.
-                    let message = match wire::Message::decode(message_data.coalesce()) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(client_addr = %client_addr, ?err, "failed to parse message");
-                            state.error_counter.inc();
-                            continue;
-                        }
-                    };
 
-                    // Start a new task to handle the message.
-                    // The response will be sent on `response_sender`.
-                    context.with_label("request_handler").spawn({
-                        let state = state.clone();
-                        let response_sender = response_sender.clone();
-                        move |_| async move {
-                            let response = handle_message::<DB>(&state, message).await;
-                            if let Err(err) = response_sender.send(response).await {
-                                warn!(client_addr = %client_addr, ?err, "failed to send response to main loop");
-                            }
-                        }
-                    });
-                }
-                Err(err) => {
-                    info!(client_addr = %client_addr, ?err, "recv failed (client likely disconnected)");
-                    state.error_counter.inc();
-                    return Ok(());
-                }
-            }
-        },
+    // Spawn a dedicated recv task so recv_frame is never cancelled.
+    let recv_handle = context.with_label("recv").spawn({
+        let context = context.with_label("recv");
+        let state = state.clone();
+        let response_sender = response_sender.clone();
+        move |_| recv_loop::<DB, E>(context, state, stream, response_sender, client_addr)
+    });
 
-        Some(response) = response_receiver.recv() else {
-            // Channel closed
-            return Ok(());
-        } => {
-            // We have a response to send to the client.
-            let response_data = response.encode();
-            if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
-                info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
-                state.error_counter.inc();
-                return Ok(());
-            }
-        },
+    // Drop our copy so the channel closes when the recv task's senders are all dropped.
+    drop(response_sender);
+
+    // Send loop: forward responses to the client.
+    while let Some(response) = response_receiver.recv().await {
+        let response_data = response.encode();
+        if let Err(err) = send_frame(&mut sink, response_data, MAX_MESSAGE_SIZE).await {
+            info!(client_addr = %client_addr, ?err, "send failed (client likely disconnected)");
+            state.error_counter.inc();
+            break;
+        }
     }
 
+    recv_handle.abort();
     Ok(())
 }
 
