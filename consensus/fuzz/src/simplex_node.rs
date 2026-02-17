@@ -17,9 +17,7 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Monitor, Viewable,
 };
-use commonware_cryptography::{
-    ed25519::PublicKey as Ed25519PublicKey, sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Metrics, Runner};
@@ -113,21 +111,22 @@ enum CertificateKey {
 
 struct NodeDriver<S>
 where
-    S: SimplexScheme<Sha256Digest, PublicKey = Ed25519PublicKey>,
+    S: SimplexScheme<Sha256Digest>,
+    S::PublicKey: Send + Sync + 'static,
 {
     context: deterministic::Context,
-    honest: Ed25519PublicKey,
+    honest: S::PublicKey,
     relay: std::sync::Arc<
-        commonware_consensus::simplex::mocks::relay::Relay<Sha256Digest, Ed25519PublicKey>,
+        commonware_consensus::simplex::mocks::relay::Relay<Sha256Digest, S::PublicKey>,
     >,
-    byzantine_participants: Vec<Ed25519PublicKey>,
+    byzantine_participants: Vec<S::PublicKey>,
     schemes: Vec<S>,
-    vote_senders: Vec<simulated::Sender<Ed25519PublicKey, deterministic::Context>>,
-    certificate_senders: Vec<simulated::Sender<Ed25519PublicKey, deterministic::Context>>,
-    resolver_senders: Vec<simulated::Sender<Ed25519PublicKey, deterministic::Context>>,
-    vote_receivers: Vec<simulated::Receiver<Ed25519PublicKey>>,
-    certificate_receivers: Vec<simulated::Receiver<Ed25519PublicKey>>,
-    resolver_receivers: Vec<simulated::Receiver<Ed25519PublicKey>>,
+    vote_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+    certificate_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+    resolver_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+    vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+    certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+    resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     strategy: SmallScope,
 
     last_view: u64,
@@ -151,23 +150,24 @@ where
 
 impl<S> NodeDriver<S>
 where
-    S: SimplexScheme<Sha256Digest, PublicKey = Ed25519PublicKey>,
+    S: SimplexScheme<Sha256Digest>,
+    S::PublicKey: Send + Sync + 'static,
 {
     #[allow(clippy::too_many_arguments)]
     fn new(
         context: deterministic::Context,
-        honest: Ed25519PublicKey,
+        honest: S::PublicKey,
         relay: std::sync::Arc<
-            commonware_consensus::simplex::mocks::relay::Relay<Sha256Digest, Ed25519PublicKey>,
+            commonware_consensus::simplex::mocks::relay::Relay<Sha256Digest, S::PublicKey>,
         >,
-        byzantine_participants: Vec<Ed25519PublicKey>,
+        byzantine_participants: Vec<S::PublicKey>,
         schemes: Vec<S>,
-        vote_senders: Vec<simulated::Sender<Ed25519PublicKey, deterministic::Context>>,
-        certificate_senders: Vec<simulated::Sender<Ed25519PublicKey, deterministic::Context>>,
-        resolver_senders: Vec<simulated::Sender<Ed25519PublicKey, deterministic::Context>>,
-        vote_receivers: Vec<simulated::Receiver<Ed25519PublicKey>>,
-        certificate_receivers: Vec<simulated::Receiver<Ed25519PublicKey>>,
-        resolver_receivers: Vec<simulated::Receiver<Ed25519PublicKey>>,
+        vote_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+        certificate_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+        resolver_senders: Vec<simulated::Sender<S::PublicKey, deterministic::Context>>,
+        vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+        certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+        resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     ) -> Self {
         Self {
             context,
@@ -499,7 +499,7 @@ where
         }
     }
 
-    fn handle_honest_votes(&mut self, sender: &Ed25519PublicKey, bytes: Vec<u8>) {
+    fn handle_honest_votes(&mut self, sender: &S::PublicKey, bytes: Vec<u8>) {
         if sender != &self.honest {
             return;
         }
@@ -615,8 +615,7 @@ where
         }
 
         for idx in 0..self.resolver_receivers.len() {
-            while let Some(Ok((_, msg))) = self.resolver_receivers[idx].recv().now_or_never()
-            {
+            while let Some(Ok((_, msg))) = self.resolver_receivers[idx].recv().now_or_never() {
                 let bytes: Vec<u8> = msg.into();
                 self.handle_resolvers(idx, bytes).await;
             }
