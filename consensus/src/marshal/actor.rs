@@ -589,18 +589,16 @@ where
                 break;
             } => {
                 let mut needs_sync = false;
-                let mut remaining = self.max_repair.get();
-                let mut deliveries = Vec::with_capacity(remaining);
-                let mut produces = Vec::with_capacity(remaining);
-                let mut message = Some(message);
 
                 // Drain up to max_repair messages: blocks handled immediately,
                 // certificates batched for verification, produces deferred.
-                while remaining > 0 {
-                    let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) else {
-                        break;
-                    };
-                    remaining -= 1;
+                let msgs: Vec<_> = std::iter::once(message)
+                    .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
+                    .take(self.max_repair.get())
+                    .collect();
+                let mut deliveries = Vec::with_capacity(msgs.len());
+                let mut produces = Vec::with_capacity(msgs.len());
+                for msg in msgs {
                     match msg {
                         handler::Message::Produce { key, response } => {
                             produces.push((key, response));
