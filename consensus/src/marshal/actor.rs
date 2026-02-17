@@ -946,13 +946,13 @@ where
     /// This does NOT advance `last_processed_height` or sync metadata. It only
     /// sends the block to the application and stores a [PendingAck]. The
     /// metadata is updated later, in a subsequent `select_loop!` iteration,
-    /// when the ack arrives and [handle_block_processed] calls
-    /// [set_processed_height].
+    /// when the ack arrives and [`Self::handle_block_processed`] calls
+    /// [`Self::set_processed_height`].
     ///
     /// # Crash safety
     ///
     /// Because `select_loop!` arms run to completion, the caller's
-    /// [sync_finalized] always executes before the ack handler runs. This
+    /// [`Self::sync_finalized`] always executes before the ack handler runs. This
     /// guarantees archive data is durable before `last_processed_height`
     /// advances:
     ///
@@ -1047,9 +1047,9 @@ where
     /// Sync both finalization archives to durable storage.
     ///
     /// Must be called within the same `select_loop!` arm as any preceding
-    /// [store_finalization] / [try_repair_gaps] writes, before yielding back
+    /// [`Self::store_finalization`] / [`Self::try_repair_gaps`] writes, before yielding back
     /// to the loop. This ensures archives are durable before the ack handler
-    /// advances `last_processed_height`. See [try_dispatch_block] for details.
+    /// advances `last_processed_height`. See [`Self::try_dispatch_block`] for details.
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
@@ -1103,7 +1103,7 @@ where
     /// Writes are buffered and not synced. The caller must call
     /// [sync_finalized](Self::sync_finalized) before yielding to the
     /// `select_loop!` so that archive data is durable before the ack handler
-    /// advances `last_processed_height`. See [try_dispatch_block] for the
+    /// advances `last_processed_height`. See [`Self::try_dispatch_block`] for the
     /// crash safety invariant.
     async fn store_finalization(
         &mut self,
@@ -1271,9 +1271,9 @@ where
     /// Sets the processed height in storage, metrics, and in-memory state. Also cancels any
     /// outstanding requests below the new processed height.
     ///
-    /// This durably syncs `last_processed_height` via [put_sync]. It must only
-    /// be called after [sync_finalized] has made the corresponding archive
-    /// writes durable. See [try_dispatch_block] for the crash safety invariant.
+    /// This durably syncs `last_processed_height` via [`Metadata::put_sync`]. It must only
+    /// be called after [`Self::sync_finalized`] has made the corresponding archive
+    /// writes durable. See [`Self::try_dispatch_block`] for the crash safety invariant.
     async fn set_processed_height(
         &mut self,
         height: Height,
