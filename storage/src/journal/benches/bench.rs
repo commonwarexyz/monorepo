@@ -1,9 +1,12 @@
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
-    journal::contiguous::{
-        fixed::{Config as FixedConfig, Journal as FixedJournal},
-        variable::{Config as VariableConfig, Journal as VariableJournal},
-        Mutable,
+    journal::{
+        contiguous::{
+            fixed::{Config as FixedConfig, Journal as FixedJournal},
+            variable::{Config as VariableConfig, Journal as VariableJournal},
+            Mutable,
+        },
+        Error as JournalError,
     },
     Persistable,
 };
@@ -61,8 +64,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
 /// Append `items_to_write` random items to the given fixed journal, syncing the changes before returning.
 async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(journal: &mut C, items_to_write: u64)
 where
-    C: Mutable<Item = FixedBytes<ITEM_SIZE>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = FixedBytes<ITEM_SIZE>> + Persistable<Error = JournalError>,
 {
     // Append `items_to_write` random items to the journal.
     let mut rng = StdRng::seed_from_u64(0);
