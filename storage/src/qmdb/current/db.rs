@@ -806,6 +806,15 @@ where
         self.root()
     }
 
+    async fn proof(
+        &self,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+    ) -> Result<Self::Proof, Error> {
+        let mut hasher = H::new();
+        self.range_proof(&mut hasher, start_loc, max_ops).await
+    }
+
     async fn historical_proof(
         &self,
         historical_size: Location,
