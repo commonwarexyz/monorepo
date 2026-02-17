@@ -411,7 +411,7 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
             let faults = ctx.storage_fault_config();
-            *faults.write().unwrap() = fault_config;
+            *faults.write() = fault_config;
 
             run_operations(&mut queue, &operations).await
         }
@@ -421,7 +421,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::from(checkpoint);
     runner.start(|ctx| async move {
         // Disable fault injection for recovery verification
-        *ctx.storage_fault_config().write().unwrap() = deterministic::FaultConfig::default();
+        *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let queue_cfg = Config {
             partition: partition_name,

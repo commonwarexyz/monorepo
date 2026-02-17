@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("Commit should not fail");
                     let clean_db = durable_db.into_merkleized();
-                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root().await);
+                    historical_roots.insert(clean_db.bounds().await.end, clean_db.root());
                     db = clean_db.into_mutable();
                 }
 
@@ -225,7 +225,7 @@ fn fuzz(input: FuzzInput) {
 
                     let clean_db = db.into_merkleized();
                     if let Ok((proof, log)) = clean_db.proof(*start_loc, *max_ops).await {
-                        let root = clean_db.root().await;
+                        let root = clean_db.root();
                         assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
                     }
                     db = clean_db.into_mutable();
@@ -275,7 +275,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     let clean_db = db.into_merkleized();
-                    let _ = clean_db.root().await;
+                    let _ = clean_db.root();
                     db = clean_db.into_mutable();
                 }
 

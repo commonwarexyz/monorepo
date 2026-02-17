@@ -5,7 +5,10 @@
 use crate::{
     bitmap::partial_chunk_root,
     index::Unordered as UnorderedIndex,
-    journal::contiguous::{Contiguous, Mutable, Persistable as JournalPersistable, Reader as _},
+    journal::{
+        contiguous::{Contiguous, Mutable, Reader as _},
+        Error as JournalError,
+    },
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
@@ -39,6 +42,7 @@ use commonware_utils::{
         Prunable as BitMap,
     },
     sequence::prefixed_u64::U64,
+    sync::AsyncMutex,
     Array,
 };
 use core::{num::NonZeroU64, ops::Range};
@@ -125,10 +129,10 @@ pub struct Db<
     /// `pruned_chunks >= boundary` and their peaks remain accessible.
     pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
 
-    /// Persists the grafted MMR pruning state across restarts:
-    /// - [PRUNED_CHUNKS_PREFIX]: number of pruned bitmap chunks
-    /// - [NODE_PREFIX]: grafted MMR peak digests covering the pruned region (pinned nodes)
-    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
+    /// Persists:
+    /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
+    /// - The grafted MMR pinned nodes at key [NODE_PREFIX]
+    pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
 
     /// Optional thread pool for parallelizing grafted leaf computation.
     pub(super) thread_pool: Option<ThreadPool>,
@@ -426,19 +430,19 @@ where
         Ok(())
     }
 
-    /// Persist the grafted MMR pruning state to the metadata store.
-    async fn sync_metadata(&mut self) -> Result<(), Error> {
-        self.metadata.clear();
+    /// Sync the grafted MMR pruning state to the metadata store.
+    async fn sync_metadata(&self) -> Result<(), Error> {
+        let mut metadata = self.metadata.lock().await;
+        metadata.clear();
 
         // Write the number of pruned chunks.
+        let pruned_chunks = self.status.current().pruned_chunks() as u64;
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        let pruned_chunks = self.status.current().pruned_chunks();
-        self.metadata
-            .put(key, (pruned_chunks as u64).to_be_bytes().to_vec());
+        metadata.put(key, pruned_chunks.to_be_bytes().to_vec());
 
         // Write the grafted MMR pinned nodes. These are the ops-space peaks covering the
         // pruned portion of the bitmap.
-        let pruned_ops = (pruned_chunks as u64)
+        let pruned_ops = pruned_chunks
             .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
             .ok_or_else(|| Error::DataCorrupted("pruned ops overflow"))?;
         let ops_mmr_size = Position::try_from(Location::new_unchecked(pruned_ops))?;
@@ -450,13 +454,10 @@ where
                 .get_node(grafted_pos)
                 .ok_or(mmr::Error::MissingNode(ops_pos))?;
             let key = U64::new(NODE_PREFIX, i as u64);
-            self.metadata.put(key, digest.to_vec());
+            metadata.put(key, digest.to_vec());
         }
 
-        self.metadata
-            .sync()
-            .await
-            .map_err(mmr::Error::MetadataError)?;
+        metadata.sync().await.map_err(mmr::Error::MetadataError)?;
 
         Ok(())
     }
@@ -469,13 +470,13 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
     /// Sync all database state to disk.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.any.sync().await?;
 
         // Write the bitmap pruning boundary to disk so that next startup doesn't have to
@@ -486,7 +487,7 @@ where
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error> {
         // Clean up bitmap metadata partition.
-        self.metadata.destroy().await?;
+        self.metadata.into_inner().destroy().await?;
 
         // Clean up Any components (MMR and log).
         self.any.destroy().await
@@ -644,7 +645,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -758,20 +759,20 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         // No-op, DB already in recoverable state.
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+    async fn sync(&self) -> Result<(), Error> {
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -801,7 +802,7 @@ where
         Vec<[u8; N]>,
     );
 
-    async fn root(&self) -> H::Digest {
+    fn root(&self) -> H::Digest {
         self.root()
     }
 
@@ -1033,7 +1034,7 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {
     let metadata_cfg = MConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         codec_config: ((0..).into(), ()),
     };
     let metadata =

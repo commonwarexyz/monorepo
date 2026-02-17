@@ -1,8 +1,9 @@
 #[cfg(any(test, feature = "test-traits"))]
-use crate::journal::contiguous::Persistable as JournalPersistable;
-#[cfg(any(test, feature = "test-traits"))]
 use crate::qmdb::{
-    any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
+    any::states::{
+        CleanAny, MerkleizedNonDurableAny, MutableAny, PersistableMutableLog,
+        UnmerkleizedDurableAny,
+    },
     Durable, Merkleized,
 };
 use crate::{
@@ -554,7 +555,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -574,7 +575,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -601,7 +602,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -620,7 +621,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -706,11 +707,11 @@ mod test {
         // uncommitted op, and even without a clean shutdown.
         let d1 = Sha256::fill(1u8);
         let d2 = Sha256::fill(2u8);
-        let root = db.root().await;
+        let root = db.root();
         let mut db = db.into_mutable();
         db.write_batch([(d1, Some(d2))]).await.unwrap();
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
         assert_eq!(db.size().await, 1);
 
         // Test calling commit on an empty db.
@@ -722,7 +723,7 @@ mod test {
         assert_eq!(range.end, Location::new_unchecked(2));
         assert_eq!(db.size().await, 2); // floor op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        let root = db.root().await;
+        let root = db.root();
         assert!(matches!(
             db.prune(db.inactivity_floor_loc().await).await,
             Ok(())
@@ -732,7 +733,7 @@ mod test {
         let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.size().await, 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         let mut mutable_db = db.into_mutable();
@@ -830,10 +831,10 @@ mod test {
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
         let op_count = db.size().await;
-        let root = db.root().await;
+        let root = db.root();
         let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.size().await, op_count);
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
@@ -854,10 +855,10 @@ mod test {
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.size().await;
-        let root = db.root().await;
+        let root = db.root();
         let db = reopen_db(context.with_label("reopen2")).await;
 
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
         assert_eq!(db.size().await, op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
@@ -872,12 +873,12 @@ mod test {
             .await
             .unwrap();
 
-        assert!(db.root().await != root);
+        assert!(db.root() != root);
 
         // Pruning inactive ops should not affect current state or root.
-        let root = db.root().await;
+        let root = db.root();
         db.prune(db.inactivity_floor_loc().await).await.unwrap();
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
     }
@@ -898,11 +899,11 @@ mod test {
         // uncommitted op, and even without a clean shutdown.
         let d1 = FixedBytes::from([1u8; 4]);
         let d2 = Sha256::fill(2u8);
-        let root = db.root().await;
+        let root = db.root();
         let mut db = db.into_mutable();
         db.write_batch([(d1, Some(d2))]).await.unwrap();
         let db = reopen_db(context.with_label("reopen1")).await;
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
         assert_eq!(db.bounds().await.end, 1);
 
         // Test calling commit on an empty db.
@@ -914,7 +915,7 @@ mod test {
         assert_eq!(range.end, Location::new_unchecked(2));
         assert_eq!(db.bounds().await.end, 2); // floor op added
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        let root = db.root().await;
+        let root = db.root();
         assert!(matches!(
             db.prune(db.inactivity_floor_loc().await).await,
             Ok(())
@@ -924,7 +925,7 @@ mod test {
         let db = reopen_db(context.with_label("reopen2")).await;
         assert_eq!(db.bounds().await.end, 2);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         let mut mutable_db = db.into_mutable();
@@ -1017,10 +1018,10 @@ mod test {
         let db = db.commit(None).await.unwrap().0;
         let db = db.into_merkleized().await.unwrap();
         let op_count = db.bounds().await.end;
-        let root = db.root().await;
+        let root = db.root();
         let db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.bounds().await.end, op_count);
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
         let mut db = db.into_mutable();
 
         // Re-activate the keys by updating them.
@@ -1035,10 +1036,10 @@ mod test {
 
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.bounds().await.end;
-        let root = db.root().await;
+        let root = db.root();
         let db = reopen_db(context.with_label("reopen2")).await;
 
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
         assert_eq!(db.bounds().await.end, op_count);
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
@@ -1047,12 +1048,12 @@ mod test {
         let db = db.commit(None).await.unwrap().0;
         let mut db = db.into_merkleized().await.unwrap();
 
-        assert!(db.root().await != root);
+        assert!(db.root() != root);
 
         // Pruning inactive ops should not affect current state or root.
-        let root = db.root().await;
+        let root = db.root();
         db.prune(db.inactivity_floor_loc().await).await.unwrap();
-        assert_eq!(db.root().await, root);
+        assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
     }

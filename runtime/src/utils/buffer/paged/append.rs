@@ -32,10 +32,11 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE},
         tip::Buffer,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut, RwLock, RwLockWriteGuard,
+    Blob, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
+use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -67,7 +68,7 @@ struct BlobState<B: Blob> {
 #[derive(Clone)]
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
-    blob_state: Arc<RwLock<BlobState<B>>>,
+    blob_state: Arc<AsyncRwLock<BlobState<B>>>,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -77,7 +78,7 @@ pub struct Append<B: Blob> {
 
     /// The write buffer containing any logical bytes following the last full page boundary in the
     /// underlying blob.
-    buffer: Arc<RwLock<Buffer>>,
+    buffer: Arc<AsyncRwLock<Buffer>>,
 }
 
 /// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
@@ -151,10 +152,10 @@ impl<B: Blob> Append<B> {
         }
 
         Ok(Self {
-            blob_state: Arc::new(RwLock::new(blob_state)),
-            id: cache_ref.next_id().await,
+            blob_state: Arc::new(AsyncRwLock::new(blob_state)),
+            id: cache_ref.next_id(),
             cache_ref,
-            buffer: Arc::new(RwLock::new(buffer)),
+            buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
     }
 
@@ -209,10 +210,10 @@ impl<B: Blob> Append<B> {
         buffer.immutable = true;
 
         Ok(Self {
-            blob_state: Arc::new(RwLock::new(blob_state)),
-            id: cache_ref.next_id().await,
+            blob_state: Arc::new(AsyncRwLock::new(blob_state)),
+            id: cache_ref.next_id(),
             cache_ref,
-            buffer: Arc::new(RwLock::new(buffer)),
+            buffer: Arc::new(AsyncRwLock::new(buffer)),
         })
     }
 
@@ -356,17 +357,16 @@ impl<B: Blob> Append<B> {
     /// to the blob as well along with a CRC record.
     async fn flush_internal(
         &self,
-        mut buf_guard: RwLockWriteGuard<'_, Buffer>,
+        mut buf_guard: AsyncRwLockWriteGuard<'_, Buffer>,
         write_partial_page: bool,
     ) -> Result<(), Error> {
         let buffer = &mut *buf_guard;
 
         // Cache the pages we are writing in the page cache so they remain cached for concurrent
         // reads while we flush the buffer.
-        let remaining_byte_count = self
-            .cache_ref
-            .cache(self.id, buffer.data.as_ref(), buffer.offset)
-            .await;
+        let remaining_byte_count =
+            self.cache_ref
+                .cache(self.id, buffer.data.as_ref(), buffer.offset);
 
         // Read the old partial page state before doing the heavy work of preparing physical pages.
         // This is safe because partial_page_state is only modified by flush_internal, and we hold
@@ -556,8 +556,7 @@ impl<B: Blob> Append<B> {
         // concurrent reads even while a flush is in progress.
         let cached = self
             .cache_ref
-            .read_cached(self.id, &mut buf[..remaining], logical_offset)
-            .await;
+            .read_cached(self.id, &mut buf[..remaining], logical_offset);
 
         if cached == remaining {
             // All bytes found in cache.

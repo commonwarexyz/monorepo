@@ -1,8 +1,14 @@
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
-use commonware_storage::journal::contiguous::{
-    fixed::{Config as FixedConfig, Journal as FixedJournal},
-    variable::{Config as VariableConfig, Journal as VariableJournal},
-    Mutable, Persistable,
+use commonware_storage::{
+    journal::{
+        contiguous::{
+            fixed::{Config as FixedConfig, Journal as FixedJournal},
+            variable::{Config as VariableConfig, Journal as VariableJournal},
+            Mutable,
+        },
+        Error as JournalError,
+    },
+    Persistable,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use criterion::criterion_main;
@@ -47,7 +53,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
 ) -> FixedJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = FixedConfig {
-        partition: partition_name.to_string(),
+        partition: partition_name.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -58,7 +64,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
 /// Append `items_to_write` random items to the given fixed journal, syncing the changes before returning.
 async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(journal: &mut C, items_to_write: u64)
 where
-    C: Mutable<Item = FixedBytes<ITEM_SIZE>> + Persistable,
+    C: Mutable<Item = FixedBytes<ITEM_SIZE>> + Persistable<Error = JournalError>,
 {
     // Append `items_to_write` random items to the journal.
     let mut rng = StdRng::seed_from_u64(0);
@@ -83,7 +89,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
 ) -> VariableJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = VariableConfig {
-        partition: partition_name.to_string(),
+        partition: partition_name.into(),
         items_per_section,
         compression: None,
         codec_config: (),

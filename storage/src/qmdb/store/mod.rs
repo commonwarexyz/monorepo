@@ -82,7 +82,7 @@ pub trait MerkleizedStore: LogStore {
     type Proof: Send;
 
     /// Returns the root digest of the authenticated store.
-    fn root(&self) -> impl Future<Output = Self::Digest> + Send;
+    fn root(&self) -> Self::Digest;
 
     /// Generate and return a proof of all operations applied to the store in the range starting at
     /// (and including) location `start_loc`, and ending at the first of either:

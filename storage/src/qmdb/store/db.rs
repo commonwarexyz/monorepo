@@ -30,7 +30,7 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_partition: "test-partition".to_string(),
+//!         log_partition: "test-partition".into(),
 //!         log_write_buffer: NZUsize!(64 * 1024),
 //!         log_compression: None,
 //!         log_codec_config: (),
@@ -344,7 +344,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -481,12 +481,12 @@ where
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         // No-op, DB already in recoverable state.
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.sync().await
     }
 
@@ -593,7 +593,7 @@ mod test {
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
-            log_partition: "journal".to_string(),
+            log_partition: "journal".into(),
             log_write_buffer: NZUsize!(64 * 1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
@@ -803,7 +803,7 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -852,7 +852,7 @@ mod test {
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
 
-            let (mut db, _) = db.commit(None).await.unwrap();
+            let (db, _) = db.commit(None).await.unwrap();
             db.sync().await.unwrap();
             drop(db);
 
@@ -1056,7 +1056,7 @@ mod test {
             assert_eq!(db.bounds().await.end, op_count);
 
             // Sync and reopen the store to ensure the final commit is preserved.
-            let mut db = db;
+            let db = db;
             db.sync().await.unwrap();
             drop(db);
             let mut db = create_test_store(context.with_label("store_4"))

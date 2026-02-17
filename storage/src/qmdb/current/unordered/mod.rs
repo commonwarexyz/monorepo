@@ -54,12 +54,12 @@ pub mod tests {
             assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
             assert_eq!(db.inactivity_floor_loc().await, Location::new_unchecked(0));
             assert_eq!(db.oldest_retained().await, 0);
-            let root0 = db.root().await;
+            let root0 = db.root();
             drop(db);
             let db: C = open_db(context.with_label("second"), partition.clone()).await;
             assert_eq!(db.bounds().await.end, Location::new_unchecked(1));
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root().await, root0);
+            assert_eq!(db.root(), root0);
 
             // Add one key.
             let mut db = db.into_mutable();
@@ -74,13 +74,13 @@ pub mod tests {
             assert_eq!(*range.end, 4);
             assert!(db.get_metadata().await.unwrap().is_none());
             assert_eq!(db.bounds().await.end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 move + 1 initial commit.
-            let root1 = db.root().await;
+            let root1 = db.root();
             assert_ne!(root1, root0);
             drop(db);
             let db: C = open_db(context.with_label("third"), partition.clone()).await;
             assert_eq!(db.bounds().await.end, Location::new_unchecked(4)); // 1 update, 1 commit, 1 moves + 1 initial commit.
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root().await, root1);
+            assert_eq!(db.root(), root1);
 
             // Create of same key should fail (key already exists).
             let mut db = db.into_mutable();
@@ -96,17 +96,17 @@ pub mod tests {
             assert_eq!(*range.end, 6);
             assert_eq!(db.bounds().await.end, Location::new_unchecked(6)); // 1 update, 2 commits, 1 move, 1 delete.
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
-            let root2 = db.root().await;
+            let root2 = db.root();
 
             // Repeated delete of same key should fail (key already deleted).
             let db = db.into_mutable();
             assert!(db.get(&k1).await.unwrap().is_none());
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             // Commit adds a commit even for no-op, so op_count increases and root changes.
             assert_eq!(db.bounds().await.end, Location::new_unchecked(7));
-            let root3 = db.root().await;
+            let root3 = db.root();
             assert_ne!(root3, root2);
 
             // Confirm re-open preserves state.
@@ -115,7 +115,7 @@ pub mod tests {
             assert_eq!(db.bounds().await.end, Location::new_unchecked(7));
             // Last commit had no metadata (passed None to commit).
             assert!(db.get_metadata().await.unwrap().is_none());
-            assert_eq!(db.root().await, root3);
+            assert_eq!(db.root(), root3);
 
             // Confirm all activity bits are false except for the last commit.
             let bounds = db.bounds().await;
@@ -129,7 +129,7 @@ pub mod tests {
             db.write_batch([(k1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db: C = db.into_merkleized().await.unwrap();
-            assert_ne!(db.root().await, root3);
+            assert_ne!(db.root(), root3);
 
             db.destroy().await.unwrap();
         });

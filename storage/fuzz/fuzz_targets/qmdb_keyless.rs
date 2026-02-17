@@ -211,7 +211,7 @@ fn fuzz(input: FuzzInput) {
 
                 Operation::Root => {
                     let merkleized_db = db.into_merkleized();
-                    let _ = merkleized_db.root().await;
+                    let _ = merkleized_db.root();
                     db = merkleized_db.into_mutable();
                 }
 
@@ -227,7 +227,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
                     let start_loc = Location::new(start_loc).unwrap();
-                    let root = merkleized_db.root().await;
+                    let root = merkleized_db.root();
                     if let Ok((proof, ops)) = merkleized_db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
                                 verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
@@ -252,7 +252,7 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = (*start_offset as u64) % *size;
                     let start_loc = Location::new(start_loc).unwrap();
                     let max_ops_value = ((*max_ops as u64) % MAX_PROOF_OPS) + 1;
-                    let root = merkleized_db.root().await;
+                    let root = merkleized_db.root();
                     if let Ok((proof, ops)) = merkleized_db
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {

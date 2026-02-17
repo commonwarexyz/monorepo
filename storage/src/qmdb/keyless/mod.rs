@@ -182,8 +182,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher>
     }
 
     /// Return the root of the db.
-    pub async fn root(&self) -> H::Digest {
-        self.journal.root().await
+    pub fn root(&self) -> H::Digest {
+        self.journal.root()
     }
 
     /// Generate and return:
@@ -336,8 +336,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher, D: DurabilitySta
     type Operation = Operation<V>;
     type Proof = (Proof<H::Digest>, Vec<Operation<V>>);
 
-    async fn root(&self) -> Self::Digest {
-        self.journal.root().await
+    fn root(&self) -> Self::Digest {
+        self.journal.root()
     }
 
     async fn historical_proof(
@@ -437,12 +437,12 @@ mod test {
 
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let v1 = vec![1u8; 8];
-            let root = db.root().await;
+            let root = db.root();
             let mut db = db.into_mutable();
             db.append(v1).await.unwrap();
             drop(db); // Simulate failed commit
             let db = open_db(context.with_label("db2")).await;
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -457,13 +457,13 @@ mod test {
                 db.get(Location::new_unchecked(1)).await.unwrap(),
                 Some(metadata.clone())
             ); // the commit op
-            let root = db.root().await;
+            let root = db.root();
 
             // Commit op should remain after reopen even without clean shutdown.
             let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.bounds().await.end, 2); // commit op should remain after re-open.
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Location::new_unchecked(1));
 
             db.destroy().await.unwrap();
@@ -493,12 +493,12 @@ mod test {
             assert_eq!(db.bounds().await.end, 4); // 2 appends, 1 commit + 1 initial commit
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert_eq!(db.get(Location::new_unchecked(3)).await.unwrap(), None); // the commit op
-            let root = db.root().await;
+            let root = db.root();
             db.sync().await.unwrap();
             drop(db);
             let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.bounds().await.end, 4);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             assert_eq!(db.get(loc1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
@@ -511,13 +511,13 @@ mod test {
             drop(db); // Simulate failed commit
             let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.bounds().await.end, 4);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             // Make sure commit operation remains after drop/reopen.
             drop(db);
             let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.bounds().await.end, 4);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -537,7 +537,7 @@ mod test {
         const ELEMENTS: usize = 1000;
         executor.start(|mut context| async move {
             let db = open_db(context.with_label("db1")).await;
-            let root = db.root().await;
+            let root = db.root();
             let mut db = db.into_mutable();
 
             append_elements(&mut db, &mut context, ELEMENTS).await;
@@ -546,14 +546,14 @@ mod test {
             drop(db);
             // Should rollback to the previous root.
             let db = open_db(context.with_label("db2")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
             let db = durable.into_merkleized();
-            let root = db.root().await;
+            let root = db.root();
 
             // Append more values.
             let mut db = db.into_mutable();
@@ -563,20 +563,20 @@ mod test {
             drop(db);
             // Should rollback to the previous root.
             let db = open_db(context.with_label("db3")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
 
             // Re-apply the updates and commit them this time.
             let mut db = db.into_mutable();
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
             let db = durable.into_merkleized();
-            let root = db.root().await;
+            let root = db.root();
 
             // Make sure we can reopen and get back to the same state.
             drop(db);
             let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.bounds().await.end, 2 * ELEMENTS as u64 + 3);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -596,13 +596,13 @@ mod test {
             append_elements(&mut db, &mut context, ELEMENTS).await;
             let (durable, _) = db.commit(None).await.unwrap();
             let db = durable.into_merkleized();
-            let root = db.root().await;
+            let root = db.root();
             let op_count = db.bounds().await.end;
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.bounds().await.end, op_count);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), op_count - 1);
             drop(db);
 
@@ -621,7 +621,7 @@ mod test {
                 drop(db);
                 let db = open_db(context.with_label(label2)).await;
                 assert_eq!(db.bounds().await.end, op_count);
-                assert_eq!(db.root().await, root);
+                assert_eq!(db.root(), root);
             }
 
             recover_from_failure(context.with_label("recovery1"), "a", "b", root, op_count).await;
@@ -630,7 +630,7 @@ mod test {
             let mut db = open_db(context.with_label("db3")).await;
             db.prune(db.last_commit_loc()).await.unwrap();
             assert_eq!(db.bounds().await.end, op_count);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             db.sync().await.unwrap();
             drop(db);
 
@@ -643,7 +643,7 @@ mod test {
             let db = open_db(context.with_label("db5")).await;
             let bounds = db.bounds().await;
             assert!(bounds.end > op_count);
-            assert_ne!(db.root().await, root);
+            assert_ne!(db.root(), root);
             assert_eq!(db.last_commit_loc(), bounds.end - 1);
 
             db.destroy().await.unwrap();
@@ -658,12 +658,12 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let db = open_db(context.with_label("db1")).await;
-            let root = db.root().await;
+            let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.with_label("db2")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             async fn apply_ops(db: &mut MutableDb) {
                 for i in 0..ELEMENTS {
@@ -678,7 +678,7 @@ mod test {
             drop(db);
             let db = open_db(context.with_label("db3")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             // Repeat: simulate failure after inserting operations without a commit.
             let mut db = db.into_mutable();
@@ -686,7 +686,7 @@ mod test {
             drop(db);
             let db = open_db(context.with_label("db4")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
             let mut db = db.into_mutable();
@@ -696,7 +696,7 @@ mod test {
             drop(db);
             let db = open_db(context.with_label("db5")).await;
             assert_eq!(db.bounds().await.end, 1); // initial commit should exist
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.last_commit_loc(), Location::new_unchecked(0));
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -705,7 +705,7 @@ mod test {
             let (_db, _) = db.commit(None).await.unwrap();
             let db = open_db(context.with_label("db6")).await;
             assert!(db.bounds().await.end > 1);
-            assert_ne!(db.root().await, root);
+            assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -737,7 +737,7 @@ mod test {
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
-            let root = db.root().await;
+            let root = db.root();
 
             // Test proof generation for various ranges
             let test_cases = vec![
@@ -838,7 +838,7 @@ mod test {
             }
             let (durable, _) = db.commit(None).await.unwrap();
             let mut db = durable.into_merkleized();
-            let root = db.root().await;
+            let root = db.root();
 
             println!("last commit loc: {}", db.last_commit_loc());
 
@@ -851,7 +851,7 @@ mod test {
 
             // Root should remain the same after pruning
             assert_eq!(
-                db.root().await,
+                db.root(),
                 root,
                 "Root should not change after pruning"
             );
@@ -859,7 +859,7 @@ mod test {
             db.sync().await.unwrap();
             drop(db);
             let mut db = open_db(context.with_label("db2")).await;
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, 2 * ELEMENTS + 3);
             assert!(bounds.start <= PRUNE_LOC);
@@ -958,7 +958,7 @@ mod test {
             }
             let (durable, _) = db.commit(None).await.unwrap();
             let db = durable.into_merkleized();
-            let committed_root = db.root().await;
+            let committed_root = db.root();
             let committed_size = db.bounds().await.end;
 
             // Add exactly one more append (uncommitted)
@@ -978,11 +978,7 @@ mod test {
                 committed_size,
                 "Should rewind to last commit"
             );
-            assert_eq!(
-                db.root().await,
-                committed_root,
-                "Root should match last commit"
-            );
+            assert_eq!(db.root(), committed_root, "Root should match last commit");
             assert_eq!(
                 db.last_commit_loc(),
                 committed_size - 1,
@@ -1005,7 +1001,7 @@ mod test {
             // Test with multiple trailing appends to ensure robustness
             let (durable, _) = db.commit(None).await.unwrap();
             let db = durable.into_merkleized();
-            let new_committed_root = db.root().await;
+            let new_committed_root = db.root();
             let new_committed_size = db.bounds().await.end;
 
             // Add multiple uncommitted appends
@@ -1026,7 +1022,7 @@ mod test {
                 "Should rewind to last commit with multiple trailing appends"
             );
             assert_eq!(
-                db.root().await,
+                db.root(),
                 new_committed_root,
                 "Root should match last commit after multiple appends"
             );

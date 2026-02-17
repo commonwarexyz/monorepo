@@ -166,7 +166,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config {
-            partition: "queue-operations-fuzz-test".to_string(),
+            partition: "queue-operations-fuzz-test".into(),
             items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),

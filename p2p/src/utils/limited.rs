@@ -3,8 +3,8 @@
 use crate::{Recipients, UnlimitedSender};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
-use commonware_utils::channel::ring;
-use futures::{lock::Mutex, Future, FutureExt, StreamExt};
+use commonware_utils::{channel::ring, sync::Mutex};
+use futures::{Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer subscriptions for resolving [`Recipients::All`].
@@ -101,7 +101,7 @@ where
             self.peer_subscription = Some(self.peers.subscribe().await);
         }
 
-        let rate_limit = self.rate_limit.lock().await;
+        let rate_limit = self.rate_limit.lock();
 
         // Update known peers from subscription if available (non-blocking)
         if let Some(ref mut subscription) = self.peer_subscription {
@@ -239,7 +239,7 @@ mod tests {
         }
 
         async fn sent_messages(&self) -> Vec<SentMessage> {
-            self.sent.lock().await.clone()
+            self.sent.lock().clone()
         }
     }
 
@@ -259,7 +259,7 @@ mod tests {
                 Recipients::All => Vec::new(),
             };
             let message = message.into().coalesce();
-            self.sent.lock().await.push((recipients, message, priority));
+            self.sent.lock().push((recipients, message, priority));
             Ok(sent_to)
         }
     }

@@ -70,5 +70,5 @@ pub trait Database: Sized + Send {
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error>> + Send;
 
     /// Get the root digest of the database for verification
-    fn root(&self) -> impl Future<Output = Self::Digest> + Send;
+    fn root(&self) -> Self::Digest;
 }

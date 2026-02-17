@@ -312,7 +312,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         hasher: &mut impl MmrHasher<Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
-            partition: partition.to_string(),
+            partition: partition.into(),
             codec_config: ((0..).into(), ()),
         };
         let metadata =
