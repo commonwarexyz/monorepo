@@ -564,7 +564,12 @@ pub mod mocks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer as _};
     use commonware_codec::{Decode, Encode};
+    use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
+    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
+    use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]
     fn test_from_signers() {
@@ -641,12 +646,6 @@ mod tests {
         // Use the macro to generate the test scheme
         impl_certificate_ed25519!(TestSubject, Vec<u8>);
     }
-
-    use crate::{ed25519::PrivateKey, sha256::Digest as Sha256Digest, Signer as _};
-    use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::{ordered::Set, test_rng, N3f1, TryCollect};
-    use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     const NAMESPACE: &[u8] = b"test-bisect";
     const MESSAGE: &[u8] = b"good message";
