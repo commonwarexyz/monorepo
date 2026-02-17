@@ -26,6 +26,16 @@ pub trait Certificates: Send + Sync + 'static {
     ///
     /// Implementations must ignore overwrites for an existing finalization at the same
     /// height or commitment.
+    ///
+    /// # Arguments
+    ///
+    /// * `height`: The application height for this finalization.
+    /// * `commitment`: The block commitment for this finalization.
+    /// * `finalization`: The finalization certificate to store.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success, or `Err` if the write fails.
     fn put(
         &mut self,
         height: Height,

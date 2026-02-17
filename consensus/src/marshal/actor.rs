@@ -59,41 +59,6 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
-/// Mark entries as verified by iteratively bisecting failed ranges.
-///
-/// `verify_range(start, end)` should return true when all items in `[start, end)`
-/// are valid. Failed ranges are split until singleton leaves.
-fn bisect_verified<F>(len: usize, mut verify_range: F) -> Vec<bool>
-where
-    F: FnMut(usize, usize) -> bool,
-{
-    let mut verified = vec![false; len];
-    if len == 0 {
-        return verified;
-    }
-
-    let mut stack = vec![(0usize, len)];
-    while let Some((start, end)) = stack.pop() {
-        let width = end - start;
-        if width == 0 {
-            continue;
-        }
-
-        if verify_range(start, end) {
-            verified[start..end].fill(true);
-            continue;
-        }
-
-        if width > 1 {
-            let mid = start + width / 2;
-            stack.push((mid, end));
-            stack.push((start, mid));
-        }
-    }
-
-    verified
-}
-
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 enum PendingVerification<S: CertificateScheme, B: Block> {
     Finalized {
@@ -109,6 +74,9 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
         response: oneshot::Sender<bool>,
     },
 }
+
+/// A subject-certificate pair for batch verification.
+type CertificateSubject<'a, S, D> = (Subject<'a, D>, &'a <S as CertificateScheme>::Certificate);
 
 /// A pending acknowledgement from the application for processing a block at the contained height/commitment.
 #[pin_project]
@@ -853,14 +821,10 @@ where
     }
 
     /// Verify a batch of pending finalization/notarization certificates.
-    #[allow(clippy::type_complexity)]
     fn verify_pending_batch<'a>(
         &mut self,
         scheme: &P::Scheme,
-        batch: &[(
-            Subject<'a, B::Commitment>,
-            &'a <P::Scheme as CertificateScheme>::Certificate,
-        )],
+        batch: &[CertificateSubject<'a, P::Scheme, B::Commitment>],
     ) -> bool {
         scheme.verify_certificates::<_, B::Commitment, _, N3f1>(
             &mut self.context,
@@ -1317,6 +1281,41 @@ where
         )?;
         Ok(())
     }
+}
+
+/// Mark entries as verified by iteratively bisecting failed ranges.
+///
+/// `verify_range(start, end)` should return true when all items in `[start, end)`
+/// are valid. Failed ranges are split until singleton leaves.
+fn bisect_verified<F>(len: usize, mut verify_range: F) -> Vec<bool>
+where
+    F: FnMut(usize, usize) -> bool,
+{
+    let mut verified = vec![false; len];
+    if len == 0 {
+        return verified;
+    }
+
+    let mut stack = vec![(0usize, len)];
+    while let Some((start, end)) = stack.pop() {
+        let width = end - start;
+        if width == 0 {
+            continue;
+        }
+
+        if verify_range(start, end) {
+            verified[start..end].fill(true);
+            continue;
+        }
+
+        if width > 1 {
+            let mid = start + width / 2;
+            stack.push((mid, end));
+            stack.push((start, mid));
+        }
+    }
+
+    verified
 }
 
 #[cfg(test)]
