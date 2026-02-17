@@ -35,7 +35,6 @@ rand.workspace = true
 rand_core.workspace = true
 rayon.workspace = true
 sha2.workspace = true
-sysinfo.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
@@ -47,12 +46,19 @@ version = "0.2.15"
 features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+
+# Enable the apple-sandbox feature only on macos
 axum.workspace = true
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+sysinfo = { workspace = true, default-features = false, features = ["system", "apple-sandbox"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+sysinfo = { workspace = true, default-features = false, features = ["system"] }
 
 [features]
 default = []
