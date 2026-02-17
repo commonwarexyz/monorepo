@@ -588,10 +588,9 @@ where
                 info!("handler closed, shutting down");
                 break;
             } => {
-                let mut needs_sync = false;
-
                 // Drain up to max_repair messages: blocks handled immediately,
                 // certificates batched for verification, produces deferred.
+                let mut needs_sync = false;
                 let msgs: Vec<_> = std::iter::once(message)
                     .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
                     .take(self.max_repair.get())
