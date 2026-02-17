@@ -299,24 +299,6 @@ impl<D: Digest> Viewable for Subject<'_, D> {
     }
 }
 
-/// Batch-verifies certificates and returns a per-item result.
-///
-/// Uses bisection to efficiently identify invalid certificates when batch
-/// verification fails.
-pub fn verify_certificates_bisect<'a, R, S, D>(
-    rng: &mut R,
-    scheme: &S,
-    certificates: &[(Subject<'a, D>, &'a S::Certificate)],
-    strategy: &impl Strategy,
-) -> Vec<bool>
-where
-    R: CryptoRngCore,
-    S: scheme::Scheme<D>,
-    D: Digest,
-{
-    scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
-}
-
 /// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Vote<S: Scheme, D: Digest> {
@@ -946,6 +928,24 @@ where
             attestation,
         })
     }
+}
+
+/// Batch-verifies certificates and returns a per-item result.
+///
+/// Uses bisection to efficiently identify invalid certificates when batch
+/// verification fails.
+pub fn verify_certificates_bisect<'a, R, S, D>(
+    rng: &mut R,
+    scheme: &S,
+    certificates: &[(Subject<'a, D>, &'a S::Certificate)],
+    strategy: &impl Strategy,
+) -> Vec<bool>
+where
+    R: CryptoRngCore,
+    S: scheme::Scheme<D>,
+    D: Digest,
+{
+    scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
 }
 
 /// Aggregated notarization certificate recovered from notarize votes.
