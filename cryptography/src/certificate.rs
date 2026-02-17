@@ -658,7 +658,7 @@ mod tests {
     ) -> <Ed25519Scheme as Scheme>::Certificate {
         let attestations: Vec<_> = schemes
             .iter()
-            .filter_map(|s| s.sign::<Sha256Digest>(subject(message)))
+            .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))
             .collect();
         schemes[0]
             .assemble::<_, N3f1>(attestations, &Sequential)
@@ -699,7 +699,7 @@ mod tests {
         let (schemes, verifier) = setup_ed25519(4);
         let cert = make_certificate(&schemes, MESSAGE);
         let good = TestSubject { message: MESSAGE };
-        let pairs: Vec<_> = (0..5).map(|_| (good.clone(), &cert)).collect();
+        let pairs: Vec<_> = (0..5).map(|_| (good, &cert)).collect();
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
             &mut rng,
             &pairs,
@@ -718,14 +718,14 @@ mod tests {
             message: BAD_MESSAGE,
         };
         let pairs = vec![
-            (good.clone(), &cert),
-            (bad.clone(), &cert),
-            (good.clone(), &cert),
-            (bad.clone(), &cert),
-            (good.clone(), &cert),
-            (good.clone(), &cert),
-            (bad.clone(), &cert),
-            (bad.clone(), &cert),
+            (good, &cert),
+            (bad, &cert),
+            (good, &cert),
+            (bad, &cert),
+            (good, &cert),
+            (good, &cert),
+            (bad, &cert),
+            (bad, &cert),
         ];
         let expected = vec![true, false, true, false, true, true, false, false];
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
@@ -744,7 +744,7 @@ mod tests {
         let bad = TestSubject {
             message: BAD_MESSAGE,
         };
-        let pairs: Vec<_> = (0..4).map(|_| (bad.clone(), &cert)).collect();
+        let pairs: Vec<_> = (0..4).map(|_| (bad, &cert)).collect();
         let result = verifier.verify_certificates_bisect::<_, Sha256Digest, N3f1>(
             &mut rng,
             &pairs,
