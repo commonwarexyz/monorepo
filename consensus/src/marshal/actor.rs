@@ -605,9 +605,11 @@ where
                         handler::Message::Produce { key, response } => {
                             produces.push((key, response));
                         }
-                        deliver => {
+                        handler::Message::Deliver { key, value, response } => {
                             needs_sync |= self.handle_deliver(
-                                deliver,
+                                key,
+                                value,
+                                response,
                                 &mut deliveries,
                                 &mut application,
                             ).await;
@@ -687,18 +689,12 @@ where
     /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver(
         &mut self,
-        message: handler::Message<B>,
+        key: Request<B>,
+        value: Bytes,
+        response: oneshot::Sender<bool>,
         deliveries: &mut Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) -> bool {
-        let handler::Message::Deliver {
-            key,
-            value,
-            response,
-        } = message
-        else {
-            unreachable!();
-        };
         match key {
             Request::Block(commitment) => {
                 let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
