@@ -406,7 +406,9 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         }
         try_join_all(futures).await?;
 
+        // Clear pending sections.
         pending.clear();
+
         Ok(())
     }
 
