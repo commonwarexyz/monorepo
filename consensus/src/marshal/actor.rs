@@ -14,7 +14,7 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates_bisect, Finalization, Notarization, Subject},
+        types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
     Block, Reporter,
@@ -805,7 +805,7 @@ where
             self.provider.all().map_or_else(
                 || vec![false; pending_certs.len()],
                 |scheme| {
-                    verify_certificates_bisect(
+                    verify_certificates(
                         &mut self.context,
                         scheme.as_ref(),
                         &pending_certs,

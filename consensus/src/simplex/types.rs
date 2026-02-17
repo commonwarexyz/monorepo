@@ -934,7 +934,7 @@ where
 ///
 /// Uses bisection to efficiently identify invalid certificates when batch
 /// verification fails.
-pub fn verify_certificates_bisect<'a, R, S, D>(
+pub fn verify_certificates<'a, R, S, D>(
     rng: &mut R,
     scheme: &S,
     certificates: &[(Subject<'a, D>, &'a S::Certificate)],
