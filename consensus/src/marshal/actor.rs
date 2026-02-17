@@ -46,7 +46,7 @@ use commonware_utils::{
     sequence::U64,
     Acknowledgement, BoxedError,
 };
-use futures::try_join;
+use futures::{future::join_all, try_join};
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
@@ -595,15 +595,11 @@ where
                 let mut needs_sync = false;
                 let mut remaining = self.max_repair.get();
                 let mut pending = Vec::with_capacity(remaining);
-                let mut produces = Vec::new();
+                let mut produces = Vec::with_capacity(remaining);
                 let mut message = Some(message);
 
-                // Drain up to max_repair messages from the resolver channel.
-                // Block deliveries are handled immediately.
-                // Finalized/Notarized deliveries are collected into pending
-                // for batch certificate verification.
-                // Produce requests are deferred until after pending items
-                // are processed so they can find recently delivered data.
+                // Drain up to max_repair messages: blocks handled immediately,
+                // certificates batched for verification, produces deferred.
                 while remaining > 0 {
                     let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) else {
                         break;
@@ -636,7 +632,7 @@ where
                     .await;
 
                 // Handle produce requests in parallel after pending items are stored
-                futures::future::join_all(produces.into_iter().map(|(key, response)| {
+                join_all(produces.into_iter().map(|(key, response)| {
                     self.handle_produce(key, response, &buffer)
                 })).await;
 
@@ -718,6 +714,7 @@ where
                     return false;
                 }
 
+                // Persist the block, also storing the finalization if we have it
                 let height = block.height();
                 let finalization = self.cache.get_finalization_for(commitment).await;
                 self.store_finalization(height, commitment, block, finalization, application)
@@ -1191,6 +1188,7 @@ where
         buffer: &buffered::Mailbox<K, B>,
         commitment: B::Commitment,
     ) -> Option<B> {
+        // Check buffer
         if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
             return Some(block);
         }
