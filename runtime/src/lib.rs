@@ -758,7 +758,7 @@ stability_scope!(BETA {
         fn storage_buffer_pool(&self) -> &BufferPool;
     }
 });
-stability_scope!(ALPHA, cfg(feature = "external") {
+stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
     pub trait Pacer: Clock + Clone + Send + Sync + 'static {
         /// Defer completion of a future until a specified `latency` has elapsed. If the future is
