@@ -196,7 +196,7 @@ where
     ) -> (Self, Mailbox<P::Scheme, B>, Height) {
         // Initialize cache
         let prunable_config = cache::Config {
-            partition_prefix: format!("{}-cache", config.partition_prefix.clone()),
+            partition_prefix: format!("{}-cache", config.partition_prefix),
             prunable_items_per_section: config.prunable_items_per_section,
             replay_buffer: config.replay_buffer,
             key_write_buffer: config.key_write_buffer,
@@ -408,7 +408,7 @@ where
 
                         // Store notarization by view
                         self.cache
-                            .put_notarization(round, commitment, notarization.clone())
+                            .put_notarization(round, commitment, notarization)
                             .await;
 
                         // Search for block locally, otherwise fetch it remotely
@@ -1232,7 +1232,7 @@ where
         resolver: &mut impl Resolver<Key = Request<B>>,
     ) -> Result<(), metadata::Error> {
         self.application_metadata
-            .put_sync(LATEST_KEY.clone(), height)
+            .put_sync(LATEST_KEY, height)
             .await?;
         self.last_processed_height = height;
         let _ = self
