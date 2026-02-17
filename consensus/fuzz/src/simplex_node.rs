@@ -23,10 +23,7 @@ use commonware_cryptography::{
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Metrics, Runner};
-use commonware_utils::{
-    channel::mpsc::{error::TryRecvError, Receiver},
-    BytesRng,
-};
+use commonware_utils::{channel::mpsc::Receiver, BytesRng};
 use futures::FutureExt;
 use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -62,7 +59,7 @@ pub struct SimplexNodeFuzzInput {
 
 impl Arbitrary<'_> for SimplexNodeFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let event_count = usize::from(u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?);
+        let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
 
         let mut events = Vec::with_capacity(event_count);
         for _ in 0..event_count {
@@ -355,7 +352,7 @@ where
         &mut self,
         view: u64,
     ) -> Option<Notarization<S, Sha256Digest>> {
-        let base = self.get_or_build_proposal_for_view(view.max(1).min(MAX_SAFE_VIEW));
+        let base = self.get_or_build_proposal_for_view(view);
         let mut conflicting = self.strategy.mutate_proposal(
             &mut self.context,
             &base,
@@ -384,23 +381,22 @@ where
     }
 
     fn build_invalid_nullification_for_view(&mut self, view: u64) -> Option<Nullification<S>> {
-        let base_view = view.max(1).min(MAX_SAFE_VIEW);
         let mut conflicting_view = self.strategy.mutate_nullify_view(
             &mut self.context,
-            base_view,
+            view,
             self.last_finalized_view,
             self.last_notarized_view,
             self.last_nullified_view,
         );
-        conflicting_view = conflicting_view.max(1).min(MAX_SAFE_VIEW);
-        if conflicting_view == base_view {
-            conflicting_view = base_view.saturating_add(1).min(MAX_SAFE_VIEW);
-            if conflicting_view == base_view {
-                conflicting_view = base_view.saturating_sub(1).max(1);
+        conflicting_view = conflicting_view.clamp(1, MAX_SAFE_VIEW);
+        if conflicting_view == view {
+            conflicting_view = view.saturating_add(1).min(MAX_SAFE_VIEW);
+            if conflicting_view == view {
+                conflicting_view = view.saturating_sub(1).max(1);
             }
         }
 
-        let base_round = Round::new(Epoch::new(crate::EPOCH), View::new(base_view));
+        let base_round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
         let conflicting_round = Round::new(Epoch::new(crate::EPOCH), View::new(conflicting_view));
         let votes = [
             Nullify::<S>::sign::<Sha256Digest>(&self.schemes[0], base_round)?,
@@ -469,17 +465,13 @@ where
                 Some(Certificate::Finalization(cert))
             }
             2 => {
-                let view = self
-                    .strategy
-                    .mutate_nullify_view(
-                        &mut self.context,
-                        view,
-                        self.last_finalized_view,
-                        self.last_notarized_view,
-                        self.last_nullified_view,
-                    )
-                    .max(1)
-                    .min(MAX_SAFE_VIEW);
+                let view = self.strategy.mutate_nullify_view(
+                    &mut self.context,
+                    view,
+                    self.last_finalized_view,
+                    self.last_notarized_view,
+                    self.last_nullified_view,
+                );
                 let round = if self.context.gen_bool(0.8) {
                     Round::new(Epoch::new(crate::EPOCH), View::new(view))
                 } else {
@@ -581,83 +573,62 @@ where
 
     async fn drain_inboxes(&mut self) {
         for idx in 0..self.vote_receivers.len() {
-            loop {
-                match self.vote_receivers[idx].recv().now_or_never() {
-                    Some(Ok((sender, msg))) => {
-                        let bytes: Vec<u8> = msg.into();
-                        self.observe_vote(&sender, bytes);
-                    }
-                    Some(Err(_)) | None => break,
-                }
+            while let Some(Ok((sender, msg))) = self.vote_receivers[idx].recv().now_or_never() {
+                let bytes: Vec<u8> = msg.into();
+                self.observe_vote(&sender, bytes);
             }
         }
 
         for idx in 0..self.certificate_receivers.len() {
-            loop {
-                match self.certificate_receivers[idx].recv().now_or_never() {
-                    Some(Ok((_sender, msg))) => {
-                        let bytes: Vec<u8> = msg.into();
-                        self.observe_certificate(bytes);
-                    }
-                    Some(Err(_)) | None => break,
-                }
+            while let Some(Ok((_, msg))) = self.certificate_receivers[idx].recv().now_or_never() {
+                let bytes: Vec<u8> = msg.into();
+                self.observe_certificate(bytes);
             }
         }
 
         for idx in 0..self.resolver_receivers.len() {
-            loop {
-                match self.resolver_receivers[idx].recv().now_or_never() {
-                    Some(Ok((_sender, msg))) => {
-                        let bytes: Vec<u8> = msg.into();
-                        let default_response = self
-                            .strategy
-                            .mutate_resolver_bytes(&mut self.context, &bytes);
-                        let response = if let Some((id, requested_view)) =
-                            Self::decode_resolver_request(&bytes)
-                        {
-                            if self.context.gen_bool(0.8) {
-                                if let Some(certificate) =
-                                    self.certificate_for_requested_view(requested_view)
-                                {
-                                    let mut cert_bytes = certificate.encode().to_vec();
-                                    if self.context.gen_bool(0.2) {
-                                        cert_bytes = self.strategy.mutate_certificate_bytes(
-                                            &mut self.context,
-                                            &cert_bytes,
-                                        );
-                                    }
-                                    Self::encode_resolver_response(id, cert_bytes)
-                                } else {
-                                    default_response
+            while let Some(Ok((_sender, msg))) = self.resolver_receivers[idx].recv().now_or_never()
+            {
+                let bytes: Vec<u8> = msg.into();
+                let default_response = self
+                    .strategy
+                    .mutate_resolver_bytes(&mut self.context, &bytes);
+                let response =
+                    if let Some((id, requested_view)) = Self::decode_resolver_request(&bytes) {
+                        if self.context.gen_bool(0.8) {
+                            if let Some(certificate) =
+                                self.certificate_for_requested_view(requested_view)
+                            {
+                                let mut cert_bytes = certificate.encode().to_vec();
+                                if self.context.gen_bool(0.2) {
+                                    cert_bytes = self
+                                        .strategy
+                                        .mutate_certificate_bytes(&mut self.context, &cert_bytes);
                                 }
+                                Self::encode_resolver_response(id, cert_bytes)
                             } else {
                                 default_response
                             }
                         } else {
                             default_response
-                        };
-                        let _ = self.resolver_senders[idx]
-                            .send(Recipients::One(self.honest.clone()), response, true)
-                            .await;
-                    }
-                    Some(Err(_)) | None => break,
-                }
+                        }
+                    } else {
+                        default_response
+                    };
+                let _ = self.resolver_senders[idx]
+                    .send(Recipients::One(self.honest.clone()), response, true)
+                    .await;
             }
         }
     }
 
     fn poll_monitor(&mut self, latest: &mut View, monitor: &mut Receiver<View>) -> bool {
         let mut progressed = false;
-        loop {
-            match monitor.try_recv() {
-                Ok(update) => {
-                    if update.get() > latest.get() {
-                        *latest = update;
-                        self.last_finalized_view = update.get();
-                        progressed = true;
-                    }
-                }
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        while let Ok(update) = monitor.try_recv() {
+            if update.get() > latest.get() {
+                *latest = update;
+                self.last_finalized_view = update.get();
+                progressed = true;
             }
         }
         progressed
@@ -748,17 +719,13 @@ where
     }
 
     async fn send_nullify_vote(&mut self, signer_idx: usize) {
-        let view = self
-            .strategy
-            .mutate_nullify_view(
-                &mut self.context,
-                self.last_view,
-                self.last_finalized_view,
-                self.last_notarized_view,
-                self.last_nullified_view,
-            )
-            .max(1)
-            .min(MAX_SAFE_VIEW);
+        let view = self.strategy.mutate_nullify_view(
+            &mut self.context,
+            self.last_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
 
         let key = VoteKey::Nullify {
             signer: signer_idx,
@@ -823,7 +790,7 @@ where
     }
 
     async fn send_wrong_epoch_nullification_certificate(&mut self, signer_idx: usize) {
-        let view = self.last_view.max(1).min(MAX_SAFE_VIEW);
+        let view = self.last_view.clamp(1, MAX_SAFE_VIEW);
         let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
         let round = Round::new(wrong_epoch, View::new(view));
         let Some(cert) = self.build_nullification_from_byz(round, &[0, 1, 2]) else {
@@ -841,8 +808,7 @@ where
             .last_view
             .max(self.last_notarized_view)
             .max(self.last_finalized_view)
-            .max(1)
-            .min(MAX_SAFE_VIEW);
+            .clamp(1, MAX_SAFE_VIEW);
         let Some(cert) = self.build_invalid_notarization_for_view(view) else {
             return;
         };
@@ -858,8 +824,7 @@ where
             .last_view
             .max(self.last_nullified_view)
             .max(self.last_finalized_view)
-            .max(1)
-            .min(MAX_SAFE_VIEW);
+            .clamp(1, MAX_SAFE_VIEW);
         let Some(cert) = self.build_invalid_nullification_for_view(view) else {
             return;
         };
@@ -1101,14 +1066,13 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
         let mut fuzzer_certificate_receivers = Vec::new();
         let mut fuzzer_resolver_receivers = Vec::new();
 
-        for idx in 0..3usize {
-            let byz = participants[idx].clone();
+        for byz in participants.iter().take(3usize) {
             let (
                 (vote_sender, vote_receiver),
                 (cert_sender, cert_receiver),
                 (resolver_sender, resolver_receiver),
             ) = registrations
-                .remove(&byz)
+                .remove(byz)
                 .expect("byzantine participant must exist");
 
             fuzzer_vote_senders.push(vote_sender);
