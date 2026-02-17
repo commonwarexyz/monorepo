@@ -594,9 +594,14 @@ where
                 break;
             } => {
                 let mut needs_sync = false;
-                let mut pending = Vec::new();
-                let mut message = Some(message);
                 let mut remaining = self.max_repair.get();
+                let mut pending = Vec::with_capacity(remaining);
+                let mut message = Some(message);
+
+                // Drain up to max_repair messages from the resolver channel.
+                // Produce and Block deliveries are handled immediately.
+                // Finalized/Notarized deliveries are collected into pending
+                // for batch certificate verification.
                 while remaining > 0 {
                     let Some(msg) = message.take().or_else(|| resolver_rx.try_recv().ok()) else {
                         break;
@@ -609,10 +614,14 @@ where
                         &mut buffer,
                     ).await;
                 }
+
+                // Batch verify and process all pending certificates
                 needs_sync |= self.verify_and_process_pending(
                     pending,
                     &mut application,
                 ).await;
+
+                // If any blocks were stored, attempt to fill gaps and sync
                 if needs_sync {
                     let _ = self
                         .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
