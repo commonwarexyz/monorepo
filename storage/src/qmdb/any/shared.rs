@@ -310,6 +310,15 @@ where
             return Ok(());
         }
 
+        match guard
+            .as_ref()
+            .expect("shared any db invariant violated: state missing")
+        {
+            SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
+            SharedStateDb::UnmerkleizedNonDurable(db) => db.prepare_merkleized(),
+            _ => {}
+        }
+
         let mut guard = guard.upgrade().await;
         let state = guard
             .take()
@@ -398,6 +407,17 @@ where
         // Optionally force a full sync according to policy.
         let now = Instant::now();
         if self.inner.should_auto_full_sync(now) {
+            let upgradable_guard = write_guard.downgrade_to_upgradable();
+            match upgradable_guard
+                .as_ref()
+                .expect("shared any db invariant violated: state missing")
+            {
+                SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
+                SharedStateDb::MerkleizedDurable(_) => {}
+                _ => panic!("shared commit invariant violated: expected durable state"),
+            }
+
+            let mut write_guard = upgradable_guard.upgrade().await;
             let state = write_guard
                 .take()
                 .expect("shared any db invariant violated: state missing");
@@ -435,6 +455,15 @@ where
                 .expect("shared any db invariant violated: state missing"),
             SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_)
         ) {
+            match guard
+                .as_ref()
+                .expect("shared any db invariant violated: state missing")
+            {
+                SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
+                SharedStateDb::UnmerkleizedNonDurable(db) => db.prepare_merkleized(),
+                _ => {}
+            }
+
             let mut write_guard = guard.upgrade().await;
             let state = write_guard
                 .take()
@@ -487,6 +516,15 @@ where
                 .expect("shared any db invariant violated: state missing"),
             SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_)
         ) {
+            match guard
+                .as_ref()
+                .expect("shared any db invariant violated: state missing")
+            {
+                SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
+                SharedStateDb::UnmerkleizedNonDurable(db) => db.prepare_merkleized(),
+                _ => {}
+            }
+
             let mut write_guard = guard.upgrade().await;
             let state = write_guard
                 .take()

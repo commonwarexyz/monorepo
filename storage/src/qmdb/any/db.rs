@@ -276,6 +276,11 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
+    /// Perform all currently available merkleization work while remaining unmerkleized.
+    pub fn prepare_merkleized(&self) {
+        self.log.do_merkleization_work();
+    }
+
     pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
         Db {
             log: self.log.merkleize(),

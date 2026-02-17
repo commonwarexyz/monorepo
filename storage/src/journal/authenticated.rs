@@ -313,6 +313,12 @@ where
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
+    /// Perform all currently available merkleization work while remaining in Dirty state.
+    pub fn do_merkleization_work(&self) {
+        let mut hasher = StandardHasher::<H>::new();
+        self.mmr.do_merkleization_work(&mut hasher);
+    }
+
     /// Merkleize the journal and compute the root digest.
     pub fn merkleize(self) -> Journal<E, C, H, Clean<H::Digest>> {
         let Self {
