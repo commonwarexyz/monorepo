@@ -789,8 +789,6 @@ where
             return false;
         }
 
-        let mut wrote = false;
-
         // Extract (subject, certificate) pairs for batch verification
         let pending_certs: Vec<_> = pending
             .iter()
@@ -823,6 +821,8 @@ where
             self.verify_pending_by_epoch(&pending, &pending_certs)
         };
 
+        // Attempt to process each verified item, sending a failure response for each unverified item.
+        let mut wrote = false;
         for (index, item) in pending.drain(..).enumerate() {
             if verified[index] {
                 wrote |= self.process_verified(item, application).await;
