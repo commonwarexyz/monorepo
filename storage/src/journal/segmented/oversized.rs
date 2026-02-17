@@ -379,7 +379,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)?
             }
-            Ok(None) | Err(Error::SectionOutOfRange(_)) => 0,
+            Ok(None) => 0,
+            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
             Err(e) => return Err(e),
         };
 
@@ -403,7 +404,8 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)?
             }
-            Ok(None) | Err(Error::SectionOutOfRange(_)) => 0,
+            Ok(None) => 0,
+            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
             Err(e) => return Err(e),
         };
 
@@ -3017,6 +3019,42 @@ mod tests {
                 Err(Error::SectionOutOfRange(0))
             ));
             assert_eq!(oversized.value_size(0).await.unwrap(), 0);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_nonzero_on_missing_section_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let result = oversized.rewind(0, 1).await;
+            assert!(
+                matches!(result, Err(Error::SectionOutOfRange(0))),
+                "nonzero index_size on missing section must fail, got: {result:?}"
+            );
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_section_nonzero_on_missing_section_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let result = oversized.rewind_section(0, 1).await;
+            assert!(
+                matches!(result, Err(Error::SectionOutOfRange(0))),
+                "nonzero index_size on missing section must fail, got: {result:?}"
+            );
 
             oversized.destroy().await.expect("Failed to destroy");
         });
