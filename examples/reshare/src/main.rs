@@ -153,7 +153,6 @@ fn main() {
 
     let config = tokio::Config::new()
         .with_worker_threads(app.worker_threads)
-        .with_tcp_nodelay(Some(true))
         .with_catch_panics(false);
     let runner = tokio::Runner::new(config);
     runner.start(|context| async move {
