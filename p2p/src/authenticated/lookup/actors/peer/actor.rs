@@ -337,6 +337,8 @@ mod tests {
             let local_pk = local_key.public_key();
             let remote_pk = remote_key.public_key();
 
+            // Establish an encrypted connection between local (attacker) and
+            // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
@@ -376,7 +378,8 @@ mod tests {
                 .expect("listen failed")
                 .expect("listen result failed");
 
-            // Create peer actor with metrics we can inspect
+            // Clone the received_messages family so we can inspect it after
+            // the actor finishes.
             let received_messages = Family::<metrics::Message, Counter>::default();
             let cfg = Config {
                 received_messages: received_messages.clone(),
@@ -385,13 +388,16 @@ mod tests {
             let (peer_actor, _mailbox, _relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
 
-            // Register channel 0 only
+            // Only channel 0 is registered -- any other channel value is
+            // attacker-controlled and must not produce a metric label.
             let mut channels = create_channels(&context);
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
 
-            // Send a message on an unregistered channel (attacker-controlled value)
+            // Simulate the attack: send a Data message with an arbitrary
+            // unregistered channel value. Before the fix, this would create
+            // a persistent "data_99999" time series in the metrics Family.
             let invalid_channel = 99999;
             let msg = types::Message::Data(crate::authenticated::data::Data {
                 channel: invalid_channel,
@@ -399,7 +405,7 @@ mod tests {
             });
             local_sender.send(msg.encode()).await.expect("send failed");
 
-            // Run peer actor - should fail with InvalidChannel
+            // The actor should reject the message and return InvalidChannel.
             let result = peer_actor
                 .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
                 .await;
@@ -408,8 +414,9 @@ mod tests {
                 "Expected InvalidChannel error, got: {result:?}"
             );
 
-            // Verify: no metric was created for the attacker-controlled channel value.
-            // Only the "invalid" metric should exist.
+            // The attacker-controlled channel value must NOT have created a
+            // metric series. If it did, repeated reconnections with fresh
+            // channel values would cause unbounded memory growth.
             let attacker_metric = metrics::Message::new_data(&local_pk, invalid_channel);
             let attacker_count = received_messages.get_or_create(&attacker_metric).get();
             assert_eq!(
@@ -417,6 +424,7 @@ mod tests {
                 "metric was created for attacker-controlled channel, unbounded cardinality bug"
             );
 
+            // The bounded "invalid" metric should have been incremented instead.
             let invalid_metric = metrics::Message::new_invalid(&local_pk);
             let invalid_count = received_messages.get_or_create(&invalid_metric).get();
             assert_eq!(

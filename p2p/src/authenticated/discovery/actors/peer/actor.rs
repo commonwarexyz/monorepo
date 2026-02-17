@@ -252,21 +252,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         }
                     };
 
-                    // Update metrics for non-Data messages (bounded label cardinality).
-                    // Data metrics are deferred until after channel validation to avoid
-                    // unbounded cardinality from attacker-controlled channel values.
-                    let metric = match &msg {
-                        types::Payload::Data(_) => None,
-                        types::Payload::Greeting(_) => Some(metrics::Message::new_greeting(&peer)),
-                        types::Payload::BitVec(_) => Some(metrics::Message::new_bit_vec(&peer)),
-                        types::Payload::Peers(_) => Some(metrics::Message::new_peers(&peer)),
-                    };
-                    if let Some(ref metric) = metric {
-                        self.received_messages.get_or_create(metric).inc();
-                    }
-
-                    // Ensure we start with a greeting message and then never receive another
+                    // Handle greeting messages first (they `continue` the loop).
                     if let types::Payload::Greeting(info) = msg {
+                        self.received_messages
+                            .get_or_create(&metrics::Message::new_greeting(&peer))
+                            .inc();
                         if greeting_received {
                             debug!(?peer, "received duplicate greeting");
                             return Err(Error::DuplicateGreeting);
@@ -290,28 +280,26 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         return Err(Error::MissingGreeting);
                     }
 
-                    // Validate channel for Data messages and resolve rate limiter.
+                    // Validate channel and resolve rate limiter before emitting
+                    // any channel-labeled metrics (to avoid unbounded cardinality
+                    // from attacker-controlled channel values).
                     //
                     // We skip rate limiting for the first BitVec and first Peers message
                     // because they are expected immediately after the greeting exchange
                     // (we send BitVec right after our greeting, and they respond with Peers).
                     let (metric, rate_limiter) = match &msg {
-                        types::Payload::Data(data) => {
-                            match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => {
-                                    let m = metrics::Message::new_data(&peer, data.channel);
-                                    self.received_messages.get_or_create(&m).inc();
-                                    (m, Some(rate_limit))
-                                }
-                                None => {
-                                    debug!(?peer, channel = data.channel, "invalid channel");
-                                    self.received_messages
-                                        .get_or_create(&metrics::Message::new_invalid(&peer))
-                                        .inc();
-                                    return Err(Error::InvalidChannel);
-                                }
+                        types::Payload::Data(data) => match rate_limits.get(&data.channel) {
+                            Some(rate_limit) => {
+                                (metrics::Message::new_data(&peer, data.channel), Some(rate_limit))
                             }
-                        }
+                            None => {
+                                debug!(?peer, channel = data.channel, "invalid channel");
+                                self.received_messages
+                                    .get_or_create(&metrics::Message::new_invalid(&peer))
+                                    .inc();
+                                return Err(Error::InvalidChannel);
+                            }
+                        },
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(_) => {
                             let rate_limiter = if first_bit_vec_received {
@@ -320,7 +308,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 first_bit_vec_received = true;
                                 None
                             };
-                            (metric.unwrap(), rate_limiter)
+                            (metrics::Message::new_bit_vec(&peer), rate_limiter)
                         }
                         types::Payload::Peers(_) => {
                             let rate_limiter = if first_peers_received {
@@ -329,9 +317,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 first_peers_received = true;
                                 None
                             };
-                            (metric.unwrap(), rate_limiter)
+                            (metrics::Message::new_peers(&peer), rate_limiter)
                         }
                     };
+                    self.received_messages.get_or_create(&metric).inc();
                     if let Some(rate_limiter) = rate_limiter {
                         if let Err(wait_until) = rate_limiter.check() {
                             self.rate_limited.get_or_create(&metric).inc();
@@ -923,6 +912,8 @@ mod tests {
             let local_pk = local_key.public_key();
             let remote_pk = remote_key.public_key();
 
+            // Establish an encrypted connection between local (attacker) and
+            // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
@@ -962,6 +953,8 @@ mod tests {
                 .expect("listen failed")
                 .expect("listen result failed");
 
+            // Clone the received_messages family so we can inspect it after
+            // the actor finishes.
             let received_messages = Family::<metrics::Message, Counter>::default();
             let cfg = Config {
                 received_messages: received_messages.clone(),
@@ -970,6 +963,7 @@ mod tests {
             let (peer_actor, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
 
+            // Greeting the actor will send upon connecting to the peer.
             let greeting = types::Info::sign(
                 &local_key,
                 IP_NAMESPACE,
@@ -980,15 +974,21 @@ mod tests {
             let (tracker_mailbox, _tracker_receiver) =
                 UnboundedMailbox::<tracker::Message<PublicKey>>::new();
 
-            // Register channel 0 only
+            // Only channel 0 is registered -- any other channel value is
+            // attacker-controlled and must not produce a metric label.
             let mut channels = create_channels(&context);
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
 
+            // Simulate the attack: the discovery protocol requires a valid
+            // greeting before Data messages are accepted, so we send one
+            // first, then follow with a Data message on an unregistered
+            // channel. Before the fix, this would create a persistent
+            // "data_99999" time series in the metrics Family.
             let local_pk_clone = local_pk.clone();
             context.clone().spawn(move |_ctx| async move {
-                // Send valid greeting first
+                // Valid greeting so the actor accepts subsequent messages.
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
                     &local_key,
                     IP_NAMESPACE,
@@ -1000,7 +1000,7 @@ mod tests {
                     .await
                     .expect("send greeting failed");
 
-                // Send data on an invalid channel
+                // Data on an arbitrary unregistered channel.
                 let data = types::Payload::<PublicKey>::Data(crate::authenticated::data::Data {
                     channel: 99999,
                     message: IoBuf::from(b"attack"),
@@ -1008,6 +1008,7 @@ mod tests {
                 local_sender.send(data.encode()).await.expect("send failed");
             });
 
+            // The actor should reject the message and return InvalidChannel.
             let result = peer_actor
                 .run(
                     local_pk_clone.clone(),
@@ -1022,6 +1023,9 @@ mod tests {
                 "Expected InvalidChannel error, got: {result:?}"
             );
 
+            // The attacker-controlled channel value must NOT have created a
+            // metric series. If it did, repeated reconnections with fresh
+            // channel values would cause unbounded memory growth.
             let attacker_metric = metrics::Message::new_data(&local_pk_clone, 99999);
             let attacker_count = received_messages.get_or_create(&attacker_metric).get();
             assert_eq!(
@@ -1029,6 +1033,7 @@ mod tests {
                 "metric was created for attacker-controlled channel, unbounded cardinality bug"
             );
 
+            // The bounded "invalid" metric should have been incremented instead.
             let invalid_metric = metrics::Message::new_invalid(&local_pk_clone);
             let invalid_count = received_messages.get_or_create(&invalid_metric).get();
             assert_eq!(invalid_count, 1);
