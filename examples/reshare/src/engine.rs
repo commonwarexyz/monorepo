@@ -136,7 +136,7 @@ where
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
 
-        let (dkg, dkg_mailbox) = dkg::Actor::init(
+        let (dkg, dkg_mailbox) = dkg::Actor::new(
             context.with_label("dkg"),
             dkg::Config {
                 manager: config.manager.clone(),
@@ -145,8 +145,7 @@ where
                 partition_prefix: config.partition_prefix.clone(),
                 peer_config: config.peer_config.clone(),
             },
-        )
-        .await;
+        );
 
         let (buffer, buffered_mailbox) = buffered::Engine::new(
             context.with_label("buffer"),

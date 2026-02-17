@@ -46,7 +46,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
     }
 
     /// Broadcasts a payload to all registered recipients.
-    pub async fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
+    pub fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
         // Send to all recipients
         let channels = {
             let mut channels = Vec::new();

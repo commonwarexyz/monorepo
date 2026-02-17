@@ -317,7 +317,7 @@ where
             },
             // Handle waiter completions first (aborted futures are skipped)
             Ok((commitment, block)) = waiters.next_completed() else continue => {
-                self.notify_subscribers(commitment, &block).await;
+                self.notify_subscribers(commitment, &block);
             },
             // Handle application acknowledgements next
             ack = &mut self.pending_ack => {
@@ -793,7 +793,7 @@ where
     // -------------------- Waiters --------------------
 
     /// Notify any subscribers for the given commitment with the provided block.
-    async fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
+    fn notify_subscribers(&mut self, commitment: B::Commitment, block: &B) {
         if let Some(mut bs) = self.block_subscriptions.remove(&commitment) {
             for subscriber in bs.subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
@@ -873,13 +873,13 @@ where
 
     /// Add a verified block to the prunable archive.
     async fn cache_verified(&mut self, round: Round, commitment: B::Commitment, block: B) {
-        self.notify_subscribers(commitment, &block).await;
+        self.notify_subscribers(commitment, &block);
         self.cache.put_verified(round, commitment, block).await;
     }
 
     /// Add a notarized block to the prunable archive.
     async fn cache_block(&mut self, round: Round, commitment: B::Commitment, block: B) {
-        self.notify_subscribers(commitment, &block).await;
+        self.notify_subscribers(commitment, &block);
         self.cache.put_block(round, commitment, block).await;
     }
 
@@ -943,7 +943,7 @@ where
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        self.notify_subscribers(commitment, &block).await;
+        self.notify_subscribers(commitment, &block);
 
         // Extract round before finalization is moved into try_join
         let round = finalization.as_ref().map(|f| f.round());

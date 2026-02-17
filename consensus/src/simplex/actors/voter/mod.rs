@@ -2215,7 +2215,7 @@ mod tests {
                     .as_slice(),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents)).await;
+            relay.broadcast(&leader, (proposal.payload, contents));
             mailbox.proposal(proposal).await;
 
             // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
@@ -2409,7 +2409,7 @@ mod tests {
 
             // Broadcast payload and send proposal
             let contents = (proposal3.round, proposal2.payload, 0u64).encode();
-            relay.broadcast(&me, (digest3, contents)).await;
+            relay.broadcast(&me, (digest3, contents));
             mailbox.proposal(proposal3.clone()).await;
 
             // Send notarization
@@ -2644,7 +2644,7 @@ mod tests {
 
             // Broadcast payload
             let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
-            relay.broadcast(&me, (digest5, contents)).await;
+            relay.broadcast(&me, (digest5, contents));
 
             // Send proposal to verify
             mailbox.proposal(proposal5.clone()).await;
@@ -2932,7 +2932,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents)).await;
+            relay.broadcast(&leader, (proposal.payload, contents));
             mailbox.proposal(proposal.clone()).await;
 
             // Wait for notarize vote
@@ -3241,8 +3241,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
-                .broadcast(&leader, (proposal.payload, contents))
-                .await;
+                .broadcast(&leader, (proposal.payload, contents));
             mailbox.proposal(proposal.clone()).await;
 
             // Build and send notarization so the voter tries to certify
@@ -3386,9 +3385,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal_3.round, parent_payload, 0u64).encode();
-            relay
-                .broadcast(&leader, (proposal_3.payload, contents))
-                .await;
+            relay.broadcast(&leader, (proposal_3.payload, contents));
             mailbox.proposal(proposal_3.clone()).await;
 
             let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);

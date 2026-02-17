@@ -238,7 +238,7 @@ mod tests {
             }
         }
 
-        async fn sent_messages(&self) -> Vec<SentMessage> {
+        fn sent_messages(&self) -> Vec<SentMessage> {
             self.sent.lock().clone()
         }
     }
@@ -446,7 +446,7 @@ mod tests {
             assert!(sent_to.is_empty());
 
             // Verify that the sender received the message with empty Recipients::Some
-            let messages = sender.sent_messages().await;
+            let messages = sender.sent_messages();
             assert_eq!(messages.len(), 1);
             match &messages[0].0 {
                 Recipients::Some(pks) => assert!(pks.is_empty()),
@@ -565,7 +565,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let messages = sender.sent_messages().await;
+            let messages = sender.sent_messages();
             assert_eq!(messages.len(), 1);
             assert!(messages[0].2); // priority flag
         });
