@@ -499,7 +499,7 @@ where
         }
     }
 
-    fn observe_vote(&mut self, sender: &Ed25519PublicKey, bytes: Vec<u8>) {
+    fn handle_honest_votes(&mut self, sender: &Ed25519PublicKey, bytes: Vec<u8>) {
         if sender != &self.honest {
             return;
         }
@@ -534,7 +534,35 @@ where
         }
     }
 
-    fn observe_certificate(&mut self, bytes: Vec<u8>) {
+    async fn handle_resolvers(&mut self, idx: usize, bytes: Vec<u8>) {
+        let default_response = self
+            .strategy
+            .mutate_resolver_bytes(&mut self.context, &bytes);
+        let response = if let Some((id, requested_view)) = Self::decode_resolver_request(&bytes) {
+            if self.context.gen_bool(0.8) {
+                if let Some(certificate) = self.certificate_for_requested_view(requested_view) {
+                    let mut cert_bytes = certificate.encode().to_vec();
+                    if self.context.gen_bool(0.2) {
+                        cert_bytes = self
+                            .strategy
+                            .mutate_certificate_bytes(&mut self.context, &cert_bytes);
+                    }
+                    Self::encode_resolver_response(id, cert_bytes)
+                } else {
+                    default_response
+                }
+            } else {
+                default_response
+            }
+        } else {
+            default_response
+        };
+        let _ = self.resolver_senders[idx]
+            .send(Recipients::One(self.honest.clone()), response, true)
+            .await;
+    }
+
+    fn handle_certificates(&mut self, bytes: Vec<u8>) {
         let cfg = self.schemes[0].certificate_codec_config();
         let Ok(certificate) = Certificate::<S, Sha256Digest>::read_cfg(&mut bytes.as_slice(), &cfg)
         else {
@@ -571,58 +599,31 @@ where
         }
     }
 
-    async fn drain_inboxes(&mut self) {
+    async fn handle_receivers(&mut self) {
         for idx in 0..self.vote_receivers.len() {
             while let Some(Ok((sender, msg))) = self.vote_receivers[idx].recv().now_or_never() {
                 let bytes: Vec<u8> = msg.into();
-                self.observe_vote(&sender, bytes);
+                self.handle_honest_votes(&sender, bytes);
             }
         }
 
         for idx in 0..self.certificate_receivers.len() {
             while let Some(Ok((_, msg))) = self.certificate_receivers[idx].recv().now_or_never() {
                 let bytes: Vec<u8> = msg.into();
-                self.observe_certificate(bytes);
+                self.handle_certificates(bytes);
             }
         }
 
         for idx in 0..self.resolver_receivers.len() {
-            while let Some(Ok((_sender, msg))) = self.resolver_receivers[idx].recv().now_or_never()
+            while let Some(Ok((_, msg))) = self.resolver_receivers[idx].recv().now_or_never()
             {
                 let bytes: Vec<u8> = msg.into();
-                let default_response = self
-                    .strategy
-                    .mutate_resolver_bytes(&mut self.context, &bytes);
-                let response =
-                    if let Some((id, requested_view)) = Self::decode_resolver_request(&bytes) {
-                        if self.context.gen_bool(0.8) {
-                            if let Some(certificate) =
-                                self.certificate_for_requested_view(requested_view)
-                            {
-                                let mut cert_bytes = certificate.encode().to_vec();
-                                if self.context.gen_bool(0.2) {
-                                    cert_bytes = self
-                                        .strategy
-                                        .mutate_certificate_bytes(&mut self.context, &cert_bytes);
-                                }
-                                Self::encode_resolver_response(id, cert_bytes)
-                            } else {
-                                default_response
-                            }
-                        } else {
-                            default_response
-                        }
-                    } else {
-                        default_response
-                    };
-                let _ = self.resolver_senders[idx]
-                    .send(Recipients::One(self.honest.clone()), response, true)
-                    .await;
+                self.handle_resolvers(idx, bytes).await;
             }
         }
     }
 
-    fn poll_monitor(&mut self, latest: &mut View, monitor: &mut Receiver<View>) -> bool {
+    fn check_finalization(&mut self, latest: &mut View, monitor: &mut Receiver<View>) -> bool {
         let mut progressed = false;
         while let Ok(update) = monitor.try_recv() {
             if update.get() > latest.get() {
@@ -835,8 +836,10 @@ where
         self.send_certificate_bytes(signer_idx, msg).await;
     }
 
+    // The goal of this function is to unlock the honest node using
+    // finalize votes for the votes that were notarized by the honest node.
     async fn inject_finalize_quorum_for_honest_notarize_views(&mut self) {
-        let targets: Vec<_> = self
+        let notarized: Vec<_> = self
             .honest_notarize_votes
             .iter()
             .filter(|(proposal, _)| {
@@ -845,10 +848,14 @@ where
                     .contains(&proposal.view().get())
             })
             .map(|(proposal, _)| (proposal.view().get(), proposal.clone()))
-            .take(2)
             .collect();
 
-        for (view, proposal) in targets {
+        if notarized.is_empty() {
+            return;
+        }
+        let budget = self.context.gen_range(1..=notarized.len());
+
+        for (view, proposal) in notarized.into_iter().take(budget) {
             for signer_idx in 0..self.schemes.len() {
                 self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
                     .await;
@@ -1114,8 +1121,8 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
         );
 
         for event in input.events.iter() {
-            driver.poll_monitor(&mut latest, &mut monitor);
-            driver.drain_inboxes().await;
+            driver.check_finalization(&mut latest, &mut monitor);
+            driver.handle_receivers().await;
             driver
                 .inject_finalize_quorum_for_honest_notarize_views()
                 .await;
