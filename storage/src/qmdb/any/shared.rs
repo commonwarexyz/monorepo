@@ -1,4 +1,41 @@
 //! Shared facade for Any QMDB.
+//!
+//! This facade provides a single-writer, multi-reader access pattern over Any QMDB while preserving
+//! typestate transitions internally.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! use commonware_storage::kv::{Batchable as _, Gettable as _};
+//! use commonware_storage::mmr::Location;
+//! use commonware_storage::qmdb::any::{SharedDb, SyncPolicy};
+//! use std::num::NonZeroU64;
+//! use std::time::{Duration, SystemTime};
+//!
+//! # async fn demo(mut db: impl Sized) -> Result<(), Box<dyn std::error::Error>> {
+//! // Start from a clean Any Db and convert to shared handles.
+//! let (writer, shared) = db.into_shared(
+//!     SyncPolicy::Interval(Duration::from_secs(5)),
+//!     SystemTime::now,
+//! );
+//!
+//! // Read path.
+//! let reader = shared.reader().await;
+//! let _value = reader.get(&key).await?;
+//!
+//! // Write path.
+//! writer.write_batch(vec![(key.clone(), Some(new_value))]).await?;
+//! let _committed = writer.commit(None).await?;
+//!
+//! // Prover path (forces transition to merkleized state if needed).
+//! let prover = shared.prover().await?;
+//! let _root = prover.root()?;
+//! let (_proof, _ops) = prover
+//!     .proof(Location::new_unchecked(0), NonZeroU64::new(1).unwrap())
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use super::{
     db::Db,
@@ -8,7 +45,8 @@ use super::{
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{contiguous::Mutable, Error as JournalError},
-    mmr::{Location, Proof},
+    kv,
+    mmr::{Location, Proof, StandardHasher},
     qmdb::{store, Durable, Error, Merkleized, NonDurable, Unmerkleized},
     Persistable,
 };
@@ -22,7 +60,7 @@ use commonware_utils::{
 use core::{num::NonZeroU64, ops::Range};
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, SystemTime},
 };
 
 /// Runtime state for a shared Any DB facade.
@@ -33,10 +71,10 @@ pub enum SharedStateDb<
     H: Hasher,
     U: Send + Sync,
 > {
-    MerkleizedDurable(Db<E, C, I, H, U, Merkleized<H>, Durable>),
+    Clean(Db<E, C, I, H, U, Merkleized<H>, Durable>),
     MerkleizedNonDurable(Db<E, C, I, H, U, Merkleized<H>, NonDurable>),
     UnmerkleizedDurable(Db<E, C, I, H, U, Unmerkleized, Durable>),
-    UnmerkleizedNonDurable(Db<E, C, I, H, U, Unmerkleized, NonDurable>),
+    Mutable(Db<E, C, I, H, U, Unmerkleized, NonDurable>),
 }
 
 /// Policy that controls when a full `sync()` is performed after `commit()`.
@@ -59,7 +97,9 @@ pub(crate) struct SharedInner<
 > {
     pub(crate) db: UpgradableAsyncRwLock<Option<SharedStateDb<E, C, I, H, U>>>,
     sync_policy: SyncPolicy,
-    last_full_sync: Mutex<Option<Instant>>,
+    merkleize_hasher: Mutex<StandardHasher<H>>,
+    now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+    last_full_sync: Mutex<Option<SystemTime>>,
 }
 
 impl<
@@ -74,7 +114,7 @@ impl<
         self.sync_policy
     }
 
-    fn should_auto_full_sync(&self, now: Instant) -> bool {
+    fn should_auto_full_sync(&self, now: SystemTime) -> bool {
         match self.sync_policy {
             SyncPolicy::Never => false,
             SyncPolicy::Always => true,
@@ -85,17 +125,75 @@ impl<
                     .expect("last_full_sync lock poisoned");
                 match *last {
                     None => true,
-                    Some(last) => now.duration_since(last) >= interval,
+                    Some(last) => now
+                        .duration_since(last)
+                        .map(|elapsed| elapsed >= interval)
+                        .unwrap_or(true),
                 }
             }
         }
     }
 
-    fn mark_full_sync(&self, now: Instant) {
+    fn mark_full_sync(&self, now: SystemTime) {
         *self
             .last_full_sync
             .lock()
             .expect("last_full_sync lock poisoned") = Some(now);
+    }
+}
+
+impl<E, K, V, U, C, I, H> SharedInner<E, C, I, H, U>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: ValueEncoding,
+    U: Update<K, V>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<K, V, U>: Codec,
+{
+    fn prepare_merkleized(&self, state: &SharedStateDb<E, C, I, H, U>) {
+        let mut hasher = self
+            .merkleize_hasher
+            .lock()
+            .expect("shared merkleization hasher lock poisoned");
+        match state {
+            SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(&mut *hasher),
+            SharedStateDb::Mutable(db) => db.prepare_merkleized(&mut *hasher),
+            SharedStateDb::Clean(_) | SharedStateDb::MerkleizedNonDurable(_) => {}
+        }
+    }
+
+    async fn prover(&self) -> Result<SharedProver<'_, E, C, I, H, U>, Error> {
+        let mut guard = self.db.upgradable_read().await;
+        if !matches!(
+            guard.as_ref().expect("state missing"),
+            SharedStateDb::Clean(_) | SharedStateDb::MerkleizedNonDurable(_)
+        ) {
+            self.prepare_merkleized(guard.as_ref().expect("state missing"));
+
+            let mut write_guard = guard.upgrade().await;
+            let state = write_guard.take().expect("state missing");
+            *write_guard = Some(match state {
+                SharedStateDb::Clean(db) => SharedStateDb::Clean(db),
+                SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::MerkleizedNonDurable(db),
+                SharedStateDb::UnmerkleizedDurable(db) => {
+                    SharedStateDb::Clean(db.into_merkleized())
+                }
+                SharedStateDb::Mutable(db) => {
+                    SharedStateDb::MerkleizedNonDurable(db.into_merkleized())
+                }
+            });
+            guard = write_guard.downgrade_to_upgradable();
+        }
+
+        match guard.as_ref().expect("state missing") {
+            SharedStateDb::Clean(_) | SharedStateDb::MerkleizedNonDurable(_) => {
+                Ok(SharedProver { guard })
+            }
+            _ => panic!("shared prover invariant violated: expected merkleized state"),
+        }
     }
 }
 
@@ -151,10 +249,13 @@ fn into_shared_handles<
 >(
     state: SharedStateDb<E, C, I, H, U>,
     sync_policy: SyncPolicy,
+    now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
 ) -> (SharedWriter<E, C, I, H, U>, Shared<E, C, I, H, U>) {
     let inner = Arc::new(SharedInner {
         db: UpgradableAsyncRwLock::new(Some(state)),
         sync_policy,
+        merkleize_hasher: Mutex::new(StandardHasher::<H>::new()),
+        now,
         last_full_sync: Mutex::new(None),
     });
     (
@@ -214,11 +315,71 @@ impl<
         U: Send + Sync,
     > SharedReader<'a, E, C, I, H, U>
 {
-    pub(super) fn state(&self) -> Result<&SharedStateDb<E, C, I, H, U>, Error> {
-        Ok(self
-            .guard
-            .as_ref()
-            .expect("shared any db invariant violated: state missing"))
+    pub(super) fn state(&self) -> &SharedStateDb<E, C, I, H, U> {
+        self.guard.as_ref().expect("state missing")
+    }
+}
+
+impl<'a, E, K, V, U, C, I, H> kv::Gettable for SharedReader<'a, E, C, I, H, U>
+where
+    E: Storage + Clock + Metrics,
+    K: Array + Send + Sync,
+    V: ValueEncoding,
+    V::Value: Send + Sync,
+    U: Update<K, V>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location> + Send + Sync + 'static,
+    H: Hasher,
+    Operation<K, V, U>: Codec,
+    Db<E, C, I, H, U, Merkleized<H>, Durable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+    Db<E, C, I, H, U, Merkleized<H>, NonDurable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+    Db<E, C, I, H, U, Unmerkleized, Durable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+    Db<E, C, I, H, U, Unmerkleized, NonDurable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+{
+    type Key = K;
+    type Value = V::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        match self.state() {
+            SharedStateDb::Clean(db) => kv::Gettable::get(db, key).await,
+            SharedStateDb::MerkleizedNonDurable(db) => kv::Gettable::get(db, key).await,
+            SharedStateDb::UnmerkleizedDurable(db) => kv::Gettable::get(db, key).await,
+            SharedStateDb::Mutable(db) => kv::Gettable::get(db, key).await,
+        }
+    }
+}
+
+impl<E, K, V, U, C, I, H> kv::Gettable for SharedWriter<E, C, I, H, U>
+where
+    E: Storage + Clock + Metrics,
+    K: Array + Send + Sync,
+    V: ValueEncoding,
+    V::Value: Send + Sync,
+    U: Update<K, V>,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    I: UnorderedIndex<Value = Location> + Send + Sync + 'static,
+    H: Hasher,
+    Operation<K, V, U>: Codec,
+    Db<E, C, I, H, U, Merkleized<H>, Durable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+    Db<E, C, I, H, U, Merkleized<H>, NonDurable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+    Db<E, C, I, H, U, Unmerkleized, Durable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+    Db<E, C, I, H, U, Unmerkleized, NonDurable>:
+        kv::Gettable<Key = K, Value = V::Value, Error = Error>,
+{
+    type Key = K;
+    type Value = V::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.reader().await.get(key).await
     }
 }
 
@@ -231,11 +392,8 @@ impl<
         U: Send + Sync,
     > SharedProver<'a, E, C, I, H, U>
 {
-    pub(super) fn state(&self) -> Result<&SharedStateDb<E, C, I, H, U>, Error> {
-        Ok(self
-            .guard
-            .as_ref()
-            .expect("shared any db invariant violated: state missing"))
+    pub(super) fn state(&self) -> &SharedStateDb<E, C, I, H, U> {
+        self.guard.as_ref().expect("state missing")
     }
 }
 
@@ -253,8 +411,9 @@ where
     pub fn into_shared(
         self,
         sync_policy: SyncPolicy,
+        now: impl Fn() -> SystemTime + Send + Sync + 'static,
     ) -> (SharedWriter<E, C, I, H, U>, Shared<E, C, I, H, U>) {
-        into_shared_handles(SharedStateDb::MerkleizedDurable(self), sync_policy)
+        into_shared_handles(SharedStateDb::Clean(self), sync_policy, Arc::new(now))
     }
 }
 
@@ -269,32 +428,54 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
+    pub fn start_batch(&self) -> kv::Batch<'_, K, V::Value, Self>
+    where
+        Self: kv::Gettable<Key = K, Value = V::Value, Error = Error> + Sync,
+    {
+        kv::Batch::new(self)
+    }
+
+    pub async fn write_batch<Iter>(&self, iter: Iter) -> Result<(), Error>
+    where
+        Db<E, C, I, H, U, Unmerkleized, NonDurable>:
+            kv::Batchable<Key = K, Value = V::Value, Error = Error> + Send,
+        V::Value: Clone,
+        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send,
+        Iter::IntoIter: Send,
+    {
+        let mut guard = self.inner.db.write().await;
+        let state = guard.take().expect("state missing");
+        let mut db = match state {
+            SharedStateDb::Clean(db) => db.into_mutable(),
+            SharedStateDb::MerkleizedNonDurable(db) => db.into_mutable(),
+            SharedStateDb::UnmerkleizedDurable(db) => db.into_mutable(),
+            SharedStateDb::Mutable(db) => db,
+        };
+
+        if let Err(err) = kv::Batchable::write_batch(&mut db, iter).await {
+            panic!("shared write_batch failed; state is unrecoverable: {err}");
+        }
+
+        *guard = Some(SharedStateDb::Mutable(db));
+        Ok(())
+    }
+
     pub async fn into_mutable(&self) -> Result<(), Error> {
         let guard = self.inner.db.upgradable_read().await;
         if matches!(
-            guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing"),
-            SharedStateDb::UnmerkleizedNonDurable(_)
+            guard.as_ref().expect("state missing"),
+            SharedStateDb::Mutable(_)
         ) {
             return Ok(());
         }
 
         let mut guard = guard.upgrade().await;
-        let state = guard
-            .take()
-            .expect("shared any db invariant violated: state missing");
+        let state = guard.take().expect("state missing");
         *guard = Some(match state {
-            SharedStateDb::MerkleizedDurable(db) => {
-                SharedStateDb::UnmerkleizedNonDurable(db.into_mutable())
-            }
-            SharedStateDb::MerkleizedNonDurable(db) => {
-                SharedStateDb::UnmerkleizedNonDurable(db.into_mutable())
-            }
-            SharedStateDb::UnmerkleizedDurable(db) => {
-                SharedStateDb::UnmerkleizedNonDurable(db.into_mutable())
-            }
-            SharedStateDb::UnmerkleizedNonDurable(db) => SharedStateDb::UnmerkleizedNonDurable(db),
+            SharedStateDb::Clean(db) => SharedStateDb::Mutable(db.into_mutable()),
+            SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::Mutable(db.into_mutable()),
+            SharedStateDb::UnmerkleizedDurable(db) => SharedStateDb::Mutable(db.into_mutable()),
+            SharedStateDb::Mutable(db) => SharedStateDb::Mutable(db),
         });
         Ok(())
     }
@@ -302,53 +483,38 @@ where
     pub async fn into_merkleized(&self) -> Result<(), Error> {
         let guard = self.inner.db.upgradable_read().await;
         if matches!(
-            guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing"),
-            SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_)
+            guard.as_ref().expect("state missing"),
+            SharedStateDb::Clean(_) | SharedStateDb::MerkleizedNonDurable(_)
         ) {
             return Ok(());
         }
 
-        match guard
-            .as_ref()
-            .expect("shared any db invariant violated: state missing")
-        {
-            SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
-            SharedStateDb::UnmerkleizedNonDurable(db) => db.prepare_merkleized(),
-            _ => {}
-        }
+        self.inner
+            .prepare_merkleized(guard.as_ref().expect("state missing"));
 
         let mut guard = guard.upgrade().await;
-        let state = guard
-            .take()
-            .expect("shared any db invariant violated: state missing");
+        let state = guard.take().expect("state missing");
         *guard = Some(match state {
-            SharedStateDb::MerkleizedDurable(db) => SharedStateDb::MerkleizedDurable(db),
+            SharedStateDb::Clean(db) => SharedStateDb::Clean(db),
             SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::MerkleizedNonDurable(db),
-            SharedStateDb::UnmerkleizedDurable(db) => {
-                SharedStateDb::MerkleizedDurable(db.into_merkleized())
-            }
-            SharedStateDb::UnmerkleizedNonDurable(db) => {
-                SharedStateDb::MerkleizedNonDurable(db.into_merkleized())
-            }
+            SharedStateDb::UnmerkleizedDurable(db) => SharedStateDb::Clean(db.into_merkleized()),
+            SharedStateDb::Mutable(db) => SharedStateDb::MerkleizedNonDurable(db.into_merkleized()),
         });
         Ok(())
     }
 
     /// Commit pending operations and fsync without holding an exclusive lock during fsync.
     ///
-    /// This leaves the shared db in `(Unmerkleized, Durable)` state on success.
+    /// This leaves the shared db in a durable state on success: `Mutable` normally, or `Clean`
+    /// when policy-triggered full sync runs.
     pub async fn commit(&self, metadata: Option<V::Value>) -> Result<Range<Location>, Error> {
         let mut write_guard = self.inner.db.write().await;
-        let state = write_guard
-            .take()
-            .expect("shared any db invariant violated: state missing");
+        let state = write_guard.take().expect("state missing");
         let mut db = match state {
-            SharedStateDb::MerkleizedDurable(db) => db.into_mutable(),
+            SharedStateDb::Clean(db) => db.into_mutable(),
             SharedStateDb::MerkleizedNonDurable(db) => db.into_mutable(),
             SharedStateDb::UnmerkleizedDurable(db) => db.into_mutable(),
-            SharedStateDb::UnmerkleizedNonDurable(db) => db,
+            SharedStateDb::Mutable(db) => db,
         };
         let range = match db.commit_no_sync(metadata).await {
             Ok(range) => range,
@@ -356,19 +522,15 @@ where
                 panic!("shared commit failed after mutable update; state is unrecoverable: {err}")
             }
         };
-        *write_guard = Some(SharedStateDb::UnmerkleizedNonDurable(db));
+        *write_guard = Some(SharedStateDb::Mutable(db));
 
         // Keep writer serialization while allowing concurrent readers during fsync.
         let upgradable_guard = write_guard.downgrade_to_upgradable();
 
         if let Err(err) = {
-            let state = upgradable_guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing");
+            let state = upgradable_guard.as_ref().expect("state missing");
             match state {
-                SharedStateDb::UnmerkleizedNonDurable(db) => {
-                    db.log.commit().await.map_err(Error::from)
-                }
+                SharedStateDb::Mutable(db) => db.log.commit().await.map_err(Error::from),
                 SharedStateDb::MerkleizedNonDurable(db) => {
                     db.log.commit().await.map_err(Error::from)
                 }
@@ -378,118 +540,81 @@ where
             panic!("shared commit fsync failed; state is unrecoverable: {err}");
         }
 
-        let mut write_guard = upgradable_guard.upgrade().await;
-        let state = write_guard
-            .take()
-            .expect("shared any db invariant violated: state missing");
-        *write_guard = Some(match state {
-            SharedStateDb::UnmerkleizedNonDurable(db) => SharedStateDb::UnmerkleizedDurable(Db {
-                log: db.log,
-                inactivity_floor_loc: db.inactivity_floor_loc,
-                last_commit_loc: db.last_commit_loc,
-                snapshot: db.snapshot,
-                active_keys: db.active_keys,
-                durable_state: store::Durable,
-                _update: core::marker::PhantomData,
-            }),
-            SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::MerkleizedDurable(Db {
-                log: db.log,
-                inactivity_floor_loc: db.inactivity_floor_loc,
-                last_commit_loc: db.last_commit_loc,
-                snapshot: db.snapshot,
-                active_keys: db.active_keys,
-                durable_state: store::Durable,
-                _update: core::marker::PhantomData,
-            }),
-            other => other,
-        });
-
-        // Optionally force a full sync according to policy.
-        let now = Instant::now();
+        let now = (self.inner.now)();
         if self.inner.should_auto_full_sync(now) {
-            let upgradable_guard = write_guard.downgrade_to_upgradable();
-            match upgradable_guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing")
-            {
-                SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
-                SharedStateDb::MerkleizedDurable(_) => {}
-                _ => panic!("shared commit invariant violated: expected durable state"),
-            }
+            self.inner
+                .prepare_merkleized(upgradable_guard.as_ref().expect("state missing"));
 
             let mut write_guard = upgradable_guard.upgrade().await;
-            let state = write_guard
-                .take()
-                .expect("shared any db invariant violated: state missing");
+            let state = write_guard.take().expect("state missing");
             *write_guard = Some(match state {
-                SharedStateDb::MerkleizedDurable(db) => SharedStateDb::MerkleizedDurable(db),
-                SharedStateDb::UnmerkleizedDurable(db) => {
-                    SharedStateDb::MerkleizedDurable(db.into_merkleized())
+                SharedStateDb::Mutable(db) => {
+                    let db = db.into_merkleized();
+                    SharedStateDb::Clean(Db {
+                        log: db.log,
+                        inactivity_floor_loc: db.inactivity_floor_loc,
+                        last_commit_loc: db.last_commit_loc,
+                        snapshot: db.snapshot,
+                        active_keys: db.active_keys,
+                        durable_state: store::Durable,
+                        _update: core::marker::PhantomData,
+                    })
                 }
-                _ => panic!("shared commit invariant violated: expected durable state"),
+                SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::Clean(Db {
+                    log: db.log,
+                    inactivity_floor_loc: db.inactivity_floor_loc,
+                    last_commit_loc: db.last_commit_loc,
+                    snapshot: db.snapshot,
+                    active_keys: db.active_keys,
+                    durable_state: store::Durable,
+                    _update: core::marker::PhantomData,
+                }),
+                _ => panic!("shared commit invariant violated: expected non-durable state"),
             });
 
             let upgradable_guard = write_guard.downgrade_to_upgradable();
             if let Err(err) = {
-                let state = upgradable_guard
-                    .as_ref()
-                    .expect("shared any db invariant violated: state missing");
+                let state = upgradable_guard.as_ref().expect("state missing");
                 match state {
-                    SharedStateDb::MerkleizedDurable(db) => db.sync().await,
+                    SharedStateDb::Clean(db) => db.sync().await,
                     _ => panic!("shared commit invariant violated: expected merkleized durable"),
                 }
             } {
                 panic!("shared full sync after commit failed; state is unrecoverable: {err}");
             }
-            self.inner.mark_full_sync(now);
+            let finished_at = (self.inner.now)();
+            self.inner.mark_full_sync(finished_at);
+        } else {
+            let mut write_guard = upgradable_guard.upgrade().await;
+            let state = write_guard.take().expect("state missing");
+            *write_guard = Some(match state {
+                SharedStateDb::Mutable(db) => SharedStateDb::UnmerkleizedDurable(Db {
+                    log: db.log,
+                    inactivity_floor_loc: db.inactivity_floor_loc,
+                    last_commit_loc: db.last_commit_loc,
+                    snapshot: db.snapshot,
+                    active_keys: db.active_keys,
+                    durable_state: store::Durable,
+                    _update: core::marker::PhantomData,
+                }),
+                SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::Clean(Db {
+                    log: db.log,
+                    inactivity_floor_loc: db.inactivity_floor_loc,
+                    last_commit_loc: db.last_commit_loc,
+                    snapshot: db.snapshot,
+                    active_keys: db.active_keys,
+                    durable_state: store::Durable,
+                    _update: core::marker::PhantomData,
+                }),
+                _ => panic!("shared commit invariant violated: expected non-durable state"),
+            });
         }
 
         Ok(range)
     }
 
     pub async fn prover(&self) -> Result<SharedProver<'_, E, C, I, H, U>, Error> {
-        let mut guard = self.inner.db.upgradable_read().await;
-        if !matches!(
-            guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing"),
-            SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_)
-        ) {
-            match guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing")
-            {
-                SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
-                SharedStateDb::UnmerkleizedNonDurable(db) => db.prepare_merkleized(),
-                _ => {}
-            }
-
-            let mut write_guard = guard.upgrade().await;
-            let state = write_guard
-                .take()
-                .expect("shared any db invariant violated: state missing");
-            *write_guard = Some(match state {
-                SharedStateDb::MerkleizedDurable(db) => SharedStateDb::MerkleizedDurable(db),
-                SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::MerkleizedNonDurable(db),
-                SharedStateDb::UnmerkleizedDurable(db) => {
-                    SharedStateDb::MerkleizedDurable(db.into_merkleized())
-                }
-                SharedStateDb::UnmerkleizedNonDurable(db) => {
-                    SharedStateDb::MerkleizedNonDurable(db.into_merkleized())
-                }
-            });
-            guard = write_guard.downgrade_to_upgradable();
-        }
-
-        match guard
-            .as_ref()
-            .expect("shared any db invariant violated: state missing")
-        {
-            SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_) => {
-                Ok(SharedProver { guard })
-            }
-            _ => panic!("shared prover invariant violated: expected merkleized state"),
-        }
+        self.inner.prover().await
     }
 }
 
@@ -509,48 +634,7 @@ where
     }
 
     pub async fn prover(&self) -> Result<SharedProver<'_, E, C, I, H, U>, Error> {
-        let mut guard = self.inner.db.upgradable_read().await;
-        if !matches!(
-            guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing"),
-            SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_)
-        ) {
-            match guard
-                .as_ref()
-                .expect("shared any db invariant violated: state missing")
-            {
-                SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(),
-                SharedStateDb::UnmerkleizedNonDurable(db) => db.prepare_merkleized(),
-                _ => {}
-            }
-
-            let mut write_guard = guard.upgrade().await;
-            let state = write_guard
-                .take()
-                .expect("shared any db invariant violated: state missing");
-            *write_guard = Some(match state {
-                SharedStateDb::MerkleizedDurable(db) => SharedStateDb::MerkleizedDurable(db),
-                SharedStateDb::MerkleizedNonDurable(db) => SharedStateDb::MerkleizedNonDurable(db),
-                SharedStateDb::UnmerkleizedDurable(db) => {
-                    SharedStateDb::MerkleizedDurable(db.into_merkleized())
-                }
-                SharedStateDb::UnmerkleizedNonDurable(db) => {
-                    SharedStateDb::MerkleizedNonDurable(db.into_merkleized())
-                }
-            });
-            guard = write_guard.downgrade_to_upgradable();
-        }
-
-        match guard
-            .as_ref()
-            .expect("shared any db invariant violated: state missing")
-        {
-            SharedStateDb::MerkleizedDurable(_) | SharedStateDb::MerkleizedNonDurable(_) => {
-                Ok(SharedProver { guard })
-            }
-            _ => panic!("shared prover invariant violated: expected merkleized state"),
-        }
+        self.inner.prover().await
     }
 }
 
@@ -566,9 +650,9 @@ where
     Operation<K, V, U>: Codec,
 {
     pub fn root(&self) -> Result<H::Digest, Error> {
-        let state = self.state()?;
+        let state = self.state();
         match state {
-            SharedStateDb::MerkleizedDurable(db) => Ok(db.root()),
+            SharedStateDb::Clean(db) => Ok(db.root()),
             SharedStateDb::MerkleizedNonDurable(db) => Ok(db.root()),
             _ => panic!("shared prover invariant violated: expected merkleized state"),
         }
@@ -579,9 +663,9 @@ where
         loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        let state = self.state()?;
+        let state = self.state();
         match state {
-            SharedStateDb::MerkleizedDurable(db) => db.proof(loc, max_ops).await,
+            SharedStateDb::Clean(db) => db.proof(loc, max_ops).await,
             SharedStateDb::MerkleizedNonDurable(db) => db.proof(loc, max_ops).await,
             _ => panic!("shared prover invariant violated: expected merkleized state"),
         }
@@ -593,9 +677,9 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
-        let state = self.state()?;
+        let state = self.state();
         match state {
-            SharedStateDb::MerkleizedDurable(db) => {
+            SharedStateDb::Clean(db) => {
                 db.historical_proof(historical_size, start_loc, max_ops)
                     .await
             }

@@ -10,7 +10,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{Location, Proof},
+    mmr::{hasher::Hasher as MmrHasher, Location, Proof},
     qmdb::{
         any::ValueEncoding,
         build_snapshot_from_log,
@@ -277,8 +277,8 @@ where
     Operation<K, V, U>: Codec,
 {
     /// Perform all currently available merkleization work while remaining unmerkleized.
-    pub fn prepare_merkleized(&self) {
-        self.log.do_merkleization_work();
+    pub fn prepare_merkleized(&self, hasher: &mut impl MmrHasher<Digest = DigestOf<H>>) {
+        self.log.do_merkleization_work(hasher);
     }
 
     pub fn into_merkleized(self) -> Db<E, C, I, H, U, Merkleized<H>, D> {
