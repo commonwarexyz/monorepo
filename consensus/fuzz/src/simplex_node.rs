@@ -138,8 +138,8 @@ where
     latest_proposals: VecDeque<Proposal<Sha256Digest>>,
     proposal_by_view: HashMap<u64, Proposal<Sha256Digest>>,
 
-    used_votes: std::collections::HashSet<VoteKey>,
-    used_certificates: std::collections::HashSet<CertificateKey>,
+    used_votes: HashSet<VoteKey>,
+    used_certificates: HashSet<CertificateKey>,
 
     honest_notarize_votes: HashMap<Proposal<Sha256Digest>, Notarize<S, Sha256Digest>>,
     honest_finalize_votes: HashMap<Proposal<Sha256Digest>, Finalize<S, Sha256Digest>>,
@@ -191,8 +191,8 @@ where
             last_nullified_view: 0,
             latest_proposals: VecDeque::new(),
             proposal_by_view: HashMap::new(),
-            used_votes: std::collections::HashSet::new(),
-            used_certificates: std::collections::HashSet::new(),
+            used_votes: HashSet::new(),
+            used_certificates: HashSet::new(),
             honest_notarize_votes: HashMap::new(),
             honest_finalize_votes: HashMap::new(),
             injected_finalize_views: HashSet::new(),
@@ -1059,12 +1059,12 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
         let relay = std::sync::Arc::new(commonware_consensus::simplex::mocks::relay::Relay::new());
         let byzantine_participants: Vec<_> = participants.iter().take(3).cloned().collect();
 
-        let mut fuzzer_vote_senders = Vec::new();
-        let mut fuzzer_certificate_senders = Vec::new();
-        let mut fuzzer_resolver_senders = Vec::new();
-        let mut fuzzer_vote_receivers = Vec::new();
-        let mut fuzzer_certificate_receivers = Vec::new();
-        let mut fuzzer_resolver_receivers = Vec::new();
+        let mut vote_senders = Vec::new();
+        let mut certificate_senders = Vec::new();
+        let mut resolver_senders = Vec::new();
+        let mut vote_receivers = Vec::new();
+        let mut certificate_receivers = Vec::new();
+        let mut resolver_receivers = Vec::new();
 
         for byz in participants.iter().take(3usize) {
             let (
@@ -1075,12 +1075,12 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
                 .remove(byz)
                 .expect("byzantine participant must exist");
 
-            fuzzer_vote_senders.push(vote_sender);
-            fuzzer_certificate_senders.push(cert_sender);
-            fuzzer_resolver_senders.push(resolver_sender);
-            fuzzer_vote_receivers.push(vote_receiver);
-            fuzzer_certificate_receivers.push(cert_receiver);
-            fuzzer_resolver_receivers.push(resolver_receiver);
+            vote_senders.push(vote_sender);
+            certificate_senders.push(cert_sender);
+            resolver_senders.push(resolver_sender);
+            vote_receivers.push(vote_receiver);
+            certificate_receivers.push(cert_receiver);
+            resolver_receivers.push(resolver_receiver);
         }
 
         let honest = participants[3].clone();
@@ -1105,12 +1105,12 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
             relay,
             byzantine_participants,
             fuzzer_schemes.to_vec(),
-            fuzzer_vote_senders,
-            fuzzer_certificate_senders,
-            fuzzer_resolver_senders,
-            fuzzer_vote_receivers,
-            fuzzer_certificate_receivers,
-            fuzzer_resolver_receivers,
+            vote_senders,
+            certificate_senders,
+            resolver_senders,
+            vote_receivers,
+            certificate_receivers,
+            resolver_receivers,
         );
 
         for event in input.events.iter() {
