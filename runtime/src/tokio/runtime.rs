@@ -17,19 +17,19 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
+use commonware_utils::sync::Mutex;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry},
+    registry::{Metric, Registry as PrometheusRegistry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
@@ -41,7 +41,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime},
 };
@@ -61,7 +61,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut Registry) -> Self {
+    pub fn init(registry: &mut PrometheusRegistry) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
@@ -284,8 +284,8 @@ impl crate::Runner for Runner {
         Fut: Future,
     {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -403,6 +403,7 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
+            scope: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
@@ -440,6 +441,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -456,6 +458,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
+            scope: self.scope.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -560,7 +563,7 @@ impl crate::Spawner for Context {
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            let mut shutdown = self.executor.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -579,7 +582,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.shutdown.lock().unwrap().stopped()
+        self.executor.shutdown.lock().stopped()
     }
 }
 
@@ -636,26 +639,46 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Apply attributes to the registry (in sorted order)
-        let mut registry = self.executor.registry.lock().unwrap();
-        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
-            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-        });
+        // Route to the appropriate registry (root or scoped)
+        let mut registry = self.executor.registry.lock();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
         sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
-        let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        encoder.into_string()
+        self.executor.registry.lock().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        // Add the attribute to the list of attributes
         let mut attributes = self.attributes.clone();
         add_attribute(&mut attributes, key, value);
         Self {
             attributes,
+            ..self.clone()
+        }
+    }
+
+    fn with_scope(&self) -> Self {
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        // Closure is infallible to avoid panicking in Drop.
+        let executor = self.executor.clone();
+        let scope_id = executor.registry.lock().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            executor.registry.lock().remove_scope(id);
+        }));
+        Self {
+            scope: Some(guard),
             ..self.clone()
         }
     }

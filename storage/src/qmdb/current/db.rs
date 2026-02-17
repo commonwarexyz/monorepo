@@ -36,9 +36,11 @@ use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, Array};
+use commonware_utils::{
+    bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, sync::AsyncMutex, Array,
+};
 use core::{num::NonZeroU64, ops::Range};
-use futures::{future::try_join_all, lock::Mutex};
+use futures::future::try_join_all;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use tracing::{error, warn};
@@ -112,7 +114,7 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted MMR pinned nodes at key [NODE_PREFIX]
-    pub(super) metadata: Mutex<Metadata<E, U64, Vec<u8>>>,
+    pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
 
     /// Optional thread pool for parallelizing grafted leaf computation.
     pub(super) thread_pool: Option<ThreadPool>,
@@ -631,7 +633,7 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    async fn root(&self) -> H::Digest {
+    fn root(&self) -> H::Digest {
         self.root()
     }
 
@@ -863,7 +865,7 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {
     let metadata_cfg = MConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         codec_config: ((0..).into(), ()),
     };
     let metadata =

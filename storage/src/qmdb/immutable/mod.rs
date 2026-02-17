@@ -198,8 +198,8 @@ impl<
     > Immutable<E, K, V, H, T, Merkleized<H>, D>
 {
     /// Return the root of the db.
-    pub async fn root(&self) -> H::Digest {
-        self.journal.root().await
+    pub fn root(&self) -> H::Digest {
+        self.journal.root()
     }
 
     /// Generate and return:
@@ -509,8 +509,8 @@ impl<
     type Digest = H::Digest;
     type Operation = Operation<K, V>;
 
-    async fn root(&self) -> Self::Digest {
-        self.root().await
+    fn root(&self) -> Self::Digest {
+        self.root()
     }
 
     async fn historical_proof(
@@ -579,12 +579,12 @@ pub(super) mod test {
             // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
             let k1 = Sha256::fill(1u8);
             let v1 = vec![4, 5, 6, 7];
-            let root = db.root().await;
+            let root = db.root();
             let mut db = db.into_mutable();
             db.set(k1, v1).await.unwrap();
             drop(db); // Simulate failed commit
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.bounds().await.end, 1);
 
             // Test calling commit on an empty db which should make it (durably) non-empty.
@@ -592,11 +592,11 @@ pub(super) mod test {
             let (durable_db, _) = db.commit(None).await.unwrap();
             let db = durable_db.into_merkleized();
             assert_eq!(db.bounds().await.end, 2); // commit op added
-            let root = db.root().await;
+            let root = db.root();
             drop(db);
 
             let db = open_db(context.with_label("third")).await;
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -648,7 +648,7 @@ pub(super) mod test {
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Capture state.
-            let root = db.root().await;
+            let root = db.root();
 
             // Add an uncommitted op then simulate failure.
             let k3 = Sha256::fill(3u8);
@@ -662,7 +662,7 @@ pub(super) mod test {
             let db = open_db(context.with_label("second")).await;
             assert!(db.get(&k3).await.unwrap().is_none());
             assert_eq!(db.bounds().await.end, 5);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             // Cleanup.
@@ -693,11 +693,11 @@ pub(super) mod test {
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
 
             // Drop & reopen the db, making sure it has exactly the same state.
-            let root = db.root().await;
+            let root = db.root();
             drop(db);
 
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
             assert_eq!(db.bounds().await.end, ELEMENTS + 2);
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
@@ -742,7 +742,7 @@ pub(super) mod test {
             let (durable_db, _) = db.commit(None).await.unwrap();
             let mut db = durable_db.into_merkleized();
             db.sync().await.unwrap();
-            let halfway_root = db.root().await;
+            let halfway_root = db.root();
 
             // Insert another 1000 keys then simulate a failed close and test recovery.
             let mut db = db.into_mutable();
@@ -761,14 +761,14 @@ pub(super) mod test {
             // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
             let db = open_db(context.with_label("second")).await;
             assert_eq!(db.bounds().await.end, 2003);
-            let root = db.root().await;
+            let root = db.root();
             assert_ne!(root, halfway_root);
 
             // Drop & reopen could preserve the final commit.
             drop(db);
             let db = open_db(context.with_label("third")).await;
             assert_eq!(db.bounds().await.end, 2003);
-            assert_eq!(db.root().await, root);
+            assert_eq!(db.root(), root);
 
             db.destroy().await.unwrap();
         });
@@ -786,7 +786,7 @@ pub(super) mod test {
             db.set(k1, v1).await.unwrap();
             let (durable_db, _) = db.commit(None).await.unwrap();
             let db = durable_db.into_merkleized();
-            let first_commit_root = db.root().await;
+            let first_commit_root = db.root();
 
             // Insert 1000 keys then sync.
             const ELEMENTS: u64 = 1000;
@@ -813,7 +813,7 @@ pub(super) mod test {
             // Recovery should back up to previous commit point.
             let db = open_db(context.with_label("second")).await;
             assert_eq!(db.bounds().await.end, 3);
-            let root = db.root().await;
+            let root = db.root();
             assert_eq!(root, first_commit_root);
 
             db.destroy().await.unwrap();
@@ -863,12 +863,12 @@ pub(super) mod test {
             assert!(db.get(&unpruned_key).await.unwrap().is_some());
 
             // Drop & reopen the db, making sure it has exactly the same state.
-            let root = db.root().await;
+            let root = db.root();
             db.sync().await.unwrap();
             drop(db);
 
             let mut db = open_db(context.with_label("second")).await;
-            assert_eq!(root, db.root().await);
+            assert_eq!(root, db.root());
             let bounds = db.bounds().await;
             assert_eq!(bounds.end, ELEMENTS + 2);
             let oldest_retained_loc = bounds.start;

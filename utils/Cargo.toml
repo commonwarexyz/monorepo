@@ -25,6 +25,7 @@ num-bigint = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
 num-rational = { workspace = true, optional = true }
 num-traits.workspace = true
+parking_lot = { workspace = true, optional = true }
 pin-project.workspace = true
 rand.workspace = true
 thiserror.workspace = true
@@ -57,6 +58,7 @@ std = [
 	"num-integer",
 	"num-rational",
 	"num-traits/std",
+	"parking_lot",
 	"rand/std",
 	"rand/std_rng",
 	"thiserror/std",

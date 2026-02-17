@@ -4,7 +4,7 @@
 //! implemented to make consensus logging easier to follow.
 
 use commonware_runtime::{Metrics, Spawner};
-use commonware_utils::channel::mpsc;
+use commonware_utils::{channel::mpsc, sync::Mutex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -18,11 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
-use std::{
-    io::stdout,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io::stdout, sync::Arc, time::Duration};
 use tracing_subscriber::fmt::MakeWriter;
 
 const HEIGHT_OFFSET: u16 = 2;
@@ -101,10 +97,10 @@ impl std::io::Write for Writer {
 
         // Append progress message
         if progress {
-            let mut progress = self.progress.lock().unwrap();
+            let mut progress = self.progress.lock();
             progress.push(formatted_msg);
         } else {
-            let mut logs = self.logs.lock().unwrap();
+            let mut logs = self.logs.lock();
             logs.push(formatted_msg);
         }
         Ok(buf.len())
@@ -207,7 +203,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
                     // Display progress
                     let progress_height = chunks[0].height - HEIGHT_OFFSET;
-                    let progress = self.progress.lock().unwrap();
+                    let progress = self.progress.lock();
                     let progress_len = progress.len() as u16;
                     let progress_max_scroll = progress_len.saturating_sub(progress_height);
                     if focused_window != Focus::Logs {
@@ -244,7 +240,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
                     // Display logs
                     let logs_height = chunks[1].height - HEIGHT_OFFSET;
-                    let logs = self.logs.lock().unwrap();
+                    let logs = self.logs.lock();
                     let logs_len = logs.len() as u16;
                     let logs_max_scroll = logs_len.saturating_sub(logs_height);
                     if focused_window != Focus::Logs {

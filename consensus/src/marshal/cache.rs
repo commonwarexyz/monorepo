@@ -16,7 +16,7 @@ use std::{
     cmp::max,
     collections::BTreeMap,
     num::{NonZero, NonZeroUsize},
-    time::Instant,
+    time::Duration,
 };
 use tracing::{debug, info};
 
@@ -35,6 +35,8 @@ pub(crate) struct Config {
 
 /// Prunable archives for a single epoch.
 struct Cache<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: Scheme> {
+    /// Scoped context that keeps this epoch's metrics alive until the cache is dropped.
+    _scope: R,
     /// Verified blocks stored by view
     verified_blocks: prunable::Archive<TwoCap, R, B::Commitment, B>,
     /// Notarized blocks stored by view
@@ -157,29 +159,45 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
 
     /// Helper to initialize the cache for a given epoch.
     async fn init_epoch(&mut self, epoch: Epoch) {
-        let verified_blocks = self
-            .init_archive(epoch, "verified", self.block_codec_config.clone())
-            .await;
-        let notarized_blocks = self
-            .init_archive(epoch, "notarized", self.block_codec_config.clone())
-            .await;
-        let notarizations = self
-            .init_archive(
+        let scope = self
+            .context
+            .with_label("cache")
+            .with_attribute("epoch", epoch)
+            .with_scope();
+        let (verified_blocks, notarized_blocks, notarizations, finalizations) = futures::join!(
+            Self::init_archive(
+                &scope,
+                &self.cfg,
+                epoch,
+                "verified",
+                self.block_codec_config.clone()
+            ),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
+                epoch,
+                "notarized",
+                self.block_codec_config.clone()
+            ),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
                 epoch,
                 "notarizations",
                 S::certificate_codec_config_unbounded(),
-            )
-            .await;
-        let finalizations = self
-            .init_archive(
+            ),
+            Self::init_archive(
+                &scope,
+                &self.cfg,
                 epoch,
                 "finalizations",
                 S::certificate_codec_config_unbounded(),
-            )
-            .await;
+            ),
+        );
         let existing = self.caches.insert(
             epoch,
             Cache {
+                _scope: scope,
                 verified_blocks,
                 notarized_blocks,
                 notarizations,
@@ -191,33 +209,29 @@ impl<R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage, B: Block, S: S
 
     /// Helper to initialize an archive.
     async fn init_archive<T: CodecShared>(
-        &self,
+        ctx: &R,
+        cfg: &Config,
         epoch: Epoch,
         name: &str,
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, B::Commitment, T> {
-        let start = Instant::now();
-        let cfg = prunable::Config {
+        let start = ctx.current();
+        let archive_cfg = prunable::Config {
             translator: TwoCap,
-            key_partition: format!("{}-cache-{epoch}-{name}-key", self.cfg.partition_prefix),
-            key_page_cache: self.cfg.key_page_cache.clone(),
-            value_partition: format!("{}-cache-{epoch}-{name}-value", self.cfg.partition_prefix),
-            items_per_section: self.cfg.prunable_items_per_section,
+            key_partition: format!("{}-cache-{epoch}-{name}-key", cfg.partition_prefix),
+            key_page_cache: cfg.key_page_cache.clone(),
+            value_partition: format!("{}-cache-{epoch}-{name}-value", cfg.partition_prefix),
+            items_per_section: cfg.prunable_items_per_section,
             compression: None,
             codec_config,
-            replay_buffer: self.cfg.replay_buffer,
-            key_write_buffer: self.cfg.key_write_buffer,
-            value_write_buffer: self.cfg.value_write_buffer,
+            replay_buffer: cfg.replay_buffer,
+            key_write_buffer: cfg.key_write_buffer,
+            value_write_buffer: cfg.value_write_buffer,
         };
-        let archive = prunable::Archive::init(
-            self.context
-                .with_label(&format!("cache_{name}"))
-                .with_attribute("epoch", epoch),
-            cfg,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
-        info!(elapsed = ?start.elapsed(), "restored {name} archive");
+        let archive = prunable::Archive::init(ctx.with_label(name), archive_cfg)
+            .await
+            .unwrap_or_else(|_| panic!("failed to initialize {name} archive"));
+        info!(elapsed = ?ctx.current().duration_since(start).unwrap_or(Duration::ZERO), "restored {name} archive");
         archive
     }
 
