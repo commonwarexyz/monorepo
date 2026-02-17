@@ -606,7 +606,7 @@ where
                             produces.push((key, response));
                         }
                         deliver => {
-                            needs_sync |= self.handle_resolver_deliver(
+                            needs_sync |= self.handle_deliver(
                                 deliver,
                                 &mut pending,
                                 &mut application,
@@ -685,7 +685,7 @@ where
     /// immediately. Finalized/Notarized deliveries are parsed and structurally
     /// validated, then collected into `pending` for batch certificate verification.
     /// Returns true if finalization archives were written and need syncing.
-    async fn handle_resolver_deliver(
+    async fn handle_deliver(
         &mut self,
         message: handler::Message<B>,
         pending: &mut Vec<PendingVerification<P::Scheme, B>>,
@@ -742,7 +742,10 @@ where
                     return false;
                 };
 
-                if block.height() != height || finalization.proposal.payload != block.commitment() {
+                if block.height() != height
+                    || finalization.proposal.payload != block.commitment()
+                    || finalization.epoch() != bounds.epoch()
+                {
                     response.send_lossy(false);
                     return false;
                 }
