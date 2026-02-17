@@ -1,8 +1,9 @@
 #[cfg(any(test, feature = "test-traits"))]
-use crate::journal::contiguous::Persistable as JournalPersistable;
-#[cfg(any(test, feature = "test-traits"))]
 use crate::qmdb::{
-    any::states::{CleanAny, MerkleizedNonDurableAny, MutableAny, UnmerkleizedDurableAny},
+    any::states::{
+        CleanAny, MerkleizedNonDurableAny, MutableAny, PersistableMutableLog,
+        UnmerkleizedDurableAny,
+    },
     Durable, Merkleized,
 };
 use crate::{
@@ -554,7 +555,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -574,7 +575,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -601,7 +602,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,
@@ -620,7 +621,7 @@ where
     E: Storage + Clock + Metrics,
     K: Array,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<K, V>> + JournalPersistable,
+    C: PersistableMutableLog<Operation<K, V>>,
     I: Index<Value = Location> + 'static,
     H: Hasher,
     Operation<K, V>: Codec,

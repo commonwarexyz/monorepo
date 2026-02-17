@@ -71,24 +71,6 @@ pub trait Contiguous: Send + Sync {
     fn size(&self) -> impl Future<Output = u64> + Send;
 }
 
-/// Journals that can be durably persisted and destroyed.
-//
-// TODO(<https://github.com/commonwarexyz/monorepo/issues/3118>): This trait is temporary and will
-// be removed in favor of [crate::Persistable] once it can be updated to use non-mut functions.
-pub trait Persistable: Send + Sync {
-    /// Durably persist the journal, guaranteeing the current state will survive a crash.
-    ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-    fn commit(&self) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Durably persist the journal, ensuring the current state will survive a crash and that
-    /// no recovery will be needed on startup.
-    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Destroy the journal, removing all associated storage.
-    fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
-}
-
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.
 pub trait Mutable: Contiguous + Send + Sync {
     /// Append a new item to the journal, returning its position.

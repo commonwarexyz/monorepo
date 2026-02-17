@@ -1,14 +1,20 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
 use super::{Contiguous, Reader as _};
-use crate::journal::{contiguous::Mutable, Error};
+use crate::{
+    journal::{contiguous::Mutable, Error},
+    Persistable,
+};
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(super) trait PersistableContiguous: Mutable<Item = u64> + super::Persistable {}
+pub(super) trait PersistableContiguous:
+    Mutable<Item = u64> + Persistable<Error = Error>
+{
+}
 
-impl<T> PersistableContiguous for T where T: Mutable<Item = u64> + super::Persistable {}
+impl<T> PersistableContiguous for T where T: Mutable<Item = u64> + Persistable<Error = Error> {}
 
 async fn get_bounds<J: Contiguous>(journal: &J) -> std::ops::Range<u64> {
     let reader = journal.reader().await;

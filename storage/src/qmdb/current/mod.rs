@@ -633,7 +633,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
             // Drop and reopen the db
@@ -658,7 +658,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
 
             let root = db.root();
@@ -864,7 +864,7 @@ pub mod tests {
                 .await
                 .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db: C = db.into_merkleized().await.unwrap();
+            let db: C = db.into_merkleized().await.unwrap();
 
             // The bitmap should have been pruned during into_merkleized().
             let pruned_bits_before = db.pruned_bits();

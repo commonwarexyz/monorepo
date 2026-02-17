@@ -2,6 +2,7 @@
 //! benchmark code across the variants.
 
 use crate::{
+    journal::contiguous::Mutable,
     kv::{Batchable, Gettable},
     mmr::Location,
     qmdb::{
@@ -14,6 +15,17 @@ use commonware_codec::Codec;
 use commonware_cryptography::Digest;
 use commonware_utils::Array;
 use std::{future::Future, ops::Range};
+
+/// A mutable operation log that can be durably persisted.
+pub(crate) trait PersistableMutableLog<O>:
+    Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
+
+impl<T, O> PersistableMutableLog<O> for T where
+    T: Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
 
 /// Trait for the (Merkleized,Durable) state.
 ///
