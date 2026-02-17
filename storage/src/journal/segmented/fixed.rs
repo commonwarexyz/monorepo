@@ -163,10 +163,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Read the last item in a section, if any.
     pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
-        let blob = self
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
+        let Some(blob) = self.manager.get(section)? else {
+            return Ok(None);
+        };
 
         let size = blob.size().await;
         if size < Self::CHUNK_SIZE_U64 {
@@ -1217,6 +1216,44 @@ mod tests {
                 journal.get(0, 0).await,
                 Err(Error::SectionOutOfRange(0))
             ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_missing_section_returns_none() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            assert_eq!(journal.last(0).await.unwrap(), None);
+            assert_eq!(journal.last(99).await.unwrap(), None);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_after_rewind_to_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            journal.append(0, test_digest(0)).await.unwrap();
+            journal.append(0, test_digest(1)).await.unwrap();
+            journal.sync(0).await.unwrap();
+
+            assert!(journal.last(0).await.unwrap().is_some());
+
+            journal.rewind(0, 0).await.unwrap();
+            assert_eq!(journal.last(0).await.unwrap(), None);
 
             journal.destroy().await.unwrap();
         });
