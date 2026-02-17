@@ -165,8 +165,6 @@ impl crate::Network for Network {
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
         let stream = TcpStream::connect(socket)
             .await
-            .map_err(|_| crate::Error::ConnectionFailed)?
-            .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
@@ -182,6 +180,11 @@ impl crate::Network for Network {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
+
+        // Convert the stream to a std::net::TcpStream
+        let stream = stream
+            .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Explicitly set non-blocking mode to true
         stream
@@ -230,10 +233,6 @@ impl crate::Listener for Listener {
             .await
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
-        let stream = stream
-            .into_std()
-            .map_err(|_| crate::Error::ConnectionFailed)?;
-
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
@@ -247,6 +246,11 @@ impl crate::Listener for Listener {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
+
+        // Convert the stream to a std::net::TcpStream
+        let stream = stream
+            .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Explicitly set non-blocking mode to true
         stream
