@@ -60,9 +60,6 @@ use tracing::{debug, error, info, warn};
 /// The key used to store the last processed height in the metadata store.
 const LATEST_KEY: U64 = U64::new(0xFF);
 
-/// A (subject, certificate) pair for batch verification.
-type CertificatePair<'a, S, D> = (Subject<'a, D>, &'a <S as CertificateScheme>::Certificate);
-
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 enum PendingVerification<S: CertificateScheme, B: Block> {
     Notarized {
@@ -831,128 +828,107 @@ where
                 &self.strategy,
             )
         } else {
-            self.verify_pending_by_epoch(&pending, &pending_certs)
+            let mut verified = vec![false; pending.len()];
+
+            // Group indices by epoch
+            let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
+            for (i, item) in pending.iter().enumerate() {
+                let epoch = match item {
+                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
+                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
+                };
+                by_epoch.entry(epoch).or_default().push(i);
+            }
+
+            // Batch verify each epoch group
+            for (epoch, indices) in &by_epoch {
+                let Some(scheme) = self.provider.scoped(*epoch) else {
+                    continue;
+                };
+                let group: Vec<_> = indices.iter().map(|&i| pending_certs[i]).collect();
+                let results =
+                    verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
+                for (j, &idx) in indices.iter().enumerate() {
+                    verified[idx] = results[j];
+                }
+            }
+            verified
         };
 
-        // Attempt to process each verified item, sending a failure response for each unverified item.
+        // Process each verified item, rejecting unverified ones
         let mut wrote = false;
         for (index, item) in pending.drain(..).enumerate() {
-            if verified[index] {
-                wrote |= self.process_verified(item, application).await;
-            } else {
+            if !verified[index] {
                 match item {
                     PendingVerification::Finalized { response, .. }
                     | PendingVerification::Notarized { response, .. } => {
                         response.send_lossy(false);
                     }
                 }
-            }
-        }
-
-        wrote
-    }
-
-    /// Batch verify pending items grouped by epoch using scoped verifiers.
-    fn verify_pending_by_epoch(
-        &mut self,
-        pending: &[PendingVerification<P::Scheme, B>],
-        pending_certs: &[CertificatePair<'_, P::Scheme, B::Commitment>],
-    ) -> Vec<bool> {
-        let mut verified = vec![false; pending.len()];
-
-        // Group indices by epoch
-        let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-        for (i, item) in pending.iter().enumerate() {
-            let epoch = match item {
-                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-            };
-            by_epoch.entry(epoch).or_default().push(i);
-        }
-
-        // Batch verify each epoch group
-        for (epoch, indices) in &by_epoch {
-            let Some(scheme) = self.provider.scoped(*epoch) else {
                 continue;
-            };
-            let group: Vec<_> = indices.iter().map(|&i| pending_certs[i]).collect();
-            let results =
-                verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
-            for (j, &idx) in indices.iter().enumerate() {
-                verified[idx] = results[j];
             }
-        }
-
-        verified
-    }
-
-    /// Process a verified pending item (finalization or notarization).
-    /// Returns true if finalization archives were written.
-    async fn process_verified(
-        &mut self,
-        item: PendingVerification<P::Scheme, B>,
-        application: &mut impl Reporter<Activity = Update<B, A>>,
-    ) -> bool {
-        match item {
-            PendingVerification::Finalized {
-                finalization,
-                block,
-                response,
-            } => {
-                // Valid finalization received
-                response.send_lossy(true);
-                let round = finalization.round();
-                let height = block.height();
-                debug!(?round, %height, "received finalization");
-
-                // Store the finalization
-                self.store_finalization(
-                    height,
-                    block.commitment(),
+            match item {
+                PendingVerification::Finalized {
+                    finalization,
                     block,
-                    Some(finalization),
-                    application,
-                )
-                .await;
-                true
-            }
-            PendingVerification::Notarized {
-                notarization,
-                block,
-                response,
-            } => {
-                // Valid notarization received
-                response.send_lossy(true);
-                let round = notarization.round();
-                let commitment = block.commitment();
-                debug!(?round, ?commitment, "received notarization");
+                    response,
+                } => {
+                    // Valid finalization received
+                    response.send_lossy(true);
+                    let round = finalization.round();
+                    let height = block.height();
+                    debug!(?round, %height, "received finalization");
 
-                // If there exists a finalization certificate for this block, we
-                // should finalize it. This could finalize the block faster when
-                // a notarization then a finalization are received via consensus
-                // and we resolve the notarization request before the block request.
-                let height = block.height();
-                let mut wrote = false;
-                if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
                     self.store_finalization(
                         height,
-                        commitment,
-                        block.clone(),
+                        block.commitment(),
+                        block,
                         Some(finalization),
                         application,
                     )
                     .await;
                     wrote = true;
                 }
+                PendingVerification::Notarized {
+                    notarization,
+                    block,
+                    response,
+                } => {
+                    // Valid notarization received
+                    response.send_lossy(true);
+                    let round = notarization.round();
+                    let commitment = block.commitment();
+                    debug!(?round, ?commitment, "received notarization");
 
-                // Cache the notarization and block
-                self.cache_block(round, commitment, block).await;
-                self.cache
-                    .put_notarization(round, commitment, notarization)
-                    .await;
-                wrote
+                    // If there exists a finalization certificate for this block, we
+                    // should finalize it. This could finalize the block faster when
+                    // a notarization then a finalization are received via consensus
+                    // and we resolve the notarization request before the block request.
+                    let height = block.height();
+                    if let Some(finalization) =
+                        self.cache.get_finalization_for(commitment).await
+                    {
+                        self.store_finalization(
+                            height,
+                            commitment,
+                            block.clone(),
+                            Some(finalization),
+                            application,
+                        )
+                        .await;
+                        wrote = true;
+                    }
+
+                    // Cache the notarization and block
+                    self.cache_block(round, commitment, block).await;
+                    self.cache
+                        .put_notarization(round, commitment, notarization)
+                        .await;
+                }
             }
         }
+
+        wrote
     }
 
     /// Returns a scheme suitable for verifying certificates at the given epoch.
