@@ -673,6 +673,7 @@ where
                 response,
             } => match key {
                 Request::Block(commitment) => {
+                    // Parse block
                     let Ok(block) = B::decode_cfg(value.as_ref(), &self.block_codec_config) else {
                         response.send_lossy(false);
                         return false;
@@ -681,6 +682,8 @@ where
                         response.send_lossy(false);
                         return false;
                     }
+
+                    // Persist the block, also persisting the finalization if we have it
                     let height = block.height();
                     let finalization = self.cache.get_finalization_for(commitment).await;
                     self.store_finalization(height, commitment, block, finalization, application)
@@ -698,6 +701,8 @@ where
                         response.send_lossy(false);
                         return false;
                     };
+
+                    // Parse finalization
                     let Ok((finalization, block)) =
                         <(Finalization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                             value,
@@ -710,6 +715,8 @@ where
                         response.send_lossy(false);
                         return false;
                     };
+
+                    // Structural validation
                     if block.height() != height
                         || finalization.proposal.payload != block.commitment()
                     {
@@ -729,6 +736,8 @@ where
                         response.send_lossy(false);
                         return false;
                     };
+
+                    // Parse notarization
                     let Ok((notarization, block)) =
                         <(Notarization<P::Scheme, B::Commitment>, B)>::decode_cfg(
                             value,
@@ -741,6 +750,8 @@ where
                         response.send_lossy(false);
                         return false;
                     };
+
+                    // Structural validation
                     if notarization.round() != round
                         || notarization.proposal.payload != block.commitment()
                     {
