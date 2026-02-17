@@ -491,6 +491,94 @@ where
     }
 }
 
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>> + crate::Persistable<Error = crate::journal::Error>,
+        I: Index<Value = Location> + Send + Sync + 'static,
+        H: Hasher,
+    > kv::Gettable for crate::qmdb::any::SharedReader<'_, E, C, I, H, Update<K, V>>
+where
+    Operation<K, V>: CodecShared,
+    V::Value: Send + Sync,
+{
+    type Key = K;
+    type Value = V::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        let state = self.state()?;
+        match state {
+            crate::qmdb::any::SharedStateDb::MerkleizedDurable(db) => db.get(key).await,
+            crate::qmdb::any::SharedStateDb::MerkleizedNonDurable(db) => db.get(key).await,
+            crate::qmdb::any::SharedStateDb::UnmerkleizedDurable(db) => db.get(key).await,
+            crate::qmdb::any::SharedStateDb::UnmerkleizedNonDurable(db) => db.get(key).await,
+        }
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>> + crate::Persistable<Error = crate::journal::Error>,
+        I: Index<Value = Location> + Send + Sync + 'static,
+        H: Hasher,
+    > kv::Gettable for crate::qmdb::any::SharedWriter<E, C, I, H, Update<K, V>>
+where
+    Operation<K, V>: CodecShared,
+    V::Value: Send + Sync,
+{
+    type Key = K;
+    type Value = V::Value;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        self.reader().await.get(key).await
+    }
+}
+
+impl<
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: ValueEncoding,
+        C: Mutable<Item = Operation<K, V>> + crate::Persistable<Error = crate::journal::Error>,
+        I: Index<Value = Location> + Send + Sync + 'static,
+        H: Hasher,
+    > crate::qmdb::any::SharedWriter<E, C, I, H, Update<K, V>>
+where
+    Operation<K, V>: CodecShared,
+    V::Value: Send + Sync,
+{
+    pub fn start_batch(&self) -> kv::Batch<'_, K, V::Value, Self> {
+        kv::Batch::new(self)
+    }
+
+    pub async fn write_batch(
+        &self,
+        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+    ) -> Result<(), Error> {
+        let mut guard = self.inner.db.write().await;
+        let state = guard
+            .take()
+            .expect("shared any db invariant violated: state missing");
+        let mut db = match state {
+            crate::qmdb::any::SharedStateDb::MerkleizedDurable(db) => db.into_mutable(),
+            crate::qmdb::any::SharedStateDb::MerkleizedNonDurable(db) => db.into_mutable(),
+            crate::qmdb::any::SharedStateDb::UnmerkleizedDurable(db) => db.into_mutable(),
+            crate::qmdb::any::SharedStateDb::UnmerkleizedNonDurable(db) => db,
+        };
+
+        if let Err(err) = db.write_batch(iter).await {
+            panic!("shared write_batch failed; state is unrecoverable: {err}");
+        }
+
+        *guard = Some(crate::qmdb::any::SharedStateDb::UnmerkleizedNonDurable(db));
+        Ok(())
+    }
+}
+
 /// Returns the next key to `key` within `possible_next`. The result will "cycle around" to the
 /// first key if `key` is the last key.
 ///
