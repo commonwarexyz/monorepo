@@ -590,7 +590,7 @@ where
             } => {
                 let mut needs_sync = false;
                 let mut remaining = self.max_repair.get();
-                let mut pending = Vec::with_capacity(remaining);
+                let mut deliveries = Vec::with_capacity(remaining);
                 let mut produces = Vec::with_capacity(remaining);
                 let mut message = Some(message);
 
@@ -608,16 +608,16 @@ where
                         deliver => {
                             needs_sync |= self.handle_deliver(
                                 deliver,
-                                &mut pending,
+                                &mut deliveries,
                                 &mut application,
                             ).await;
                         }
                     }
                 }
 
-                // Batch verify and process all pending certificates
-                needs_sync |= self.verify_and_process_pending(
-                    pending,
+                // Batch verify and process all deliveries
+                needs_sync |= self.verify_delivered(
+                    deliveries,
                     &mut application,
                 ).await;
 
@@ -683,12 +683,12 @@ where
 
     /// Handle a deliver message from the resolver. Block deliveries are handled
     /// immediately. Finalized/Notarized deliveries are parsed and structurally
-    /// validated, then collected into `pending` for batch certificate verification.
+    /// validated, then collected into `deliveries` for batch certificate verification.
     /// Returns true if finalization archives were written and need syncing.
     async fn handle_deliver(
         &mut self,
         message: handler::Message<B>,
-        pending: &mut Vec<PendingVerification<P::Scheme, B>>,
+        deliveries: &mut Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) -> bool {
         let handler::Message::Deliver {
@@ -749,7 +749,7 @@ where
                     response.send_lossy(false);
                     return false;
                 }
-                pending.push(PendingVerification::Finalized {
+                deliveries.push(PendingVerification::Finalized {
                     finalization,
                     block,
                     response,
@@ -781,7 +781,7 @@ where
                     response.send_lossy(false);
                     return false;
                 }
-                pending.push(PendingVerification::Notarized {
+                deliveries.push(PendingVerification::Notarized {
                     notarization,
                     block,
                     response,
@@ -793,17 +793,17 @@ where
 
     /// Batch verify pending certificates and process valid items. Returns true
     /// if finalization archives were written and need syncing.
-    async fn verify_and_process_pending(
+    async fn verify_delivered(
         &mut self,
-        mut pending: Vec<PendingVerification<P::Scheme, B>>,
+        mut deliveries: Vec<PendingVerification<P::Scheme, B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) -> bool {
-        if pending.is_empty() {
+        if deliveries.is_empty() {
             return false;
         }
 
         // Extract (subject, certificate) pairs for batch verification
-        let pending_certs: Vec<_> = pending
+        let certs: Vec<_> = deliveries
             .iter()
             .map(|item| match item {
                 PendingVerification::Finalized { finalization, .. } => (
@@ -827,15 +827,15 @@ where
             verify_certificates(
                 &mut self.context,
                 scheme.as_ref(),
-                &pending_certs,
+                &certs,
                 &self.strategy,
             )
         } else {
-            let mut verified = vec![false; pending.len()];
+            let mut verified = vec![false; deliveries.len()];
 
             // Group indices by epoch
             let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in pending.iter().enumerate() {
+            for (i, item) in deliveries.iter().enumerate() {
                 let epoch = match item {
                     PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
                     PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
@@ -848,7 +848,7 @@ where
                 let Some(scheme) = self.provider.scoped(*epoch) else {
                     continue;
                 };
-                let group: Vec<_> = indices.iter().map(|&i| pending_certs[i]).collect();
+                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
                 let results =
                     verify_certificates(&mut self.context, scheme.as_ref(), &group, &self.strategy);
                 for (j, &idx) in indices.iter().enumerate() {
@@ -860,7 +860,7 @@ where
 
         // Process each verified item, rejecting unverified ones
         let mut wrote = false;
-        for (index, item) in pending.drain(..).enumerate() {
+        for (index, item) in deliveries.drain(..).enumerate() {
             if !verified[index] {
                 match item {
                     PendingVerification::Finalized { response, .. }
