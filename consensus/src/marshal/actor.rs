@@ -619,8 +619,8 @@ where
                     &mut application,
                 ).await;
 
-                // Attempt to fill gaps before handling produce requests
-                // so that produce can find recently repaired data
+                // Attempt to fill gaps before handling produce requests (so
+                // we can serve data we just received)
                 needs_sync |= self
                     .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                     .await;

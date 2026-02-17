@@ -162,6 +162,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Read the last item in a section, if any.
+    ///
+    /// Returns `Ok(None)` if the section doesn't exist or is empty.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
     pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         let Some(blob) = self.manager.get(section)? else {
             return Ok(None);
@@ -1254,6 +1260,31 @@ mod tests {
 
             journal.rewind(0, 0).await.unwrap();
             assert_eq!(journal.last(0).await.unwrap(), None);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_pruned_section_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            journal.append(0, test_digest(0)).await.unwrap();
+            journal.append(1, test_digest(1)).await.unwrap();
+            journal.sync_all().await.unwrap();
+
+            journal.prune(1).await.unwrap();
+
+            assert!(matches!(
+                journal.last(0).await,
+                Err(Error::AlreadyPrunedToSection(1))
+            ));
+            assert!(journal.last(1).await.unwrap().is_some());
 
             journal.destroy().await.unwrap();
         });

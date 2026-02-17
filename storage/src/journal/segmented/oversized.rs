@@ -306,6 +306,12 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Get the last entry for a section, if any.
+    ///
+    /// Returns `Ok(None)` if the section doesn't exist or is empty.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
     pub async fn last(&self, section: u64) -> Result<Option<I>, Error> {
         self.index.last(section).await
     }
@@ -3004,6 +3010,37 @@ mod tests {
 
             assert_eq!(oversized.last(0).await.unwrap(), None);
             assert_eq!(oversized.value_size(0).await.unwrap(), 0);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_last_pruned_section_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            oversized
+                .append(0, TestEntry::new(1, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized
+                .append(1, TestEntry::new(2, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync_all().await.expect("Failed to sync");
+
+            oversized.prune(1).await.expect("Failed to prune");
+
+            assert!(matches!(
+                oversized.last(0).await,
+                Err(Error::AlreadyPrunedToSection(1))
+            ));
+            assert!(oversized.last(1).await.unwrap().is_some());
 
             oversized.destroy().await.expect("Failed to destroy");
         });
