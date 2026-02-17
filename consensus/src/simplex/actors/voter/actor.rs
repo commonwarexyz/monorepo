@@ -890,7 +890,7 @@ impl<
                 // Clear verify waiter
                 pending_verify = None;
 
-                // Try to use result
+                // Try to use resultg
                 view = context.view();
                 match verified {
                     Ok(true) => {
