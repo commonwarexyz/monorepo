@@ -319,7 +319,7 @@ where
             .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
             .await
         {
-            self.sync_finalization_archives().await;
+            self.sync_finalized().await;
         }
 
         select_loop! {
@@ -442,7 +442,7 @@ where
                             let _ =
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                                     .await;
-                            self.sync_finalization_archives().await;
+                            self.sync_finalized().await;
                             debug!(?round, %height, "finalized block stored");
                         } else {
                             // Otherwise, fetch the block from the network.
@@ -625,15 +625,16 @@ where
                     .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                     .await;
 
-                // Handle produce requests in parallel after delivers are stored
+                // Sync archives before responding to peers (prioritize our
+                // own durability)
+                if needs_sync {
+                    self.sync_finalized().await;
+                }
+
+                // Handle produce requests in parallel
                 join_all(produces.into_iter().map(|(key, response)| {
                     self.handle_produce(key, response, &buffer)
                 })).await;
-
-                // Sync archives if any blocks were stored or gaps repaired
-                if needs_sync {
-                    self.sync_finalization_archives().await;
-                }
             },
         }
     }
@@ -1021,7 +1022,7 @@ where
     }
 
     /// Sync both finalization archives to durable storage.
-    async fn sync_finalization_archives(&mut self) {
+    async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
                 self.finalized_blocks.sync().await.map_err(Box::new)?;
@@ -1072,7 +1073,7 @@ where
     /// then attempt to dispatch the next contiguous block to the application.
     ///
     /// Writes are buffered and not synced. The caller is responsible for
-    /// calling [Self::sync_finalization_archives] when appropriate.
+    /// calling [Self::sync_finalized] when appropriate.
     async fn store_finalization(
         &mut self,
         height: Height,
@@ -1168,7 +1169,7 @@ where
     /// though multiple gaps may be spanned.
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
-    /// needs a subsequent [`sync_finalization_archives`](Self::sync_finalization_archives).
+    /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
     async fn try_repair_gaps<K: PublicKey>(
         &mut self,
         buffer: &mut buffered::Mailbox<K, B>,
