@@ -833,11 +833,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             return Ok(());
         }
 
-        let clean_mmr = self.merkleize(hasher);
-        let journal_size = clean_mmr.journal.size().await;
-
         // Snapshot up to `write_limit` pending nodes while holding the read lock, then release
         // it before performing async journal writes.
+        let clean_mmr = self.merkleize(hasher);
+        let journal_size = clean_mmr.journal.size().await;
         let pending_nodes = {
             let inner = clean_mmr.inner.read();
             let mut pending_nodes = Vec::with_capacity(write_limit);
