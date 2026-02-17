@@ -634,6 +634,7 @@ where
             handler::Message::Produce { key, response } => {
                 match key {
                     Request::Block(commitment) => {
+                        // Check for block locally
                         let Some(block) = self.find_block(buffer, commitment).await else {
                             debug!(?commitment, "block missing on request");
                             return false;
@@ -641,6 +642,7 @@ where
                         response.send_lossy(block.encode());
                     }
                     Request::Finalized { height } => {
+                        // Get finalization and block
                         let Some(finalization) = self.get_finalization_by_height(height).await
                         else {
                             debug!(%height, "finalization missing on request");
@@ -653,6 +655,7 @@ where
                         response.send_lossy((finalization, block).encode());
                     }
                     Request::Notarized { round } => {
+                        // Get notarization and block
                         let Some(notarization) = self.cache.get_notarization(round).await else {
                             debug!(?round, "notarization missing on request");
                             return false;
@@ -783,6 +786,7 @@ where
 
         let mut wrote = false;
 
+        // Extract (subject, certificate) pairs for batch verification
         let verified = {
             let pending_certs = pending
                 .iter()
@@ -802,6 +806,8 @@ where
                 })
                 .collect::<Vec<_>>();
 
+            // Batch verify using the all-epoch verifier if available,
+            // otherwise mark all as unverified for per-epoch fallback
             self.provider.all().map_or_else(
                 || vec![false; pending_certs.len()],
                 |scheme| {
@@ -815,6 +821,8 @@ where
             )
         };
 
+        // Process each item: try per-epoch verification as fallback
+        // for items that failed batch verification
         for (index, item) in pending.drain(..).enumerate() {
             if verified[index] || self.verify_pending_item(&item) {
                 wrote |= self.process_verified(item, application).await;
