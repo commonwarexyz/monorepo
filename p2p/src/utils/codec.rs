@@ -204,31 +204,32 @@ where
         select_loop! {
             self.context,
             on_start => {
+                let mut saw_error = false;
                 while decode_pool.len() >= self.max_concurrency
                     || (receiver_closed && !decode_pool.is_empty())
                 {
                     let Ok(result) = decode_pool.next_completed().await else {
+                        saw_error = true;
                         break;
                     };
-                    self.handle_decode_result(result).await;
+                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
                 }
-                if receiver_closed && decode_pool.is_empty() {
+                if saw_error || (receiver_closed && decode_pool.is_empty()) {
                     break;
                 }
             },
             on_stopped => {},
             Ok(result) = decode_pool.next_completed() else break => {
-                self.handle_decode_result(result).await;
+                Self::handle_decode_result(&mut self.blocker, &mut self.sender, result).await;
             },
             Ok((peer, bytes)) = self.receiver.recv() else {
                 receiver_closed = true;
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let sender = self.sender.clone();
                 let handle = self.context.clone().shared(true).spawn(|_| async move {
                     let result = V::decode_cfg(bytes.as_ref(), &config);
-                    (peer, result, sender)
+                    (peer, result)
                 });
                 decode_pool.push(handle);
             }
@@ -236,17 +237,18 @@ where
     }
 
     async fn handle_decode_result(
-        &mut self,
-        result: (P, Result<V, commonware_codec::Error>, mpsc::Sender<(P, V)>),
+        blocker: &mut B,
+        sender: &mut mpsc::Sender<(P, V)>,
+        result: (P, Result<V, commonware_codec::Error>),
     ) {
-        let (peer, decode_result, mut sender) = result;
+        let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
                 sender.send_lossy((peer, value)).await;
             }
             Err(err) => {
                 warn!(?peer, ?err, "received invalid message, blocking peer");
-                self.blocker.block(peer).await;
+                blocker.block(peer).await;
             }
         }
     }
