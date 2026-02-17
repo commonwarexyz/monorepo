@@ -467,8 +467,10 @@ impl<
             let dropped_count = initial_len - waiters.len();
 
             // Increment metrics for each dropped waiter
-            for _ in 0..dropped_count {
-                self.metrics.get.inc(Status::Dropped);
+            if dropped_count > 0 {
+                self.metrics
+                    .subscribe
+                    .inc_by(Status::Dropped, dropped_count as u64);
             }
 
             !waiters.is_empty()
