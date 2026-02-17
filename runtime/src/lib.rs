@@ -434,7 +434,6 @@ stability_scope!(BETA {
         /// // Metrics are removed when all clones of `scoped` are dropped.
         /// ```
         fn with_scope(&self) -> Self;
-
     }
 
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
@@ -849,6 +848,7 @@ mod tests {
     use utils::reschedule;
 
     fn test_error_future<R: Runner>(runner: R) {
+        #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
         }

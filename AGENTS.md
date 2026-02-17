@@ -81,6 +81,8 @@ All public primitives are annotated with stability levels that constrain what ch
 | **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
+**When modifying code at ALPHA**: Breaking changes to APIs, wire formats, and storage formats are permitted without a migration path. Do not add backwards-compatibility shims or preserve old behavior.
+
 **When modifying code at BETA or higher**: You must not introduce breaking changes to wire or storage formats without providing a migration path.
 
 All public API items must have stability annotations. CI enforces this via the `Stability` and `Unstable-Public` workflows (`just check-stability` and `just unstable-public`). The annotation check uses a synthetic `commonware_stability_RESERVED` cfg that excludes ALL stability-marked items. Any public items remaining in rustdoc output are unmarked and will fail CI.

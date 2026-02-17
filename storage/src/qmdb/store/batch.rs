@@ -156,7 +156,7 @@ pub mod tests {
         assert!(batch.create(key, TestValue::from_seed(1)).await?);
         assert!(!batch.create(key, TestValue::from_seed(2)).await?);
 
-        batch.delete_unchecked(key).await?;
+        batch.delete_unchecked(key)?;
         assert!(batch.create(key, TestValue::from_seed(3)).await?);
         assert_eq!(batch.get(&key).await?, Some(TestValue::from_seed(3)));
 
@@ -210,13 +210,13 @@ pub mod tests {
 
         let mut batch = db.start_batch();
         batch.update(key, TestValue::from_seed(12)).await?;
-        batch.delete_unchecked(key).await?;
+        batch.delete_unchecked(key)?;
         assert_eq!(batch.get(&key).await?, None);
 
         db.write_batch([(key, Some(TestValue::from_seed(13)))])
             .await?;
         let mut batch = db.start_batch();
-        batch.delete_unchecked(key).await?;
+        batch.delete_unchecked(key)?;
         assert_eq!(batch.get(&key).await?, None);
 
         destroy_db(db).await
@@ -322,7 +322,7 @@ pub mod tests {
             }
         }
         // Try to delete an inactive key.
-        batch.delete_unchecked(TestKey::from_seed(255)).await?;
+        batch.delete_unchecked(TestKey::from_seed(255))?;
 
         // Commit the batch then confirm output is as expected.
         db.write_batch(batch.into_iter()).await?;
