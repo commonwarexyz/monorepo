@@ -678,8 +678,18 @@ where
 
     async fn send_notarize_vote(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
-        self.send_notarize_vote_for_proposal(signer_idx, proposal)
-            .await;
+        match self.context.gen_range(0..100u8) {
+            // 97% - normal notarize vote
+            0..=96 => {
+                self.send_notarize_vote_for_proposal(signer_idx, proposal)
+                    .await;
+            }
+            // 3% - malformed vote bytes
+            97..=99 => {
+                self.send_malformed_vote(signer_idx).await;
+            }
+            _ => unreachable!(),
+        }
     }
 
     async fn send_broadcast_and_notarize(&mut self, signer_idx: usize) {
@@ -711,11 +721,8 @@ where
         let Some(vote) = Notarize::sign(&self.schemes[signer_idx], proposal) else {
             return;
         };
-
-        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode();
-        let _ = self.vote_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().to_vec();
+        self.send_vote_bytes(signer_idx, msg).await;
     }
 
     async fn send_nullify_vote(&mut self, signer_idx: usize) {
@@ -739,10 +746,8 @@ where
             return;
         };
 
-        let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode();
-        let _ = self.vote_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        let msg = Vote::<S, Sha256Digest>::Nullify(vote).encode().to_vec();
+        self.send_vote_bytes(signer_idx, msg).await;
     }
 
     async fn send_finalize_vote(&mut self, signer_idx: usize) {
@@ -770,10 +775,21 @@ where
             return;
         };
 
-        let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
+        let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode().to_vec();
+        self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_vote_bytes(&mut self, signer_idx: usize, msg: Vec<u8>) {
         let _ = self.vote_senders[signer_idx]
             .send(Recipients::One(self.honest.clone()), msg, true)
             .await;
+    }
+
+    async fn send_malformed_vote(&mut self, signer_idx: usize) {
+        let msg = self
+            .strategy
+            .mutate_resolver_bytes(&mut self.context, &[0u8]);
+        self.send_vote_bytes(signer_idx, msg).await;
     }
 
     async fn send_certificate_bytes(&mut self, signer_idx: usize, msg: Vec<u8>) {
