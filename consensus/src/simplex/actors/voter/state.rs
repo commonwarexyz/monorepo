@@ -813,6 +813,57 @@ mod tests {
     }
 
     #[test]
+    fn expire_old_round_is_noop() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(12),
+                activity_timeout: ViewDelta::new(3),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            // Expiring a non-current view should do nothing.
+            let deadline_v1 = state.next_timeout_deadline();
+            assert!(!state.expire_round(View::zero()));
+            assert_eq!(state.current_view(), View::new(1));
+            assert_eq!(state.next_timeout_deadline(), deadline_v1);
+            assert!(
+                !state.views.contains_key(&View::zero()),
+                "old round should not be created when expire is ignored"
+            );
+
+            // Move to view 2 so view 1 becomes stale.
+            let view_1 = View::new(1);
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(state.epoch(), view_1))
+                        .expect("nullify")
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullify");
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(2));
+
+            let deadline_v2 = state.next_timeout_deadline();
+            assert!(!state.expire_round(view_1));
+            assert_eq!(state.current_view(), View::new(2));
+            assert_eq!(state.next_timeout_deadline(), deadline_v2);
+        });
+    }
+
+    #[test]
     fn round_prunes_with_min_active() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {

@@ -237,6 +237,18 @@ impl<
                         .or_insert_with(|| self.new_round())
                         .set_leader(leader);
 
+                    // If we already buffered a leader nullify for this now-current view
+                    // (allowed because we accept votes up to `current+1`), fast-path the
+                    // voter immediately on view entry.
+                    let local_is_leader = self.scheme.me().is_some_and(|me| me == leader);
+                    if !local_is_leader
+                        && work
+                            .get(&current)
+                            .is_some_and(|round| round.has_pending_nullify(leader))
+                    {
+                        voter.leader_nullify(current).await;
+                    }
+
                     // Check if the leader has been active recently
                     let skip_timeout = self.skip_timeout.get() as usize;
                     let is_active =

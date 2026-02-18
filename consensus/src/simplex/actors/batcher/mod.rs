@@ -1356,6 +1356,129 @@ mod tests {
         leader_nullify_marks_active(secp256r1::fixture);
     }
 
+    /// Test that if a leader nullify for `v+1` is buffered while current view is `v`,
+    /// the batcher emits a voter hint immediately when entering `v+1`.
+    fn leader_nullify_hint_on_view_entry<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_leader_nullify_hint_on_view_entry".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) =
+                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (_certificate_sender, certificate_receiver) =
+                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+
+            let leader_idx = Participant::new(2);
+            let leader_pk = participants[usize::from(leader_idx)].clone();
+            let (mut leader_sender, _leader_receiver) =
+                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            oracle
+                .add_link(
+                    leader_pk.clone(),
+                    me.clone(),
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            // Enter view 1 first.
+            let _ = batcher_mailbox
+                .update(View::new(1), Participant::new(1), View::zero())
+                .await;
+
+            // Buffer a leader nullify for view 2 while current is still view 1.
+            let buffered_view = View::new(2);
+            leader_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::<S, Sha256Digest>::Nullify(
+                        Nullify::sign::<Sha256Digest>(&schemes[usize::from(leader_idx)], Round::new(epoch, buffered_view))
+                            .expect("nullify"),
+                    )
+                    .encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Move current view to 2 with that same leader; should emit the hint immediately.
+            let _ = batcher_mailbox.update(buffered_view, leader_idx, View::zero()).await;
+
+            loop {
+                match voter_receiver.recv().await.unwrap() {
+                    voter::Message::LeaderNullify(view) if view == buffered_view => break,
+                    voter::Message::Proposal(_) | voter::Message::Verified(_, _) => continue,
+                    _ => continue,
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_leader_nullify_hint_on_view_entry() {
+        leader_nullify_hint_on_view_entry(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        leader_nullify_hint_on_view_entry(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        leader_nullify_hint_on_view_entry(bls12381_threshold_std::fixture::<MinPk, _>);
+        leader_nullify_hint_on_view_entry(bls12381_threshold_std::fixture::<MinSig, _>);
+        leader_nullify_hint_on_view_entry(bls12381_multisig::fixture::<MinPk, _>);
+        leader_nullify_hint_on_view_entry(bls12381_multisig::fixture::<MinSig, _>);
+        leader_nullify_hint_on_view_entry(ed25519::fixture);
+        leader_nullify_hint_on_view_entry(secp256r1::fixture);
+    }
+
     /// Test that votes above finalized trigger verification/construction,
     /// but votes at or below finalized do not.
     fn votes_skipped_for_finalized_views<S, F>(mut fixture: F)
