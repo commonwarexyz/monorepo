@@ -679,14 +679,19 @@ where
     async fn send_notarize_vote(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
         match self.context.gen_range(0..100u8) {
-            // 97% - normal notarize vote
-            0..=96 => {
+            // 94% - normal notarize vote
+            0..=93 => {
                 self.send_notarize_vote_for_proposal(signer_idx, proposal)
                     .await;
             }
             // 3% - malformed vote bytes
-            97..=99 => {
+            94..=96 => {
                 self.send_malformed_vote(signer_idx).await;
+            }
+            // 3% - validly encoded notarize with wrong epoch
+            97..=99 => {
+                self.send_wrong_epoch_notarize_vote_for_proposal(signer_idx, proposal)
+                    .await;
             }
             _ => unreachable!(),
         }
@@ -789,6 +794,24 @@ where
         let msg = self
             .strategy
             .mutate_resolver_bytes(&mut self.context, &[0u8]);
+        self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_wrong_epoch_notarize_vote_for_proposal(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
+        let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
+        let wrong_proposal = Proposal::new(
+            Round::new(wrong_epoch, proposal.view()),
+            proposal.parent,
+            proposal.payload,
+        );
+        let Some(vote) = Notarize::sign(&self.schemes[signer_idx], wrong_proposal) else {
+            return;
+        };
+        let msg = Vote::<S, Sha256Digest>::Notarize(vote).encode().to_vec();
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
