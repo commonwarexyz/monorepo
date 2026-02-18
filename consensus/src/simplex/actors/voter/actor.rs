@@ -932,15 +932,13 @@ impl<
                         }
                     }
                     Err(err) => {
+                        // Unlike propose/verify (where failing to act will lead to a timeout
+                        // and subsequent nullification), failing to certify can lead to a halt
+                        // because we'll never exit the view without a notarization + certification.
+                        //
+                        // We do not assume failure here because certification results are persisted
+                        // to the journal and will be recovered on restart.
                         debug!(?err, ?round, "failed to certify proposal");
-
-                        // Treat a canceled certification receiver as local certification failure.
-                        // This preserves liveness and allows resolver to fetch nullifications for
-                        // the stuck view.
-                        let Some(_) = self.handle_certification(view, false).await else {
-                            continue;
-                        };
-                        resolver.certified(view, false).await;
                     }
                 };
             },

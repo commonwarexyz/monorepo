@@ -105,7 +105,6 @@ pub trait Blocks: Send + Sync + 'static {
     /// # Arguments
     ///
     /// * `block`: The finalized block, which provides its `height()` and `digest()`.
-    ///
     fn put(&mut self, block: Self::Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
