@@ -347,10 +347,17 @@ impl IoUringLoop {
                 self.handle_cqe(&mut ring, cqe);
             }
 
-            // Drain inbound work and stage SQEs.
+            // Try to fill the submission queue with incoming work.
+            // Stop if we are at the max number of processing work.
+            //
+            // NOTE: We can safely use `cfg.size` directly as the limit here, even
+            // when `op_timeout` is enabled, because we already doubled the ring
+            // size in `new_ring()` to account for the fact that each operation
+            // needs 2 SQ entries (op + timeout). This ensures users get the number
+            // of concurrent operations they configured.
             while self.waiters.len() < self.cfg.size as usize {
                 let op = match self.receiver.try_recv() {
-                    Ok(work_item) => work_item,
+                    Ok(work) => work,
                     Err(TryRecvError::Disconnected) => {
                         self.drain_ring(&mut ring);
                         return;
@@ -392,11 +399,13 @@ impl IoUringLoop {
                         .build()
                         .user_data(TIMEOUT_WORK_ID);
 
-                    // Submit op and timeout.
+                    // Submit the op and timeout.
                     //
-                    // SAFETY: `buffer`, `timespec`, and `fd` are stored in
-                    // `self.waiters` until CQE processing, ensuring referenced
-                    // memory remains valid and FD reuse is prevented.
+                    // SAFETY: `buffer`, `timespec`, and `fd` are stored in `self.waiters`
+                    // until the CQE is processed, ensuring memory referenced by the SQEs
+                    // remains valid and the FD cannot be reused. The ring was doubled in
+                    // size for timeout support, and `self.waiters.len() < cfg.size`
+                    // guarantees space for both entries.
                     unsafe {
                         let mut sq = ring.submission();
                         sq.push(&work).expect("unable to push to queue");
@@ -407,9 +416,11 @@ impl IoUringLoop {
                 } else {
                     // No timeout, submit the operation normally.
                     //
-                    // SAFETY: `buffer` and `fd` are stored in `self.waiters` until
-                    // CQE processing, ensuring referenced memory remains valid
-                    // and FD reuse is prevented.
+                    // SAFETY: `buffer` and `fd` are stored in `self.waiters` until the
+                    // CQE is processed, ensuring memory referenced by the SQE remains
+                    // valid and the FD cannot be reused. The loop condition
+                    // `self.waiters.len() < cfg.size` guarantees space in the submission
+                    // queue.
                     unsafe {
                         ring.submission()
                             .push(&work)
