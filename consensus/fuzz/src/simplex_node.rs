@@ -1016,13 +1016,35 @@ where
             .await;
     }
 
+    fn build_invalid_finalization_for_view(
+        &mut self,
+        view: u64,
+    ) -> Option<Finalization<S, Sha256Digest>> {
+        let base = self.get_or_build_proposal_for_view(view);
+        let valid = self.build_finalization_from_byz(&base, &[0, 1, 2])?;
+
+        let mut conflicting = self.strategy.mutate_proposal(
+            &mut self.context,
+            &base,
+            self.last_view,
+            self.last_finalized_view,
+            self.last_notarized_view,
+            self.last_nullified_view,
+        );
+        conflicting = self
+            .strategy
+            .proposal_with_view(&conflicting, base.view().get());
+        Some(Finalization {
+            proposal: conflicting,
+            certificate: valid.certificate,
+        })
+    }
+
     async fn send_invalid_finalization_certificate(&mut self, signer_idx: usize) -> bool {
         let view = self
             .last_view
             .max(self.last_notarized_view)
-            .max(self.last_finalized_view)
-            .max(1)
-            .min(MAX_SAFE_VIEW);
+            .max(self.last_finalized_view);
         let Some(cert) = self.build_invalid_finalization_for_view(view) else {
             return false;
         };
@@ -1031,6 +1053,7 @@ where
         let _ = self.certificate_senders[signer_idx]
             .send(Recipients::One(self.honest.clone()), msg, true)
             .await;
+        true
     }
 
     async fn send_finalization_certificate(&mut self, signer_idx: usize) {
