@@ -734,8 +734,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
     ///
     /// # Errors
     ///
-    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if
-    ///   `leaves` corresponds to a pruned leaf.
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()`.
     /// - Returns [Error::Empty] if the provable range would be empty.
     ///
     /// # Warning
@@ -908,8 +907,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     ///
     /// # Errors
     ///
-    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if
-    ///   `leaves` corresponds to a pruned leaf.
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()`.
     /// - Returns [Error::Empty] if the provable range would be empty.
     ///
     /// # Warning
@@ -930,9 +928,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         let merkleized_size = *self.merkleized_size.read();
         if requested_size > merkleized_size {
             let mut inner = self.inner.write();
-            let dirty_mem = std::mem::take(&mut inner.mem_mmr);
-            inner.mem_mmr = dirty_mem.merkleize(hasher, self.pool.clone()).into_dirty();
-            *self.merkleized_size.write() = inner.mem_mmr.size();
+            // Re-check under the write lock: another concurrent prover call may have already
+            // merkleized to tip after our optimistic read, and we want to avoid duplicate work.
+            let merkleized_size = *self.merkleized_size.read();
+            if requested_size > merkleized_size {
+                let dirty_mem = std::mem::take(&mut inner.mem_mmr);
+                inner.mem_mmr = dirty_mem.merkleize(hasher, self.pool.clone()).into_dirty();
+                *self.merkleized_size.write() = inner.mem_mmr.size();
+            }
         }
 
         Ok(Prover {
