@@ -2,7 +2,10 @@ use super::*;
 use crate::{ingress, Actor};
 use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
-use commonware_utils::channel::{fallible::OneshotExt, mpsc};
+use commonware_utils::{
+    channel::{fallible::OneshotExt, mpsc},
+    sync::Mutex,
+};
 use std::{
     num::NonZeroUsize,
     sync::{
@@ -403,7 +406,7 @@ enum BatchLane {
 
 struct LaneScopedBatchActor {
     preprocess_count: u64,
-    log: Arc<std::sync::Mutex<Vec<(&'static str, u64)>>>,
+    log: Arc<Mutex<Vec<(&'static str, u64)>>>,
     batch: NonZeroUsize,
 }
 
@@ -447,17 +450,11 @@ impl<E: Spawner> Actor<E> for LaneScopedBatchActor {
     ) -> Result<(), Self::Error> {
         match message {
             LaneScopedBatchMailboxReadWriteMessage::PushPriority => {
-                self.log
-                    .lock()
-                    .expect("log lock poisoned")
-                    .push(("priority", self.preprocess_count));
+                self.log.lock().push(("priority", self.preprocess_count));
                 Ok(())
             }
             LaneScopedBatchMailboxReadWriteMessage::PushNormal => {
-                self.log
-                    .lock()
-                    .expect("log lock poisoned")
-                    .push(("normal", self.preprocess_count));
+                self.log.lock().push(("normal", self.preprocess_count));
                 Ok(())
             }
         }
@@ -468,7 +465,7 @@ impl<E: Spawner> Actor<E> for LaneScopedBatchActor {
 fn test_lane_batch_does_not_cross_lanes() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
-        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::new(Mutex::new(Vec::new()));
         let actor = LaneScopedBatchActor {
             preprocess_count: 0,
             log: log.clone(),
@@ -495,13 +492,13 @@ fn test_lane_batch_does_not_cross_lanes() {
         service.start();
 
         for _ in 0..10 {
-            if log.lock().expect("log lock poisoned").len() == 2 {
+            if log.lock().len() == 2 {
                 break;
             }
             context.sleep(Duration::from_millis(1)).await;
         }
 
-        let entries = log.lock().expect("log lock poisoned").clone();
+        let entries = log.lock().clone();
         assert_eq!(entries, vec![("priority", 1), ("normal", 2)]);
     });
 }
@@ -924,7 +921,7 @@ fn test_subscribe_returns_receiver() {
         let (mailbox, service) = ServiceBuilder::new(actor).build(context.with_label("subscribe"));
         service.start();
 
-        let rx = mailbox.wait_for_value().await;
+        let rx = mailbox.wait_for_value();
 
         mailbox
             .resolve("hello".to_string())
@@ -948,7 +945,6 @@ fn test_try_subscribe_reports_delivery_error() {
 
         let err = mailbox
             .try_wait_for_value()
-            .await
             .expect_err("try_subscribe should fail when mailbox is closed");
         assert_eq!(err, crate::mailbox::MailboxError::Closed);
     });
