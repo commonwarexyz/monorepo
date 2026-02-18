@@ -305,8 +305,8 @@ impl<O: Sink> Sender<O> {
     ///
     /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
     /// and sends the ciphertext.
-    pub async fn send(&mut self, buf: impl Into<IoBufs>) -> Result<(), Error> {
-        let mut bufs = buf.into();
+    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
+        let mut bufs = bufs.into();
         let ciphertext_len = bufs.len() + TAG_SIZE as usize;
 
         send_frame_with(
