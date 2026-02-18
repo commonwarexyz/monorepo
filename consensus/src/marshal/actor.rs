@@ -111,6 +111,11 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
         self.queue.clear();
     }
 
+    /// Returns the height of the last (most recent) pending ack, if any.
+    fn last_height(&self) -> Option<Height> {
+        self.queue.back().map(|e| e.height)
+    }
+
     /// If the front ack is already resolved, pops and returns it along with
     /// the result. Returns [None] if the queue is empty or the front ack is
     /// still pending.
@@ -1037,10 +1042,10 @@ where
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
         while !self.pending_acks.is_full() {
-            let next_height = match self.pending_acks.queue.back() {
-                Some(last) => last.height.next(),
-                None => self.last_processed_height.next(),
-            };
+            let next_height = self
+                .pending_acks
+                .last_height()
+                .map_or_else(|| self.last_processed_height.next(), |h| h.next());
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
