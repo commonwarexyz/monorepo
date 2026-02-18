@@ -1029,16 +1029,12 @@ impl<
                             continue;
                         }
 
-                        // A leader nullify is an explicit "cannot progress" signal. Fast-path
-                        // to local timeout here so verifiers do not wait for the timer.
-                        debug!(%nullified_view, "leader nullify observed, triggering immediate timeout");
-                        self.handle_timeout(
-                            &mut batcher,
-                            &mut vote_sender,
-                            &mut certificate_sender,
-                        )
-                        .await;
-                        view = self.state.current_view();
+                        // A leader nullify is an explicit "cannot progress" signal. We expire
+                        // the current round so the normal timeout path fires immediately on the
+                        // next tick.
+                        debug!(%nullified_view, "leader nullify observed, expiring round");
+                        self.state.expire_round(current_view);
+                        continue;
                     }
                 }
             },

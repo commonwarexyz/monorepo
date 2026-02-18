@@ -2464,6 +2464,39 @@ mod tests {
                     },
                 }
             }
+
+            // Send the same leader nullify again. Duplicates should not retrigger the fast-path.
+            leader_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Vote::<S, Sha256Digest>::Nullify(
+                        Nullify::sign::<Sha256Digest>(
+                            &schemes[usize::from(leader_idx)],
+                            Round::new(epoch, target_view),
+                        )
+                        .unwrap(),
+                    )
+                    .encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            let duplicate_window = context.current() + Duration::from_millis(300);
+            while context.current() < duplicate_window {
+                select! {
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            panic!("duplicate leader nullify should not retrigger fast-path");
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    },
+                }
+            }
         });
     }
 

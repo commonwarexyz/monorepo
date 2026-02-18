@@ -383,29 +383,27 @@ impl<
                 }
 
                 // If the current leader explicitly nullifies the current view, hint the voter so
-                // it can fast-path timeout without waiting for its local timer.
+                // it can fast-path timeout without waiting for its local timer. We do this because
+                // `nullify` still counts as "activity" for skip-timeout heuristics.
                 let local_is_leader = self
                     .scheme
                     .me()
                     .is_some_and(|me| current_leader == Some(me));
-                if view == current
+                let leader_nullified_current = view == current
                     && matches!(&message, Vote::Nullify(_))
                     && current_leader
                         .and_then(|leader| self.participants.key(leader))
                         .is_some_and(|leader_key| leader_key == &sender)
-                    && !local_is_leader
-                {
-                    voter.leader_nullify(view).await;
-                }
+                    && !local_is_leader;
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
-                if work
+                let added = work
                     .entry(view)
                     .or_insert_with(|| self.new_round())
                     .add_network(sender, message)
-                    .await
-                {
+                    .await;
+                if added {
                     self.added.inc();
 
                     // Update per-peer latest vote metric (only if higher than current)
@@ -413,6 +411,11 @@ impl<
                         .latest_vote
                         .get_or_create(&peer)
                         .try_set_max(view.get());
+
+                    // Only fast-path once for the first accepted leader nullify vote.
+                    if leader_nullified_current {
+                        voter.leader_nullify(view).await;
+                    }
                 }
                 updated_view = view;
             },
