@@ -66,7 +66,7 @@ mod tests {
         types::{Participant, Round, View},
         Viewable,
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
@@ -75,7 +75,7 @@ mod tests {
         Hasher as _, Sha256,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_p2p::simulated::{Config as NConfig, Network};
+    use commonware_p2p::simulated::{Config as NConfig, Link, Network};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
@@ -2258,6 +2258,510 @@ mod tests {
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    /// Tests that if the application drops verification requests, we suppress all votes
+    /// for that view until the application starts responding again.
+    fn dropped_verify_suppresses_votes_until_ready<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"dropped_verify_suppresses_votes_until_ready".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let signing = schemes[0].clone();
+            let elector = L::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            app_actor.set_drop_verifications(true);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing.clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("voter_drop_verify_test_{me}"),
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(250),
+                notarization_timeout: Duration::from_millis(250),
+                nullify_retry: Duration::from_millis(250),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let observer = participants[1].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            // Initial batcher update.
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                _ => panic!("expected initial update"),
+            }
+
+            // Find a view where we are a verifier (not leader).
+            let mut current_view = View::new(1);
+            let (target_view, leader) = loop {
+                let proposal = Proposal::new(
+                    Round::new(epoch, current_view),
+                    current_view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                let (new_view, leader) = loop {
+                    match batcher_receiver.recv().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } => {
+                            active.send(true).unwrap();
+                            if current > current_view {
+                                break (current, leader);
+                            }
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    }
+                };
+                current_view = new_view;
+                if leader != Participant::new(0) {
+                    break (current_view, participants[usize::from(leader)].clone());
+                }
+            };
+
+            // Trigger verification in target view. The application drops the verify response,
+            // which should disable voting.
+            let proposal = Proposal::new(
+                Round::new(epoch, target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"drop_verify"),
+            );
+            let contents = (
+                proposal.round,
+                Sha256::hash(target_view.previous().unwrap().get().to_be_bytes().as_slice()),
+                7u64,
+            )
+                .encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal).await;
+
+            // Observe for long enough that the view timeout should fire.
+            //
+            // We expect local construction to continue (so the engine can still aggregate
+            // certificates), but the vote message should not be sent to peers.
+            let mut local_vote_constructed = false;
+            let observe_until = context.current() + Duration::from_millis(800);
+            loop {
+                select! {
+                    _ = context.sleep_until(observe_until) => break,
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(vote) => {
+                            let vote_view = match vote {
+                                Vote::Notarize(v) => v.view(),
+                                Vote::Nullify(v) => v.view(),
+                                Vote::Finalize(v) => v.view(),
+                            };
+                            if vote_view == target_view {
+                                local_vote_constructed = true;
+                            }
+                        }
+                    },
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                        let (_, message) = message.unwrap();
+                        let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                        if vote.view() == target_view {
+                            panic!("unexpected network vote for non-ready view {target_view}");
+                        }
+                    },
+                }
+            }
+            assert!(
+                local_vote_constructed,
+                "expected local vote construction for non-ready view {target_view}"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_verify_suppresses_votes_until_ready() {
+        dropped_verify_suppresses_votes_until_ready::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        dropped_verify_suppresses_votes_until_ready::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        dropped_verify_suppresses_votes_until_ready::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        dropped_verify_suppresses_votes_until_ready::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        dropped_verify_suppresses_votes_until_ready::<_, _, RoundRobin>(ed25519::fixture);
+        dropped_verify_suppresses_votes_until_ready::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    /// Tests the readiness latch is one-way: once a node becomes ready, a dropped
+    /// verification response must not disable vote broadcasts again.
+    fn dropped_verify_does_not_disable_ready_node<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"dropped_verify_does_not_disable_ready_node".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let me_idx = Participant::new(0);
+            let signing = schemes[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: signing.clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let application_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (mut app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), application_cfg);
+            app_actor.set_drop_verifications(true);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: signing.clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: format!("voter_one_way_ready_test_{me}"),
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_millis(250),
+                notarization_timeout: Duration::from_millis(250),
+                nullify_retry: Duration::from_millis(250),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(64);
+            let batcher_mailbox = batcher::Mailbox::new(batcher_sender);
+
+            let (vote_sender, _vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let observer = participants[1].clone();
+            let (_, mut observer_vote_receiver) = oracle
+                .control(observer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    me.clone(),
+                    observer,
+                    Link {
+                        latency: Duration::from_millis(0),
+                        jitter: Duration::from_millis(0),
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher_mailbox,
+                resolver_mailbox,
+                vote_sender,
+                certificate_sender,
+            );
+
+            let (mut current_view, mut current_leader) = match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current,
+                    leader,
+                    active,
+                    ..
+                } => {
+                    active.send(true).unwrap();
+                    (current, leader)
+                }
+                _ => panic!("expected initial update"),
+            };
+
+            // Move to a view where we are leader.
+            while current_leader != me_idx {
+                let proposal = Proposal::new(
+                    Round::new(epoch, current_view),
+                    current_view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                loop {
+                    match batcher_receiver.recv().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } if current > current_view => {
+                            active.send(true).unwrap();
+                            current_view = current;
+                            current_leader = leader;
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    }
+                }
+            }
+            let leader_view = current_view;
+
+            // Wait until we actually broadcast a vote in our leader view (this marks ready=true).
+            let ready_deadline = context.current() + Duration::from_secs(1);
+            let mut became_ready = false;
+            while context.current() < ready_deadline {
+                select! {
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    },
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                        let (_, message) = message.unwrap();
+                        let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                        if vote.view() == leader_view {
+                            became_ready = true;
+                            break;
+                        }
+                    },
+                }
+            }
+            assert!(became_ready, "expected a network vote in leader view {leader_view}");
+
+            // Move to a non-leader view to trigger dropped verification.
+            let (target_view, target_leader) = loop {
+                let proposal = Proposal::new(
+                    Round::new(epoch, current_view),
+                    current_view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                let mut found = None;
+                loop {
+                    match batcher_receiver.recv().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            active,
+                            ..
+                        } if current > current_view => {
+                            active.send(true).unwrap();
+                            current_view = current;
+                            if leader != me_idx {
+                                found = Some((current, participants[usize::from(leader)].clone()));
+                            }
+                            break;
+                        }
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    }
+                }
+                if let Some(target) = found {
+                    break target;
+                }
+            };
+
+            // This verify request will be dropped by the application.
+            let proposal = Proposal::new(
+                Round::new(epoch, target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"drop_verify_after_ready"),
+            );
+            let contents = (
+                proposal.round,
+                Sha256::hash(target_view.previous().unwrap().get().to_be_bytes().as_slice()),
+                11u64,
+            )
+                .encode();
+            relay.broadcast(&target_leader, (proposal.payload, contents));
+            mailbox.proposal(proposal).await;
+
+            // We should still broadcast for target_view (typically a nullify after timeout),
+            // proving the readiness latch did not flip back to false.
+            let target_deadline = context.current() + Duration::from_secs(1);
+            let mut saw_target_network_vote = false;
+            while context.current() < target_deadline {
+                select! {
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { active, .. } => active.send(true).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    },
+                    message = commonware_p2p::Receiver::recv(&mut observer_vote_receiver) => {
+                        let (_, message) = message.unwrap();
+                        let vote: Vote<S, Sha256Digest> = Vote::decode(message).unwrap();
+                        if vote.view() == target_view {
+                            saw_target_network_vote = true;
+                            break;
+                        }
+                    },
+                }
+            }
+            assert!(
+                saw_target_network_vote,
+                "expected a network vote for target view {target_view} after dropped verification"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_dropped_verify_does_not_disable_ready_node() {
+        dropped_verify_does_not_disable_ready_node(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        dropped_verify_does_not_disable_ready_node(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        dropped_verify_does_not_disable_ready_node(bls12381_multisig::fixture::<MinPk, _>);
+        dropped_verify_does_not_disable_ready_node(bls12381_multisig::fixture::<MinSig, _>);
+        dropped_verify_does_not_disable_ready_node(ed25519::fixture);
+        dropped_verify_does_not_disable_ready_node(secp256r1::fixture);
     }
 
     /// Tests that after replay, we do not re-certify views that have already
