@@ -41,9 +41,9 @@ impl<K: PublicKey, B: Block> Buffer<B> for buffered::Mailbox<K, B> {
 
 /// Buffer implementation for environments where network broadcast is disabled.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NoOp;
+pub struct Inert;
 
-impl<B: Block> Buffer<B> for NoOp {
+impl<B: Block> Buffer<B> for Inert {
     async fn broadcast(&mut self, _block: B) {}
 
     async fn get(&self, _commitment: B::Commitment) -> Option<B> {

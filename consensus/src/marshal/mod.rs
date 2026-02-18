@@ -65,7 +65,7 @@
 pub mod actor;
 pub use actor::Actor;
 mod buffer;
-pub use buffer::{Buffer, NoOp};
+pub use buffer::{Buffer, Inert};
 pub mod cache;
 pub mod config;
 pub use config::Config;
@@ -106,7 +106,7 @@ pub mod mocks;
 mod tests {
     use super::{
         actor,
-        buffer::NoOp,
+        buffer::Inert,
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
@@ -380,7 +380,7 @@ mod tests {
             broadcast_engine.start(network);
             actor.start(application.clone(), buffer, resolver);
         } else {
-            actor.start(application.clone(), NoOp, resolver);
+            actor.start(application.clone(), Inert, resolver);
         }
 
         (application, mailbox, processed_height)
