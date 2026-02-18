@@ -54,12 +54,15 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{
-    sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock, UpgradableAsyncRwLockUpgradableReadGuard},
+    sync::{
+        AsyncRwLockReadGuard, Mutex, UpgradableAsyncRwLock,
+        UpgradableAsyncRwLockUpgradableReadGuard,
+    },
     Array,
 };
 use core::{num::NonZeroU64, ops::Range};
 use std::{
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -88,6 +91,13 @@ pub enum SyncPolicy {
     Interval(Duration),
 }
 
+type SharedStateOption<E, C, I, H, U> = Option<SharedStateDb<E, C, I, H, U>>;
+type SharedHandles<E, C, I, H, U> = (SharedWriter<E, C, I, H, U>, Shared<E, C, I, H, U>);
+type SharedReadGuard<'a, E, C, I, H, U> =
+    AsyncRwLockReadGuard<'a, SharedStateOption<E, C, I, H, U>>;
+type SharedUpgradableReadGuard<'a, E, C, I, H, U> =
+    UpgradableAsyncRwLockUpgradableReadGuard<'a, SharedStateOption<E, C, I, H, U>>;
+
 pub(crate) struct SharedInner<
     E: Storage + Clock + Metrics,
     C: Mutable<Item: CodecShared> + Persistable<Error = JournalError>,
@@ -95,7 +105,7 @@ pub(crate) struct SharedInner<
     H: Hasher,
     U: Send + Sync,
 > {
-    pub(crate) db: UpgradableAsyncRwLock<Option<SharedStateDb<E, C, I, H, U>>>,
+    pub(crate) db: UpgradableAsyncRwLock<SharedStateOption<E, C, I, H, U>>,
     sync_policy: SyncPolicy,
     merkleize_hasher: Mutex<StandardHasher<H>>,
     now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
@@ -110,7 +120,7 @@ impl<
         U: Send + Sync,
     > SharedInner<E, C, I, H, U>
 {
-    fn sync_policy(&self) -> SyncPolicy {
+    const fn sync_policy(&self) -> SyncPolicy {
         self.sync_policy
     }
 
@@ -119,26 +129,18 @@ impl<
             SyncPolicy::Never => false,
             SyncPolicy::Always => true,
             SyncPolicy::Interval(interval) => {
-                let last = self
-                    .last_full_sync
-                    .lock()
-                    .expect("last_full_sync lock poisoned");
-                match *last {
-                    None => true,
-                    Some(last) => now
-                        .duration_since(last)
+                let last = self.last_full_sync.lock();
+                (*last).is_none_or(|last| {
+                    now.duration_since(last)
                         .map(|elapsed| elapsed >= interval)
-                        .unwrap_or(true),
-                }
+                        .unwrap_or(true)
+                })
             }
         }
     }
 
     fn mark_full_sync(&self, now: SystemTime) {
-        *self
-            .last_full_sync
-            .lock()
-            .expect("last_full_sync lock poisoned") = Some(now);
+        *self.last_full_sync.lock() = Some(now);
     }
 }
 
@@ -154,10 +156,7 @@ where
     Operation<K, V, U>: Codec,
 {
     fn prepare_merkleized(&self, state: &SharedStateDb<E, C, I, H, U>) {
-        let mut hasher = self
-            .merkleize_hasher
-            .lock()
-            .expect("shared merkleization hasher lock poisoned");
+        let mut hasher = self.merkleize_hasher.lock();
         match state {
             SharedStateDb::UnmerkleizedDurable(db) => db.prepare_merkleized(&mut *hasher),
             SharedStateDb::Mutable(db) => db.prepare_merkleized(&mut *hasher),
@@ -226,7 +225,7 @@ pub struct SharedReader<
     H: Hasher,
     U: Send + Sync,
 > {
-    guard: AsyncRwLockReadGuard<'a, Option<SharedStateDb<E, C, I, H, U>>>,
+    guard: SharedReadGuard<'a, E, C, I, H, U>,
 }
 
 pub struct SharedProver<
@@ -237,7 +236,7 @@ pub struct SharedProver<
     H: Hasher,
     U: Send + Sync,
 > {
-    guard: UpgradableAsyncRwLockUpgradableReadGuard<'a, Option<SharedStateDb<E, C, I, H, U>>>,
+    guard: SharedUpgradableReadGuard<'a, E, C, I, H, U>,
 }
 
 fn into_shared_handles<
@@ -250,7 +249,7 @@ fn into_shared_handles<
     state: SharedStateDb<E, C, I, H, U>,
     sync_policy: SyncPolicy,
     now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
-) -> (SharedWriter<E, C, I, H, U>, Shared<E, C, I, H, U>) {
+) -> SharedHandles<E, C, I, H, U> {
     let inner = Arc::new(SharedInner {
         db: UpgradableAsyncRwLock::new(Some(state)),
         sync_policy,
@@ -412,7 +411,7 @@ where
         self,
         sync_policy: SyncPolicy,
         now: impl Fn() -> SystemTime + Send + Sync + 'static,
-    ) -> (SharedWriter<E, C, I, H, U>, Shared<E, C, I, H, U>) {
+    ) -> SharedHandles<E, C, I, H, U> {
         into_shared_handles(SharedStateDb::Clean(self), sync_policy, Arc::new(now))
     }
 }
@@ -428,7 +427,7 @@ where
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
-    pub fn start_batch(&self) -> kv::Batch<'_, K, V::Value, Self>
+    pub const fn start_batch(&self) -> kv::Batch<'_, K, V::Value, Self>
     where
         Self: kv::Gettable<Key = K, Value = V::Value, Error = Error> + Sync,
     {
