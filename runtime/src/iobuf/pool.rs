@@ -359,15 +359,19 @@ impl AlignedBuffer {
     ///
     /// # Panics
     ///
-    /// Panics if alignment is not a power of two.
+    /// Panics if:
+    /// - `capacity == 0`
+    /// - `alignment` is zero or not a power of two
+    /// - `capacity`, rounded up to `alignment`, exceeds `isize::MAX`
     ///
     /// # Aborts
     ///
     /// Aborts the process on allocation failure via `handle_alloc_error`.
     fn new(capacity: usize, alignment: usize) -> Self {
+        assert!(capacity > 0, "capacity must be greater than zero");
         let layout = Layout::from_size_align(capacity, alignment).expect("invalid layout");
 
-        // SAFETY: Layout is valid (non-zero size, power-of-two alignment).
+        // SAFETY: Layout is valid and has non-zero size.
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
 
@@ -378,15 +382,19 @@ impl AlignedBuffer {
     ///
     /// # Panics
     ///
-    /// Panics if alignment is not a power of two.
+    /// Panics if:
+    /// - `capacity == 0`
+    /// - `alignment` is zero or not a power of two
+    /// - `capacity`, rounded up to `alignment`, exceeds `isize::MAX`
     ///
     /// # Aborts
     ///
     /// Aborts the process on allocation failure via `handle_alloc_error`.
     fn new_zeroed(capacity: usize, alignment: usize) -> Self {
+        assert!(capacity > 0, "capacity must be greater than zero");
         let layout = Layout::from_size_align(capacity, alignment).expect("invalid layout");
 
-        // SAFETY: Layout is valid (non-zero size, power-of-two alignment).
+        // SAFETY: Layout is valid and has non-zero size.
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
 
@@ -464,12 +472,10 @@ pub(crate) struct BufferPoolInner {
 
 impl BufferPoolInner {
     /// Try to allocate a buffer from the given size class.
-    fn try_alloc(&self, class_index: usize) -> Option<AlignedBuffer> {
-        self.try_alloc_internal(class_index, false)
-            .map(|allocation| allocation.buffer)
-    }
-
-    fn try_alloc_internal(&self, class_index: usize, zero_new: bool) -> Option<Allocation> {
+    ///
+    /// If `zero_on_new` is true, newly-created buffers are allocated with
+    /// `alloc_zeroed`. Reused buffers are never re-zeroed here.
+    fn try_alloc(&self, class_index: usize, zero_on_new: bool) -> Option<Allocation> {
         let class = &self.classes[class_index];
         let label = SizeClassLabel {
             size_class: class.size as u64,
@@ -492,7 +498,7 @@ impl BufferPoolInner {
                 class.allocated.fetch_add(1, Ordering::Relaxed);
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
-                let buffer = if zero_new {
+                let buffer = if zero_on_new {
                     AlignedBuffer::new_zeroed(class.size, class.alignment)
                 } else {
                     AlignedBuffer::new(class.size, class.alignment)
@@ -637,7 +643,8 @@ impl BufferPool {
 
         let buffer = self
             .inner
-            .try_alloc(class_index)
+            .try_alloc(class_index, false)
+            .map(|allocation| allocation.buffer)
             .ok_or(PoolError::Exhausted)?;
         let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
         Ok(IoBufMut::from_pooled(pooled))
@@ -707,7 +714,7 @@ impl BufferPool {
             .ok_or(PoolError::Oversized)?;
         let allocation = self
             .inner
-            .try_alloc_internal(class_index, true)
+            .try_alloc(class_index, true)
             .ok_or(PoolError::Exhausted)?;
 
         let mut buf = IoBufMut::from_pooled(PooledBufMut::new(
@@ -1249,6 +1256,18 @@ mod tests {
         let buf2 = AlignedBuffer::new(4096, cache_line);
         assert_eq!(buf2.capacity(), 4096);
         assert!((buf2.as_ptr() as usize).is_multiple_of(cache_line));
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be greater than zero")]
+    fn test_aligned_buffer_zero_capacity_panics() {
+        let _ = AlignedBuffer::new(0, page_size());
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be greater than zero")]
+    fn test_aligned_buffer_zeroed_zero_capacity_panics() {
+        let _ = AlignedBuffer::new_zeroed(0, page_size());
     }
 
     #[test]
