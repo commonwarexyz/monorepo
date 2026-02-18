@@ -19,6 +19,7 @@
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
+//! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
 use crate::{

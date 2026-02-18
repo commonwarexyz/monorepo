@@ -9,6 +9,15 @@
 //! - normal CQE progress in the ring
 //! - `eventfd` readiness when new work is queued or all submitters are dropped
 //!
+//! # Kernel Requirements
+//!
+//! - Baseline: Linux kernel 5.13 or newer (required for io_uring multishot poll
+//!   used by the internal `eventfd` wake path).
+//! - With [`Config::single_issuer`] enabled: Linux kernel 6.1 or newer, because
+//!   this implementation also enables `IORING_SETUP_DEFER_TASKRUN`.
+//! - Effective requirement for runtime io_uring network/storage backends: 6.1+,
+//!   since those backends enable [`Config::single_issuer`].
+//!
 //! # Architecture
 //!
 //! ## Event Loop
@@ -364,9 +373,10 @@ impl IoUringLoop {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
         assert!(
             try_arm_wake_poll(&mut ring, &self.wake_fd),
-            "internal invariant violated: wake poll SQE should always fit in the ring at startup"
+            "wake poll SQE should always fit in the ring at startup"
         );
-        let mut next_work_id: u64 = 0;
+
+        let mut next_work_id = 0;
         // Maps a work ID to the sender that we will send the result to
         // and the buffer used for the operation.
         let mut waiters = Waiters::with_capacity(self.cfg.size as usize);
@@ -407,7 +417,7 @@ impl IoUringLoop {
 
                 // Assign a unique ID, skipping reserved IDs.
                 let work_id = next_work_id;
-                next_work_id = next_work_id.wrapping_add(1);
+                next_work_id += 1;
                 if next_work_id >= WAKE_WORK_ID {
                     next_work_id = 0;
                 }
@@ -488,7 +498,7 @@ fn handle_wake_cqe(ring: &mut IoUring, cqe: CqueueEntry, wake_fd: &OwnedFd) {
     if !io_uring::cqueue::more(cqe.flags()) {
         assert!(
             try_arm_wake_poll(ring, wake_fd),
-            "internal invariant violated: wake poll SQE should always fit in the ring"
+            "wake poll SQE should always fit in the ring"
         );
     }
 }
@@ -565,9 +575,6 @@ fn drain_wake_fd(wake_fd: &OwnedFd) {
 /// Attempt to arm the multishot wake poll request.
 ///
 /// Returns `false` if no SQ entry is available at this moment.
-///
-/// With this loop's sizing and in-flight limits, callers treat `false` as an
-/// internal invariant violation.
 fn try_arm_wake_poll(ring: &mut IoUring, wake_fd: &OwnedFd) -> bool {
     let wake_poll = PollAdd::new(Fd(wake_fd.as_raw_fd()), libc::POLLIN as u32)
         .multi(true)
