@@ -454,7 +454,7 @@ where
                     };
                 }
 
-                if let Err(e) = self.sync_processed_height().await {
+                if let Err(e) = self.application_metadata.sync().await {
                     error!(?e, "failed to sync application progress");
                     return;
                 }
@@ -654,7 +654,7 @@ where
 
                         // Update the processed height
                         self.update_processed_height(height, &mut resolver).await;
-                        if let Err(err) = self.sync_processed_height().await {
+                        if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
                             return;
                         }
@@ -1069,8 +1069,8 @@ where
     ///   sync_finalized      ->  archive durable
     ///
     /// Iteration M (ack handler, M > N):
-    ///   handle_block_processed  ->  update_processed_height  ->  metadata buffered
-    ///   sync_processed_height   ->  metadata durable
+    ///   handle_block_processed   ->  update_processed_height  ->  metadata buffered
+    ///   application_metadata.sync ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
         &mut self,
@@ -1101,8 +1101,7 @@ where
     /// Handle acknowledgement from the application that a block has been processed.
     ///
     /// Buffers the processed height update but does NOT sync to durable storage.
-    /// The caller must call [`Self::sync_processed_height`] after processing
-    /// all ready acks.
+    /// The caller must sync metadata after processing all ready acks.
     async fn handle_block_processed(
         &mut self,
         height: Height,
@@ -1376,8 +1375,7 @@ where
     }
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
-    /// to durable storage. Call [`Self::sync_processed_height`] after all
-    /// buffered updates to make them durable.
+    /// to durable storage. Sync metadata after buffered updates to make them durable.
     async fn update_processed_height(
         &mut self,
         height: Height,
@@ -1393,11 +1391,6 @@ where
         resolver
             .retain(Request::<B>::Finalized { height }.predicate())
             .await;
-    }
-
-    /// Durably syncs the buffered processed height to storage.
-    async fn sync_processed_height(&mut self) -> Result<(), metadata::Error> {
-        self.application_metadata.sync().await
     }
 
     /// Prunes finalized blocks and certificates below the given height.
