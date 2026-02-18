@@ -93,8 +93,6 @@
 //!   so the normal timeout path promptly broadcasts our `nullify(v)` (rather than waiting for the
 //!   local leader timeout). This avoids unnecessary timeout delay when the leader has already
 //!   signaled it cannot progress.
-//!   It also prevents a local stall where leader-nullify traffic keeps that leader marked as
-//!   "active" for activity-timeout heuristics while verifiers still wait on local timeout.
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
