@@ -113,7 +113,9 @@ pub enum Error {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location, Location),
 
-    /// No bitmap commit exists for the requested historical size.
+    /// No bitmap commit exists for the requested historical size. This occurs when
+    /// the size was never a merkleization point, or when the commit has been
+    /// discarded by pruning.
     #[error("no bitmap commit at {0}")]
     NoBitmapCommit(Location),
 

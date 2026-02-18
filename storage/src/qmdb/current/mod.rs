@@ -1837,17 +1837,9 @@ pub mod tests {
                 let safe_start = Location::new_unchecked(*current_floor);
                 let max_ops = NZU64!(8);
 
-                // Verify the most recent surviving snapshot's proof.
-                let (last_size, last_root) = snapshots.last().unwrap();
-                let (proof, ops, chunks) = db
-                    .historical_range_proof(hasher.inner(), *last_size, safe_start, max_ops)
-                    .await
-                    .unwrap();
-                assert!(proof.verify(hasher.inner(), safe_start, &ops, &chunks, last_root));
-
-                // Each earlier snapshot must either produce a valid proof or
-                // fail with a well-defined error.
-                for (size_i, root_i) in &snapshots[..snapshots.len() - 1] {
+                // Each snapshot must either produce a valid proof or fail
+                // with a well-defined error.
+                for (size_i, root_i) in &snapshots {
                     match db
                         .historical_range_proof(hasher.inner(), *size_i, safe_start, max_ops)
                         .await

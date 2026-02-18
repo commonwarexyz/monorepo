@@ -980,6 +980,77 @@ fn test_randomized_with_multiple_seeds() {
     }
 }
 
+/// Test prune_commits_below_pruned_chunks removes the right commits.
+#[test]
+fn test_prune_commits_below_pruned_chunks() {
+    let bitmap: BitMap<4> = BitMap::new();
+
+    // Build 128 bits (4 chunks of 32 bits each).
+    let bitmap = bitmap
+        .apply_batch(1, |dirty| {
+            for _ in 0..4 {
+                dirty.push_chunk(&[0xFF; 4]);
+            }
+        })
+        .unwrap();
+    // Commit 1: diff.pruned_chunks = 0 (base state before commit)
+
+    let bitmap = bitmap
+        .apply_batch(2, |dirty| {
+            dirty.prune_to_bit(32);
+        })
+        .unwrap();
+    // Commit 2: diff.pruned_chunks = 0 (base state had 0 pruned chunks)
+
+    let bitmap = bitmap
+        .apply_batch(3, |dirty| {
+            dirty.prune_to_bit(64);
+        })
+        .unwrap();
+    // Commit 3: diff.pruned_chunks = 1 (base state had 1 pruned chunk)
+
+    let bitmap = bitmap
+        .apply_batch(4, |dirty| {
+            dirty.prune_to_bit(96);
+        })
+        .unwrap();
+    // Commit 4: diff.pruned_chunks = 2 (base state had 2 pruned chunks)
+
+    // Diff pruned_chunks values: [0, 0, 1, 2]
+
+    // Sanity: all 4 commits exist.
+    assert_eq!(bitmap.commits().count(), 4);
+    assert!(bitmap.get_at_commit(1).is_some());
+
+    // min = 0 removes nothing (all have pruned_chunks >= 0).
+    let mut bm = bitmap.clone();
+    assert_eq!(bm.prune_commits_below_pruned_chunks(0), 0);
+    assert_eq!(bm.commits().count(), 4);
+
+    // min = 1 removes commits 1 and 2 (both have pruned_chunks = 0).
+    let mut bm = bitmap.clone();
+    assert_eq!(bm.prune_commits_below_pruned_chunks(1), 2);
+    assert_eq!(bm.commits().count(), 2);
+    assert!(bm.get_at_commit(1).is_none());
+    assert!(bm.get_at_commit(2).is_none());
+    assert!(bm.get_at_commit(3).is_some());
+    assert!(bm.get_at_commit(4).is_some());
+
+    // min = 2 removes commits 1, 2, and 3.
+    let mut bm = bitmap.clone();
+    assert_eq!(bm.prune_commits_below_pruned_chunks(2), 3);
+    assert_eq!(bm.commits().count(), 1);
+    assert!(bm.get_at_commit(4).is_some());
+
+    // min = 100 removes all commits.
+    let mut bm = bitmap;
+    assert_eq!(bm.prune_commits_below_pruned_chunks(100), 4);
+    assert_eq!(bm.commits().count(), 0);
+
+    // No commits: returns 0.
+    assert_eq!(bm.prune_commits_below_pruned_chunks(1), 0);
+}
+
 #[test]
 #[should_panic(expected = "bit pruned: 31")]
 fn test_pop_into_pruned_region_panics() {

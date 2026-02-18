@@ -341,6 +341,24 @@ impl<const N: usize> CleanBitMap<N> {
         count - self.commits.len()
     }
 
+    /// Remove the oldest commits whose `pruned_chunks` is below `min_pruned_chunks`.
+    ///
+    /// Since `pruned_chunks` monotonically increases across commits, this removes
+    /// a contiguous prefix from the commit history.
+    ///
+    /// Returns the number of commits removed.
+    pub fn prune_commits_below_pruned_chunks(&mut self, min_pruned_chunks: usize) -> usize {
+        let mut removed = 0;
+        while let Some((&commit_num, diff)) = self.commits.iter().next() {
+            if diff.pruned_chunks >= min_pruned_chunks {
+                break;
+            }
+            self.commits.remove(&commit_num);
+            removed += 1;
+        }
+        removed
+    }
+
     /// Clear all historical commits.
     pub fn clear_history(&mut self) {
         self.commits.clear();
