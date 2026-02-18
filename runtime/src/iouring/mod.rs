@@ -1,26 +1,39 @@
-//! Asynchronous io_uring event loop implementation.
+//! io_uring event loop implementation.
 //!
 //! This module provides a high-level interface for submitting operations to Linux's io_uring
-//! subsystem and receiving their results asynchronously. The design centers around a single
-//! event loop that manages the submission queue (SQ) and completion queue (CQ) of an io_uring
-//! instance.
+//! subsystem and receiving their results. The design centers around a single event loop that
+//! manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
+//!
+//! Work is submitted via [Submitter], which pushes operations into an MPSC queue and signals
+//! an internal `eventfd` wake source. The event loop blocks in `io_uring_enter` and is woken by:
+//! - normal CQE progress in the ring
+//! - `eventfd` readiness when new work is queued or all submitters are dropped
 //!
 //! # Architecture
 //!
 //! ## Event Loop
 //!
-//! The core of this implementation is the [run] function, which operates an event loop that:
-//! 1. Receives operation requests via an MPSC channel
+//! The core of this implementation is [IoUringLoop::run], which blocks its calling thread while
+//! operating an event loop that:
+//! 1. Drains operation requests from a bounded MPSC channel fed by [Submitter]
 //! 2. Assigns unique IDs to each operation and submits them to io_uring's submission queue (SQE)
-//! 3. Polls io_uring's completion queue (CQE) for completed operations
+//! 3. Processes io_uring completion queue entries (CQEs), including internal wake CQEs
 //! 4. Routes completion results back to the original requesters via oneshot channels
 //!
 //! ## Operation Flow
 //!
 //! ```text
-//! Client Code ─[Op]→ MPSC Channel ─→ Event Loop ─[SQE]→ io_uring Kernel
-//!      ↑                                                 ↓
-//! Oneshot Channel ←─ Waiter Tracking ←[CQE]─ io_uring Kernel
+//! Data path:
+//!   Client task -> Submitter -> bounded MPSC -> IoUringLoop -> SQE -> io_uring
+//!   Client task <- oneshot <- IoUringLoop <- CQE <- io_uring
+//!
+//! Wake path:
+//!   Submitter --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_WORK_ID)--> IoUringLoop
+//!
+//! Loop behavior:
+//!   1) Drain CQEs.
+//!   2) Drain MPSC and stage SQEs.
+//!   3) Submit and block in io_uring_enter until a CQE (data or wake) arrives.
 //! ```
 //!
 //! ## Work Tracking
@@ -29,6 +42,7 @@
 //! in the SQE. The event loop maintains a `waiters` HashMap that maps each work ID to:
 //! - A oneshot sender for returning results to the caller
 //! - An optional buffer that must be kept alive for the duration of the operation
+//! - An optional FD handle to prevent descriptor reuse while the operation is in flight
 //! - An optional timespec, if operation timeouts are enabled, that must be kept
 //!   alive for the duration of the operation
 //!
@@ -37,17 +51,14 @@
 //! Operations can be configured with timeouts using `Config::op_timeout`. When enabled:
 //! - Each operation is linked to a timeout using io_uring's `IOSQE_IO_LINK` flag
 //! - If the timeout fires first, the operation is canceled and returns `ETIMEDOUT`
-//! - Reserved work IDs distinguish timeout completions from regular operations
+//! - Reserved work IDs distinguish internal timeout/wake completions from regular operations
 //!
-//! ## Deadlock Prevention
+//! ## Wake Handling
 //!
-//! The [Config::force_poll] interval prevents deadlocks in scenarios where:
-//! - Multiple tasks use the same io_uring instance
-//! - One task's completion depends on another task's submission
-//! - The event loop is blocked waiting for completions and can't process new submissions
-//!
-//! The event loop uses a bounded wait time when waiting for completions,
-//! ensuring forward progress even when no completions are immediately available.
+//! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
+//! a multishot `PollAdd` on an internal `eventfd`.
+//! - [Submitter::send] coalesces wake writes with an atomic wake-pending latch
+//! - Wake CQEs drain the `eventfd` counter and re-arm when `IORING_CQE_F_MORE` is not set
 //!
 //! ## Shutdown Process
 //!
@@ -55,7 +66,8 @@
 //! 1. Stops accepting new operations
 //! 2. Waits for all in-flight operations to complete
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
-//! 4. Cleans up and exits
+//! 4. Cleans up and exits. Dropping the last submitter signals `eventfd` so shutdown is observed
+//!    promptly even if the loop is blocked.
 
 use crate::{IoBuf, IoBufMut};
 use commonware_utils::channel::{
@@ -64,16 +76,28 @@ use commonware_utils::channel::{
 };
 use io_uring::{
     cqueue::Entry as CqueueEntry,
-    opcode::LinkTimeout,
+    opcode::{LinkTimeout, PollAdd},
     squeue::Entry as SqueueEntry,
-    types::{SubmitArgs, Timespec},
+    types::{Fd, SubmitArgs, Timespec},
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
-use std::{collections::HashMap, fs::File, os::fd::OwnedFd, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fs::File,
+    mem::size_of,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 /// Reserved ID for a CQE that indicates an operation timed out.
 const TIMEOUT_WORK_ID: u64 = u64::MAX;
+/// Reserved ID for internal wake poll completions.
+const WAKE_WORK_ID: u64 = u64::MAX - 1;
 
 /// Buffer for io_uring operations.
 ///
@@ -162,20 +186,14 @@ pub struct Config {
     /// If true, use IOPOLL mode.
     pub io_poll: bool,
     /// If true, use single issuer mode.
-    /// Warning: when enabled, user must guarantee that the same thread
-    /// that creates the io_uring instance is the only thread that submits
-    /// work to it. Since the `run` event loop is a future that may move
-    /// between threads, this means in practice that `single_issuer` should
-    /// only be used in a single-threaded context.
+    /// Warning: when enabled, the same thread that creates the ring must be
+    /// the only thread that submits work to it.
+    ///
+    /// This loop creates the ring inside [IoUringLoop::run] and performs all
+    /// ring submissions from that same thread, so it is compatible with
+    /// `single_issuer` when `run` is executed on a dedicated thread.
     /// See IORING_SETUP_SINGLE_ISSUER in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
     pub single_issuer: bool,
-    /// In the io_uring event loop (`run`), wait at most this long for a new
-    /// completion before checking for new work to submit to the io_ring. This
-    /// periodic wake-up prevents deadlocks where one task depends on completions
-    /// that won't arrive until another task submits additional work. Avoid
-    /// setting this to very low values, or the loop may burn CPU by waking
-    /// continuously even when no completions are available.
-    pub force_poll: Duration,
     /// If None, operations submitted to the io_uring will not time out.
     /// In this case, the caller should be careful to ensure that the
     /// operations submitted to the io_uring will eventually complete.
@@ -196,7 +214,6 @@ impl Default for Config {
             size: 128,
             io_poll: false,
             single_issuer: false,
-            force_poll: Duration::from_secs(1),
             op_timeout: None,
             shutdown_timeout: None,
         }
@@ -228,18 +245,21 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
 
     // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
     // timeout). We double the ring size to ensure users get the number of
-    // concurrent operations they configured.
+    // concurrent operations they configured. We also reserve one extra SQE for
+    // the internal wake poll.
     let ring_size = if cfg.op_timeout.is_some() {
-        cfg.size * 2
-    } else {
         cfg.size
+            .checked_mul(2)
+            .and_then(|size| size.checked_add(1))
+            .expect("ring size overflow")
+    } else {
+        cfg.size.checked_add(1).expect("ring size overflow")
     };
 
     builder.build(ring_size)
 }
 
-/// An operation submitted to the io_uring event loop which will be processed
-/// asynchronously by the event loop in `run`.
+/// An operation submitted to [IoUringLoop], processed by [IoUringLoop::run].
 pub struct Op {
     /// The submission queue entry to be submitted to the ring.
     /// Its user data field will be overwritten. Users shouldn't rely on it.
@@ -261,11 +281,307 @@ pub struct Op {
     pub fd: Option<OpFd>,
 }
 
-// Returns false iff we received a shutdown timeout
-// and we should stop processing completions.
+struct SubmitterState {
+    sender: mpsc::Sender<Op>,
+    wake_fd: Arc<OwnedFd>,
+    wake_pending: Arc<AtomicBool>,
+}
+
+impl Drop for SubmitterState {
+    fn drop(&mut self) {
+        // Wake the loop when the last sender is dropped so it can observe
+        // channel disconnect and shut down promptly.
+        signal_wake(&self.wake_fd);
+    }
+}
+
+/// Handle for submitting operations to an [IoUringLoop].
+#[derive(Clone)]
+pub struct Submitter {
+    inner: Arc<SubmitterState>,
+}
+
+impl Submitter {
+    /// Submit an operation to the io_uring loop.
+    ///
+    /// On success, this may signal the loop's `eventfd` wake source. Wake writes are coalesced
+    /// with an atomic wake-pending latch so bursts of submissions usually trigger a single wake.
+    pub async fn send(&self, op: Op) -> Result<(), mpsc::error::SendError<Op>> {
+        self.inner.sender.send(op).await?;
+
+        // Only the first send in a burst performs the eventfd write.
+        if !self.inner.wake_pending.swap(true, Ordering::AcqRel) {
+            signal_wake(&self.inner.wake_fd);
+        }
+
+        Ok(())
+    }
+}
+
+/// io_uring event loop state.
+pub(crate) struct IoUringLoop {
+    cfg: Config,
+    metrics: Arc<Metrics>,
+    receiver: mpsc::Receiver<Op>,
+    wake_fd: Arc<OwnedFd>,
+    wake_pending: Arc<AtomicBool>,
+}
+
+impl IoUringLoop {
+    /// Create a new io_uring loop and submit handle.
+    ///
+    /// The loop allocates its own metrics, operation channel, and internal `eventfd` wake source.
+    pub(crate) fn new(cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+        let metrics = Arc::new(Metrics::new(registry));
+        let (sender, receiver) = mpsc::channel(cfg.size as usize);
+        let wake_fd = Arc::new(new_wake_fd().expect("unable to create wake eventfd"));
+        let wake_pending = Arc::new(AtomicBool::new(false));
+
+        let submitter = Submitter {
+            inner: Arc::new(SubmitterState {
+                sender,
+                wake_fd: wake_fd.clone(),
+                wake_pending: wake_pending.clone(),
+            }),
+        };
+
+        (
+            submitter,
+            Self {
+                cfg,
+                metrics,
+                receiver,
+                wake_fd,
+                wake_pending,
+            },
+        )
+    }
+
+    /// Runs the io_uring event loop until all submitters are dropped and in-flight work drains.
+    ///
+    /// This method blocks the current thread.
+    pub(crate) fn run(mut self) {
+        let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
+        assert!(
+            try_arm_wake_poll(&mut ring, &self.wake_fd),
+            "internal invariant violated: wake poll SQE should always fit in the ring at startup"
+        );
+        let mut next_work_id: u64 = 0;
+        // Maps a work ID to the sender that we will send the result to
+        // and the buffer used for the operation.
+        let mut waiters = Waiters::with_capacity(self.cfg.size as usize);
+
+        loop {
+            // Process available completions.
+            loop {
+                let cqe = {
+                    let mut completion = ring.completion();
+                    completion.next()
+                };
+                let Some(cqe) = cqe else {
+                    break;
+                };
+                if cqe.user_data() == WAKE_WORK_ID {
+                    handle_wake_cqe(&mut ring, cqe, &self.wake_fd);
+                    continue;
+                }
+                handle_cqe(&mut waiters, cqe, &self.cfg);
+            }
+
+            // Drain inbound work and stage SQEs.
+            while waiters.len() < self.cfg.size as usize {
+                let op = match self.receiver.try_recv() {
+                    Ok(work_item) => work_item,
+                    Err(TryRecvError::Disconnected) => {
+                        drain(&mut ring, &mut waiters, &self.cfg, &self.wake_fd);
+                        return;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                };
+                let Op {
+                    mut work,
+                    sender,
+                    buffer,
+                    fd,
+                } = op;
+
+                // Assign a unique ID, skipping reserved IDs.
+                let work_id = next_work_id;
+                next_work_id = next_work_id.wrapping_add(1);
+                if next_work_id >= WAKE_WORK_ID {
+                    next_work_id = 0;
+                }
+                work = work.user_data(work_id);
+
+                // Submit the operation to the ring, with timeout if configured.
+                let timespec = if let Some(timeout) = &self.cfg.op_timeout {
+                    // Link the operation to the (following) timeout.
+                    work = work.flags(io_uring::squeue::Flags::IO_LINK);
+
+                    // The timespec needs to be allocated on the heap and kept
+                    // alive for the duration of the operation so that the pointer
+                    // stays valid.
+                    let timespec = Box::new(
+                        Timespec::new()
+                            .sec(timeout.as_secs())
+                            .nsec(timeout.subsec_nanos()),
+                    );
+
+                    // Create the timeout.
+                    let timeout = LinkTimeout::new(&*timespec)
+                        .build()
+                        .user_data(TIMEOUT_WORK_ID);
+
+                    // Submit op and timeout.
+                    //
+                    // SAFETY: `buffer`, `timespec`, and `fd` are stored in
+                    // `waiters` until CQE processing, ensuring referenced
+                    // memory remains valid and FD reuse is prevented.
+                    unsafe {
+                        let mut sq = ring.submission();
+                        sq.push(&work).expect("unable to push to queue");
+                        sq.push(&timeout).expect("unable to push timeout to queue");
+                    }
+
+                    Some(timespec)
+                } else {
+                    // No timeout, submit the operation normally.
+                    //
+                    // SAFETY: `buffer` and `fd` are stored in `waiters` until
+                    // CQE processing, ensuring referenced memory remains valid
+                    // and FD reuse is prevented.
+                    unsafe {
+                        ring.submission()
+                            .push(&work)
+                            .expect("unable to push to queue");
+                    }
+
+                    None
+                };
+
+                // We'll send the result of this operation to `sender`.
+                // `fd` is retained to prevent FD reuse until completion.
+                waiters.insert(work_id, (sender, buffer, fd, timespec));
+            }
+
+            self.metrics.pending_operations.set(waiters.len() as _);
+
+            // If producers queued more work since our last channel drain, loop
+            // again without blocking.
+            if self.wake_pending.swap(false, Ordering::AcqRel) {
+                continue;
+            }
+
+            // Sleep until either a completion arrives or wake_fd poll fires.
+            submit_and_wait(&mut ring, 1, None).expect("unable to submit to ring");
+        }
+    }
+}
+
+/// Handle a wake CQE and re-arm wake poll when required.
+fn handle_wake_cqe(ring: &mut IoUring, cqe: CqueueEntry, wake_fd: &OwnedFd) {
+    drain_wake_fd(wake_fd);
+    assert!(
+        cqe.result() >= 0,
+        "multishot wake poll failed; requires a kernel with io_uring multishot poll support"
+    );
+    if !io_uring::cqueue::more(cqe.flags()) {
+        assert!(
+            try_arm_wake_poll(ring, wake_fd),
+            "internal invariant violated: wake poll SQE should always fit in the ring"
+        );
+    }
+}
+
+/// Create the internal non-blocking eventfd used by the wake path.
+fn new_wake_fd() -> Result<OwnedFd, std::io::Error> {
+    // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: `eventfd` returned a new owned descriptor.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+/// Signal the loop wake source by incrementing the eventfd counter.
+fn signal_wake(wake_fd: &OwnedFd) {
+    let value: u64 = 1;
+    loop {
+        // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
+        // to an initialized 8-byte integer for the duration of the call.
+        let ret = unsafe {
+            libc::write(
+                wake_fd.as_raw_fd(),
+                &value as *const u64 as *const libc::c_void,
+                size_of::<u64>(),
+            )
+        };
+        if ret == size_of::<u64>() as isize {
+            return;
+        }
+        if ret == -1 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue,
+                // Counter already saturated means a wake is already pending.
+                Some(libc::EAGAIN) => return,
+                _ => return,
+            }
+        }
+        return;
+    }
+}
+
+/// Drain the eventfd counter so future wake readiness reflects new signals.
+fn drain_wake_fd(wake_fd: &OwnedFd) {
+    let mut value: u64 = 0;
+    loop {
+        // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
+        // to writable 8-byte storage for the duration of the call.
+        let ret = unsafe {
+            libc::read(
+                wake_fd.as_raw_fd(),
+                &mut value as *mut u64 as *mut libc::c_void,
+                size_of::<u64>(),
+            )
+        };
+        if ret == size_of::<u64>() as isize {
+            // eventfd (without EFD_SEMAPHORE) returns the full counter and
+            // resets it to zero in one read.
+            return;
+        }
+        if ret == -1 {
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EAGAIN) => return,
+                _ => return,
+            }
+        }
+        return;
+    }
+}
+
+/// Attempt to arm the multishot wake poll request.
+///
+/// Returns `false` if no SQ entry is available at this moment.
+///
+/// With this loop's sizing and in-flight limits, callers treat `false` as an
+/// internal invariant violation.
+fn try_arm_wake_poll(ring: &mut IoUring, wake_fd: &OwnedFd) -> bool {
+    let wake_poll = PollAdd::new(Fd(wake_fd.as_raw_fd()), libc::POLLIN as u32)
+        .multi(true)
+        .build()
+        .user_data(WAKE_WORK_ID);
+
+    // SAFETY: The poll SQE owns no user pointers and references a valid FD.
+    unsafe { ring.submission().push(&wake_poll).is_ok() }
+}
+
 fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     let work_id = cqe.user_data();
     match work_id {
+        WAKE_WORK_ID => {}
         TIMEOUT_WORK_ID => {
             assert!(
                 cfg.op_timeout.is_some(),
@@ -287,157 +603,41 @@ fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
     }
 }
 
-/// Creates a new io_uring instance that listens for incoming work on `receiver`.
-/// This function will block until `receiver` is closed or an error occurs.
-/// It should be run in a separate task.
-pub(crate) async fn run(cfg: Config, metrics: Arc<Metrics>, mut receiver: mpsc::Receiver<Op>) {
-    let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
-    let mut next_work_id: u64 = 0;
-    // Maps a work ID to the sender that we will send the result to
-    // and the buffer used for the operation.
-    let mut waiters = Waiters::with_capacity(cfg.size as usize);
-
-    loop {
-        // Try to get a completion
-        while let Some(cqe) = ring.completion().next() {
-            handle_cqe(&mut waiters, cqe, &cfg);
-        }
-
-        // Try to fill the submission queue with incoming work.
-        // Stop if we are at the max number of processing work.
-        //
-        // NOTE: We can safely use `cfg.size` directly as the limit here, even
-        // when `op_timeout` is enabled, because we already doubled the ring
-        // size in `new_ring()` to account for the fact that each operation
-        // needs 2 SQ entries (op + timeout). This ensures users get the number
-        // of concurrent operations they configured.
-        while waiters.len() < cfg.size as usize {
-            // Wait for more work
-            let op = if waiters.is_empty() {
-                // Block until there is something to do
-                match receiver.recv().await {
-                    // Got work
-                    Some(work) => work,
-                    // Channel closed, shut down
-                    None => {
-                        drain(&mut ring, &mut waiters, &cfg);
-                        return;
-                    }
-                }
-            } else {
-                // Handle incoming work
-                match receiver.try_recv() {
-                    // Got work without blocking
-                    Ok(work_item) => work_item,
-                    // Channel closed, shut down
-                    Err(TryRecvError::Disconnected) => {
-                        drain(&mut ring, &mut waiters, &cfg);
-                        return;
-                    }
-                    // No new work available, wait for a completion
-                    Err(TryRecvError::Empty) => break,
-                }
-            };
-            let Op {
-                mut work,
-                sender,
-                buffer,
-                fd,
-            } = op;
-
-            // Assign a unique id
-            let work_id = next_work_id;
-            next_work_id += 1;
-            if next_work_id == TIMEOUT_WORK_ID {
-                // Wrap back to 0
-                next_work_id = 0;
-            }
-            work = work.user_data(work_id);
-
-            // Submit the operation to the ring, with timeout if configured
-            let timespec = if let Some(timeout) = &cfg.op_timeout {
-                // Link the operation to the (following) timeout
-                work = work.flags(io_uring::squeue::Flags::IO_LINK);
-
-                // The timespec needs to be allocated on the heap and kept alive
-                // for the duration of the operation so that the pointer stays
-                // valid
-                let timespec = Box::new(
-                    Timespec::new()
-                        .sec(timeout.as_secs())
-                        .nsec(timeout.subsec_nanos()),
-                );
-
-                // Create the timeout
-                let timeout = LinkTimeout::new(&*timespec)
-                    .build()
-                    .user_data(TIMEOUT_WORK_ID);
-
-                // Submit the op and timeout.
-                //
-                // SAFETY: `buffer`, `timespec`, and `fd` are stored in
-                // `waiters` until the CQE is processed, ensuring memory
-                // referenced by the SQEs remains valid and the FD cannot be
-                // reused. The ring was doubled in size for timeout support, and
-                // `waiters.len() < cfg.size` guarantees space for both entries.
-                unsafe {
-                    let mut sq = ring.submission();
-                    sq.push(&work).expect("unable to push to queue");
-                    sq.push(&timeout).expect("unable to push timeout to queue");
-                }
-
-                Some(timespec)
-            } else {
-                // No timeout, submit the operation normally.
-                //
-                // SAFETY: `buffer` and `fd` are stored in `waiters` until
-                // the CQE is processed, ensuring memory referenced by the SQE
-                // remains valid and the FD cannot be reused. The loop condition
-                // `waiters.len() < cfg.size` guarantees space in the submission
-                // queue.
-                unsafe {
-                    ring.submission()
-                        .push(&work)
-                        .expect("unable to push to queue");
-                }
-
-                None
-            };
-
-            // We'll send the result of this operation to `sender`.
-            // `fd` is retained to prevent FD reuse until completion.
-            waiters.insert(work_id, (sender, buffer, fd, timespec));
-        }
-
-        // Submit and wait for at least 1 item to be in the completion queue.
-        // Note that we block until anything is in the completion queue,
-        // even if it's there before this call. That is, a completion
-        // that arrived before this call will be counted and cause this
-        // call to return. Note that waiters.len() > 0 here.
-        //
-        // Bound the wait so we periodically check for new work or shutdown,
-        // ensuring we don't block indefinitely (e.g. if in the meantime waiters
-        // has become 0).
-        metrics.pending_operations.set(waiters.len() as _);
-        submit_and_wait(&mut ring, 1, Some(cfg.force_poll)).expect("unable to submit to ring");
-    }
-}
-
 /// Process `ring` completions until all pending operations are complete or
 /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
 /// indefinitely.
-fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config) {
-    // When op_timeout is set, each operation uses 2 SQ entries
-    // (op + linked timeout).
-    let pending = if cfg.op_timeout.is_some() {
-        waiters.len() * 2
-    } else {
-        waiters.len()
-    };
+fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config, wake_fd: &OwnedFd) {
+    while !waiters.is_empty() {
+        // When op_timeout is set, each operation uses 2 SQ entries
+        // (op + linked timeout).
+        let pending = if cfg.op_timeout.is_some() {
+            waiters.len() * 2
+        } else {
+            waiters.len()
+        };
 
-    submit_and_wait(ring, pending, cfg.shutdown_timeout).expect("unable to submit to ring");
-    while let Some(cqe) = ring.completion().next() {
-        handle_cqe(waiters, cqe, cfg);
+        let got_completion =
+            submit_and_wait(ring, pending, cfg.shutdown_timeout).expect("unable to submit to ring");
+
+        loop {
+            let cqe = {
+                let mut completion = ring.completion();
+                completion.next()
+            };
+            let Some(cqe) = cqe else {
+                break;
+            };
+            if cqe.user_data() == WAKE_WORK_ID {
+                handle_wake_cqe(ring, cqe, wake_fd);
+                continue;
+            }
+            handle_cqe(waiters, cqe, cfg);
+        }
+
+        // Bounded shutdown wait elapsed.
+        if !got_completion {
+            break;
+        }
     }
 }
 
@@ -445,7 +645,7 @@ fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config) {
 ///
 /// This function submits all pending SQEs to the kernel and waits for at least
 /// `want` completions to arrive. It can optionally use a timeout to bound the
-/// wait time, which is useful for implementing periodic wake-ups.
+/// wait time.
 ///
 /// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
 /// feature to implement a bounded wait without injecting a timeout SQE
@@ -490,12 +690,8 @@ pub const fn should_retry(return_value: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::iouring::{Config, IoBuf, IoBufMut, Op};
-    use commonware_utils::channel::{
-        mpsc,
-        oneshot::{self, error::RecvError},
-    };
-    use futures::executor::block_on;
+    use super::*;
+    use commonware_utils::channel::oneshot::{self, error::RecvError};
     use io_uring::{
         opcode,
         types::{Fd, Timespec},
@@ -503,15 +699,14 @@ mod tests {
     use prometheus_client::registry::Registry;
     use std::{
         os::{fd::AsRawFd, unix::net::UnixStream},
-        sync::Arc,
         time::Duration,
     };
 
     async fn recv_then_send(cfg: Config, should_succeed: bool) {
         // Create a new io_uring instance
-        let (submitter, receiver) = mpsc::channel(1);
-        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
-        let handle = tokio::spawn(super::run(cfg, metrics.clone(), receiver));
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
 
         let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
@@ -530,11 +725,6 @@ mod tests {
             })
             .await
             .expect("failed to send work");
-
-        while metrics.pending_operations.get() == 0 {
-            // Wait for the read to be submitted
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
 
         // Submit a write that satisfies the read.
         let write =
@@ -561,48 +751,31 @@ mod tests {
             let _ = write_rx.await;
         }
         drop(submitter);
-        handle.await.unwrap();
+        handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_force_poll_short_interval_prevents_deadlock() {
-        // With a short force_poll interval, the event loop should wake up
-        // frequently to check for new work, preventing the deadlock.
-        let cfg = Config {
-            force_poll: Duration::from_millis(10),
-            ..Default::default()
-        };
-        recv_then_send(cfg, true).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_force_poll_long_interval_deadlock() {
-        // With a long force_poll interval, the event loop may block on recv
-        // long enough that the matching write isn't observed within our test
-        // timeout.
-        let cfg = Config {
-            force_poll: Duration::from_secs(60),
-            ..Default::default()
-        };
-        // recv_then_send should block for 60 seconds (i.e. force_poll duration).
-        // Set a timeout and make sure it doesn't complete.
-        let timeout = tokio::time::timeout(Duration::from_secs(2), recv_then_send(cfg, false));
+    async fn test_wake_path_makes_progress() {
+        let timeout = tokio::time::timeout(
+            Duration::from_secs(2),
+            recv_then_send(Default::default(), true),
+        );
         assert!(
-            timeout.await.is_err(),
-            "recv_then_send completed unexpectedly"
+            timeout.await.is_ok(),
+            "recv_then_send timed out unexpectedly"
         );
     }
 
     #[tokio::test]
     async fn test_timeout() {
         // Create an io_uring instance
-        let cfg = super::Config {
+        let cfg = Config {
             op_timeout: Some(std::time::Duration::from_secs(1)),
             ..Default::default()
         };
-        let (submitter, receiver) = mpsc::channel(1);
-        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
-        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
 
         // Submit a work item that will time out (because we don't write to the pipe)
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
@@ -627,19 +800,19 @@ mod tests {
         let (result, _) = rx.await.expect("failed to receive result");
         assert_eq!(result, -libc::ETIMEDOUT);
         drop(submitter);
-        handle.await.unwrap();
+        handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_no_timeout() {
         // Create an io_uring instance with shutdown timeout disabled
-        let cfg = super::Config {
+        let cfg = Config {
             shutdown_timeout: None,
             ..Default::default()
         };
-        let (submitter, receiver) = mpsc::channel(1);
-        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
-        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
 
         // Submit an operation that will complete after shutdown
         let timeout = Timespec::new().sec(3);
@@ -661,19 +834,19 @@ mod tests {
         // Wait for the operation `timeout` to fire.
         let (result, _) = rx.await.unwrap();
         assert_eq!(result, -libc::ETIME);
-        handle.await.unwrap();
+        handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
         // Create an io_uring instance with shutdown timeout enabled
-        let cfg = super::Config {
+        let cfg = Config {
             shutdown_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let (submitter, receiver) = mpsc::channel(1);
-        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
-        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
 
         // Submit an operation that will complete long after shutdown starts
         let timeout = Timespec::new().sec(5_000);
@@ -699,7 +872,7 @@ mod tests {
         // dropping `tx` and causing `rx` to return RecvError.
         let err = rx.await.unwrap_err();
         assert!(matches!(err, RecvError { .. }));
-        handle.await.unwrap();
+        handle.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -708,14 +881,14 @@ mod tests {
         // space for operations with linked timeouts. Each op needs 2 SQEs (op +
         // timeout) but the code only ensured 1 slot is available before pushing
         // both.
-        let cfg = super::Config {
+        let cfg = Config {
             size: 8,
             op_timeout: Some(Duration::from_millis(5)),
             ..Default::default()
         };
-        let (submitter, receiver) = mpsc::channel(8);
-        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
-        let handle = tokio::spawn(super::run(cfg, metrics, receiver));
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
 
         // Submit more operations than the SQ size to force batching.
         let total = 64usize;
@@ -742,23 +915,23 @@ mod tests {
         }
 
         drop(submitter);
-        handle.await.unwrap();
+        handle.join().unwrap();
     }
 
     #[tokio::test]
     async fn test_single_issuer() {
         // Test that SINGLE_ISSUER with DEFER_TASKRUN works correctly.
         // The simplest test: just submit a no-op and verify it completes.
-        let cfg = super::Config {
+        let cfg = Config {
             single_issuer: true,
             ..Default::default()
         };
 
-        let (sender, receiver) = mpsc::channel(1);
-        let metrics = Arc::new(super::Metrics::new(&mut Registry::default()));
+        let mut registry = Registry::default();
+        let (sender, iouring) = IoUringLoop::new(cfg, &mut registry);
 
         // Run io_uring in a dedicated thread
-        let uring_thread = std::thread::spawn(move || block_on(super::run(cfg, metrics, receiver)));
+        let uring_thread = std::thread::spawn(move || iouring.run());
 
         // Submit a no-op
         let (tx, rx) = oneshot::channel();

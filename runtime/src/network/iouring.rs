@@ -26,8 +26,7 @@ use crate::{
     iouring::{self, should_retry, OpBuffer, OpFd},
     BufferPool, IoBufMut, IoBufs,
 };
-use commonware_utils::channel::{mpsc, oneshot};
-use futures::executor::block_on;
+use commonware_utils::channel::oneshot;
 use io_uring::types::Fd;
 use prometheus_client::registry::Registry;
 use std::{
@@ -85,9 +84,9 @@ pub struct Network {
     /// Whether or not to set the `SO_LINGER` socket option.
     so_linger: Option<Duration>,
     /// Used to submit send operations to the send io_uring event loop.
-    send_submitter: mpsc::Sender<iouring::Op>,
+    send_submitter: iouring::Submitter,
     /// Used to submit recv operations to the recv io_uring event loop.
-    recv_submitter: mpsc::Sender<iouring::Op>,
+    recv_submitter: iouring::Submitter,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
     /// Buffer pool for recv allocations.
@@ -108,27 +107,23 @@ impl Network {
         registry: &mut Registry,
         pool: BufferPool,
     ) -> Result<Self, crate::Error> {
-        // Create an io_uring instance to handle send operations.
-        let (send_submitter, rx) = mpsc::channel(cfg.iouring_config.size as usize);
-
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
         cfg.iouring_config.single_issuer = true;
 
-        std::thread::spawn({
-            let cfg = cfg.clone();
-            let registry = registry.sub_registry_with_prefix("iouring_sender");
-            let metrics = Arc::new(iouring::Metrics::new(registry));
-            move || block_on(iouring::run(cfg.iouring_config, metrics, rx))
-        });
+        // Create an io_uring instance to handle send operations.
+        let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
+        let (send_submitter, send_loop) =
+            iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
+        std::thread::spawn(move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
-        let (recv_submitter, rx) = mpsc::channel(cfg.iouring_config.size as usize);
-        let registry = registry.sub_registry_with_prefix("iouring_receiver");
-        let metrics = Arc::new(iouring::Metrics::new(registry));
-        std::thread::spawn(|| block_on(iouring::run(cfg.iouring_config, metrics, rx)));
+        let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
+        let (recv_submitter, recv_loop) =
+            iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
+        std::thread::spawn(move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
@@ -213,9 +208,9 @@ pub struct Listener {
     so_linger: Option<Duration>,
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
-    send_submitter: mpsc::Sender<iouring::Op>,
+    send_submitter: iouring::Submitter,
     /// Used to submit recv operations to the recv io_uring event loop.
-    recv_submitter: mpsc::Sender<iouring::Op>,
+    recv_submitter: iouring::Submitter,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
     /// Buffer pool for recv allocations.
@@ -280,13 +275,13 @@ impl crate::Listener for Listener {
 pub struct Sink {
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    submitter: mpsc::Sender<iouring::Op>,
+    submitter: iouring::Submitter,
     /// Buffer pool for send allocations.
     pool: BufferPool,
 }
 
 impl Sink {
-    const fn new(fd: Arc<OwnedFd>, submitter: mpsc::Sender<iouring::Op>, pool: BufferPool) -> Self {
+    const fn new(fd: Arc<OwnedFd>, submitter: iouring::Submitter, pool: BufferPool) -> Self {
         Self {
             fd,
             submitter,
@@ -363,7 +358,7 @@ impl crate::Sink for Sink {
 pub struct Stream {
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    submitter: mpsc::Sender<iouring::Op>,
+    submitter: iouring::Submitter,
     /// Internal read buffer.
     buffer: IoBufMut,
     /// Current read position in the buffer.
@@ -377,7 +372,7 @@ pub struct Stream {
 impl Stream {
     fn new(
         fd: Arc<OwnedFd>,
-        submitter: mpsc::Sender<iouring::Op>,
+        submitter: iouring::Submitter,
         buffer_capacity: usize,
         pool: BufferPool,
     ) -> Self {
@@ -546,18 +541,8 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            Network::start(
-                Config {
-                    iouring_config: iouring::Config {
-                        force_poll: Duration::from_millis(100),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                &mut Registry::default(),
-                test_pool(),
-            )
-            .expect("Failed to start io_uring")
+            Network::start(Config::default(), &mut Registry::default(), test_pool())
+                .expect("Failed to start io_uring")
         })
         .await;
     }
@@ -570,7 +555,6 @@ mod tests {
                 Config {
                     iouring_config: iouring::Config {
                         size: 256,
-                        force_poll: Duration::from_millis(100),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -585,18 +569,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_send_read_quickly() {
-        let network = Network::start(
-            Config {
-                iouring_config: iouring::Config {
-                    force_poll: Duration::from_millis(100),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
-        .expect("Failed to start io_uring");
+        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
+            .expect("Failed to start io_uring");
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -630,7 +604,6 @@ mod tests {
             Config {
                 iouring_config: iouring::Config {
                     op_timeout: Some(op_timeout),
-                    force_poll: Duration::from_millis(10),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -675,10 +648,6 @@ mod tests {
         let network = Network::start(
             Config {
                 read_buffer_size: 0,
-                iouring_config: iouring::Config {
-                    force_poll: Duration::from_millis(100),
-                    ..Default::default()
-                },
                 ..Default::default()
             },
             &mut Registry::default(),
@@ -732,7 +701,6 @@ mod tests {
         let network = Network::start(
             Config {
                 iouring_config: iouring::Config {
-                    force_poll: Duration::from_millis(10),
                     op_timeout: Some(op_timeout),
                     ..Default::default()
                 },
@@ -777,18 +745,8 @@ mod tests {
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
         // Use default buffer size to enable buffering
-        let network = Network::start(
-            Config {
-                iouring_config: iouring::Config {
-                    force_poll: Duration::from_millis(100),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            &mut Registry::default(),
-            test_pool(),
-        )
-        .expect("Failed to start io_uring");
+        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
+            .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();

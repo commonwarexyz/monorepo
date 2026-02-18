@@ -26,11 +26,7 @@ use crate::{
     BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    from_hex, hex,
-};
-use futures::executor::block_on;
+use commonware_utils::{channel::oneshot, from_hex, hex};
 use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
@@ -73,29 +69,28 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_sender: iouring::Submitter,
     pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
-        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
-
-        let storage = Self {
-            storage_directory: cfg.storage_directory.clone(),
-            io_sender,
-            pool,
-        };
-        let metrics = Arc::new(iouring::Metrics::new(registry));
-
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
         cfg.iouring_config.single_issuer = true;
 
-        std::thread::spawn(|| block_on(iouring::run(cfg.iouring_config, metrics, receiver)));
+        let (io_sender, iouring_loop) = iouring::IoUringLoop::new(cfg.iouring_config, registry);
+
+        let storage = Self {
+            storage_directory: cfg.storage_directory,
+            io_sender,
+            pool,
+        };
+
+        std::thread::spawn(move || iouring_loop.run());
         storage
     }
 }
@@ -234,7 +229,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_sender: iouring::Submitter,
     /// Buffer pool for read allocations
     pool: BufferPool,
 }
@@ -256,7 +251,7 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<iouring::Op>,
+        io_sender: iouring::Submitter,
         pool: BufferPool,
     ) -> Self {
         Self {
