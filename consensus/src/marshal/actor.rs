@@ -1272,11 +1272,7 @@ where
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<U: Buffer<B>>(
-        &self,
-        buffer: &U,
-        commitment: B::Commitment,
-    ) -> Option<B> {
+    async fn find_block<U: Buffer<B>>(&self, buffer: &U, commitment: B::Commitment) -> Option<B> {
         // Check buffer
         if let Some(block) = buffer.get(commitment).await {
             return Some(block);
