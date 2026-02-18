@@ -103,10 +103,6 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
         self.queue.push_back(entry);
     }
 
-    fn pop_front(&mut self) -> Option<PendingAckEntry<B, A>> {
-        self.queue.pop_front()
-    }
-
     fn clear(&mut self) {
         self.queue.clear();
     }
@@ -134,16 +130,23 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
 impl<B: Block, A: Acknowledgement> Unpin for PendingAcks<B, A> {}
 
 impl<B: Block, A: Acknowledgement> Future for PendingAcks<B, A> {
-    type Output = <A::Waiter as Future>::Output;
+    type Output = (PendingAckEntry<B, A>, <A::Waiter as Future>::Output);
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
-        match this.queue.front_mut() {
-            Some(entry) => std::pin::Pin::new(&mut entry.receiver).poll(cx),
-            None => std::task::Poll::Pending,
+        let entry = match this.queue.front_mut() {
+            Some(entry) => entry,
+            None => return std::task::Poll::Pending,
+        };
+        match std::pin::Pin::new(&mut entry.receiver).poll(cx) {
+            std::task::Poll::Ready(result) => {
+                let entry = this.queue.pop_front().unwrap();
+                std::task::Poll::Ready((entry, result))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }
@@ -392,21 +395,9 @@ where
             Ok((commitment, block)) = waiters.next_completed() else continue => {
                 self.notify_subscribers(commitment, &block);
             },
-            // Handle application acknowledgements next (drain all ready acks, sync once)
-            ack = &mut self.pending_acks => {
-                let entry = self.pending_acks.pop_front().expect("ack state must be present");
-                match ack {
-                    Ok(()) => {
-                        self.handle_block_processed(entry.height, entry.commitment, &mut resolver).await;
-                    }
-                    Err(e) => {
-                        error!(e = ?e, height = %entry.height, "application did not acknowledge block");
-                        return;
-                    }
-                }
-
-                // Drain any additional ready acks
-                while let Some((entry, result)) = self.pending_acks.try_pop_ready() {
+            // Handle application acknowledgements (drain all ready acks, sync once)
+            (mut entry, mut result) = &mut self.pending_acks => {
+                loop {
                     match result {
                         Ok(()) => {
                             self.handle_block_processed(entry.height, entry.commitment, &mut resolver).await;
@@ -416,9 +407,12 @@ where
                             return;
                         }
                     }
+                    match self.pending_acks.try_pop_ready() {
+                        Some((e, r)) => { entry = e; result = r; }
+                        None => break,
+                    }
                 }
 
-                // Single sync for all processed acks
                 if let Err(e) = self.sync_processed_height().await {
                     error!(?e, "failed to sync application progress");
                     return;
