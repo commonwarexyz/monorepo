@@ -66,6 +66,11 @@ where
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
 
+    /// Maximum number of blocks dispatched to the application that have not
+    /// yet been acknowledged. Increasing this value allows the application
+    /// to buffer work while marshal continues dispatching, hiding ack latency.
+    pub max_pending_acks: NonZeroUsize,
+
     /// Strategy for parallel operations.
     pub strategy: T,
 }

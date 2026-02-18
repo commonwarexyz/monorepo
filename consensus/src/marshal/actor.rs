@@ -45,14 +45,15 @@ use commonware_utils::{
     sequence::U64,
     Acknowledgement, BoxedError,
 };
-use futures::{future::join_all, try_join};
+use futures::{future::join_all, try_join, FutureExt};
 use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{btree_map::Entry, BTreeMap, VecDeque},
     future::Future,
     num::NonZeroUsize,
+    pin::Pin,
     sync::Arc,
 };
 use tracing::{debug, error, info, warn};
@@ -74,7 +75,7 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
     },
 }
 
-/// A pending acknowledgement from the application for processing a block at the contained height/commitment.
+/// A pending acknowledgement from the application for a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
     height: Height,
@@ -91,6 +92,80 @@ impl<B: Block, A: Acknowledgement> Future for PendingAck<B, A> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         self.project().receiver.poll(cx)
+    }
+}
+
+/// Tracks in-flight application acknowledgements with FIFO semantics.
+struct PendingAcks<B: Block, A: Acknowledgement> {
+    current: OptionFuture<PendingAck<B, A>>,
+    queue: VecDeque<PendingAck<B, A>>,
+    max: usize,
+}
+
+impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
+    /// Creates a new pending-ack tracker with a maximum in-flight capacity.
+    fn new(max: usize) -> Self {
+        Self {
+            current: None.into(),
+            queue: VecDeque::with_capacity(max),
+            max,
+        }
+    }
+
+    /// Drops the current ack and all queued acks.
+    fn clear(&mut self) {
+        self.current = None.into();
+        self.queue.clear();
+    }
+
+    /// Returns the currently armed ack future (if any) for `select_loop!`.
+    const fn current(&mut self) -> &mut OptionFuture<PendingAck<B, A>> {
+        &mut self.current
+    }
+
+    /// Returns whether we can dispatch another block without exceeding capacity.
+    fn has_capacity(&self) -> bool {
+        let reserved = usize::from(self.current.is_some());
+        self.queue.len() < self.max - reserved
+    }
+
+    /// Returns the next height to dispatch while preserving sequential order.
+    fn next_dispatch_height(&self, last_processed_height: Height) -> Height {
+        self.queue
+            .back()
+            .map(|ack| ack.height.next())
+            .or_else(|| self.current.as_ref().map(|ack| ack.height.next()))
+            .unwrap_or_else(|| last_processed_height.next())
+    }
+
+    /// Enqueues a newly dispatched ack, arming it immediately when idle.
+    fn enqueue(&mut self, ack: PendingAck<B, A>) {
+        if self.current.is_none() {
+            self.current.replace(ack);
+            return;
+        }
+        self.queue.push_back(ack);
+    }
+
+    /// Returns metadata for a completed current ack and arms the next queued ack.
+    fn complete_current(
+        &mut self,
+        result: <A::Waiter as Future>::Output,
+    ) -> (Height, B::Commitment, <A::Waiter as Future>::Output) {
+        let PendingAck {
+            height, commitment, ..
+        } = self.current.take().expect("ack state must be present");
+        if let Some(next) = self.queue.pop_front() {
+            self.current.replace(next);
+        }
+        (height, commitment, result)
+    }
+
+    /// If the current ack is already resolved, takes it and arms the next ack.
+    fn pop_ready(&mut self) -> Option<(Height, B::Commitment, <A::Waiter as Future>::Output)> {
+        let pending = self.current.as_mut()?;
+        let result = Pin::new(&mut pending.receiver).now_or_never()?;
+        Some(self.complete_current(result))
     }
 }
 
@@ -151,8 +226,8 @@ where
     last_processed_round: Round,
     // Last height processed by the application
     last_processed_height: Height,
-    // Pending application acknowledgement, if any
-    pending_ack: OptionFuture<PendingAck<B, A>>,
+    // Pending application acknowledgements
+    pending_acks: PendingAcks<B, A>,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -253,7 +328,7 @@ where
                 strategy: config.strategy,
                 last_processed_round: Round::zero(),
                 last_processed_height,
-                pending_ack: None.into(),
+                pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -312,7 +387,7 @@ where
         }
 
         // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_block(&mut application).await;
+        self.try_dispatch_blocks(&mut application).await;
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
         if self
@@ -338,28 +413,41 @@ where
             Ok((commitment, block)) = waiters.next_completed() else continue => {
                 self.notify_subscribers(commitment, &block);
             },
-            // Handle application acknowledgements next
-            ack = &mut self.pending_ack => {
-                let PendingAck {
-                    height, commitment, ..
-                } = self.pending_ack.take().expect("ack state must be present");
-
-                match ack {
-                    Ok(()) => {
-                        if let Err(e) = self
-                            .handle_block_processed(height, commitment, &mut resolver)
-                            .await
-                        {
-                            error!(?e, %height, "failed to update application progress");
+            // Handle application acknowledgements (drain all ready acks, sync once)
+            result = self.pending_acks.current() => {
+                // Start with the ack that woke this `select_loop!` arm.
+                let mut pending = Some(self.pending_acks.complete_current(result));
+                loop {
+                    let (height, commitment, result) = pending.take().expect("pending ack must exist");
+                    match result {
+                        Ok(()) => {
+                            // Apply in-memory progress updates for this acknowledged block.
+                            self.handle_block_processed(height, commitment, &mut resolver)
+                                .await;
+                        }
+                        Err(e) => {
+                            // Ack failures are fatal for marshal/application coordination.
+                            error!(e = ?e, height = %height, "application did not acknowledge block");
                             return;
                         }
-                        self.try_dispatch_block(&mut application).await;
                     }
-                    Err(e) => {
-                        error!(?e, %height, "application did not acknowledge block");
-                        return;
-                    }
+
+                    // Opportunistically drain any additional already-ready acks so we
+                    // can persist one metadata sync for the whole batch below.
+                    let Some(next) = self.pending_acks.pop_ready() else {
+                        break;
+                    };
+                    pending = Some(next);
                 }
+
+                // Persist buffered processed-height updates once after draining all ready acks.
+                if let Err(e) = self.application_metadata.sync().await {
+                    error!(?e, "failed to sync application progress");
+                    return;
+                }
+
+                // Fill the pipeline
+                self.try_dispatch_blocks(&mut application).await;
             },
             // Handle consensus inputs before backfill or resolver traffic
             Some(message) = self.mailbox.recv() else {
@@ -552,15 +640,16 @@ where
                         }
 
                         // Update the processed height
-                        if let Err(err) = self.set_processed_height(height, &mut resolver).await {
+                        self.update_processed_height(height, &mut resolver).await;
+                        if let Err(err) = self.application_metadata.sync().await {
                             error!(?err, %height, "failed to update floor");
                             return;
                         }
 
-                        // Drop the pending acknowledgement, if one exists. We must do this to prevent
+                        // Drop all pending acknowledgements. We must do this to prevent
                         // an in-process block from being processed that is below the new floor
                         // updating `last_processed_height`.
-                        self.pending_ack = None.into();
+                        self.pending_acks.clear();
 
                         // Prune the finalized block and finalization certificate archives in parallel.
                         if let Err(err) = self.prune_finalized_archives(height).await {
@@ -941,67 +1030,75 @@ where
 
     // -------------------- Application Dispatch --------------------
 
-    /// Attempt to dispatch the next finalized block to the application if ready.
+    /// Dispatch finalized blocks to the application until the pipeline is full
+    /// or no more blocks are available.
     ///
     /// This does NOT advance `last_processed_height` or sync metadata. It only
-    /// sends the block to the application and stores a [PendingAck]. The
-    /// metadata is updated later, in a subsequent `select_loop!` iteration,
-    /// when the ack arrives and [`Self::handle_block_processed`] calls
-    /// [`Self::set_processed_height`].
+    /// sends blocks to the application and enqueues pending acks. Metadata is
+    /// updated later, in a subsequent `select_loop!` iteration, when acks
+    /// arrive and [`Self::handle_block_processed`] calls
+    /// [`Self::update_processed_height`].
+    ///
+    /// Acks are processed in FIFO order so `last_processed_height` always
+    /// advances sequentially.
     ///
     /// # Crash safety
     ///
     /// Because `select_loop!` arms run to completion, the caller's
-    /// [`Self::sync_finalized`] always executes before the ack handler runs. This
-    /// guarantees archive data is durable before `last_processed_height`
+    /// [`Self::sync_finalized`] always executes before the ack handler runs.
+    /// This guarantees archive data is durable before `last_processed_height`
     /// advances:
     ///
     /// ```text
     /// Iteration N (caller):
     ///   store_finalization  ->  Archive::put (buffered)
-    ///   try_dispatch_block  ->  sends block to app, sets pending_ack
+    ///   try_dispatch_blocks  ->  sends blocks to app, enqueues pending acks
     ///   sync_finalized      ->  archive durable
     ///
-    /// Iteration N+1 (ack handler):
-    ///   handle_block_processed  ->  set_processed_height  ->  metadata durable
+    /// Iteration M (ack handler, M > N):
+    ///   handle_block_processed   ->  update_processed_height  ->  metadata buffered
+    ///   application_metadata.sync ->  metadata durable
     /// ```
-    async fn try_dispatch_block(
+    async fn try_dispatch_blocks(
         &mut self,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        if self.pending_ack.is_some() {
-            return;
+        while self.pending_acks.has_capacity() {
+            let next_height = self
+                .pending_acks
+                .next_dispatch_height(self.last_processed_height);
+            let Some(block) = self.get_finalized_block(next_height).await else {
+                return;
+            };
+            assert_eq!(
+                block.height(),
+                next_height,
+                "finalized block height mismatch"
+            );
+
+            let (height, commitment) = (block.height(), block.commitment());
+            let (ack, ack_waiter) = A::handle();
+            application.report(Update::Block(block, ack)).await;
+            self.pending_acks.enqueue(PendingAck {
+                height,
+                commitment,
+                receiver: ack_waiter,
+            });
         }
-
-        let next_height = self.last_processed_height.next();
-        let Some(block) = self.get_finalized_block(next_height).await else {
-            return;
-        };
-        assert_eq!(
-            block.height(),
-            next_height,
-            "finalized block height mismatch"
-        );
-
-        let (height, commitment) = (block.height(), block.commitment());
-        let (ack, ack_waiter) = A::handle();
-        application.report(Update::Block(block, ack)).await;
-        self.pending_ack.replace(PendingAck {
-            height,
-            commitment,
-            receiver: ack_waiter,
-        });
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
+    ///
+    /// Buffers the processed height update but does NOT sync to durable storage.
+    /// The caller must sync metadata after processing all ready acks.
     async fn handle_block_processed(
         &mut self,
         height: Height,
         commitment: B::Commitment,
         resolver: &mut impl Resolver<Key = Request<B>>,
-    ) -> Result<(), metadata::Error> {
-        // Update the processed height
-        self.set_processed_height(height, resolver).await?;
+    ) {
+        // Update the processed height (buffered, not synced)
+        self.update_processed_height(height, resolver).await;
 
         // Cancel any useless requests
         resolver.cancel(Request::<B>::Block(commitment)).await;
@@ -1026,8 +1123,6 @@ where
                 .retain(Request::<B>::Notarized { round }.predicate())
                 .await;
         }
-
-        Ok(())
     }
 
     // -------------------- Prunable Storage --------------------
@@ -1049,7 +1144,7 @@ where
     /// Must be called within the same `select_loop!` arm as any preceding
     /// [`Self::store_finalization`] / [`Self::try_repair_gaps`] writes, before yielding back
     /// to the loop. This ensures archives are durable before the ack handler
-    /// advances `last_processed_height`. See [`Self::try_dispatch_block`] for details.
+    /// advances `last_processed_height`. See [`Self::try_dispatch_blocks`] for details.
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
@@ -1103,7 +1198,7 @@ where
     /// Writes are buffered and not synced. The caller must call
     /// [sync_finalized](Self::sync_finalized) before yielding to the
     /// `select_loop!` so that archive data is durable before the ack handler
-    /// advances `last_processed_height`. See [`Self::try_dispatch_block`] for the
+    /// advances `last_processed_height`. See [`Self::try_dispatch_blocks`] for the
     /// crash safety invariant.
     async fn store_finalization(
         &mut self,
@@ -1148,7 +1243,7 @@ where
             let _ = self.finalized_height.try_set(height.get());
         }
 
-        self.try_dispatch_block(application).await;
+        self.try_dispatch_blocks(application).await;
     }
 
     /// Get the latest finalized block information (height and commitment tuple).
@@ -1268,20 +1363,14 @@ where
         wrote
     }
 
-    /// Sets the processed height in storage, metrics, and in-memory state. Also cancels any
-    /// outstanding requests below the new processed height.
-    ///
-    /// This durably syncs `last_processed_height` via [`Metadata::put_sync`]. It must only
-    /// be called after [`Self::sync_finalized`] has made the corresponding archive
-    /// writes durable. See [`Self::try_dispatch_block`] for the crash safety invariant.
-    async fn set_processed_height(
+    /// Buffers a processed height update in memory and metrics. Does NOT sync
+    /// to durable storage. Sync metadata after buffered updates to make them durable.
+    async fn update_processed_height(
         &mut self,
         height: Height,
         resolver: &mut impl Resolver<Key = Request<B>>,
-    ) -> Result<(), metadata::Error> {
-        self.application_metadata
-            .put_sync(LATEST_KEY, height)
-            .await?;
+    ) {
+        self.application_metadata.put(LATEST_KEY, height);
         self.last_processed_height = height;
         let _ = self
             .processed_height
@@ -1291,8 +1380,6 @@ where
         resolver
             .retain(Request::<B>::Finalized { height }.predicate())
             .await;
-
-        Ok(())
     }
 
     /// Prunes finalized blocks and certificates below the given height.
