@@ -62,11 +62,10 @@ where
 impl<L, M> Lanes<L, M>
 where
     L: Ord,
-    M: Clone,
 {
-    /// Returns the mailbox for `lane`.
-    pub fn lane(&self, lane: &L) -> Option<M> {
-        self.mailboxes.get(lane).cloned()
+    /// Returns a reference to the mailbox for `lane`.
+    pub fn lane(&self, lane: &L) -> Option<&M> {
+        self.mailboxes.get(lane)
     }
 
     /// Consume and return all lane mailboxes.
