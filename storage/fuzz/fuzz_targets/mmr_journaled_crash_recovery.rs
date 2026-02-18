@@ -379,7 +379,7 @@ fn fuzz(input: FuzzInput) {
 
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
-        let mut mmr = mmr.into_dirty();
+        let mmr = mmr.into_dirty();
         mmr.add(&mut hasher, &test_data)
             .expect("Should be able to add after recovery");
         let mmr = mmr.merkleize(&mut hasher);
