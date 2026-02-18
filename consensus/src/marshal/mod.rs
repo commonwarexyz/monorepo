@@ -208,7 +208,29 @@ mod tests {
         oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
+    ) -> (
+        Application<B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        Height,
+    ) {
+        setup_validator_with(
+            context,
+            oracle,
+            validator,
+            provider,
+            NZUsize!(1),
+            Application::default(),
+        )
+        .await
+    }
+
+    async fn setup_validator_with(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
         max_pending_acks: NonZeroUsize,
+        application: Application<B>,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
@@ -349,7 +371,6 @@ mod tests {
             config,
         )
         .await;
-        let application = Application::<B>::default();
 
         // Start the application
         actor.start(application.clone(), buffer, resolver);
@@ -485,7 +506,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(3),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -607,6 +627,103 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_ack_pipeline_backlog() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(0xA11CE)
+                .with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let validator = participants[0].clone();
+            let application = Application::<B>::manual_ack();
+            let (application, mut actor, _processed_height) = setup_validator_with(
+                context.with_label("validator_0"),
+                &mut oracle,
+                validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                application,
+            )
+            .await;
+
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=5 {
+                let block = make_block(parent, Height::new(i), i);
+                parent = block.digest();
+                let round = Round::new(
+                    epocher.containing(block.height()).unwrap().epoch(),
+                    View::new(i),
+                );
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i.saturating_sub(1)),
+                    payload: block.digest(),
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+            }
+
+            // Backlog should fill to configured capacity before any ack is released.
+            let mut full = false;
+            for _ in 0..100 {
+                if application.blocks().len() == 3 && application.pending_ack_heights().len() == 3 {
+                    full = true;
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(full, "pending ack backlog never reached capacity");
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(1), Height::new(2), Height::new(3)]
+            );
+            assert!(!application.blocks().contains_key(&Height::new(4)));
+            assert!(!application.blocks().contains_key(&Height::new(5)));
+
+            // Releasing acks should preserve FIFO order and allow further dispatch.
+            for expected in 1..=5 {
+                let expected = Height::new(expected);
+                let mut ready = false;
+                for _ in 0..100 {
+                    if application.pending_ack_heights().first().copied() == Some(expected) {
+                        ready = true;
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                assert!(ready, "expected pending ack for height {expected}");
+                let acknowledged = application
+                    .acknowledge_next()
+                    .expect("pending ack should be present");
+                assert_eq!(acknowledged, expected);
+            }
+
+            // All finalized blocks should eventually be delivered after draining the backlog.
+            let mut all_delivered = false;
+            for _ in 0..100 {
+                if application.blocks().len() == 5 && application.pending_ack_heights().is_empty() {
+                    all_delivered = true;
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                all_delivered,
+                "did not deliver all blocks after draining backlog"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_sync_height_floor() {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
@@ -636,7 +753,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -729,7 +845,6 @@ mod tests {
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1066,7 +1181,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1122,7 +1236,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1199,7 +1312,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1268,7 +1380,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1380,7 +1491,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1450,7 +1560,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1532,7 +1641,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1595,7 +1703,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1654,7 +1761,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1719,7 +1825,6 @@ mod tests {
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
             let (_app1, mut actor1, _) = setup_validator(
@@ -1727,7 +1832,6 @@ mod tests {
                 &mut oracle,
                 participants[1].clone(),
                 ConstantProvider::new(schemes[1].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1797,7 +1901,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1883,7 +1986,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2037,7 +2139,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -2155,7 +2256,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
             assert_eq!(initial_height, Height::zero());
@@ -2203,7 +2303,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2294,7 +2393,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2406,7 +2504,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2541,7 +2638,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2751,7 +2847,6 @@ mod tests {
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
-                NZUsize!(1),
             )
             .await
             .1;
@@ -2779,7 +2874,6 @@ mod tests {
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
-                NZUsize!(1),
             )
             .await
             .1;
