@@ -22,9 +22,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
-};
+use commonware_cryptography::certificate::{Provider, Scheme as CertificateScheme};
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
@@ -75,7 +73,8 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
 }
 
 /// Broadcast mailbox used by marshal, keyed by the certificate scheme public key.
-type BroadcastMailbox<P, B> = buffered::Mailbox<<<P as Provider>::Scheme as CertificateScheme>::PublicKey, B>;
+type BroadcastMailbox<P, B> =
+    buffered::Mailbox<<<P as Provider>::Scheme as CertificateScheme>::PublicKey, B>;
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {

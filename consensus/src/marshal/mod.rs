@@ -214,15 +214,8 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
         Height,
     ) {
-        setup_validator_with_buffer(
-            context,
-            oracle,
-            validator,
-            provider,
-            max_pending_acks,
-            true,
-        )
-        .await
+        setup_validator_with_buffer(context, oracle, validator, provider, max_pending_acks, true)
+            .await
     }
 
     async fn setup_validator_with_buffer(
@@ -302,7 +295,8 @@ mod tests {
                 priority: false,
                 codec_config: (),
             };
-            let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
+            let (broadcast_engine, buffer) =
+                buffered::Engine::new(context.clone(), broadcast_config);
             let network = control.register(2, TEST_QUOTA).await.unwrap();
             broadcast_engine.start(network);
             Some(buffer)
