@@ -122,11 +122,6 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
         &mut self.current
     }
 
-    /// Takes the currently armed ack, leaving `current` empty.
-    fn take_current(&mut self) -> Option<PendingAck<B, A>> {
-        self.current.take()
-    }
-
     /// Returns total in-flight acks (`current` + queued).
     fn pending_count(&self) -> usize {
         usize::from(self.current.is_some()) + self.queue.len()
@@ -155,26 +150,27 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
         self.queue.push_back(ack);
     }
 
-    /// Promotes the next queued ack to `current` when no ack is armed.
-    fn arm_next(&mut self) {
+    /// Returns metadata for a completed current ack and arms the next queued ack.
+    fn complete_current(
+        &mut self,
+        result: <A::Waiter as Future>::Output,
+    ) -> (Height, B::Commitment, <A::Waiter as Future>::Output) {
+        let PendingAck {
+            height, commitment, ..
+        } = self.current.take().expect("ack state must be present");
         if self.current.is_none() {
             if let Some(next) = self.queue.pop_front() {
                 self.current.replace(next);
             }
         }
+        (height, commitment, result)
     }
 
     /// If the current ack is already resolved, takes it and arms the next ack.
-    fn try_take_ready_current(
-        &mut self,
-    ) -> Option<(Height, B::Commitment, <A::Waiter as Future>::Output)> {
+    fn pop_ready(&mut self) -> Option<(Height, B::Commitment, <A::Waiter as Future>::Output)> {
         let pending = self.current.as_mut()?;
         let result = std::pin::Pin::new(&mut pending.receiver).now_or_never()?;
-        let PendingAck {
-            height, commitment, ..
-        } = self.current.take().expect("ack state must be present");
-        self.arm_next();
-        Some((height, commitment, result))
+        Some(self.complete_current(result))
     }
 }
 
@@ -424,17 +420,7 @@ where
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
-                let PendingAck {
-                    height,
-                    commitment,
-                    ..
-                } = self
-                    .pending_acks
-                    .take_current()
-                    .expect("ack state must be present");
-                self.pending_acks.arm_next();
-
-                let mut pending = Some((height, commitment, result));
+                let mut pending = Some(self.pending_acks.complete_current(result));
                 loop {
                     let (height, commitment, result) = pending.take().expect("pending ack must exist");
                     match result {
@@ -448,7 +434,7 @@ where
                         }
                     }
 
-                    pending = self.pending_acks.try_take_ready_current();
+                    pending = self.pending_acks.pop_ready();
                     if pending.is_none() {
                         break;
                     };
