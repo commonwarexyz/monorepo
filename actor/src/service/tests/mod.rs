@@ -6,7 +6,7 @@ use commonware_utils::channel::{fallible::OneshotExt, mpsc};
 use std::{
     num::NonZeroUsize,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -261,6 +261,248 @@ fn test_preprocess_runs_each_iteration() {
 
         let count = mailbox.get_preprocess_count().await.expect("ask failed");
         assert_eq!(count, 4);
+    });
+}
+
+struct BatchingActor {
+    value: Arc<AtomicUsize>,
+    preprocess_count: Arc<AtomicUsize>,
+    postprocess_count: Arc<AtomicUsize>,
+    batch: NonZeroUsize,
+}
+
+ingress! {
+    BatchMailbox,
+
+    pub tell BatchBump;
+}
+
+impl<E: Spawner> Actor<E> for BatchingActor {
+    type Mailbox = BatchMailbox;
+    type Ingress = BatchMailboxMessage;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = ();
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    fn max_lane_batch(&self, _args: &Self::Args) -> NonZeroUsize {
+        self.batch
+    }
+
+    async fn preprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.preprocess_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn postprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.postprocess_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn on_read_only(
+        _context: E,
+        _snapshot: Self::Snapshot,
+        _message: BatchMailboxReadOnlyMessage,
+    ) -> Result<(), Self::Error> {
+        unreachable!("batching mailbox has no read-only ingress")
+    }
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: BatchMailboxReadWriteMessage,
+    ) -> Result<(), Self::Error> {
+        match message {
+            BatchMailboxReadWriteMessage::BatchBump => {
+                self.value.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[test]
+fn test_lane_batch_drains_multiple_messages_in_one_iteration() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let value = Arc::new(AtomicUsize::new(0));
+        let preprocess_count = Arc::new(AtomicUsize::new(0));
+        let postprocess_count = Arc::new(AtomicUsize::new(0));
+        let actor = BatchingActor {
+            value: value.clone(),
+            preprocess_count: preprocess_count.clone(),
+            postprocess_count: postprocess_count.clone(),
+            batch: NonZeroUsize::new(3).expect("non-zero"),
+        };
+        let (mailbox, service) = ServiceBuilder::new(actor).build_with_capacity(
+            context.with_label("batching"),
+            NonZeroUsize::new(8).expect("non-zero"),
+        );
+
+        mailbox.batch_bump().await.expect("bump 1 failed");
+        mailbox.batch_bump().await.expect("bump 2 failed");
+        mailbox.batch_bump().await.expect("bump 3 failed");
+
+        service.start();
+
+        for _ in 0..10 {
+            if value.load(Ordering::SeqCst) == 3 {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        assert_eq!(value.load(Ordering::SeqCst), 3);
+        assert_eq!(postprocess_count.load(Ordering::SeqCst), 1);
+        assert!(preprocess_count.load(Ordering::SeqCst) >= 1);
+    });
+}
+
+#[test]
+fn test_lane_batch_cap_is_respected() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let value = Arc::new(AtomicUsize::new(0));
+        let preprocess_count = Arc::new(AtomicUsize::new(0));
+        let postprocess_count = Arc::new(AtomicUsize::new(0));
+        let actor = BatchingActor {
+            value: value.clone(),
+            preprocess_count: preprocess_count.clone(),
+            postprocess_count: postprocess_count.clone(),
+            batch: NonZeroUsize::new(2).expect("non-zero"),
+        };
+        let (mailbox, service) = ServiceBuilder::new(actor).build_with_capacity(
+            context.with_label("batching_cap"),
+            NonZeroUsize::new(8).expect("non-zero"),
+        );
+
+        mailbox.batch_bump().await.expect("bump 1 failed");
+        mailbox.batch_bump().await.expect("bump 2 failed");
+        mailbox.batch_bump().await.expect("bump 3 failed");
+
+        service.start();
+
+        for _ in 0..10 {
+            if value.load(Ordering::SeqCst) == 3 {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        assert_eq!(value.load(Ordering::SeqCst), 3);
+        assert_eq!(postprocess_count.load(Ordering::SeqCst), 2);
+        assert!(preprocess_count.load(Ordering::SeqCst) >= 2);
+    });
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BatchLane {
+    Priority,
+    Normal,
+}
+
+struct LaneScopedBatchActor {
+    preprocess_count: u64,
+    log: Arc<std::sync::Mutex<Vec<(&'static str, u64)>>>,
+    batch: NonZeroUsize,
+}
+
+ingress! {
+    LaneScopedBatchMailbox,
+
+    pub tell PushPriority;
+    pub tell PushNormal;
+}
+
+impl<E: Spawner> Actor<E> for LaneScopedBatchActor {
+    type Mailbox = LaneScopedBatchMailbox;
+    type Ingress = LaneScopedBatchMailboxMessage;
+    type Error = std::convert::Infallible;
+    type Args = ();
+    type Snapshot = ();
+
+    fn snapshot(&self, _args: &Self::Args) -> Self::Snapshot {}
+
+    fn max_lane_batch(&self, _args: &Self::Args) -> NonZeroUsize {
+        self.batch
+    }
+
+    async fn preprocess(&mut self, _context: &mut E, _args: &mut Self::Args) {
+        self.preprocess_count += 1;
+    }
+
+    async fn on_read_only(
+        _context: E,
+        _snapshot: Self::Snapshot,
+        _message: LaneScopedBatchMailboxReadOnlyMessage,
+    ) -> Result<(), Self::Error> {
+        unreachable!("lane scoped batching mailbox has no read-only ingress")
+    }
+
+    async fn on_read_write(
+        &mut self,
+        _context: &mut E,
+        _args: &mut Self::Args,
+        message: LaneScopedBatchMailboxReadWriteMessage,
+    ) -> Result<(), Self::Error> {
+        match message {
+            LaneScopedBatchMailboxReadWriteMessage::PushPriority => {
+                self.log
+                    .lock()
+                    .expect("log lock poisoned")
+                    .push(("priority", self.preprocess_count));
+                Ok(())
+            }
+            LaneScopedBatchMailboxReadWriteMessage::PushNormal => {
+                self.log
+                    .lock()
+                    .expect("log lock poisoned")
+                    .push(("normal", self.preprocess_count));
+                Ok(())
+            }
+        }
+    }
+}
+
+#[test]
+fn test_lane_batch_does_not_cross_lanes() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let actor = LaneScopedBatchActor {
+            preprocess_count: 0,
+            log: log.clone(),
+            batch: NonZeroUsize::new(8).expect("non-zero"),
+        };
+
+        let (lanes, service) = ServiceBuilder::new(actor)
+            .with_lane(BatchLane::Priority, NonZeroUsize::new(8).expect("non-zero"))
+            .with_lane(BatchLane::Normal, NonZeroUsize::new(8).expect("non-zero"))
+            .build(context.with_label("lane_scoped_batch"))
+            .expect("build failed");
+
+        let priority = lanes
+            .lane(&BatchLane::Priority)
+            .expect("missing priority lane");
+        let normal = lanes.lane(&BatchLane::Normal).expect("missing normal lane");
+
+        priority
+            .push_priority()
+            .await
+            .expect("push priority failed");
+        normal.push_normal().await.expect("push normal failed");
+
+        service.start();
+
+        for _ in 0..10 {
+            if log.lock().expect("log lock poisoned").len() == 2 {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        let entries = log.lock().expect("log lock poisoned").clone();
+        assert_eq!(entries, vec![("priority", 1), ("normal", 2)]);
     });
 }
 

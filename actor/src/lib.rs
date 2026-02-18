@@ -12,7 +12,11 @@ extern crate self as commonware_actor;
 use commonware_macros::stability_scope;
 
 stability_scope!(ALPHA {
-    use std::{fmt::{Debug, Display}, future::Future};
+    use std::{
+        fmt::{Debug, Display},
+        future::Future,
+        num::NonZeroUsize,
+    };
 
     pub mod mailbox;
     pub mod service;
@@ -29,9 +33,11 @@ stability_scope!(ALPHA {
     ///
     /// 1. `on_startup` once (receives [`Actor::Args`] data).
     /// 2. Per iteration: `preprocess`, then race lanes against
-    ///    `on_external` for one event. If a message is received (`Some`),
-    ///    dispatch to `on_read_only` (concurrent) or `on_read_write` (serial),
-    ///    then `postprocess`. If the source
+    ///    `on_external` for one event. If a lane message is received (`Some`),
+    ///    the service may drain additional ready messages from that same lane,
+    ///    up to [`Actor::max_lane_batch`]. Each message is dispatched to
+    ///    `on_read_only` (concurrent) or `on_read_write` (serial), then
+    ///    `postprocess` runs once for the full batch. If the source
     ///    yields `None` (lane closed or `on_external` exhaustion), skip
     ///    directly to `on_shutdown`.
     /// 3. `on_shutdown` once, on graceful exit (runtime stop, lane closure,
@@ -111,6 +117,28 @@ stability_scope!(ALPHA {
             async {}
         }
 
+        /// Maximum number of messages to process from a winning lane in one
+        /// iteration.
+        ///
+        /// After the loop receives a mailbox event from a lane, it may
+        /// non-blockingly drain additional ready messages from that same lane
+        /// until this cap is reached.
+        ///
+        /// Tradeoff:
+        /// - lower values improve fairness across lanes and reduce tail latency
+        ///   for events waiting on other lanes.
+        /// - higher values improve throughput by reducing loop overhead and
+        ///   enabling batching on hot lanes.
+        ///
+        /// Raising this value can temporarily starve colder lanes and delay
+        /// processing of external events while a hot lane is being drained.
+        ///
+        /// The default is `1`, which preserves single-message iteration
+        /// behavior.
+        fn max_lane_batch(&self, _args: &Self::Args) -> NonZeroUsize {
+            NonZeroUsize::MIN
+        }
+
         /// Create a snapshot for handling read-only ingress concurrently.
         ///
         /// The service loop captures this snapshot when a read-only message is
@@ -182,8 +210,8 @@ stability_scope!(ALPHA {
         /// Runs at the end of each iteration that dispatched a message.
         ///
         /// Not guaranteed to be called after every single message. When
-        /// multiple read-only messages are batched concurrently,
-        /// `postprocess` may only run after the full batch completes.
+        /// a lane batch is enabled via [`Actor::max_lane_batch`],
+        /// `postprocess` runs once after the full batch completes.
         fn postprocess(
             &mut self,
             _context: &mut E,

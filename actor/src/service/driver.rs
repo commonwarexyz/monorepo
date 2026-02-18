@@ -1,4 +1,4 @@
-use super::types::{LaneReceiver, LoopEvent};
+use super::types::{LaneReceiver, LaneTryRecv, LoopEvent};
 use crate::{Actor, IngressEnvelope, IntoIngressEnvelope};
 use commonware_macros::select;
 use commonware_runtime::{signal::Signal, ContextCell, Error as RuntimeError, Handle, Spawner};
@@ -19,17 +19,32 @@ struct Lanes<'a, I> {
     lanes: &'a mut [LaneReceiver<I>],
 }
 
+struct LaneEvent<I> {
+    lane: usize,
+    message: Option<I>,
+}
+
 impl<I> Future for Lanes<'_, I> {
-    type Output = Option<I>;
+    type Output = LaneEvent<I>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lanes.is_empty() {
             return Poll::Pending;
         }
-        for lane in self.lanes.iter_mut() {
-            match lane.poll_recv(cx) {
-                Poll::Ready(Some(message)) => return Poll::Ready(Some(message)),
-                Poll::Ready(None) => return Poll::Ready(None),
+        for (lane, receiver) in self.lanes.iter_mut().enumerate() {
+            match receiver.poll_recv(cx) {
+                Poll::Ready(Some(message)) => {
+                    return Poll::Ready(LaneEvent {
+                        lane,
+                        message: Some(message),
+                    });
+                }
+                Poll::Ready(None) => {
+                    return Poll::Ready(LaneEvent {
+                        lane,
+                        message: None,
+                    });
+                }
                 Poll::Pending => {}
             }
         }
@@ -223,22 +238,20 @@ where
                             .await;
                         return;
                     }
-                    LoopEvent::Mailbox(Some(message)) => match message.into_ingress_envelope() {
-                        IngressEnvelope::ReadOnly(message) => {
-                            self.handle_read_only(&args, &mut reads, message);
+                    LoopEvent::Mailbox(lane, Some(message)) => {
+                        if self.dispatch_ingress(&mut args, &mut reads, message).await {
+                            return;
                         }
-                        IngressEnvelope::ReadWrite(message) => {
-                            if self.handle_read_write(&mut args, &mut reads, message).await {
-                                return;
-                            }
+                        if self.drain_lane_batch(&mut args, &mut reads, lane).await {
+                            return;
                         }
-                    },
+                    }
                     LoopEvent::External(Some(message)) => {
                         if self.handle_read_write(&mut args, &mut reads, message).await {
                             return;
                         }
                     }
-                    LoopEvent::Mailbox(None) | LoopEvent::External(None) => {
+                    LoopEvent::Mailbox(_, None) | LoopEvent::External(None) => {
                         self.shutdown_gracefully(
                             &mut args,
                             &mut reads,
@@ -327,6 +340,71 @@ where
         false
     }
 
+    /// Dispatch one ingress message according to its envelope.
+    ///
+    /// Returns `true` if the actor loop should exit.
+    async fn dispatch_ingress(
+        &mut self,
+        args: &mut A::Args,
+        reads: &mut Reads<E, A>,
+        message: A::Ingress,
+    ) -> bool {
+        match message.into_ingress_envelope() {
+            IngressEnvelope::ReadOnly(message) => {
+                self.handle_read_only(args, reads, message);
+                false
+            }
+            IngressEnvelope::ReadWrite(message) => {
+                self.handle_read_write(args, reads, message).await
+            }
+        }
+    }
+
+    /// Drain additional ready messages from `lane` up to the actor-defined
+    /// batch cap. Returns `true` if the actor loop should exit.
+    async fn drain_lane_batch(
+        &mut self,
+        args: &mut A::Args,
+        reads: &mut Reads<E, A>,
+        lane: usize,
+    ) -> bool {
+        let mut remaining = self.actor.max_lane_batch(args).get().saturating_sub(1);
+        while remaining > 0 {
+            if !reads.is_empty() && reads.retire_ready() {
+                self.shutdown_gracefully(args, reads, "fatal read detected")
+                    .await;
+                return true;
+            }
+            if reads.is_full() {
+                return false;
+            }
+
+            let next = match self.lanes.get_mut(lane) {
+                Some(lane) => lane.try_recv(),
+                None => LaneTryRecv::Closed,
+            };
+            match next {
+                LaneTryRecv::Message(message) => {
+                    if self.dispatch_ingress(args, reads, message).await {
+                        return true;
+                    }
+                    remaining -= 1;
+                }
+                LaneTryRecv::Empty => return false,
+                LaneTryRecv::Closed => {
+                    self.shutdown_gracefully(
+                        args,
+                        reads,
+                        "ingress source closed, shutting down actor",
+                    )
+                    .await;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Snapshot actor state and spawn a read-only handler.
     fn handle_read_only(
         &self,
@@ -385,8 +463,8 @@ where
             _ = &mut *shutdown => {
                 LoopEvent::Shutdown
             },
-            message = &mut lane_recv => {
-                LoopEvent::Mailbox(message)
+            lane_event = &mut lane_recv => {
+                LoopEvent::Mailbox(lane_event.lane, lane_event.message)
             },
             message = &mut external => {
                 LoopEvent::External(message)
