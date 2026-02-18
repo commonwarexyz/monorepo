@@ -392,7 +392,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Immediately expires `view`, forcing its timeouts to trigger on the next tick.
-    pub fn expire_round(&mut self, view: View) {
+    ///
+    /// Returns `true` if `view` was the current view and was expired, `false` otherwise.
+    pub fn expire_round(&mut self, view: View) -> bool {
+        if view != self.view {
+            return false;
+        }
+
         let now = self.context.current();
         let round = self.create_round(view);
         round.set_deadlines(now, now);
@@ -403,6 +409,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 .get_or_create(&Peer::new(&leader.key))
                 .inc();
         }
+        true
     }
 
     /// Attempt to propose a new block.

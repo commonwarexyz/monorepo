@@ -158,6 +158,33 @@ impl<
         )
     }
 
+    /// Returns true if this network message is a current-view nullify from the elected leader.
+    fn should_hint_leader_nullify(
+        &self,
+        current: View,
+        current_leader: Option<crate::types::Participant>,
+        sender: &S::PublicKey,
+        message: &Vote<S, D>,
+    ) -> bool {
+        let view = message.view();
+        if view != current || !matches!(message, Vote::Nullify(_)) {
+            return false;
+        }
+
+        // Skip local-leader hinting (only useful for verifiers).
+        if self
+            .scheme
+            .me()
+            .is_some_and(|me| current_leader == Some(me))
+        {
+            return false;
+        }
+
+        current_leader
+            .and_then(|leader| self.participants.key(leader))
+            .is_some_and(|leader_key| leader_key == sender)
+    }
+
     pub fn start(
         mut self,
         voter: voter::Mailbox<S, D>,
@@ -385,16 +412,8 @@ impl<
                 // If the current leader explicitly nullifies the current view, hint the voter so
                 // it can fast-path timeout without waiting for its local timer. We do this because
                 // `nullify` still counts as "activity" for skip-timeout heuristics.
-                let local_is_leader = self
-                    .scheme
-                    .me()
-                    .is_some_and(|me| current_leader == Some(me));
-                let leader_nullified_current = view == current
-                    && matches!(&message, Vote::Nullify(_))
-                    && current_leader
-                        .and_then(|leader| self.participants.key(leader))
-                        .is_some_and(|leader_key| leader_key == &sender)
-                    && !local_is_leader;
+                let leader_nullified_current =
+                    self.should_hint_leader_nullify(current, current_leader, &sender, &message);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);

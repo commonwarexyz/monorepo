@@ -865,17 +865,11 @@ impl<
                     Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
-                        if self.state.current_view() == context.view() {
+                        if self.state.expire_round(context.view()) {
                             debug!(
                                 round = ?context.round,
-                                "proposal unavailable, triggering immediate timeout"
+                                "proposal unavailable, expiring round"
                             );
-                            self.handle_timeout(
-                                &mut batcher,
-                                &mut vote_sender,
-                                &mut certificate_sender,
-                            )
-                            .await;
                         }
                         continue;
                     }
@@ -914,27 +908,20 @@ impl<
                     Ok(false) => {
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
-                        self.handle_timeout(
-                            &mut batcher,
-                            &mut vote_sender,
-                            &mut certificate_sender,
-                        )
-                        .await;
+                        if self.state.expire_round(context.view()) {
+                            debug!(round = ?context.round, "proposal failed verification, expiring round");
+                        }
+                        continue;
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
-                        if self.state.current_view() == context.view() {
+                        if self.state.expire_round(context.view()) {
                             debug!(
                                 round = ?context.round,
-                                "verification unavailable, triggering immediate timeout"
+                                "verification unavailable, expiring round"
                             );
-                            self.handle_timeout(
-                                &mut batcher,
-                                &mut vote_sender,
-                                &mut certificate_sender,
-                            )
-                            .await;
                         }
+                        continue;
                     }
                 };
             },
@@ -1019,21 +1006,11 @@ impl<
                         }
                     }
                     Message::LeaderNullify(nullified_view) => {
-                        let current_view = self.state.current_view();
-                        if nullified_view != current_view {
-                            trace!(
-                                current = %current_view,
-                                received = %nullified_view,
-                                "ignoring stale or future leader nullify hint"
-                            );
-                            continue;
-                        }
-
                         // A leader nullify is an explicit "cannot progress" signal. We expire
                         // the current round so the normal timeout path fires immediately on the
                         // next tick.
                         debug!(%nullified_view, "leader nullify observed, expiring round");
-                        self.state.expire_round(current_view);
+                        self.state.expire_round(nullified_view);
                         continue;
                     }
                 }

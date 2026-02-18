@@ -86,9 +86,10 @@
 //!   some number of views (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
-//! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
-//!   timeout to fire).
-//! * Immediately broadcast `nullify(v)` if the leader cannot obtain a proposal from the application.
+//! * Immediately expire the current round if the leader's proposal fails verification, so the
+//!   normal timeout path promptly broadcasts `nullify(v)` (rather than waiting for timeout).
+//! * Immediately expire the current round if the leader cannot obtain a proposal from the
+//!   application, so the normal timeout path promptly broadcasts `nullify(v)`.
 //! * Immediately expire the current round after observing the current leader's `nullify(v)` vote,
 //!   so the normal timeout path promptly broadcasts our `nullify(v)` (rather than waiting for the
 //!   local leader timeout). This avoids unnecessary timeout delay when the leader has already
