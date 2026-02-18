@@ -41,7 +41,7 @@
 //! naturally find fewer bugs. However, it can find many bugs pretty quickly,
 //! and can usually do a much better job than a unit test.
 //!
-//! In places where you'd normally write a unit test, you should instead consider
+//! In places where you'd normally write a unit test, you should additionally consider
 //! using minifuzz to cover more ground than that particular edge case, or test
 //! more examples of that kind of edge case.
 //!
@@ -51,10 +51,11 @@
 //! it.
 
 use arbitrary::Unstructured;
+use commonware_utils::{from_hex, hex};
 use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore as _, SeedableRng};
 use std::{
-    panic::{catch_unwind, AssertUnwindSafe, RefUnwindSafe, UnwindSafe},
+    panic::{catch_unwind, AssertUnwindSafe, UnwindSafe},
     time::{Duration, Instant},
 };
 
@@ -102,12 +103,10 @@ impl Branch {
 
     fn try_from_hex(s: &str) -> Option<Self> {
         let s = s.strip_prefix("0x").unwrap_or(s);
-        if s.len() != 24 {
-            return None;
-        }
-        let seed = u32::from_str_radix(&s[0..8], 16).ok()?;
-        let thread = u32::from_str_radix(&s[8..16], 16).ok()?;
-        let size = u32::from_str_radix(&s[16..24], 16).ok()?;
+        let bytes: [u8; 12] = from_hex(s)?.try_into().ok()?;
+        let seed = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let thread = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let size = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         Some(Self { seed, thread, size })
     }
 
@@ -130,7 +129,11 @@ impl Branch {
 
 impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x{:08x}{:08x}{:08x}", self.seed, self.thread, self.size)
+        let mut bytes = [0u8; 12];
+        bytes[0..4].copy_from_slice(&self.seed.to_be_bytes());
+        bytes[4..8].copy_from_slice(&self.thread.to_be_bytes());
+        bytes[8..12].copy_from_slice(&self.size.to_be_bytes());
+        write!(f, "0x{}", hex(&bytes))
     }
 }
 
@@ -342,8 +345,14 @@ impl Builder {
 
     /// Limits the fuzzer to run a fixed number of test cases.
     pub const fn with_search_limit(self, search_limit: u64) -> Self {
+        let min_iterations = if self.min_iterations > search_limit {
+            search_limit
+        } else {
+            self.min_iterations
+        };
         Self {
             search_bound: SearchBound::Limit(search_limit),
+            min_iterations,
             ..self
         }
     }
@@ -375,7 +384,7 @@ impl Builder {
     /// Runs the fuzz test. Panics if a failure is found.
     pub fn test(
         self,
-        s: impl Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error> + RefUnwindSafe,
+        mut s: impl FnMut(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error>,
     ) {
         let mut branch = match (self.reproduce, self.seed) {
             (Some(b), _) => b,
@@ -427,9 +436,7 @@ impl Builder {
 }
 
 /// Runs a fuzz test with default settings. See [`Builder`] for configuration options.
-pub fn test(
-    s: impl Fn(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error> + RefUnwindSafe,
-) {
+pub fn test(s: impl FnMut(&mut arbitrary::Unstructured<'_>) -> Result<(), arbitrary::Error>) {
     Builder::default().test(s)
 }
 
@@ -546,6 +553,20 @@ mod tests {
             .test(|_u| {
                 std::panic::panic_any(NonDisplayable);
             });
+    }
+
+    #[test]
+    fn search_limit_reduces_min_iterations() {
+        let mut calls = 0u64;
+        super::Builder::default()
+            .with_min_iterations(1000)
+            .with_search_limit(1)
+            .with_seed(0)
+            .test(|_u| {
+                calls += 1;
+                Ok(())
+            });
+        assert_eq!(calls, 1);
     }
 
     #[test]

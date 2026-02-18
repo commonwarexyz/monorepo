@@ -1373,6 +1373,7 @@ version = "2026.2.0"
 dependencies = [
  "arbitrary",
  "commonware-macros",
+ "commonware-utils",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",

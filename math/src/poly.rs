@@ -487,6 +487,7 @@ mod impl_arbitrary {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;

@@ -215,7 +215,7 @@ commonware_macros::stability_scope!(BETA {
     pub use extensions::*;
 });
 
-commonware_macros::stability_scope!(BETA {
+commonware_macros::stability_scope!(ALPHA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
 

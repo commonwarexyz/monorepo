@@ -392,7 +392,7 @@ mod test {
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
-                let (config, data, selected) = generate_case(u, 0)?;
+                let (config, data, selected) = generate_case(u, 1)?;
                 roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
@@ -404,7 +404,7 @@ mod test {
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
-                let (config, data, selected) = generate_case(u, 0)?;
+                let (config, data, selected) = generate_case(u, 1)?;
                 roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
