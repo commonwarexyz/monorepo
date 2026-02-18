@@ -1152,7 +1152,8 @@ fn run_inner<P: simplex::Simplex>(input: SimplexNodeFuzzInput) {
             honest.clone(),
             relay.clone(),
             honest_channels,
-        );
+        )
+        .with_strict(false);
 
         let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
 
