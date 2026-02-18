@@ -332,6 +332,7 @@ pub(crate) struct IoUringLoop {
     cfg: Config,
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Op>,
+    waiters: Waiters,
     wake_fd: Arc<OwnedFd>,
     wake_pending: Arc<AtomicBool>,
 }
@@ -341,8 +342,9 @@ impl IoUringLoop {
     ///
     /// The loop allocates its own metrics, operation channel, and internal `eventfd` wake source.
     pub(crate) fn new(cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+        let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
-        let (sender, receiver) = mpsc::channel(cfg.size as usize);
+        let (sender, receiver) = mpsc::channel(size);
         let wake_fd = Arc::new(new_wake_fd().expect("unable to create wake eventfd"));
         let wake_pending = Arc::new(AtomicBool::new(false));
 
@@ -360,6 +362,7 @@ impl IoUringLoop {
                 cfg,
                 metrics,
                 receiver,
+                waiters: Waiters::with_capacity(size),
                 wake_fd,
                 wake_pending,
             },
@@ -371,43 +374,29 @@ impl IoUringLoop {
     /// This method blocks the current thread.
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
-        assert!(
-            try_arm_wake_poll(&mut ring, &self.wake_fd),
-            "wake poll SQE should always fit in the ring at startup"
-        );
+        self.arm_wake_poll(&mut ring);
 
         let mut next_work_id = 0;
-        // Maps a work ID to the sender that we will send the result to
-        // and the buffer used for the operation.
-        let mut waiters = Waiters::with_capacity(self.cfg.size as usize);
-
         loop {
             // Process available completions.
             loop {
-                let cqe = {
-                    let mut completion = ring.completion();
-                    completion.next()
-                };
-                let Some(cqe) = cqe else {
+                let Some(cqe) = ring.completion().next() else {
                     break;
                 };
-                if cqe.user_data() == WAKE_WORK_ID {
-                    handle_wake_cqe(&mut ring, cqe, &self.wake_fd);
-                    continue;
-                }
-                handle_cqe(&mut waiters, cqe, &self.cfg);
+                self.handle_cqe(&mut ring, cqe);
             }
 
             // Drain inbound work and stage SQEs.
-            while waiters.len() < self.cfg.size as usize {
+            while self.waiters.len() < self.cfg.size as usize {
                 let op = match self.receiver.try_recv() {
                     Ok(work_item) => work_item,
                     Err(TryRecvError::Disconnected) => {
-                        drain(&mut ring, &mut waiters, &self.cfg, &self.wake_fd);
+                        self.drain(&mut ring);
                         return;
                     }
                     Err(TryRecvError::Empty) => break,
                 };
+
                 let Op {
                     mut work,
                     sender,
@@ -445,7 +434,7 @@ impl IoUringLoop {
                     // Submit op and timeout.
                     //
                     // SAFETY: `buffer`, `timespec`, and `fd` are stored in
-                    // `waiters` until CQE processing, ensuring referenced
+                    // `self.waiters` until CQE processing, ensuring referenced
                     // memory remains valid and FD reuse is prevented.
                     unsafe {
                         let mut sq = ring.submission();
@@ -457,7 +446,7 @@ impl IoUringLoop {
                 } else {
                     // No timeout, submit the operation normally.
                     //
-                    // SAFETY: `buffer` and `fd` are stored in `waiters` until
+                    // SAFETY: `buffer` and `fd` are stored in `self.waiters` until
                     // CQE processing, ensuring referenced memory remains valid
                     // and FD reuse is prevented.
                     unsafe {
@@ -471,10 +460,10 @@ impl IoUringLoop {
 
                 // We'll send the result of this operation to `sender`.
                 // `fd` is retained to prevent FD reuse until completion.
-                waiters.insert(work_id, (sender, buffer, fd, timespec));
+                self.waiters.insert(work_id, (sender, buffer, fd, timespec));
             }
 
-            self.metrics.pending_operations.set(waiters.len() as _);
+            self.metrics.pending_operations.set(self.waiters.len() as _);
 
             // If producers queued more work since our last channel drain, loop
             // again without blocking.
@@ -483,23 +472,172 @@ impl IoUringLoop {
             }
 
             // Sleep until either a completion arrives or wake_fd poll fires.
-            submit_and_wait(&mut ring, 1, None).expect("unable to submit to ring");
+            self.submit_and_wait(&mut ring, 1, None)
+                .expect("unable to submit to ring");
         }
     }
-}
 
-/// Handle a wake CQE and re-arm wake poll when required.
-fn handle_wake_cqe(ring: &mut IoUring, cqe: CqueueEntry, wake_fd: &OwnedFd) {
-    drain_wake_fd(wake_fd);
-    assert!(
-        cqe.result() >= 0,
-        "multishot wake poll failed; requires a kernel with io_uring multishot poll support"
-    );
-    if !io_uring::cqueue::more(cqe.flags()) {
-        assert!(
-            try_arm_wake_poll(ring, wake_fd),
-            "wake poll SQE should always fit in the ring"
-        );
+    /// Handle a single CQE from the ring.
+    ///
+    /// Internal wake and timeout CQEs are handled in-place, normal operation
+    /// CQEs are matched to `waiters` and forwarded to the original requester.
+    fn handle_cqe(&mut self, ring: &mut IoUring, cqe: CqueueEntry) {
+        let work_id = cqe.user_data();
+        match work_id {
+            WAKE_WORK_ID => {
+                assert!(
+                    cqe.result() >= 0,
+                    "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
+                );
+
+                // Clear eventfd readiness so future wake signals can trigger
+                // notifications.
+                self.drain_wake_fd();
+
+                // Multishot can terminate, so we must re-arm to keep the wake
+                // path live.
+                if !io_uring::cqueue::more(cqe.flags()) {
+                    self.arm_wake_poll(ring);
+                }
+            }
+            TIMEOUT_WORK_ID => {
+                assert!(
+                    self.cfg.op_timeout.is_some(),
+                    "received TIMEOUT_WORK_ID with op_timeout disabled"
+                );
+            }
+            _ => {
+                let result = cqe.result();
+                let result = if result == -libc::ECANCELED && self.cfg.op_timeout.is_some() {
+                    // This operation timed out.
+                    -libc::ETIMEDOUT
+                } else {
+                    result
+                };
+
+                let (result_sender, buffer, _, _) =
+                    self.waiters.remove(&work_id).expect("missing sender");
+                let _ = result_sender.send((result, buffer));
+            }
+        }
+    }
+
+    /// Arm the multishot wake poll request.
+    fn arm_wake_poll(&self, ring: &mut IoUring) {
+        let wake_poll = PollAdd::new(Fd(self.wake_fd.as_raw_fd()), libc::POLLIN as u32)
+            .multi(true)
+            .build()
+            .user_data(WAKE_WORK_ID);
+
+        // SAFETY: The poll SQE owns no user pointers and references a valid FD.
+        unsafe {
+            ring.submission()
+                .push(&wake_poll)
+                .expect("wake poll SQE should always fit in the ring");
+        }
+    }
+
+    /// Drain the eventfd counter so future wake readiness reflects new signals.
+    fn drain_wake_fd(&self) {
+        let mut value: u64 = 0;
+        loop {
+            // SAFETY: `self.wake_fd` is a valid eventfd descriptor and `value`
+            // points to writable 8-byte storage for the duration of the call.
+            let ret = unsafe {
+                libc::read(
+                    self.wake_fd.as_raw_fd(),
+                    &mut value as *mut u64 as *mut libc::c_void,
+                    size_of::<u64>(),
+                )
+            };
+            if ret == size_of::<u64>() as isize {
+                // eventfd (without EFD_SEMAPHORE) returns the full counter and
+                // resets it to zero in one read.
+                return;
+            }
+            if ret == -1 {
+                match std::io::Error::last_os_error().raw_os_error() {
+                    Some(libc::EINTR) => continue,
+                    Some(libc::EAGAIN) => return,
+                    _ => return,
+                }
+            }
+            return;
+        }
+    }
+
+    /// Process `ring` completions until all pending operations are complete or
+    /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
+    /// indefinitely.
+    fn drain(&mut self, ring: &mut IoUring) {
+        while !self.waiters.is_empty() {
+            // When op_timeout is set, each operation uses 2 SQ entries
+            // (op + linked timeout).
+            let pending = if self.cfg.op_timeout.is_some() {
+                self.waiters.len() * 2
+            } else {
+                self.waiters.len()
+            };
+
+            let got_completion = self
+                .submit_and_wait(ring, pending, self.cfg.shutdown_timeout)
+                .expect("unable to submit to ring");
+
+            loop {
+                let cqe = {
+                    let mut completion = ring.completion();
+                    completion.next()
+                };
+                let Some(cqe) = cqe else {
+                    break;
+                };
+                self.handle_cqe(ring, cqe);
+            }
+
+            // Bounded shutdown wait elapsed.
+            if !got_completion {
+                break;
+            }
+        }
+    }
+
+    /// Submits pending operations and waits for completions.
+    ///
+    /// This submits all pending SQEs to the kernel and waits for at least
+    /// `want` completions to arrive. It can optionally use a timeout to bound
+    /// the wait time.
+    ///
+    /// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
+    /// feature to implement a bounded wait without injecting a timeout SQE
+    /// (available since kernel 5.11+). Without a timeout, it falls back to the
+    /// standard `submit_and_wait`.
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Successfully received `want` completions
+    /// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
+    /// * `Err(e)` - An error occurred during submission or waiting
+    fn submit_and_wait(
+        &self,
+        ring: &mut IoUring,
+        want: usize,
+        timeout: Option<Duration>,
+    ) -> Result<bool, std::io::Error> {
+        timeout.map_or_else(
+            || ring.submit_and_wait(want).map(|_| true),
+            |timeout| {
+                let ts = Timespec::new()
+                    .sec(timeout.as_secs())
+                    .nsec(timeout.subsec_nanos());
+
+                let args = SubmitArgs::new().timespec(&ts);
+
+                match ring.submitter().submit_with_args(want, &args) {
+                    Ok(_) => Ok(true),
+                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
+                    Err(err) => Err(err),
+                }
+            },
+        )
     }
 }
 
@@ -541,149 +679,6 @@ fn signal_wake(wake_fd: &OwnedFd) {
         }
         return;
     }
-}
-
-/// Drain the eventfd counter so future wake readiness reflects new signals.
-fn drain_wake_fd(wake_fd: &OwnedFd) {
-    let mut value: u64 = 0;
-    loop {
-        // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-        // to writable 8-byte storage for the duration of the call.
-        let ret = unsafe {
-            libc::read(
-                wake_fd.as_raw_fd(),
-                &mut value as *mut u64 as *mut libc::c_void,
-                size_of::<u64>(),
-            )
-        };
-        if ret == size_of::<u64>() as isize {
-            // eventfd (without EFD_SEMAPHORE) returns the full counter and
-            // resets it to zero in one read.
-            return;
-        }
-        if ret == -1 {
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => return,
-                _ => return,
-            }
-        }
-        return;
-    }
-}
-
-/// Attempt to arm the multishot wake poll request.
-///
-/// Returns `false` if no SQ entry is available at this moment.
-fn try_arm_wake_poll(ring: &mut IoUring, wake_fd: &OwnedFd) -> bool {
-    let wake_poll = PollAdd::new(Fd(wake_fd.as_raw_fd()), libc::POLLIN as u32)
-        .multi(true)
-        .build()
-        .user_data(WAKE_WORK_ID);
-
-    // SAFETY: The poll SQE owns no user pointers and references a valid FD.
-    unsafe { ring.submission().push(&wake_poll).is_ok() }
-}
-
-fn handle_cqe(waiters: &mut Waiters, cqe: CqueueEntry, cfg: &Config) {
-    let work_id = cqe.user_data();
-    match work_id {
-        WAKE_WORK_ID => {}
-        TIMEOUT_WORK_ID => {
-            assert!(
-                cfg.op_timeout.is_some(),
-                "received TIMEOUT_WORK_ID with op_timeout disabled"
-            );
-        }
-        _ => {
-            let result = cqe.result();
-            let result = if result == -libc::ECANCELED && cfg.op_timeout.is_some() {
-                // This operation timed out
-                -libc::ETIMEDOUT
-            } else {
-                result
-            };
-
-            let (result_sender, buffer, _, _) = waiters.remove(&work_id).expect("missing sender");
-            let _ = result_sender.send((result, buffer));
-        }
-    }
-}
-
-/// Process `ring` completions until all pending operations are complete or
-/// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
-/// indefinitely.
-fn drain(ring: &mut IoUring, waiters: &mut Waiters, cfg: &Config, wake_fd: &OwnedFd) {
-    while !waiters.is_empty() {
-        // When op_timeout is set, each operation uses 2 SQ entries
-        // (op + linked timeout).
-        let pending = if cfg.op_timeout.is_some() {
-            waiters.len() * 2
-        } else {
-            waiters.len()
-        };
-
-        let got_completion =
-            submit_and_wait(ring, pending, cfg.shutdown_timeout).expect("unable to submit to ring");
-
-        loop {
-            let cqe = {
-                let mut completion = ring.completion();
-                completion.next()
-            };
-            let Some(cqe) = cqe else {
-                break;
-            };
-            if cqe.user_data() == WAKE_WORK_ID {
-                handle_wake_cqe(ring, cqe, wake_fd);
-                continue;
-            }
-            handle_cqe(waiters, cqe, cfg);
-        }
-
-        // Bounded shutdown wait elapsed.
-        if !got_completion {
-            break;
-        }
-    }
-}
-
-/// Submits pending operations and waits for completions.
-///
-/// This function submits all pending SQEs to the kernel and waits for at least
-/// `want` completions to arrive. It can optionally use a timeout to bound the
-/// wait time.
-///
-/// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
-/// feature to implement a bounded wait without injecting a timeout SQE
-/// (available since kernel 5.11+). Without a timeout, it falls back to the
-/// standard `submit_and_wait`.
-///
-/// # Returns
-/// * `Ok(true)` - Successfully received `want` completions
-/// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
-/// * `Err(e)` - An error occurred during submission or waiting
-fn submit_and_wait(
-    ring: &mut IoUring,
-    want: usize,
-    timeout: Option<Duration>,
-) -> Result<bool, std::io::Error> {
-    timeout.map_or_else(
-        || ring.submit_and_wait(want).map(|_| true),
-        |timeout| {
-            let ts = Timespec::new()
-                .sec(timeout.as_secs())
-                .nsec(timeout.subsec_nanos());
-
-            let args = SubmitArgs::new().timespec(&ts);
-
-            match ring.submitter().submit_with_args(want, &args) {
-                Ok(_) => Ok(true),
-                Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(false),
-                Err(err) => Err(err),
-            }
-        },
-    )
 }
 
 /// Returns whether some result should be retried due to a transient error.
