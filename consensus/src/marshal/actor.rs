@@ -420,26 +420,32 @@ where
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
+                // Start with the ack that woke this `select_loop!` arm.
                 let mut pending = Some(self.pending_acks.complete_current(result));
                 loop {
                     let (height, commitment, result) = pending.take().expect("pending ack must exist");
                     match result {
                         Ok(()) => {
+                            // Apply in-memory progress updates for this acknowledged block.
                             self.handle_block_processed(height, commitment, &mut resolver)
                                 .await;
                         }
                         Err(e) => {
+                            // Ack failures are fatal for marshal/application coordination.
                             error!(e = ?e, height = %height, "application did not acknowledge block");
                             return;
                         }
                     }
 
+                    // Opportunistically drain any additional already-ready acks so we
+                    // can persist one metadata sync for the whole batch below.
                     pending = self.pending_acks.pop_ready();
                     if pending.is_none() {
                         break;
                     };
                 }
 
+                // Persist buffered processed-height updates once after draining all ready acks.
                 if let Err(e) = self.application_metadata.sync().await {
                     error!(?e, "failed to sync application progress");
                     return;
