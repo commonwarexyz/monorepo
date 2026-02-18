@@ -434,10 +434,10 @@ where
 
                     // Opportunistically drain any additional already-ready acks so we
                     // can persist one metadata sync for the whole batch below.
-                    pending = self.pending_acks.pop_ready();
-                    if pending.is_none() {
+                    let Some(next) = self.pending_acks.pop_ready() else {
                         break;
-                    }
+                    };
+                    pending = Some(next);
                 }
 
                 // Persist buffered processed-height updates once after draining all ready acks.
