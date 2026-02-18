@@ -208,7 +208,6 @@ mod tests {
         oracle: &mut Oracle<K, deterministic::Context>,
         validator: K,
         provider: P,
-        max_pending_acks: NonZeroUsize,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
@@ -219,7 +218,7 @@ mod tests {
             oracle,
             validator,
             provider,
-            max_pending_acks,
+            NZUsize!(1),
             Application::default(),
             true,
         )
@@ -515,7 +514,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(3),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -743,7 +741,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
@@ -836,7 +833,6 @@ mod tests {
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1173,7 +1169,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1229,7 +1224,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1306,7 +1300,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1375,7 +1368,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -1487,7 +1479,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1557,7 +1548,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1639,7 +1629,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1702,7 +1691,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1761,7 +1749,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1826,7 +1813,6 @@ mod tests {
                 &mut oracle,
                 participants[0].clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
             let (_app1, mut actor1, _) = setup_validator(
@@ -1834,7 +1820,6 @@ mod tests {
                 &mut oracle,
                 participants[1].clone(),
                 ConstantProvider::new(schemes[1].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1904,7 +1889,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -1990,7 +1974,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2144,7 +2127,6 @@ mod tests {
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
-                    NZUsize!(1),
                 )
                 .await;
                 actors.push(actor);
@@ -2262,7 +2244,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
             assert_eq!(initial_height, Height::zero());
@@ -2310,7 +2291,6 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2401,7 +2381,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2513,7 +2492,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2648,7 +2626,6 @@ mod tests {
                 &mut oracle,
                 me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
             )
             .await;
 
@@ -2858,7 +2835,6 @@ mod tests {
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
-                NZUsize!(1),
             )
             .await
             .1;
@@ -2886,7 +2862,6 @@ mod tests {
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
-                NZUsize!(1),
             )
             .await
             .1;
