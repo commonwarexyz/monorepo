@@ -222,8 +222,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
     /// # Errors
     ///
     /// - Returns [Error::RangeOutOfBounds] if `end_leaf` is greater than the current number of
-    ///   leaves or if it corresponds to a pruned leaf.
-    /// - Returns [Error::Empty] if the resulting range is empty.
+    ///   leaves.
+    /// - Returns [Error::Empty] if the resulting range is empty (e.g. due to pruning).
     fn prover_bounds(&self, end_leaf: Location) -> Result<Range<Location>, Error> {
         // Get the pruning boundary and ensure it doesn't leave us with an invalid range.
         let prune_pos = {
@@ -234,8 +234,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
             inner.pruned_to_pos
         };
         let end_pos = Position::try_from(end_leaf)?;
-        if prune_pos > end_pos {
-            return Err(Error::RangeOutOfBounds(end_leaf));
+        if prune_pos >= end_pos {
+            return Err(Error::Empty);
         }
 
         // Convert the pruning boundary to the location of the nearest unpruned leaf.
@@ -246,7 +246,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
             Location::try_from(start_pos).expect("size + 1 should always be a leaf")
         });
 
-        if start_leaf == end_leaf {
+        if start_leaf >= end_leaf {
             return Err(Error::Empty);
         }
 
@@ -886,7 +886,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     ///
     /// # Errors
     ///
-    /// Returns Error::Empty if there are less than `leaves_to_pop` leaves.
+    /// Returns [Error::Empty] if there are less than `leaves_to_pop` leaves.
     fn compute_rewind_target_size(&mut self, leaves_to_pop: usize) -> Result<Position, Error> {
         let inner = self.inner.get_mut();
         let destination_leaf = inner
@@ -2632,10 +2632,7 @@ mod tests {
             assert!(matches!(clean_result, Err(Error::Empty)));
             let pruned_end = end - 1;
             let clean_pruned = mmr.prover(pruned_end);
-            assert!(matches!(
-                clean_pruned,
-                Err(Error::RangeOutOfBounds(loc)) if loc == pruned_end
-            ));
+            assert!(matches!(clean_pruned, Err(Error::Empty)));
             let clean_oob = mmr.prover(end + 1);
             assert!(matches!(
                 clean_oob,
@@ -2646,10 +2643,7 @@ mod tests {
             let dirty_result = mmr.prover(&mut hasher, end);
             assert!(matches!(dirty_result, Err(Error::Empty)));
             let dirty_pruned = mmr.prover(&mut hasher, pruned_end);
-            assert!(matches!(
-                dirty_pruned,
-                Err(Error::RangeOutOfBounds(loc)) if loc == pruned_end
-            ));
+            assert!(matches!(dirty_pruned, Err(Error::Empty)));
             let dirty_oob = mmr.prover(&mut hasher, end + 1);
             assert!(matches!(
                 dirty_oob,
@@ -2678,10 +2672,7 @@ mod tests {
             assert_eq!(prover.bounds(), keep_loc..end);
             let pruned_end = keep_loc - 1;
             let clean_pruned = mmr.prover(pruned_end);
-            assert!(matches!(
-                clean_pruned,
-                Err(Error::RangeOutOfBounds(loc)) if loc == pruned_end
-            ));
+            assert!(matches!(clean_pruned, Err(Error::Empty)));
             let clean_oob = mmr.prover(end + 1);
             assert!(matches!(
                 clean_oob,
@@ -2692,10 +2683,7 @@ mod tests {
             let prover = mmr.prover(&mut hasher, end).unwrap();
             assert_eq!(prover.bounds(), keep_loc..end);
             let dirty_pruned = mmr.prover(&mut hasher, pruned_end);
-            assert!(matches!(
-                dirty_pruned,
-                Err(Error::RangeOutOfBounds(loc)) if loc == pruned_end
-            ));
+            assert!(matches!(dirty_pruned, Err(Error::Empty)));
             let dirty_oob = mmr.prover(&mut hasher, end + 1);
             assert!(matches!(
                 dirty_oob,
