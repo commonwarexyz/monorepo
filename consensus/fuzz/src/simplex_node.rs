@@ -1016,10 +1016,38 @@ where
             .await;
     }
 
+    async fn send_invalid_finalization_certificate(&mut self, signer_idx: usize) -> bool {
+        let view = self
+            .last_view
+            .max(self.last_notarized_view)
+            .max(self.last_finalized_view)
+            .max(1)
+            .min(MAX_SAFE_VIEW);
+        let Some(cert) = self.build_invalid_finalization_for_view(view) else {
+            return false;
+        };
+
+        let msg = Certificate::<S, Sha256Digest>::Finalization(cert).encode();
+        let _ = self.certificate_senders[signer_idx]
+            .send(Recipients::One(self.honest.clone()), msg, true)
+            .await;
+    }
+
     async fn send_finalization_certificate(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
-        self.send_finalization_certificate_for_proposal(signer_idx, proposal)
-            .await;
+
+        match self.context.gen_range(0..100u8) {
+            // 96% — normal nullification
+            0..=95 => {
+                self.send_finalization_certificate_for_proposal(signer_idx, proposal)
+                    .await;
+            }
+            // 4% — malformed bytes
+            96..=99 => {
+                self.send_invalid_finalization_certificate(signer_idx).await;
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
