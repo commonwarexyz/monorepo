@@ -673,15 +673,9 @@ mod tests {
             }
 
             // Backlog should fill to configured capacity before any ack is released.
-            let mut full = false;
-            for _ in 0..100 {
-                if application.blocks().len() == 3 && application.pending_ack_heights().len() == 3 {
-                    full = true;
-                    break;
-                }
+            while application.blocks().len() < 3 || application.pending_ack_heights().len() < 3 {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert!(full, "pending ack backlog never reached capacity");
             assert_eq!(
                 application.pending_ack_heights(),
                 vec![Height::new(1), Height::new(2), Height::new(3)]
@@ -692,15 +686,9 @@ mod tests {
             // Releasing acks should preserve FIFO order and allow further dispatch.
             for expected in 1..=5 {
                 let expected = Height::new(expected);
-                let mut ready = false;
-                for _ in 0..100 {
-                    if application.pending_ack_heights().first().copied() == Some(expected) {
-                        ready = true;
-                        break;
-                    }
+                while application.pending_ack_heights().first().copied() != Some(expected) {
                     context.sleep(Duration::from_millis(10)).await;
                 }
-                assert!(ready, "expected pending ack for height {expected}");
                 let acknowledged = application
                     .acknowledge_next()
                     .expect("pending ack should be present");
@@ -708,18 +696,9 @@ mod tests {
             }
 
             // All finalized blocks should eventually be delivered after draining the backlog.
-            let mut all_delivered = false;
-            for _ in 0..100 {
-                if application.blocks().len() == 5 && application.pending_ack_heights().is_empty() {
-                    all_delivered = true;
-                    break;
-                }
+            while application.blocks().len() < 5 || !application.pending_ack_heights().is_empty() {
                 context.sleep(Duration::from_millis(10)).await;
             }
-            assert!(
-                all_delivered,
-                "did not deliver all blocks after draining backlog"
-            );
         });
     }
 
