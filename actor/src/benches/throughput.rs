@@ -1,7 +1,7 @@
 use commonware_actor::{ingress, service::ServiceBuilder, Actor};
 use commonware_runtime::{
     benchmarks::{context, tokio},
-    Metrics, Spawner,
+    Clock, Metrics, Spawner,
 };
 use commonware_utils::{channel::fallible::OneshotExt, test_rng};
 use criterion::{criterion_group, Criterion, Throughput};
@@ -24,6 +24,7 @@ ingress! {
 struct ThroughputActor {
     value: u64,
     lane_batch: NonZeroUsize,
+    batch_penalty: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -33,7 +34,7 @@ enum MixedOp {
     AskReadWrite,
 }
 
-impl<E: Spawner> Actor<E> for ThroughputActor {
+impl<E: Spawner + Clock> Actor<E> for ThroughputActor {
     type Mailbox = ThroughputMailbox;
     type Ingress = ThroughputMailboxMessage;
     type Error = std::convert::Infallible;
@@ -78,6 +79,21 @@ impl<E: Spawner> Actor<E> for ThroughputActor {
             }
         }
     }
+
+    async fn postprocess(&mut self, context: &mut E, _args: &mut Self::Args) {
+        // Simulate fixed per-batch work (for example, a sync-to-disk flush).
+        if self.batch_penalty > Duration::ZERO {
+            context.sleep(self.batch_penalty).await;
+        }
+    }
+}
+
+fn throughput_actor(value: u64, lane_batch: usize, batch_penalty: Duration) -> ThroughputActor {
+    ThroughputActor {
+        value,
+        lane_batch: NonZeroUsize::new(lane_batch).expect("lane batch must be non-zero"),
+        batch_penalty,
+    }
 }
 
 fn deterministic_mixed_ops(
@@ -121,11 +137,7 @@ fn bench_message_throughput(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let context = context::get::<commonware_runtime::tokio::Context>();
-                        let actor = ThroughputActor {
-                            value: 0,
-                            lane_batch: NonZeroUsize::new(lane_batch)
-                                .expect("lane batch must be non-zero"),
-                        };
+                        let actor = throughput_actor(0, lane_batch, Duration::ZERO);
                         let (mailbox, service) = ServiceBuilder::new(actor).build_with_capacity(
                             context.with_label("tell_throughput"),
                             NonZeroUsize::new(4096).expect("mailbox capacity must be non-zero"),
@@ -154,6 +166,52 @@ fn bench_message_throughput(c: &mut Criterion) {
         }
     }
 
+    for batch_penalty in [
+        Duration::ZERO,
+        Duration::from_micros(100),
+        Duration::from_micros(500),
+    ] {
+        let penalty_us = batch_penalty.as_micros();
+        for lane_batch in [1usize, 2, 4, 8, 16, 32] {
+            for msgs in [256u64, 1024] {
+                group.throughput(Throughput::Elements(msgs));
+                group.bench_function(
+                    format!(
+                        "kind=tell_batch_penalty penalty_us={penalty_us} lane_batch={lane_batch} msgs={msgs}"
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(move |iters| async move {
+                            let context = context::get::<commonware_runtime::tokio::Context>();
+                            let actor = throughput_actor(0, lane_batch, batch_penalty);
+                            let (mailbox, service) = ServiceBuilder::new(actor).build_with_capacity(
+                                context.with_label("tell_batch_penalty"),
+                                NonZeroUsize::new(4096)
+                                    .expect("mailbox capacity must be non-zero"),
+                            );
+                            let handle = service.start();
+
+                            let mut expected = 0u64;
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                for _ in 0..msgs {
+                                    mailbox.increment().await.expect("increment failed");
+                                }
+                                expected += msgs;
+                                let observed = mailbox.drain().await.expect("drain ask failed");
+                                assert_eq!(observed, expected);
+                            }
+                            let elapsed = start.elapsed();
+
+                            drop(mailbox);
+                            handle.await.expect("service join failed");
+                            elapsed
+                        });
+                    },
+                );
+            }
+        }
+    }
+
     for lane_batch in [1usize, 8, 64] {
         for msgs in [256u64, 1024] {
             group.throughput(Throughput::Elements(msgs));
@@ -162,11 +220,7 @@ fn bench_message_throughput(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let context = context::get::<commonware_runtime::tokio::Context>();
-                        let actor = ThroughputActor {
-                            value: 42,
-                            lane_batch: NonZeroUsize::new(lane_batch)
-                                .expect("lane batch must be non-zero"),
-                        };
+                        let actor = throughput_actor(42, lane_batch, Duration::ZERO);
                         let (mailbox, service) = ServiceBuilder::new(actor).build_with_capacity(
                             context.with_label("ask_throughput"),
                             NonZeroUsize::new(4096).expect("mailbox capacity must be non-zero"),
@@ -201,11 +255,7 @@ fn bench_message_throughput(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let context = context::get::<commonware_runtime::tokio::Context>();
-                            let actor = ThroughputActor {
-                                value: 42,
-                                lane_batch: NonZeroUsize::new(lane_batch)
-                                    .expect("lane batch must be non-zero"),
-                            };
+                            let actor = throughput_actor(42, lane_batch, Duration::ZERO);
                             let (mailbox, service) = ServiceBuilder::new(actor)
                                 .with_read_concurrency(
                                     NonZeroUsize::new(256)
@@ -257,11 +307,7 @@ fn bench_message_throughput(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let context = context::get::<commonware_runtime::tokio::Context>();
-                        let actor = ThroughputActor {
-                            value: 42,
-                            lane_batch: NonZeroUsize::new(lane_batch)
-                                .expect("lane batch must be non-zero"),
-                        };
+                        let actor = throughput_actor(42, lane_batch, Duration::ZERO);
                         let (mailbox, service) = ServiceBuilder::new(actor).build_with_capacity(
                             context.with_label("ask_readwrite_throughput"),
                             NonZeroUsize::new(4096).expect("mailbox capacity must be non-zero"),
@@ -308,11 +354,7 @@ fn bench_message_throughput(c: &mut Criterion) {
                                 async move {
                                     let context =
                                         context::get::<commonware_runtime::tokio::Context>();
-                                    let actor = ThroughputActor {
-                                        value: 0,
-                                        lane_batch: NonZeroUsize::new(lane_batch)
-                                            .expect("lane batch must be non-zero"),
-                                    };
+                                    let actor = throughput_actor(0, lane_batch, Duration::ZERO);
                                     let (mailbox, service) = ServiceBuilder::new(actor)
                                         .build_with_capacity(
                                             context.with_label("mixed_throughput"),

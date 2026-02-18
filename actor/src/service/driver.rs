@@ -379,10 +379,10 @@ where
                 return false;
             }
 
-            let next = match self.lanes.get_mut(lane) {
-                Some(lane) => lane.try_recv(),
-                None => LaneTryRecv::Closed,
-            };
+            let next = self
+                .lanes
+                .get_mut(lane)
+                .map_or_else(|| LaneTryRecv::Closed, |lane| lane.try_recv());
             match next {
                 LaneTryRecv::Message(message) => {
                     if self.dispatch_ingress(args, reads, message).await {

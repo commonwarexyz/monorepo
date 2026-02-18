@@ -32,7 +32,7 @@ async fn await_response_or_timeout<A, T>(
     timeout: T,
 ) -> Result<A, MailboxError>
 where
-    T: Future<Output = ()> + Send,
+    T: Future<Output = ()>,
 {
     let mut timeout = pin!(timeout);
     let mut rx = pin!(rx);
@@ -133,7 +133,7 @@ impl<I> Mailbox<I> {
     pub async fn ask_timeout<A, T>(&self, msg: A, timeout: T) -> Result<A::Response, MailboxError>
     where
         A: Ask<I>,
-        T: Future<Output = ()> + Send,
+        T: Future<Output = ()>,
     {
         let (tx, rx) = oneshot::channel::<A::Response>();
         self.tx
@@ -223,7 +223,7 @@ impl<I> UnboundedMailbox<I> {
     pub async fn ask_timeout<A, T>(&self, msg: A, timeout: T) -> Result<A::Response, MailboxError>
     where
         A: Ask<I>,
-        T: Future<Output = ()> + Send,
+        T: Future<Output = ()>,
     {
         let (tx, rx) = oneshot::channel::<A::Response>();
         self.tx

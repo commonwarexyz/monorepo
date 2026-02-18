@@ -572,7 +572,7 @@ fn emit_mailbox_method(
                 timeout: __Timeout,
             ) -> Result<#response, #actor::mailbox::MailboxError>
             where
-                __Timeout: ::core::future::Future<Output = ()> + Send,
+                __Timeout: ::core::future::Future<Output = ()>,
             {
                 self.0.ask_timeout(#unit_constructor, timeout).await
             }
@@ -590,38 +590,38 @@ fn emit_mailbox_method(
                 timeout: __Timeout,
             ) -> Result<#response, #actor::mailbox::MailboxError>
             where
-                __Timeout: ::core::future::Future<Output = ()> + Send,
+                __Timeout: ::core::future::Future<Output = ()>,
             {
                 self.0.ask_timeout(#variant { #(#values),* }, timeout).await
             }
         },
         (ItemKind::Subscribe { response }, MailboxKind::Bounded, true) => quote! {
             #(#attrs)*
-            pub async fn #method(&self) -> #actor::oneshot::Receiver<#response> {
+            pub fn #method(&self) -> #actor::oneshot::Receiver<#response> {
                 let (tx, rx) = #actor::oneshot::channel();
-                self.0.tell_lossy(#variant { response: tx }).await;
+                let _ = self.0.try_tell(#variant { response: tx });
                 rx
             }
 
             #(#attrs)*
-            pub async fn #try_method(&self) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
+            pub fn #try_method(&self) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
                 let (tx, rx) = #actor::oneshot::channel();
-                self.0.tell(#variant { response: tx }).await?;
+                self.0.try_tell(#variant { response: tx })?;
                 Ok(rx)
             }
         },
         (ItemKind::Subscribe { response }, MailboxKind::Bounded, false) => quote! {
             #(#attrs)*
-            pub async fn #method(&self, #(#args),*) -> #actor::oneshot::Receiver<#response> {
+            pub fn #method(&self, #(#args),*) -> #actor::oneshot::Receiver<#response> {
                 let (tx, rx) = #actor::oneshot::channel();
-                self.0.tell_lossy(#variant { #(#values,)* response: tx }).await;
+                let _ = self.0.try_tell(#variant { #(#values,)* response: tx });
                 rx
             }
 
             #(#attrs)*
-            pub async fn #try_method(&self, #(#args),*) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
+            pub fn #try_method(&self, #(#args),*) -> Result<#actor::oneshot::Receiver<#response>, #actor::mailbox::MailboxError> {
                 let (tx, rx) = #actor::oneshot::channel();
-                self.0.tell(#variant { #(#values,)* response: tx }).await?;
+                self.0.try_tell(#variant { #(#values,)* response: tx })?;
                 Ok(rx)
             }
         },
