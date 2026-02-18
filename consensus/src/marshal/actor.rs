@@ -1,4 +1,5 @@
 use super::{
+    buffer::Buffer,
     cache,
     config::Config,
     ingress::{
@@ -20,14 +21,9 @@ use crate::{
     Block, Epochable, Reporter,
 };
 use bytes::Bytes;
-use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
-use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
-    PublicKey,
-};
+use commonware_cryptography::certificate::{Provider, Scheme as CertificateScheme};
 use commonware_macros::select_loop;
-use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
@@ -174,7 +170,7 @@ struct BlockSubscription<B: Block> {
     // The subscribers that are waiting for the block
     subscribers: Vec<oneshot::Sender<B>>,
     // Aborter that aborts the waiter future when dropped
-    _aborter: Aborter,
+    _aborter: Option<Aborter>,
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -344,10 +340,10 @@ where
     }
 
     /// Start the actor.
-    pub fn start<R, K>(
+    pub fn start<R, U>(
         mut self,
         application: impl Reporter<Activity = Update<B, A>>,
-        buffer: buffered::Mailbox<K, B>,
+        buffer: U,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
@@ -355,23 +351,23 @@ where
             Key = handler::Request<B>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        K: PublicKey,
+        U: Buffer<B>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, K>(
+    async fn run<R, U>(
         mut self,
         mut application: impl Reporter<Activity = Update<B, A>>,
-        mut buffer: buffered::Mailbox<K, B>,
+        mut buffer: U,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
         R: Resolver<
             Key = handler::Request<B>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        K: PublicKey,
+        U: Buffer<B>,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -391,7 +387,7 @@ where
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
         if self
-            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+            .try_repair_gaps(&buffer, &mut resolver, &mut application)
             .await
         {
             self.sync_finalized().await;
@@ -484,7 +480,7 @@ where
                     Message::Proposed { round, block } => {
                         self.cache_verified(round, block.commitment(), block.clone())
                             .await;
-                        let _peers = buffer.broadcast(Recipients::All, block).await;
+                        buffer.broadcast(block).await;
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.commitment(), block).await;
@@ -528,7 +524,11 @@ where
                             )
                             .await;
                             let _ =
-                                self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                                self.try_repair_gaps(
+                                    &buffer,
+                                    &mut resolver,
+                                    &mut application,
+                                )
                                     .await;
                             self.sync_finalized().await;
                             debug!(?round, %height, "finalized block stored");
@@ -617,11 +617,13 @@ where
                                 entry.get_mut().subscribers.push(response);
                             }
                             Entry::Vacant(entry) => {
-                                let (tx, rx) = oneshot::channel();
-                                buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                let aborter = waiters.push(async move {
-                                    (commitment, rx.await.expect("buffer subscriber closed"))
-                                });
+                                let aborter = if let Some(rx) = buffer.subscribe(commitment).await {
+                                    Some(waiters.push(async move {
+                                        (commitment, rx.await.expect("buffer subscriber closed"))
+                                    }))
+                                } else {
+                                    None
+                                };
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
                                     _aborter: aborter,
@@ -711,7 +713,7 @@ where
                 // Attempt to fill gaps before handling produce requests (so
                 // we can serve data we just received)
                 needs_sync |= self
-                    .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                    .try_repair_gaps(&buffer, &mut resolver, &mut application)
                     .await;
 
                 // Sync archives before responding to peers (prioritize our
@@ -729,11 +731,11 @@ where
     }
 
     /// Handle a produce request from a remote peer.
-    async fn handle_produce<K: PublicKey>(
+    async fn handle_produce<U: Buffer<B>>(
         &self,
         key: Request<B>,
         response: oneshot::Sender<Bytes>,
-        buffer: &buffered::Mailbox<K, B>,
+        buffer: &U,
     ) {
         match key {
             Request::Block(commitment) => {
@@ -1270,13 +1272,9 @@ where
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<K: PublicKey>(
-        &self,
-        buffer: &buffered::Mailbox<K, B>,
-        commitment: B::Commitment,
-    ) -> Option<B> {
+    async fn find_block<U: Buffer<B>>(&self, buffer: &U, commitment: B::Commitment) -> Option<B> {
         // Check buffer
-        if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
+        if let Some(block) = buffer.get(commitment).await {
             return Some(block);
         }
         // Check verified / notarized blocks via cache manager.
@@ -1296,9 +1294,9 @@ where
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
-    async fn try_repair_gaps<K: PublicKey>(
+    async fn try_repair_gaps<U: Buffer<B>>(
         &mut self,
-        buffer: &mut buffered::Mailbox<K, B>,
+        buffer: &U,
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) -> bool {

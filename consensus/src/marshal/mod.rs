@@ -64,6 +64,8 @@
 
 pub mod actor;
 pub use actor::Actor;
+mod buffer;
+pub use buffer::{Buffer, Inert};
 pub mod cache;
 pub mod config;
 pub use config::Config;
@@ -104,6 +106,7 @@ pub mod mocks;
 mod tests {
     use super::{
         actor,
+        buffer::Inert,
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
@@ -220,6 +223,7 @@ mod tests {
             provider,
             NZUsize!(1),
             Application::default(),
+            true,
         )
         .await
     }
@@ -231,6 +235,7 @@ mod tests {
         provider: P,
         max_pending_acks: NonZeroUsize,
         application: Application<B>,
+        use_buffer: bool,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
@@ -268,18 +273,6 @@ mod tests {
             priority_responses: false,
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
-
-        // Create a buffered broadcast engine and get its mailbox
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: (),
-        };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(2, TEST_QUOTA).await.unwrap();
-        broadcast_engine.start(network);
 
         // Initialize finalizations by height
         let start = Instant::now();
@@ -364,6 +357,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let mailbox_size = config.mailbox_size;
         let (actor, mailbox, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
@@ -372,8 +366,22 @@ mod tests {
         )
         .await;
 
-        // Start the application
-        actor.start(application.clone(), buffer, resolver);
+        // Start the application.
+        if use_buffer {
+            let broadcast_config = buffered::Config {
+                public_key: validator.clone(),
+                mailbox_size,
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+            };
+            let (broadcast_engine, buffer) = buffered::Engine::new(context, broadcast_config);
+            let network = control.register(2, TEST_QUOTA).await.unwrap();
+            broadcast_engine.start(network);
+            actor.start(application.clone(), buffer, resolver);
+        } else {
+            actor.start(application.clone(), Inert, resolver);
+        }
 
         (application, mailbox, processed_height)
     }
@@ -650,6 +658,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(3),
                 application,
+                true,
             )
             .await;
 
@@ -2956,6 +2965,45 @@ mod tests {
                 .get_block(&commitment)
                 .await
                 .expect("block should be cached after broadcast");
+            assert_eq!(fetched, block);
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_marshal_without_buffer_caches_local_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let (i, validator) = participants.iter().enumerate().next().unwrap();
+            let mut actor = setup_validator_with(
+                context.with_label(&format!("validator_{i}")),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[i].clone()),
+                NZUsize!(1),
+                Application::default(),
+                false,
+            )
+            .await
+            .1;
+
+            let parent = Sha256::hash(b"");
+            let block = make_block(parent, Height::new(1), 1);
+            let commitment = block.digest();
+            actor
+                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+
+            let fetched = actor
+                .get_block(&commitment)
+                .await
+                .expect("block should be cached without broadcast buffer");
             assert_eq!(fetched, block);
         });
     }
