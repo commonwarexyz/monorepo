@@ -53,6 +53,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     future::Future,
     num::NonZeroUsize,
+    pin::Pin,
     sync::Arc,
 };
 use tracing::{debug, error, info, warn};
@@ -118,22 +119,17 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
     }
 
     /// Returns the currently armed ack future (if any) for `select_loop!`.
-    fn current(&mut self) -> &mut OptionFuture<PendingAck<B, A>> {
+    const fn current(&mut self) -> &mut OptionFuture<PendingAck<B, A>> {
         &mut self.current
     }
 
-    /// Returns total in-flight acks (`current` + queued).
-    fn pending_count(&self) -> usize {
-        usize::from(self.current.is_some()) + self.queue.len()
-    }
-
-    /// Returns whether the in-flight ack capacity has been reached.
-    fn is_full(&self) -> bool {
-        self.pending_count() >= self.max
+    /// Returns whether we can dispatch another block without exceeding capacity.
+    fn has_capacity(&self) -> bool {
+        usize::from(self.current.is_some()) + self.queue.len() < self.max
     }
 
     /// Returns the next height to dispatch while preserving sequential order.
-    fn next_height(&self, last_processed_height: Height) -> Height {
+    fn next_dispatch_height(&self, last_processed_height: Height) -> Height {
         self.queue
             .back()
             .map(|ack| ack.height.next())
@@ -158,10 +154,8 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
         let PendingAck {
             height, commitment, ..
         } = self.current.take().expect("ack state must be present");
-        if self.current.is_none() {
-            if let Some(next) = self.queue.pop_front() {
-                self.current.replace(next);
-            }
+        if let Some(next) = self.queue.pop_front() {
+            self.current.replace(next);
         }
         (height, commitment, result)
     }
@@ -169,7 +163,7 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
     /// If the current ack is already resolved, takes it and arms the next ack.
     fn pop_ready(&mut self) -> Option<(Height, B::Commitment, <A::Waiter as Future>::Output)> {
         let pending = self.current.as_mut()?;
-        let result = std::pin::Pin::new(&mut pending.receiver).now_or_never()?;
+        let result = Pin::new(&mut pending.receiver).now_or_never()?;
         Some(self.complete_current(result))
     }
 }
@@ -442,7 +436,7 @@ where
                     pending = self.pending_acks.pop_ready();
                     if pending.is_none() {
                         break;
-                    };
+                    }
                 }
 
                 // Persist buffered processed-height updates once after draining all ready acks.
@@ -1068,8 +1062,10 @@ where
         &mut self,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        while !self.pending_acks.is_full() {
-            let next_height = self.pending_acks.next_height(self.last_processed_height);
+        while self.pending_acks.has_capacity() {
+            let next_height = self
+                .pending_acks
+                .next_dispatch_height(self.last_processed_height);
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };

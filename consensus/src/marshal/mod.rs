@@ -213,13 +213,27 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
         Height,
     ) {
+        setup_validator_with_pending_acks(context, oracle, validator, provider, NZUsize!(1)).await
+    }
+
+    async fn setup_validator_with_pending_acks(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+    ) -> (
+        Application<B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        Height,
+    ) {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
-            max_pending_acks: NZUsize!(1),
+            max_pending_acks,
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
@@ -479,11 +493,12 @@ mod tests {
                 .track(0, participants.clone().try_into().unwrap())
                 .await;
             for (i, validator) in participants.iter().enumerate() {
-                let (application, actor, _processed_height) = setup_validator(
+                let (application, actor, _processed_height) = setup_validator_with_pending_acks(
                     context.with_label(&format!("validator_{i}")),
                     &mut oracle,
                     validator.clone(),
                     ConstantProvider::new(schemes[i].clone()),
+                    NZUsize!(3),
                 )
                 .await;
                 applications.insert(validator.clone(), application);
