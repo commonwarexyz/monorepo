@@ -1105,22 +1105,28 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for Prover<'_, 
 
         {
             let inner = self.mmr.inner.read();
-            if position >= inner.pruned_to_pos && position < inner.mem_mmr.size() {
+            // If the requested node is in the mem mmr, use that.
+            let mem_bounds = inner.mem_mmr.bounds();
+            if position >= mem_bounds.start && position < mem_bounds.end {
                 return Ok(Some(*inner.mem_mmr.get_node_unchecked(position)));
+            }
+
+            // If the requested node is pruned, return None.
+            if position < inner.pruned_to_pos {
+                return Ok(None);
             }
         }
 
-        match Mmr::<E, D, Dirty>::get_from_metadata_or_journal(
-            &self.mmr.metadata,
-            &self.mmr.journal,
-            position,
-        )
-        .await
-        {
-            Ok(digest) => Ok(Some(digest)),
-            Err(Error::MissingNode(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+        // Otherwise get the node from the journal. Since we've checked the pruning boundary above,
+        // we expect it to exist.
+        Ok(Some(
+            Mmr::<E, D, Dirty>::get_from_metadata_or_journal(
+                &self.mmr.metadata,
+                &self.mmr.journal,
+                position,
+            )
+            .await?,
+        ))
     }
 }
 
@@ -2489,6 +2495,51 @@ mod tests {
             assert_eq!(proof, expected);
 
             clean.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_prover_after_sync_reads_from_journal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..64 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let clean = mmr.merkleize(&mut hasher);
+            clean.sync().await.unwrap();
+
+            let historical_leaves = Location::new_unchecked(20);
+            let range = Location::new_unchecked(5)..Location::new_unchecked(15);
+            let expected = {
+                let prover = clean.prover(historical_leaves).unwrap();
+                prover.range_proof(range.clone()).await.unwrap()
+            };
+
+            let dirty = clean.into_dirty();
+            let (mem_start, journal_start) = {
+                let inner = dirty.inner.read();
+                (inner.mem_mmr.bounds().start, inner.pruned_to_pos)
+            };
+            assert!(mem_start > journal_start);
+
+            let actual = {
+                let prover = dirty.prover(&mut hasher, historical_leaves).unwrap();
+                prover.range_proof(range).await.unwrap()
+            };
+            assert_eq!(actual, expected);
+
+            dirty.merkleize(&mut hasher).destroy().await.unwrap();
         });
     }
 
