@@ -133,7 +133,7 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     // Add only works on Dirty MMR, so make it dirty if clean
-                    let mut mmr = match mmr {
+                    let mmr = match mmr {
                         MmrState::Clean(m) => m.into_dirty(),
                         MmrState::Dirty(m) => m,
                     };
@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    let mut mmr = match mmr {
+                    let mmr = match mmr {
                         MmrState::Clean(m) => m.into_dirty(),
                         MmrState::Dirty(m) => m,
                     };
@@ -285,17 +285,18 @@ fn fuzz(input: FuzzInput) {
                             let range =
                                 Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
 
-                            if let Ok(historical_proof) = mmr
-                                .historical_range_proof(mmr.leaves(), range.clone())
-                                .await
-                            {
-                                let root = mmr.root();
-                                assert!(historical_proof.verify_range_inclusion(
-                                    &mut hasher,
-                                    &leaves[range.to_usize_range()],
-                                    Location::new(start_loc).unwrap(),
-                                    &root
-                                ));
+                            if let Ok(prover) = mmr.prover(mmr.leaves()) {
+                                if let Ok(historical_proof) =
+                                    prover.range_proof(range.clone()).await
+                                {
+                                    let root = mmr.root();
+                                    assert!(historical_proof.verify_range_inclusion(
+                                        &mut hasher,
+                                        &leaves[range.to_usize_range()],
+                                        Location::new(start_loc).unwrap(),
+                                        &root
+                                    ));
+                                }
                             }
                         }
                     }

@@ -11,8 +11,8 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        journaled::{CleanMmr, DirtyMmr, Mmr},
-        mem::{Clean, Dirty, State},
+        journaled::{CleanMmr, DirtyMmr, Mmr, State},
+        mem::{Clean, Dirty},
         Error as MmrError, Location, Position, Proof, StandardHasher,
     },
     Persistable,
@@ -246,11 +246,15 @@ where
         if start_loc >= historical_leaves {
             return Err(MmrError::RangeOutOfBounds(start_loc).into());
         }
+        if *start_loc < bounds.start {
+            return Err(JournalError::ItemPruned(*start_loc).into());
+        }
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
         let proof = self
             .mmr
-            .historical_range_proof(historical_leaves, start_loc..end_loc)
+            .prover(historical_leaves)?
+            .range_proof(start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -727,7 +731,7 @@ mod tests {
             let (mmr, journal, mut hasher) = create_components(context, "mmr-ahead").await;
 
             // Add 20 operations to both MMR and journal
-            let mut mmr = mmr.into_dirty();
+            let mmr = mmr.into_dirty();
             for i in 0..20 {
                 let op = create_operation(i as u8);
                 let encoded = op.encode();
