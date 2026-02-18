@@ -88,6 +88,10 @@
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Immediately broadcast `nullify(v)` if the leader's proposal fails verification (rather than waiting for a
 //!   timeout to fire).
+//! * Immediately broadcast `nullify(v)` if the leader cannot obtain a proposal from the application.
+//! * Immediately timeout and broadcast `nullify(v)` after observing the current leader's
+//!   `nullify(v)` vote, rather than waiting for the local leader timeout. This avoids
+//!   unnecessary timeout delay when the leader has already signaled it cannot progress.
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.

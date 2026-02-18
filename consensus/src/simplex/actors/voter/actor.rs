@@ -115,12 +115,6 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
-    /// Indicates whether vote messages should be sent to peers.
-    ///
-    /// This flag is monotonic: it starts disabled and becomes enabled once the automaton
-    /// successfully answers a proposal or verification request.
-    automaton_ready: bool,
-
     outbound_messages: Family<Outbound, Counter>,
     notarization_latency: Histogram,
     finalization_latency: Histogram,
@@ -196,7 +190,6 @@ impl<
                 journal: None,
 
                 mailbox_receiver,
-                automaton_ready: false,
 
                 outbound_messages,
                 notarization_latency,
@@ -214,15 +207,6 @@ impl<
             return None;
         }
         Some(elapsed.as_secs_f64())
-    }
-
-    /// Marks the automaton as ready the first time we observe a successful response.
-    fn mark_automaton_ready(&mut self, round: Rnd) {
-        if self.automaton_ready {
-            return;
-        }
-        info!(?round, "automaton ready");
-        self.automaton_ready = true;
     }
 
     /// Drops views that are below the activity floor.
@@ -272,14 +256,6 @@ impl<
         sender: &mut WrappedSender<T, Vote<S, D>>,
         vote: Vote<S, D>,
     ) {
-        if !self.automaton_ready {
-            debug!(
-                view = %vote.view(),
-                "automaton unavailable, suppressing vote broadcast"
-            );
-            return;
-        }
-
         // Update outbound metrics
         let metric = match &vote {
             Vote::Notarize(_) => metrics::Outbound::notarize(),
@@ -886,12 +862,21 @@ impl<
 
                 // Try to use result
                 let proposed = match proposed {
-                    Ok(proposed) => {
-                        self.mark_automaton_ready(context.round);
-                        proposed
-                    }
+                    Ok(proposed) => proposed,
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to propose container");
+                        if self.state.current_view() == context.view() {
+                            debug!(
+                                round = ?context.round,
+                                "proposal unavailable, triggering immediate timeout"
+                            );
+                            self.handle_timeout(
+                                &mut batcher,
+                                &mut vote_sender,
+                                &mut certificate_sender,
+                            )
+                            .await;
+                        }
                         continue;
                     }
                 };
@@ -923,12 +908,10 @@ impl<
                 view = context.view();
                 match verified {
                     Ok(true) => {
-                        self.mark_automaton_ready(context.round);
                         // Mark verification complete
                         self.state.verified(view);
                     }
                     Ok(false) => {
-                        self.mark_automaton_ready(context.round);
                         // Verification failed for current view proposal, treat as immediate timeout
                         debug!(round = ?context.round, "proposal failed verification");
                         self.handle_timeout(
@@ -940,6 +923,18 @@ impl<
                     }
                     Err(err) => {
                         debug!(?err, round = ?context.round, "failed to verify proposal");
+                        if self.state.current_view() == context.view() {
+                            debug!(
+                                round = ?context.round,
+                                "verification unavailable, triggering immediate timeout"
+                            );
+                            self.handle_timeout(
+                                &mut batcher,
+                                &mut vote_sender,
+                                &mut certificate_sender,
+                            )
+                            .await;
+                        }
                     }
                 };
             },
@@ -1022,6 +1017,28 @@ impl<
                                 }
                             }
                         }
+                    }
+                    Message::LeaderNullify(nullified_view) => {
+                        let current_view = self.state.current_view();
+                        if nullified_view != current_view {
+                            trace!(
+                                current = %current_view,
+                                received = %nullified_view,
+                                "ignoring stale or future leader nullify hint"
+                            );
+                            continue;
+                        }
+
+                        // A leader nullify is an explicit "cannot progress" signal. Fast-path
+                        // to local timeout here so verifiers do not wait for the timer.
+                        debug!(%nullified_view, "leader nullify observed, triggering immediate timeout");
+                        self.handle_timeout(
+                            &mut batcher,
+                            &mut vote_sender,
+                            &mut certificate_sender,
+                        )
+                        .await;
+                        view = self.state.current_view();
                     }
                 }
             },

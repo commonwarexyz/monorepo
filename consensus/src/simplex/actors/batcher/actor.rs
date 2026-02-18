@@ -184,6 +184,7 @@ impl<
 
         // Initialize view data structures
         let mut current = View::zero();
+        let mut current_leader = None;
         let mut finalized = View::zero();
         let mut work = BTreeMap::new();
         select_loop! {
@@ -203,6 +204,7 @@ impl<
                     active,
                 } => {
                     current = new_current;
+                    current_leader = Some(leader);
                     finalized = new_finalized;
                     work.entry(current)
                         .or_insert_with(|| self.new_round())
@@ -378,6 +380,22 @@ impl<
                 let view = message.view();
                 if !interesting(self.activity_timeout, finalized, current, view, false) {
                     continue;
+                }
+
+                // If the current leader explicitly nullifies the current view, hint the voter so
+                // it can fast-path timeout without waiting for its local timer.
+                let local_is_leader = self
+                    .scheme
+                    .me()
+                    .is_some_and(|me| current_leader == Some(me));
+                if view == current
+                    && matches!(&message, Vote::Nullify(_))
+                    && current_leader
+                        .and_then(|leader| self.participants.key(leader))
+                        .is_some_and(|leader_key| leader_key == &sender)
+                    && !local_is_leader
+                {
+                    voter.leader_nullify(view).await;
                 }
 
                 // Add the vote to the verifier
