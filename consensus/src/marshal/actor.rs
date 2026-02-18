@@ -41,11 +41,12 @@ use commonware_storage::{
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
-    futures::{AbortablePool, Aborter},
+    futures::{AbortablePool, Aborter, OptionFuture},
     sequence::U64,
     Acknowledgement, BoxedError,
 };
 use futures::{future::join_all, try_join, FutureExt};
+use pin_project::pin_project;
 use prometheus_client::metrics::gauge::Gauge;
 use rand_core::CryptoRngCore;
 use std::{
@@ -74,80 +75,22 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
 }
 
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
-struct PendingAckEntry<B: Block, A: Acknowledgement> {
+#[pin_project]
+struct PendingAck<B: Block, A: Acknowledgement> {
     height: Height,
     commitment: B::Commitment,
+    #[pin]
     receiver: A::Waiter,
 }
 
-/// A bounded queue of pending acknowledgements. Implements [Future] by polling
-/// the front entry's receiver, returning [Poll::Pending] when the queue is empty.
-struct PendingAcks<B: Block, A: Acknowledgement> {
-    queue: VecDeque<PendingAckEntry<B, A>>,
-    max: usize,
-}
-
-impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
-    fn new(max: usize) -> Self {
-        Self {
-            queue: VecDeque::with_capacity(max),
-            max,
-        }
-    }
-
-    fn is_full(&self) -> bool {
-        self.queue.len() >= self.max
-    }
-
-    fn push(&mut self, entry: PendingAckEntry<B, A>) {
-        self.queue.push_back(entry);
-    }
-
-    fn clear(&mut self) {
-        self.queue.clear();
-    }
-
-    /// Returns the height of the last (most recent) pending ack, if any.
-    fn last_height(&self) -> Option<Height> {
-        self.queue.back().map(|e| e.height)
-    }
-
-    /// If the front ack is already resolved, pops and returns it along with
-    /// the result. Returns [None] if the queue is empty or the front ack is
-    /// still pending.
-    fn try_pop_ready(&mut self) -> Option<(PendingAckEntry<B, A>, <A::Waiter as Future>::Output)> {
-        let entry = self.queue.front_mut()?;
-        let result = std::pin::Pin::new(&mut entry.receiver).now_or_never()?;
-        let entry = self.queue.pop_front().unwrap();
-        Some((entry, result))
-    }
-}
-
-// Safety: all fields are effectively Unpin. VecDeque<T> is Unpin, usize is Unpin,
-// and A::Waiter is Unpin (required by the Acknowledgement trait). B::Commitment
-// may not be Unpin but we never pin it -- we only pin the receiver through
-// Pin::new, which requires Unpin on the pointee (satisfied by A::Waiter: Unpin).
-impl<B: Block, A: Acknowledgement> Unpin for PendingAcks<B, A> {}
-
-impl<B: Block, A: Acknowledgement> Future for PendingAcks<B, A> {
-    type Output = (PendingAckEntry<B, A>, <A::Waiter as Future>::Output);
+impl<B: Block, A: Acknowledgement> Future for PendingAck<B, A> {
+    type Output = <A::Waiter as Future>::Output;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        let entry = match this.queue.front_mut() {
-            Some(entry) => entry,
-            None => return std::task::Poll::Pending,
-        };
-        match std::pin::Pin::new(&mut entry.receiver).poll(cx) {
-            std::task::Poll::Ready(result) => {
-                let entry = this.queue.pop_front().unwrap();
-                std::task::Poll::Ready((entry, result))
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        self.project().receiver.poll(cx)
     }
 }
 
@@ -208,8 +151,12 @@ where
     last_processed_round: Round,
     // Last height processed by the application
     last_processed_height: Height,
-    // Pending application acknowledgements
-    pending_acks: PendingAcks<B, A>,
+    // Pending application acknowledgement currently being awaited
+    pending_ack: OptionFuture<PendingAck<B, A>>,
+    // FIFO queue of pending acknowledgements behind `pending_ack`
+    pending_ack_queue: VecDeque<PendingAck<B, A>>,
+    // Maximum total pending acknowledgements (`pending_ack` + queue)
+    max_pending_acks: usize,
     // Highest known finalized height
     tip: Height,
     // Outstanding subscriptions for blocks
@@ -310,7 +257,9 @@ where
                 strategy: config.strategy,
                 last_processed_round: Round::zero(),
                 last_processed_height,
-                pending_acks: PendingAcks::new(config.max_pending_acks.get()),
+                pending_ack: None.into(),
+                pending_ack_queue: VecDeque::with_capacity(config.max_pending_acks.get()),
+                max_pending_acks: config.max_pending_acks.get(),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
                 cache,
@@ -396,21 +345,35 @@ where
                 self.notify_subscribers(commitment, &block);
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
-            (mut entry, mut result) = &mut self.pending_acks => {
+            result = &mut self.pending_ack => {
+                let PendingAck {
+                    height,
+                    commitment,
+                    ..
+                } = self
+                    .pending_ack
+                    .take()
+                    .expect("ack state must be present");
+                self.arm_next_pending_ack();
+
+                let mut pending = Some((height, commitment, result));
                 loop {
+                    let (height, commitment, result) = pending.take().expect("pending ack must exist");
                     match result {
                         Ok(()) => {
-                            self.handle_block_processed(entry.height, entry.commitment, &mut resolver).await;
+                            self.handle_block_processed(height, commitment, &mut resolver)
+                                .await;
                         }
                         Err(e) => {
-                            error!(e = ?e, height = %entry.height, "application did not acknowledge block");
+                            error!(e = ?e, height = %height, "application did not acknowledge block");
                             return;
                         }
                     }
-                    match self.pending_acks.try_pop_ready() {
-                        Some((e, r)) => { entry = e; result = r; }
-                        None => break,
-                    }
+
+                    pending = self.try_take_ready_pending_ack();
+                    if pending.is_none() {
+                        break;
+                    };
                 }
 
                 if let Err(e) = self.sync_processed_height().await {
@@ -621,7 +584,8 @@ where
                         // Drop all pending acknowledgements. We must do this to prevent
                         // an in-process block from being processed that is below the new floor
                         // updating `last_processed_height`.
-                        self.pending_acks.clear();
+                        self.pending_ack = None.into();
+                        self.pending_ack_queue.clear();
 
                         // Prune the finalized block and finalization certificate archives in parallel.
                         if let Err(err) = self.prune_finalized_archives(height).await {
@@ -1035,11 +999,8 @@ where
         &mut self,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        while !self.pending_acks.is_full() {
-            let next_height = self
-                .pending_acks
-                .last_height()
-                .map_or_else(|| self.last_processed_height.next(), |h| h.next());
+        while self.pending_ack_count() < self.max_pending_acks {
+            let next_height = self.next_pending_ack_height();
             let Some(block) = self.get_finalized_block(next_height).await else {
                 return;
             };
@@ -1052,7 +1013,7 @@ where
             let (height, commitment) = (block.height(), block.commitment());
             let (ack, ack_waiter) = A::handle();
             application.report(Update::Block(block, ack)).await;
-            self.pending_acks.push(PendingAckEntry {
+            self.enqueue_pending_ack(PendingAck {
                 height,
                 commitment,
                 receiver: ack_waiter,
@@ -1360,6 +1321,46 @@ where
     /// Durably syncs the buffered processed height to storage.
     async fn sync_processed_height(&mut self) -> Result<(), metadata::Error> {
         self.application_metadata.sync().await
+    }
+
+    fn pending_ack_count(&self) -> usize {
+        usize::from(self.pending_ack.is_some()) + self.pending_ack_queue.len()
+    }
+
+    fn next_pending_ack_height(&self) -> Height {
+        self.pending_ack_queue
+            .back()
+            .map(|ack| ack.height.next())
+            .or_else(|| self.pending_ack.as_ref().map(|ack| ack.height.next()))
+            .unwrap_or_else(|| self.last_processed_height.next())
+    }
+
+    fn enqueue_pending_ack(&mut self, ack: PendingAck<B, A>) {
+        if self.pending_ack.is_none() {
+            self.pending_ack.replace(ack);
+            return;
+        }
+        self.pending_ack_queue.push_back(ack);
+    }
+
+    fn arm_next_pending_ack(&mut self) {
+        if self.pending_ack.is_none() {
+            if let Some(next) = self.pending_ack_queue.pop_front() {
+                self.pending_ack.replace(next);
+            }
+        }
+    }
+
+    fn try_take_ready_pending_ack(
+        &mut self,
+    ) -> Option<(Height, B::Commitment, <A::Waiter as Future>::Output)> {
+        let pending = self.pending_ack.as_mut()?;
+        let result = std::pin::Pin::new(&mut pending.receiver).now_or_never()?;
+        let PendingAck {
+            height, commitment, ..
+        } = self.pending_ack.take().expect("ack state must be present");
+        self.arm_next_pending_ack();
+        Some((height, commitment, result))
     }
 
     /// Prunes finalized blocks and certificates below the given height.
