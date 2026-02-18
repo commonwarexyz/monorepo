@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```ignore
-//! use commonware_storage::kv::{Batchable as _, Gettable as _};
+//! use commonware_storage::kv::{Batchable as _, Gettable as _, Updatable as _};
 //! use commonware_storage::mmr::Location;
 //! use commonware_storage::qmdb::any::{SharedDb, SyncPolicy};
 //! use std::num::NonZeroU64;
@@ -23,8 +23,10 @@
 //! let reader = shared.reader().await;
 //! let _value = reader.get(&key).await?;
 //!
-//! // Write path.
-//! writer.write_batch(vec![(key.clone(), Some(new_value))]).await?;
+//! // Write path (forces transition to mutable state if needed).
+//! let mut batch = writer.start_batch();
+//! batch.update(key.clone(), new_value).await?;
+//! writer.write_batch(batch).await?;
 //! let _committed = writer.commit(None).await?;
 //!
 //! // Prover path (forces transition to merkleized state if needed).
