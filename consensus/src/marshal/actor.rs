@@ -24,7 +24,6 @@ use commonware_broadcast::{buffered, Broadcaster};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    PublicKey,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
@@ -74,6 +73,9 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
         response: oneshot::Sender<bool>,
     },
 }
+
+/// Broadcast mailbox used by marshal, keyed by the certificate scheme public key.
+type BroadcastMailbox<P, B> = buffered::Mailbox<<<P as Provider>::Scheme as CertificateScheme>::PublicKey, B>;
 
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
 #[pin_project]
@@ -174,7 +176,7 @@ struct BlockSubscription<B: Block> {
     // The subscribers that are waiting for the block
     subscribers: Vec<oneshot::Sender<B>>,
     // Aborter that aborts the waiter future when dropped
-    _aborter: Aborter,
+    _aborter: Option<Aborter>,
 }
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
@@ -344,10 +346,10 @@ where
     }
 
     /// Start the actor.
-    pub fn start<R, K>(
+    pub fn start<R>(
         mut self,
         application: impl Reporter<Activity = Update<B, A>>,
-        buffer: buffered::Mailbox<K, B>,
+        buffer: Option<BroadcastMailbox<P, B>>,
         resolver: (mpsc::Receiver<handler::Message<B>>, R),
     ) -> Handle<()>
     where
@@ -355,23 +357,21 @@ where
             Key = handler::Request<B>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        K: PublicKey,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
 
     /// Run the application actor.
-    async fn run<R, K>(
+    async fn run<R>(
         mut self,
         mut application: impl Reporter<Activity = Update<B, A>>,
-        mut buffer: buffered::Mailbox<K, B>,
+        mut buffer: Option<BroadcastMailbox<P, B>>,
         (mut resolver_rx, mut resolver): (mpsc::Receiver<handler::Message<B>>, R),
     ) where
         R: Resolver<
             Key = handler::Request<B>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        K: PublicKey,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<(B::Commitment, B)>::default();
@@ -391,7 +391,7 @@ where
 
         // Attempt to repair any gaps in the finalized blocks archive, if there are any.
         if self
-            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+            .try_repair_gaps(buffer.as_ref(), &mut resolver, &mut application)
             .await
         {
             self.sync_finalized().await;
@@ -484,7 +484,9 @@ where
                     Message::Proposed { round, block } => {
                         self.cache_verified(round, block.commitment(), block.clone())
                             .await;
-                        let _peers = buffer.broadcast(Recipients::All, block).await;
+                        if let Some(buffer) = buffer.as_mut() {
+                            let _peers = buffer.broadcast(Recipients::All, block).await;
+                        }
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.commitment(), block).await;
@@ -499,7 +501,7 @@ where
                             .await;
 
                         // Search for block locally, otherwise fetch it remotely
-                        if let Some(block) = self.find_block(&buffer, commitment).await {
+                        if let Some(block) = self.find_block(buffer.as_ref(), commitment).await {
                             // If found, persist the block
                             self.cache_block(round, commitment, block).await;
                         } else {
@@ -516,7 +518,7 @@ where
                             .await;
 
                         // Search for block locally, otherwise fetch it remotely
-                        if let Some(block) = self.find_block(&buffer, commitment).await {
+                        if let Some(block) = self.find_block(buffer.as_ref(), commitment).await {
                             // If found, persist the block
                             let height = block.height();
                             self.store_finalization(
@@ -528,7 +530,11 @@ where
                             )
                             .await;
                             let _ =
-                                self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                                self.try_repair_gaps(
+                                    buffer.as_ref(),
+                                    &mut resolver,
+                                    &mut application,
+                                )
                                     .await;
                             self.sync_finalized().await;
                             debug!(?round, %height, "finalized block stored");
@@ -543,7 +549,7 @@ where
                         response,
                     } => match identifier {
                         BlockID::Commitment(commitment) => {
-                            let result = self.find_block(&buffer, commitment).await;
+                            let result = self.find_block(buffer.as_ref(), commitment).await;
                             response.send_lossy(result);
                         }
                         BlockID::Height(height) => {
@@ -553,7 +559,7 @@ where
                         BlockID::Latest => {
                             let block = match self.get_latest().await {
                                 Some((_, commitment, _)) => {
-                                    self.find_block(&buffer, commitment).await
+                                    self.find_block(buffer.as_ref(), commitment).await
                                 }
                                 None => None,
                             };
@@ -585,7 +591,7 @@ where
                         response,
                     } => {
                         // Check for block locally
-                        if let Some(block) = self.find_block(&buffer, commitment).await {
+                        if let Some(block) = self.find_block(buffer.as_ref(), commitment).await {
                             response.send_lossy(block);
                             continue;
                         }
@@ -617,11 +623,15 @@ where
                                 entry.get_mut().subscribers.push(response);
                             }
                             Entry::Vacant(entry) => {
-                                let (tx, rx) = oneshot::channel();
-                                buffer.subscribe_prepared(None, commitment, None, tx).await;
-                                let aborter = waiters.push(async move {
-                                    (commitment, rx.await.expect("buffer subscriber closed"))
-                                });
+                                let aborter = if let Some(buffer) = buffer.as_mut() {
+                                    let (tx, rx) = oneshot::channel();
+                                    buffer.subscribe_prepared(None, commitment, None, tx).await;
+                                    Some(waiters.push(async move {
+                                        (commitment, rx.await.expect("buffer subscriber closed"))
+                                    }))
+                                } else {
+                                    None
+                                };
                                 entry.insert(BlockSubscription {
                                     subscribers: vec![response],
                                     _aborter: aborter,
@@ -711,7 +721,7 @@ where
                 // Attempt to fill gaps before handling produce requests (so
                 // we can serve data we just received)
                 needs_sync |= self
-                    .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                    .try_repair_gaps(buffer.as_ref(), &mut resolver, &mut application)
                     .await;
 
                 // Sync archives before responding to peers (prioritize our
@@ -722,18 +732,18 @@ where
 
                 // Handle produce requests in parallel
                 join_all(produces.into_iter().map(|(key, response)| {
-                    self.handle_produce(key, response, &buffer)
+                    self.handle_produce(key, response, buffer.as_ref())
                 })).await;
             },
         }
     }
 
     /// Handle a produce request from a remote peer.
-    async fn handle_produce<K: PublicKey>(
+    async fn handle_produce(
         &self,
         key: Request<B>,
         response: oneshot::Sender<Bytes>,
-        buffer: &buffered::Mailbox<K, B>,
+        buffer: Option<&BroadcastMailbox<P, B>>,
     ) {
         match key {
             Request::Block(commitment) => {
@@ -1270,14 +1280,16 @@ where
     // -------------------- Mixed Storage --------------------
 
     /// Looks for a block anywhere in local storage.
-    async fn find_block<K: PublicKey>(
+    async fn find_block(
         &self,
-        buffer: &buffered::Mailbox<K, B>,
+        buffer: Option<&BroadcastMailbox<P, B>>,
         commitment: B::Commitment,
     ) -> Option<B> {
         // Check buffer
-        if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
-            return Some(block);
+        if let Some(buffer) = buffer {
+            if let Some(block) = buffer.get(None, commitment, None).await.into_iter().next() {
+                return Some(block);
+            }
         }
         // Check verified / notarized blocks via cache manager.
         if let Some(block) = self.cache.find_block(commitment).await {
@@ -1296,9 +1308,9 @@ where
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
-    async fn try_repair_gaps<K: PublicKey>(
+    async fn try_repair_gaps(
         &mut self,
-        buffer: &mut buffered::Mailbox<K, B>,
+        buffer: Option<&BroadcastMailbox<P, B>>,
         resolver: &mut impl Resolver<Key = Request<B>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) -> bool {

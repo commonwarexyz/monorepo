@@ -214,6 +214,29 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
         Height,
     ) {
+        setup_validator_with_buffer(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            true,
+        )
+        .await
+    }
+
+    async fn setup_validator_with_buffer(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        use_buffer: bool,
+    ) -> (
+        Application<B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        Height,
+    ) {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -247,17 +270,22 @@ mod tests {
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-        // Create a buffered broadcast engine and get its mailbox
-        let broadcast_config = buffered::Config {
-            public_key: validator.clone(),
-            mailbox_size: config.mailbox_size,
-            deque_size: 10,
-            priority: false,
-            codec_config: (),
+        // Optionally create a buffered broadcast engine and mailbox.
+        let buffer = if use_buffer {
+            let broadcast_config = buffered::Config {
+                public_key: validator.clone(),
+                mailbox_size: config.mailbox_size,
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+            };
+            let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
+            let network = control.register(2, TEST_QUOTA).await.unwrap();
+            broadcast_engine.start(network);
+            Some(buffer)
+        } else {
+            None
         };
-        let (broadcast_engine, buffer) = buffered::Engine::new(context.clone(), broadcast_config);
-        let network = control.register(2, TEST_QUOTA).await.unwrap();
-        broadcast_engine.start(network);
 
         // Initialize finalizations by height
         let start = Instant::now();
@@ -912,7 +940,7 @@ mod tests {
                     )
                     .await;
                     let application = Application::<B>::default();
-                    actor.start(application.clone(), buffer, resolver);
+                    actor.start(application.clone(), Some(buffer), resolver);
 
                     (mailbox, application)
                 }
@@ -2803,6 +2831,44 @@ mod tests {
                 .get_block(&commitment)
                 .await
                 .expect("block should be cached after broadcast");
+            assert_eq!(fetched, block);
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_marshal_without_buffer_caches_local_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let (i, validator) = participants.iter().enumerate().next().unwrap();
+            let mut actor = setup_validator_with_buffer(
+                context.with_label(&format!("validator_{i}")),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[i].clone()),
+                NZUsize!(1),
+                false,
+            )
+            .await
+            .1;
+
+            let parent = Sha256::hash(b"");
+            let block = make_block(parent, Height::new(1), 1);
+            let commitment = block.digest();
+            actor
+                .proposed(Round::new(Epoch::new(0), View::new(1)), block.clone())
+                .await;
+
+            let fetched = actor
+                .get_block(&commitment)
+                .await
+                .expect("block should be cached without broadcast buffer");
             assert_eq!(fetched, block);
         });
     }
