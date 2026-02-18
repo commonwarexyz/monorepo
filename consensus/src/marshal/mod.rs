@@ -214,29 +214,14 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
         Height,
     ) {
-        setup_validator_with_buffer(context, oracle, validator, provider, max_pending_acks, true)
-            .await
-    }
-
-    async fn setup_validator_with_buffer(
-        context: deterministic::Context,
-        oracle: &mut Oracle<K, deterministic::Context>,
-        validator: K,
-        provider: P,
-        max_pending_acks: NonZeroUsize,
-        use_buffer: bool,
-    ) -> (
-        Application<B>,
-        crate::marshal::ingress::mailbox::Mailbox<S, B>,
-        Height,
-    ) {
         setup_validator_with(
             context,
             oracle,
             validator,
             provider,
-            NZUsize!(1),
+            max_pending_acks,
             Application::default(),
+            true,
         )
         .await
     }
@@ -248,6 +233,7 @@ mod tests {
         provider: P,
         max_pending_acks: NonZeroUsize,
         application: Application<B>,
+        use_buffer: bool,
     ) -> (
         Application<B>,
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
@@ -674,6 +660,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(3),
                 application,
+                true,
             )
             .await;
 
@@ -2939,12 +2926,13 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let (i, validator) = participants.iter().enumerate().next().unwrap();
-            let mut actor = setup_validator_with_buffer(
+            let mut actor = setup_validator_with(
                 context.with_label(&format!("validator_{i}")),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
                 NZUsize!(1),
+                Application::default(),
                 false,
             )
             .await

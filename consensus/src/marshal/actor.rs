@@ -75,6 +75,7 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
 /// Broadcast mailbox used by marshal, keyed by the certificate scheme public key.
 type BroadcastMailbox<P, B> =
     buffered::Mailbox<<<P as Provider>::Scheme as CertificateScheme>::PublicKey, B>;
+
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
