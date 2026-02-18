@@ -1006,7 +1006,9 @@ dependencies = [
  "commonware-macros",
  "commonware-runtime",
  "commonware-utils",
+ "criterion",
  "futures",
+ "rand 0.8.5",
  "thiserror 2.0.17",
  "tracing",
 ]
