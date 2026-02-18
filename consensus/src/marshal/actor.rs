@@ -122,6 +122,10 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
     }
 }
 
+// Safety: all fields are effectively Unpin. VecDeque<T> is Unpin, usize is Unpin,
+// and A::Waiter is Unpin (required by the Acknowledgement trait). B::Commitment
+// may not be Unpin but we never pin it -- we only pin the receiver through
+// Pin::new, which requires Unpin on the pointee (satisfied by A::Waiter: Unpin).
 impl<B: Block, A: Acknowledgement> Unpin for PendingAcks<B, A> {}
 
 impl<B: Block, A: Acknowledgement> Future for PendingAcks<B, A> {
@@ -999,17 +1003,17 @@ where
 
     // -------------------- Application Dispatch --------------------
 
-    /// Attempt to dispatch the next finalized block to the application if ready.
+    /// Dispatch finalized blocks to the application until the pipeline is full
+    /// or no more blocks are available.
     ///
     /// This does NOT advance `last_processed_height` or sync metadata. It only
-    /// sends the block to the application and enqueues a pending ack. The
-    /// metadata is updated later, in a subsequent `select_loop!` iteration,
-    /// when the ack arrives and [`Self::handle_block_processed`] calls
-    /// [`Self::set_processed_height`].
+    /// sends blocks to the application and enqueues pending acks. Metadata is
+    /// updated later, in a subsequent `select_loop!` iteration, when acks
+    /// arrive and [`Self::handle_block_processed`] calls
+    /// [`Self::update_processed_height`].
     ///
-    /// Multiple blocks may be in flight simultaneously (up to
-    /// `max_pending_acks`). Acks are processed in FIFO order so
-    /// `last_processed_height` always advances sequentially.
+    /// Acks are processed in FIFO order so `last_processed_height` always
+    /// advances sequentially.
     ///
     /// # Crash safety
     ///
@@ -1021,41 +1025,40 @@ where
     /// ```text
     /// Iteration N (caller):
     ///   store_finalization  ->  Archive::put (buffered)
-    ///   try_dispatch_block  ->  sends block to app, enqueues pending ack
+    ///   try_dispatch_block  ->  sends blocks to app, enqueues pending acks
     ///   sync_finalized      ->  archive durable
     ///
     /// Iteration M (ack handler, M > N):
-    ///   handle_block_processed  ->  set_processed_height  ->  metadata durable
+    ///   handle_block_processed  ->  update_processed_height  ->  metadata buffered
+    ///   sync_processed_height   ->  metadata durable
     /// ```
     async fn try_dispatch_block(
         &mut self,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
-        if self.pending_acks.is_full() {
-            return;
+        while !self.pending_acks.is_full() {
+            let next_height = match self.pending_acks.queue.back() {
+                Some(last) => last.height.next(),
+                None => self.last_processed_height.next(),
+            };
+            let Some(block) = self.get_finalized_block(next_height).await else {
+                return;
+            };
+            assert_eq!(
+                block.height(),
+                next_height,
+                "finalized block height mismatch"
+            );
+
+            let (height, commitment) = (block.height(), block.commitment());
+            let (ack, ack_waiter) = A::handle();
+            application.report(Update::Block(block, ack)).await;
+            self.pending_acks.push(PendingAckEntry {
+                height,
+                commitment,
+                receiver: ack_waiter,
+            });
         }
-
-        let next_height = match self.pending_acks.queue.back() {
-            Some(last) => last.height.next(),
-            None => self.last_processed_height.next(),
-        };
-        let Some(block) = self.get_finalized_block(next_height).await else {
-            return;
-        };
-        assert_eq!(
-            block.height(),
-            next_height,
-            "finalized block height mismatch"
-        );
-
-        let (height, commitment) = (block.height(), block.commitment());
-        let (ack, ack_waiter) = A::handle();
-        application.report(Update::Block(block, ack)).await;
-        self.pending_acks.push(PendingAckEntry {
-            height,
-            commitment,
-            receiver: ack_waiter,
-        });
     }
 
     /// Handle acknowledgement from the application that a block has been processed.
