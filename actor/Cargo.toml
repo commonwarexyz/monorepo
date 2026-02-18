@@ -25,3 +25,12 @@ tracing.workspace = true
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["async"] }
+rand.workspace = true
+
+[[bench]]
+name = "actor"
+harness = false
+path = "src/benches/bench.rs"
