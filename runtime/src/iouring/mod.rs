@@ -229,45 +229,6 @@ impl Default for Config {
     }
 }
 
-fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
-    let mut builder = &mut IoUring::builder();
-    if cfg.io_poll {
-        builder = builder.setup_iopoll();
-    }
-    if cfg.single_issuer {
-        builder = builder.setup_single_issuer();
-        // Enable `DEFER_TASKRUN` to defer work processing until `io_uring_enter` is
-        // called with `IORING_ENTER_GETEVENTS`. By default, io_uring processes work at
-        // the end of any system call or thread interrupt, which can delay application
-        // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
-        // requested, reducing overhead and improving CPU cache locality.
-        //
-        // This is safe in our implementation since we always call `submit_and_wait()`
-        // (which sets `IORING_ENTER_GETEVENTS`), and we are also enabling
-        // `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
-        //
-        // This is available since kernel 6.1.
-        //
-        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
-        builder = builder.setup_defer_taskrun();
-    }
-
-    // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
-    // timeout). We double the ring size to ensure users get the number of
-    // concurrent operations they configured. We also reserve one extra SQE for
-    // the internal wake poll.
-    let ring_size = if cfg.op_timeout.is_some() {
-        cfg.size
-            .checked_mul(2)
-            .and_then(|size| size.checked_add(1))
-            .expect("ring size overflow")
-    } else {
-        cfg.size.checked_add(1).expect("ring size overflow")
-    };
-
-    builder.build(ring_size)
-}
-
 /// An operation submitted to [IoUringLoop], processed by [IoUringLoop::run].
 pub struct Op {
     /// The submission queue entry to be submitted to the ring.
@@ -376,7 +337,7 @@ impl IoUringLoop {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
         self.arm_wake_poll(&mut ring);
 
-        let mut next_work_id = 0;
+        let mut next_work_id: u64 = 0;
         loop {
             // Process available completions.
             loop {
@@ -566,34 +527,33 @@ impl IoUringLoop {
         }
     }
 
-    /// Process `ring` completions until all pending operations are complete or
-    /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
-    /// indefinitely.
+    /// Perform a single shutdown wait/drain pass.
+    ///
+    /// This waits once for up to the current pending operation count, then drains
+    /// currently available CQEs and returns. Remaining waiters, if any, are
+    /// abandoned as part of shutdown.
     fn drain_ring(&mut self, ring: &mut IoUring) {
-        while !self.waiters.is_empty() {
-            // When op_timeout is set, each operation uses 2 SQ entries
-            // (op + linked timeout).
-            let pending = if self.cfg.op_timeout.is_some() {
-                self.waiters.len() * 2
-            } else {
-                self.waiters.len()
-            };
+        if self.waiters.is_empty() {
+            return;
+        }
 
-            let got_completion = self
-                .submit_and_wait(ring, pending, self.cfg.shutdown_timeout)
-                .expect("unable to submit to ring");
+        // When op_timeout is set, each operation uses 2 SQ entries
+        // (op + linked timeout).
+        let pending = if self.cfg.op_timeout.is_some() {
+            self.waiters.len() * 2
+        } else {
+            self.waiters.len()
+        };
 
-            loop {
-                let Some(cqe) = ring.completion().next() else {
-                    break;
-                };
-                self.handle_cqe(ring, cqe);
-            }
+        let _ = self
+            .submit_and_wait(ring, pending, self.cfg.shutdown_timeout)
+            .expect("unable to submit to ring");
 
-            // Bounded shutdown wait elapsed.
-            if !got_completion {
+        loop {
+            let Some(cqe) = ring.completion().next() else {
                 break;
-            }
+            };
+            self.handle_cqe(ring, cqe);
         }
     }
 
@@ -635,6 +595,46 @@ impl IoUringLoop {
             },
         )
     }
+}
+
+/// Build and configure an `io_uring` instance.
+fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
+    let mut builder = &mut IoUring::builder();
+    if cfg.io_poll {
+        builder = builder.setup_iopoll();
+    }
+    if cfg.single_issuer {
+        builder = builder.setup_single_issuer();
+        // Enable `DEFER_TASKRUN` to defer work processing until `io_uring_enter` is
+        // called with `IORING_ENTER_GETEVENTS`. By default, io_uring processes work at
+        // the end of any system call or thread interrupt, which can delay application
+        // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
+        // requested, reducing overhead and improving CPU cache locality.
+        //
+        // This is safe in our implementation since we always call `submit_and_wait()`
+        // (which sets `IORING_ENTER_GETEVENTS`), and we are also enabling
+        // `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
+        //
+        // This is available since kernel 6.1.
+        //
+        // See IORING_SETUP_DEFER_TASKRUN in <https://man7.org/linux/man-pages/man2/io_uring_setup.2.html>.
+        builder = builder.setup_defer_taskrun();
+    }
+
+    // When `op_timeout` is set, each operation uses 2 SQ entries (op + linked
+    // timeout). We double the ring size to ensure users get the number of
+    // concurrent operations they configured. We also reserve one extra SQE for
+    // the internal wake poll.
+    let ring_size = if cfg.op_timeout.is_some() {
+        cfg.size
+            .checked_mul(2)
+            .and_then(|size| size.checked_add(1))
+            .expect("ring size overflow")
+    } else {
+        cfg.size.checked_add(1).expect("ring size overflow")
+    };
+
+    builder.build(ring_size)
 }
 
 /// Create the internal non-blocking eventfd used by the wake path.
@@ -829,9 +829,10 @@ mod tests {
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
-        // Wait for the operation `timeout` to fire.
-        let (result, _) = rx.await.unwrap();
-        assert_eq!(result, -libc::ETIME);
+        // With single-pass shutdown draining, the loop may exit before this
+        // operation completes, dropping `tx`.
+        let err = rx.await.unwrap_err();
+        assert!(matches!(err, RecvError { .. }));
         handle.join().unwrap();
     }
 
