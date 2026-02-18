@@ -100,11 +100,36 @@ pub(super) enum LaneReceiverKind<I> {
     Unbounded(mpsc::UnboundedReceiver<I>),
 }
 
+/// Non-blocking lane receive result.
+pub(super) enum LaneTryRecv<I> {
+    /// A message was received.
+    Message(I),
+    /// No message is currently available.
+    Empty,
+    /// The lane closed.
+    Closed,
+}
+
 impl<I> LaneReceiver<I> {
     pub(super) fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<I>> {
         match &mut self.receiver {
             LaneReceiverKind::Bounded(rx) => Pin::new(rx).poll_recv(cx),
             LaneReceiverKind::Unbounded(rx) => Pin::new(rx).poll_recv(cx),
+        }
+    }
+
+    pub(super) fn try_recv(&mut self) -> LaneTryRecv<I> {
+        match &mut self.receiver {
+            LaneReceiverKind::Bounded(rx) => match rx.try_recv() {
+                Ok(message) => LaneTryRecv::Message(message),
+                Err(mpsc::error::TryRecvError::Empty) => LaneTryRecv::Empty,
+                Err(mpsc::error::TryRecvError::Disconnected) => LaneTryRecv::Closed,
+            },
+            LaneReceiverKind::Unbounded(rx) => match rx.try_recv() {
+                Ok(message) => LaneTryRecv::Message(message),
+                Err(mpsc::error::TryRecvError::Empty) => LaneTryRecv::Empty,
+                Err(mpsc::error::TryRecvError::Disconnected) => LaneTryRecv::Closed,
+            },
         }
     }
 }
@@ -117,8 +142,8 @@ where
 {
     /// Runtime shutdown signal observed.
     Shutdown,
-    /// A message received from the actor's mailbox. `None` indicates at least one lane closed.
-    Mailbox(Option<I>),
+    /// A message received from lane `usize`. `None` indicates that lane closed.
+    Mailbox(usize, Option<I>),
     /// A message received from the actor-defined external future.
     External(Option<W>),
 }
