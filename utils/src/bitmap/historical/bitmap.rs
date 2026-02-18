@@ -93,7 +93,7 @@ pub(super) enum ChunkDiff<const N: usize> {
     Pruned([u8; N]),
 }
 
-/// A reverse diff capturing the bitmap state before a commit.
+/// A reverse diff that describes the state before a commit.
 #[derive(Clone, Debug)]
 pub(super) struct CommitDiff<const N: usize> {
     /// Total length in bits before this commit.
@@ -110,13 +110,13 @@ pub(super) struct CommitDiff<const N: usize> {
 /// Uses a type-state pattern to track whether the bitmap is clean (no pending
 /// mutations) or dirty (has pending mutations).
 ///
-/// Commit numbers must be strictly monotonically increasing and < `u64::MAX`.
+/// Commit numbers must be strictly monotonically increasing and < u64::MAX.
 #[derive(Clone, Debug)]
 pub struct BitMap<const N: usize, S: State = Clean> {
     /// The current/HEAD state - the one and only full bitmap.
     current: Prunable<N>,
 
-    /// Historical commits: commit_number -> reverse diff.
+    /// Historical commits: commit_number -> reverse diff from that commit.
     commits: BTreeMap<u64, CommitDiff<N>>,
 
     /// State marker (Clean or Dirty).
