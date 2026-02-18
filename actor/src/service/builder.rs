@@ -62,7 +62,8 @@ where
 ///
 /// # Behavioral Semantics
 ///
-/// - At most one event is dispatched per iteration.
+/// - Each iteration dispatches at most one external event, or a batch of up
+///   to [`Actor::max_lane_batch`] messages from one winning lane.
 /// - Returning `Err` from [`Actor::on_read_only`] or [`Actor::on_read_write`]
 ///   is fatal: the error is logged, remaining in-flight reads are drained,
 ///   and then [`Actor::on_shutdown`] is called before the loop exits.
