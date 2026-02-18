@@ -53,6 +53,7 @@ const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
 const PAGE_CACHE_PAGE_SIZE: NonZeroU16 = NZU16!(4_096); // 4KB
 const PAGE_CACHE_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
 const MAX_REPAIR: NonZero<usize> = NZUsize!(50);
+const MAX_PENDING_ACKS: NonZero<usize> = NZUsize!(16);
 
 pub struct Config<C, P, B, V, T>
 where
@@ -273,7 +274,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: NZUsize!(16),
+                max_pending_acks: MAX_PENDING_ACKS,
                 strategy: config.strategy.clone(),
             },
         )
