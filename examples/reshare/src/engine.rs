@@ -38,7 +38,7 @@ use std::{
 };
 use tracing::{error, info, warn};
 
-const MAILBOX_SIZE: usize = 10;
+const MAILBOX_SIZE: usize = 1024;
 const DEQUE_SIZE: usize = 10;
 const ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -273,7 +273,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: NZUsize!(1),
+                max_pending_acks: NZUsize!(16),
                 strategy: config.strategy.clone(),
             },
         )
