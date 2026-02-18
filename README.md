@@ -48,9 +48,9 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
+* [invariants](./invariants/README.md): Define and exercise invariants.
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
-* [invariants](./invariants/README.md): Define and exercise invariants in your code
 * [pipeline](./pipeline): Mechanisms under development.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 

@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-invariants.svg)](https://crates.io/crates/commonware-invariants)
 [![Docs.rs](https://docs.rs/commonware-invariants/badge.svg)](https://docs.rs/commonware-invariants)
 
-Define and exercise invariants in your code
+Define and exercise invariants.
 
 ## Status
 
