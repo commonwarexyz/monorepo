@@ -43,7 +43,7 @@ use prometheus_client::{
     registry::Registry,
 };
 use std::{
-    alloc::{alloc, dealloc, Layout},
+    alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
@@ -359,13 +359,44 @@ impl AlignedBuffer {
     ///
     /// # Panics
     ///
-    /// Panics if allocation fails or alignment is not a power of two.
+    /// Panics if:
+    /// - `capacity == 0`
+    /// - `alignment` is zero or not a power of two
+    /// - `capacity`, rounded up to `alignment`, exceeds `isize::MAX`
+    ///
+    /// # Aborts
+    ///
+    /// Aborts the process on allocation failure via `handle_alloc_error`.
     fn new(capacity: usize, alignment: usize) -> Self {
+        assert!(capacity > 0, "capacity must be greater than zero");
         let layout = Layout::from_size_align(capacity, alignment).expect("invalid layout");
 
-        // SAFETY: Layout is valid (non-zero size, power-of-two alignment).
+        // SAFETY: Layout is valid and has non-zero size.
         let ptr = unsafe { alloc(layout) };
-        let ptr = NonNull::new(ptr).expect("allocation failed");
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+
+        Self { ptr, layout }
+    }
+
+    /// Allocates a new zero-initialized buffer with the given capacity and alignment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `capacity == 0`
+    /// - `alignment` is zero or not a power of two
+    /// - `capacity`, rounded up to `alignment`, exceeds `isize::MAX`
+    ///
+    /// # Aborts
+    ///
+    /// Aborts the process on allocation failure via `handle_alloc_error`.
+    fn new_zeroed(capacity: usize, alignment: usize) -> Self {
+        assert!(capacity > 0, "capacity must be greater than zero");
+        let layout = Layout::from_size_align(capacity, alignment).expect("invalid layout");
+
+        // SAFETY: Layout is valid and has non-zero size.
+        let ptr = unsafe { alloc_zeroed(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
 
         Self { ptr, layout }
     }
@@ -426,6 +457,12 @@ impl SizeClass {
     }
 }
 
+/// Internal allocation result for pooled allocations.
+struct Allocation {
+    buffer: AlignedBuffer,
+    is_new: bool,
+}
+
 /// Internal state of the buffer pool.
 pub(crate) struct BufferPoolInner {
     config: BufferPoolConfig,
@@ -435,7 +472,10 @@ pub(crate) struct BufferPoolInner {
 
 impl BufferPoolInner {
     /// Try to allocate a buffer from the given size class.
-    fn try_alloc(&self, class_index: usize) -> Option<AlignedBuffer> {
+    ///
+    /// If `zero_on_new` is true, newly-created buffers are allocated with
+    /// `alloc_zeroed`. Reused buffers are never re-zeroed here.
+    fn try_alloc(&self, class_index: usize, zero_on_new: bool) -> Option<Allocation> {
         let class = &self.classes[class_index];
         let label = SizeClassLabel {
             size_class: class.size as u64,
@@ -448,14 +488,25 @@ impl BufferPoolInner {
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
                 self.metrics.available.get_or_create(&label).dec();
-                Some(buffer)
+                Some(Allocation {
+                    buffer,
+                    is_new: false,
+                })
             }
             Some(None) => {
                 // Create new buffer (we have a slot)
                 class.allocated.fetch_add(1, Ordering::Relaxed);
                 self.metrics.allocations_total.get_or_create(&label).inc();
                 self.metrics.allocated.get_or_create(&label).inc();
-                Some(AlignedBuffer::new(class.size, class.alignment))
+                let buffer = if zero_on_new {
+                    AlignedBuffer::new_zeroed(class.size, class.alignment)
+                } else {
+                    AlignedBuffer::new(class.size, class.alignment)
+                };
+                Some(Allocation {
+                    buffer,
+                    is_new: true,
+                })
             }
             None => {
                 // Pool exhausted (no slots available)
@@ -560,7 +611,46 @@ impl BufferPool {
         }
     }
 
-    /// Allocates a buffer with the given capacity.
+    /// Returns the size class index for `capacity`, recording oversized metrics on failure.
+    fn class_index_or_record_oversized(&self, capacity: usize) -> Option<usize> {
+        let class_index = self.inner.config.class_index(capacity);
+        if class_index.is_none() {
+            self.inner.metrics.oversized_total.inc();
+        }
+        class_index
+    }
+
+    /// Attempts to allocate a pooled buffer.
+    ///
+    /// Unlike [`Self::alloc`], this method does not fall back to untracked
+    /// allocation.
+    ///
+    /// The returned buffer has `len() == 0` and `capacity() >= capacity`.
+    ///
+    /// # Initialization
+    ///
+    /// The returned buffer contains **uninitialized memory**. Do not read from
+    /// it until data has been written.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
+    /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
+    pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
+        let class_index = self
+            .class_index_or_record_oversized(capacity)
+            .ok_or(PoolError::Oversized)?;
+
+        let buffer = self
+            .inner
+            .try_alloc(class_index, false)
+            .map(|allocation| allocation.buffer)
+            .ok_or(PoolError::Exhausted)?;
+        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
+        Ok(IoBufMut::from_pooled(pooled))
+    }
+
+    /// Allocates a buffer with capacity for at least `capacity` bytes.
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
     /// matching the semantics of [`IoBufMut::with_capacity`] and
@@ -572,8 +662,7 @@ impl BufferPool {
     /// when dropped. Otherwise, falls back to an untracked aligned heap
     /// allocation that is deallocated when dropped.
     ///
-    /// Use [`Self::try_alloc`] if you need to distinguish between pooled and
-    /// untracked allocations.
+    /// Use [`Self::try_alloc`] if you need pooled-only behavior.
     ///
     /// # Initialization
     ///
@@ -603,44 +692,73 @@ impl BufferPool {
         buf
     }
 
-    /// Allocates a zero-initialized buffer with readable length `len`.
+    /// Attempts to allocate a zero-initialized pooled buffer.
     ///
-    /// Equivalent to `alloc(len)` followed by `put_bytes(0, len)`.
+    /// Unlike [`Self::alloc_zeroed`], this method does not fall back to
+    /// untracked allocation.
     ///
-    /// Use this for read APIs that require an initialized `&mut [u8]`.
-    /// This avoids `unsafe set_len` at callsites, at the cost of zero-filling
-    /// `len` bytes before the read.
-    pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
-        let mut buf = self.alloc(len);
-        buf.put_bytes(0, len);
-        buf
-    }
-
-    /// Attempts to allocate a pooled buffer, returning an error on failure.
+    /// The returned buffer has `len() == len` and `capacity() >= len`.
     ///
-    /// Unlike [`Self::alloc`], this method does not fall back to untracked
-    /// allocation. Use this when you need to know whether the buffer came
-    /// from the pool.
+    /// # Initialization
+    ///
+    /// Bytes in `0..len` are initialized to zero. Bytes in `len..capacity`
+    /// may be uninitialized.
     ///
     /// # Errors
     ///
-    /// - [`PoolError::Oversized`]: `capacity` exceeds `max_size`
+    /// - [`PoolError::Oversized`]: `len` exceeds `max_size`
     /// - [`PoolError::Exhausted`]: Pool exhausted for required size class
-    pub fn try_alloc(&self, capacity: usize) -> Result<IoBufMut, PoolError> {
-        let class_index = match self.inner.config.class_index(capacity) {
-            Some(idx) => idx,
-            None => {
-                self.inner.metrics.oversized_total.inc();
-                return Err(PoolError::Oversized);
-            }
-        };
-
-        let buffer = self
+    pub fn try_alloc_zeroed(&self, len: usize) -> Result<IoBufMut, PoolError> {
+        let class_index = self
+            .class_index_or_record_oversized(len)
+            .ok_or(PoolError::Oversized)?;
+        let allocation = self
             .inner
-            .try_alloc(class_index)
+            .try_alloc(class_index, true)
             .ok_or(PoolError::Exhausted)?;
-        let pooled = PooledBufMut::new(buffer, Arc::downgrade(&self.inner));
-        Ok(IoBufMut::from_pooled(pooled))
+
+        let mut buf = IoBufMut::from_pooled(PooledBufMut::new(
+            allocation.buffer,
+            Arc::downgrade(&self.inner),
+        ));
+        if allocation.is_new {
+            // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
+            unsafe { buf.set_len(len) };
+        } else {
+            // Reused buffers may contain old bytes, re-zero requested readable range.
+            buf.put_bytes(0, len);
+        }
+        Ok(buf)
+    }
+
+    /// Allocates a zero-initialized buffer with readable length `len`.
+    ///
+    /// The returned buffer has `len() == len` and `capacity() >= len`.
+    ///
+    /// If the pool can provide a buffer (len within limits and pool not
+    /// exhausted), returns a pooled buffer that will be returned to the pool
+    /// when dropped. Otherwise, falls back to an untracked aligned heap
+    /// allocation that is deallocated when dropped.
+    ///
+    /// Use this for read APIs that require an initialized `&mut [u8]`.
+    /// This avoids `unsafe set_len` at callsites.
+    ///
+    /// Use [`Self::try_alloc_zeroed`] if you need pooled-only behavior.
+    ///
+    /// # Initialization
+    ///
+    /// Bytes in `0..len` are initialized to zero. Bytes in `len..capacity`
+    /// may be uninitialized.
+    pub fn alloc_zeroed(&self, len: usize) -> IoBufMut {
+        self.try_alloc_zeroed(len).unwrap_or_else(|_| {
+            // Pool exhausted or oversized: allocate untracked zeroed memory.
+            let size = len.max(self.inner.config.min_size.get());
+            let buffer = AlignedBuffer::new_zeroed(size, self.inner.config.alignment.get());
+            let mut buf = IoBufMut::from_pooled(PooledBufMut::new(buffer, Weak::new()));
+            // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
+            unsafe { buf.set_len(len) };
+            buf
+        })
     }
 
     /// Returns the pool configuration.
@@ -1141,6 +1259,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "capacity must be greater than zero")]
+    fn test_aligned_buffer_zero_capacity_panics() {
+        let _ = AlignedBuffer::new(0, page_size());
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be greater than zero")]
+    fn test_aligned_buffer_zeroed_zero_capacity_panics() {
+        let _ = AlignedBuffer::new_zeroed(0, page_size());
+    }
+
+    #[test]
     fn test_config_validation() {
         let page = page_size();
         let config = test_config(page, page * 4, 10);
@@ -1219,6 +1349,53 @@ mod tests {
         let buf = pool.alloc_zeroed(100);
         assert_eq!(buf.len(), 100);
         assert!(buf.as_ref().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_try_alloc_zeroed_sets_len_and_zeros() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page * 4, 2), &mut registry);
+
+        let buf = pool.try_alloc_zeroed(100).unwrap();
+        assert!(buf.is_pooled());
+        assert_eq!(buf.len(), 100);
+        assert!(buf.as_ref().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_alloc_zeroed_fallback_uses_untracked_zeroed_buffer() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+
+        // Exhaust pooled capacity for this class.
+        let _pooled = pool.try_alloc(100).unwrap();
+
+        let buf = pool.alloc_zeroed(100);
+        assert!(!buf.is_pooled());
+        assert_eq!(buf.len(), 100);
+        assert!(buf.as_ref().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_alloc_zeroed_reuses_dirty_pooled_buffer() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
+
+        let mut first = pool.alloc_zeroed(100);
+        assert!(first.is_pooled());
+        assert!(first.as_ref().iter().all(|&b| b == 0));
+
+        // Dirty the buffer before returning it to the pool.
+        first.as_mut().fill(0xAB);
+        drop(first);
+
+        let second = pool.alloc_zeroed(100);
+        assert!(second.is_pooled());
+        assert_eq!(second.len(), 100);
+        assert!(second.as_ref().iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -2177,6 +2354,23 @@ mod tests {
         let _buf1 = pool.try_alloc(100).unwrap();
         let _buf2 = pool.try_alloc(100).unwrap();
         let result = pool.try_alloc(100);
+        assert_eq!(result.unwrap_err(), PoolError::Exhausted);
+    }
+
+    #[test]
+    fn test_try_alloc_zeroed_errors() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        // Oversized request
+        let result = pool.try_alloc_zeroed(page * 10);
+        assert_eq!(result.unwrap_err(), PoolError::Oversized);
+
+        // Exhaust pool
+        let _buf1 = pool.try_alloc_zeroed(100).unwrap();
+        let _buf2 = pool.try_alloc_zeroed(100).unwrap();
+        let result = pool.try_alloc_zeroed(100);
         assert_eq!(result.unwrap_err(), PoolError::Exhausted);
     }
 
