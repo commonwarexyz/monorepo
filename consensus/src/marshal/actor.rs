@@ -76,7 +76,6 @@ enum PendingVerification<S: CertificateScheme, B: Block> {
 
 /// Broadcast mailbox used by marshal, keyed by the certificate scheme public key.
 type BroadcastMailbox<P, B> = buffered::Mailbox<<<P as Provider>::Scheme as CertificateScheme>::PublicKey, B>;
-
 /// A pending acknowledgement from the application for a block at the contained height/commitment.
 #[pin_project]
 struct PendingAck<B: Block, A: Acknowledgement> {
@@ -434,10 +433,10 @@ where
 
                     // Opportunistically drain any additional already-ready acks so we
                     // can persist one metadata sync for the whole batch below.
-                    pending = self.pending_acks.pop_ready();
-                    if pending.is_none() {
+                    let Some(next) = self.pending_acks.pop_ready() else {
                         break;
-                    }
+                    };
+                    pending = Some(next);
                 }
 
                 // Persist buffered processed-height updates once after draining all ready acks.
