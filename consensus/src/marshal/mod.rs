@@ -762,6 +762,12 @@ mod tests {
             assert_eq!(application.acknowledge_next(), Some(Height::new(2)));
             assert_eq!(application.acknowledge_next(), Some(Height::new(3)));
 
+            // Yield to marshal
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Assert that the application has processed up to height 3.
+            assert_eq!(application.tip().unwrap().0, Height::new(3));
+
             // Restart marshal and confirm the processed height restored from metadata.
             let (_restart_application, _restart_actor, restart_height) = setup_validator_with(
                 context.with_label("validator_0_restart"),
