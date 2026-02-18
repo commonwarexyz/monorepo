@@ -17,19 +17,19 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, MetricEncoder, Panicker},
+    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
+use commonware_utils::sync::Mutex;
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    encoding::text::encode,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
-    registry::{Metric, Registry},
+    registry::{Metric, Registry as PrometheusRegistry},
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[stability(BETA)]
@@ -41,7 +41,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime},
 };
@@ -61,7 +61,7 @@ struct Metrics {
 }
 
 impl Metrics {
-    pub fn init(registry: &mut Registry) -> Self {
+    pub fn init(registry: &mut PrometheusRegistry) -> Self {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
@@ -84,7 +84,21 @@ impl Metrics {
 pub struct NetworkConfig {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
+    ///
+    /// Defaults to `Some(true)`.
     tcp_nodelay: Option<bool>,
+
+    /// Whether or not to set the `SO_LINGER` socket option.
+    ///
+    /// When `None`, the system default is used. When
+    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
+    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// `TIME_WAIT` state. This is useful in adversarial environments to
+    /// reclaim socket resources immediately when closing connections to
+    /// misbehaving peers.
+    ///
+    /// Defaults to `Some(Duration::ZERO)`.
+    so_linger: Option<Duration>,
 
     /// Read/write timeout for network operations.
     read_write_timeout: Duration,
@@ -93,7 +107,8 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            tcp_nodelay: None,
+            tcp_nodelay: Some(true),
+            so_linger: Some(Duration::ZERO),
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -183,6 +198,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_so_linger(mut self, l: Option<Duration>) -> Self {
+        self.network_cfg.so_linger = l;
+        self
+    }
+    /// See [Config]
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
@@ -223,6 +243,10 @@ impl Config {
     /// See [Config]
     pub const fn tcp_nodelay(&self) -> Option<bool> {
         self.network_cfg.tcp_nodelay
+    }
+    /// See [Config]
+    pub const fn so_linger(&self) -> Option<Duration> {
+        self.network_cfg.so_linger
     }
     /// See [Config]
     pub const fn storage_directory(&self) -> &PathBuf {
@@ -284,8 +308,8 @@ impl crate::Runner for Runner {
         Fut: Future,
     {
         // Create a new registry
-        let mut registry = Registry::default();
-        let runtime_registry = registry.sub_registry_with_prefix(METRICS_PREFIX);
+        let mut registry = Registry::new();
+        let runtime_registry = registry.root_mut().sub_registry_with_prefix(METRICS_PREFIX);
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
@@ -353,6 +377,7 @@ impl crate::Runner for Runner {
                     runtime_registry.sub_registry_with_prefix("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
+                    so_linger: self.cfg.network_cfg.so_linger,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
@@ -376,7 +401,8 @@ impl crate::Runner for Runner {
                 let config = TokioNetworkConfig::default()
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay);
+                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
+                    .with_so_linger(self.cfg.network_cfg.so_linger);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,
@@ -403,6 +429,7 @@ impl crate::Runner for Runner {
             storage,
             name: label.name(),
             attributes: Vec::new(),
+            scope: None,
             executor: executor.clone(),
             network,
             network_buffer_pool,
@@ -440,6 +467,7 @@ cfg_if::cfg_if! {
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
+    scope: Option<Arc<ScopeGuard>>,
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
@@ -456,6 +484,7 @@ impl Clone for Context {
         Self {
             name: self.name.clone(),
             attributes: self.attributes.clone(),
+            scope: self.scope.clone(),
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
@@ -560,7 +589,7 @@ impl crate::Spawner for Context {
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock().unwrap();
+            let mut shutdown = self.executor.shutdown.lock();
             shutdown.stop(value)
         };
 
@@ -579,7 +608,7 @@ impl crate::Spawner for Context {
     }
 
     fn stopped(&self) -> Signal {
-        self.executor.shutdown.lock().unwrap().stopped()
+        self.executor.shutdown.lock().stopped()
     }
 }
 
@@ -636,26 +665,46 @@ impl crate::Metrics for Context {
             }
         };
 
-        // Apply attributes to the registry (in sorted order)
-        let mut registry = self.executor.registry.lock().unwrap();
-        let sub_registry = self.attributes.iter().fold(&mut *registry, |reg, (k, v)| {
-            reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-        });
+        // Route to the appropriate registry (root or scoped)
+        let mut registry = self.executor.registry.lock();
+        let scoped = registry.get_scope(self.scope.as_ref().map(|s| s.scope_id()));
+        let sub_registry = self
+            .attributes
+            .iter()
+            .fold(scoped, |reg, (k, v): &(String, String)| {
+                reg.sub_registry_with_label((Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+            });
         sub_registry.register(prefixed_name, help, metric);
     }
 
     fn encode(&self) -> String {
-        let mut encoder = MetricEncoder::new();
-        encode(&mut encoder, &self.executor.registry.lock().unwrap()).expect("encoding failed");
-        encoder.into_string()
+        self.executor.registry.lock().encode()
     }
 
     fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        // Add the attribute to the list of attributes
         let mut attributes = self.attributes.clone();
         add_attribute(&mut attributes, key, value);
         Self {
             attributes,
+            ..self.clone()
+        }
+    }
+
+    fn with_scope(&self) -> Self {
+        // If already scoped, inherit the existing scope
+        if self.scope.is_some() {
+            return self.clone();
+        }
+
+        // RAII guard removes the scoped registry when all clones drop.
+        // Closure is infallible to avoid panicking in Drop.
+        let executor = self.executor.clone();
+        let scope_id = executor.registry.lock().create_scope();
+        let guard = Arc::new(ScopeGuard::new(scope_id, move |id| {
+            executor.registry.lock().remove_scope(id);
+        }));
+        Self {
+            scope: Some(guard),
             ..self.clone()
         }
     }

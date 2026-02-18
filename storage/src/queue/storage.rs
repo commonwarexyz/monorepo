@@ -347,12 +347,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Queue<E, V> {
 impl<E: Clock + Storage + Metrics + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         self.journal.commit().await?;
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         self.journal.sync().await?;
         self.journal.prune(self.ack_floor).await?;
         Ok(())
@@ -378,7 +378,7 @@ mod tests {
 
     fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
         Config {
-            partition: partition.to_string(),
+            partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),

@@ -155,7 +155,7 @@ fn fuzz(input: FuzzInput) {
             .unwrap();
 
             let fault_cfg = ctx.storage_fault_config();
-            *fault_cfg.write().unwrap() = deterministic::FaultConfig {
+            *fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(write_failure_rate),
                 ..Default::default()
@@ -240,7 +240,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|ctx| {
         let suffix = suffix.clone();
         async move {
-            *ctx.storage_fault_config().write().unwrap() = deterministic::FaultConfig::default();
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
             let db = CleanDb::init(
                 ctx.with_label("recovered"),

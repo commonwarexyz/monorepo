@@ -289,7 +289,7 @@ fn fuzz(input: FuzzInput) {
                             if let Some(cache_page_size) = cache_page_size_ref {
                                 let aligned_offset =
                                     (offset / cache_page_size as u64) * cache_page_size as u64;
-                                let _ = cache.cache(blob_id as u64, data, aligned_offset).await;
+                                let _ = cache.cache(blob_id as u64, data, aligned_offset);
                             }
                         }
                     }

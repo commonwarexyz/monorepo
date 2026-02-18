@@ -2,11 +2,8 @@
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
-use commonware_utils::channel::mpsc;
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    sync::Mutex,
-};
+use commonware_utils::{channel::mpsc, sync::Mutex};
+use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{error, warn};
 
 /// Relay is a mock for distributing artifacts between applications.
@@ -26,7 +23,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
 
     /// Deregisters all recipients without clearing the payloads.
     pub fn deregister_all(&self) {
-        let mut recipients = self.recipients.lock().unwrap();
+        let mut recipients = self.recipients.lock();
         recipients.clear();
     }
 
@@ -34,7 +31,7 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
     pub fn register(&self, public_key: P) -> mpsc::UnboundedReceiver<(D, Bytes)> {
         let (sender, receiver) = mpsc::unbounded_channel();
         {
-            let mut recipients = self.recipients.lock().unwrap();
+            let mut recipients = self.recipients.lock();
             match recipients.entry(public_key.clone()) {
                 Entry::Vacant(vacant) => {
                     vacant.insert(vec![sender]);
@@ -49,11 +46,11 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
     }
 
     /// Broadcasts a payload to all registered recipients.
-    pub async fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
+    pub fn broadcast(&self, sender: &P, (payload, data): (D, Bytes)) {
         // Send to all recipients
         let channels = {
             let mut channels = Vec::new();
-            let recipients = self.recipients.lock().unwrap();
+            let recipients = self.recipients.lock();
             for (public_key, channel) in recipients.iter() {
                 if public_key == sender {
                     continue;

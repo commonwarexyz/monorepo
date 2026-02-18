@@ -205,6 +205,39 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_concurrent_sync_does_not_report_success_while_flush_fails() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store = Ordinal::<_, FixedBytes<32>>::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize store");
+
+            store
+                .put(0, FixedBytes::new([42u8; 32]))
+                .await
+                .expect("Failed to put data");
+
+            // Force flush failure by removing the underlying blob before sync.
+            let section = 0u64.to_be_bytes();
+            context
+                .remove(&cfg.partition, Some(&section))
+                .await
+                .expect("Failed to remove blob");
+
+            // Both concurrent sync calls must observe the in-flight durability failure.
+            let (first, second) = futures::future::join(store.sync(), store.sync()).await;
+            assert!(first.is_err(), "first sync unexpectedly succeeded");
+            assert!(second.is_err(), "second sync unexpectedly succeeded");
+        });
+    }
+
+    #[test_traced]
     fn test_multiple_indices() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

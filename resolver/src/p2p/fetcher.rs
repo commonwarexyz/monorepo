@@ -580,9 +580,9 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
-        BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, RwLock,
+        BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{sync::RwLock, NZU32};
     use std::{fmt, sync::Arc, time::Duration};
 
     // Mock error type for testing
@@ -724,7 +724,7 @@ mod tests {
             };
 
             {
-                let rate_limiter = self.rate_limiter.write().await;
+                let rate_limiter = self.rate_limiter.write();
                 if let Err(not_until) = rate_limiter.check_key(peer) {
                     return Err(not_until.earliest_possible());
                 }

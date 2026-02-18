@@ -306,6 +306,13 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
     }
 
     /// Get the last entry for a section, if any.
+    ///
+    /// Returns `Ok(None)` if the section is empty.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    /// - [Error::SectionOutOfRange] if the section doesn't exist.
     pub async fn last(&self, section: u64) -> Result<Option<I>, Error> {
         self.index.last(section).await
     }
@@ -364,15 +371,17 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Rewind index first (this also removes sections after `section`)
         self.index.rewind(section, index_size).await?;
 
-        // Derive value size from last entry
-        let value_size = match self.index.last(section).await? {
-            Some(entry) => {
+        // Derive value size from last entry (section may not exist if empty)
+        let value_size = match self.index.last(section).await {
+            Ok(Some(entry)) => {
                 let (offset, size) = entry.value_location();
                 offset
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)?
             }
-            None => 0,
+            Ok(None) => 0,
+            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
+            Err(e) => return Err(e),
         };
 
         // Rewind values (this also removes sections after `section`)
@@ -387,15 +396,17 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         // Rewind index first
         self.index.rewind_section(section, index_size).await?;
 
-        // Derive value size from last entry
-        let value_size = match self.index.last(section).await? {
-            Some(entry) => {
+        // Derive value size from last entry (section may not exist if empty)
+        let value_size = match self.index.last(section).await {
+            Ok(Some(entry)) => {
                 let (offset, size) = entry.value_location();
                 offset
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)?
             }
-            None => 0,
+            Ok(None) => 0,
+            Err(Error::SectionOutOfRange(_)) if index_size == 0 => 0,
+            Err(e) => return Err(e),
         };
 
         // Rewind values
@@ -418,8 +429,7 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
                     .checked_add(u64::from(size))
                     .ok_or(Error::OffsetOverflow)
             }
-            Ok(None) => Ok(0),
-            Err(Error::SectionOutOfRange(_)) => Ok(0),
+            Ok(None) | Err(Error::SectionOutOfRange(_)) => Ok(0),
             Err(e) => Err(e),
         }
     }
@@ -518,8 +528,8 @@ mod tests {
 
     fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         Config {
-            index_partition: "test-index".to_string(),
-            value_partition: "test-values".to_string(),
+            index_partition: "test-index".into(),
+            value_partition: "test-values".into(),
             index_page_cache: CacheRef::from_pooler(pooler, NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
@@ -910,8 +920,8 @@ mod tests {
             // This allows corrupting just the last entry's page without affecting others.
             // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
             let cfg = Config {
-                index_partition: "test-index".to_string(),
-                value_partition: "test-values".to_string(),
+                index_partition: "test-index".into(),
+                value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -1450,8 +1460,8 @@ mod tests {
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
             let cfg = Config {
-                index_partition: "test-index".to_string(),
-                value_partition: "test-values".to_string(),
+                index_partition: "test-index".into(),
+                value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -1735,8 +1745,8 @@ mod tests {
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
             let cfg = Config {
-                index_partition: "test-index".to_string(),
-                value_partition: "test-values".to_string(),
+                index_partition: "test-index".into(),
+                value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -2462,8 +2472,8 @@ mod tests {
         executor.start(|context| async move {
             // Use page size = entry size so one entry per page
             let cfg = Config {
-                index_partition: "test-index".to_string(),
-                value_partition: "test-values".to_string(),
+                index_partition: "test-index".into(),
+                value_partition: "test-values".into(),
                 index_page_cache: CacheRef::from_pooler(
                     &context,
                     NZU16!(TestEntry::SIZE as u16),
@@ -2957,6 +2967,125 @@ mod tests {
                 .await
                 .expect("Failed to append to section 2");
             assert_eq!(pos, 0); // First entry in new section
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_to_zero_index_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            let entry = TestEntry::new(1, 0, 0);
+            oversized
+                .append(0, entry, &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync(0).await.expect("Failed to sync");
+
+            oversized
+                .rewind(0, 0)
+                .await
+                .expect("rewind to zero index_size must not fail");
+
+            assert_eq!(oversized.last(0).await.unwrap(), None);
+            assert_eq!(oversized.size(0).await.unwrap(), 0);
+            assert_eq!(oversized.value_size(0).await.unwrap(), 0);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_to_zero_on_missing_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            oversized
+                .rewind(0, 0)
+                .await
+                .expect("rewind on missing section must not fail");
+
+            assert!(matches!(
+                oversized.last(0).await,
+                Err(Error::SectionOutOfRange(0))
+            ));
+            assert_eq!(oversized.value_size(0).await.unwrap(), 0);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_nonzero_on_missing_section_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let result = oversized.rewind(0, 1).await;
+            assert!(
+                matches!(result, Err(Error::SectionOutOfRange(0))),
+                "nonzero index_size on missing section must fail, got: {result:?}"
+            );
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_rewind_section_nonzero_on_missing_section_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let result = oversized.rewind_section(0, 1).await;
+            assert!(
+                matches!(result, Err(Error::SectionOutOfRange(0))),
+                "nonzero index_size on missing section must fail, got: {result:?}"
+            );
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_last_pruned_section_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context, cfg).await.expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            oversized
+                .append(0, TestEntry::new(1, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized
+                .append(1, TestEntry::new(2, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized.sync_all().await.expect("Failed to sync");
+
+            oversized.prune(1).await.expect("Failed to prune");
+
+            assert!(matches!(
+                oversized.last(0).await,
+                Err(Error::AlreadyPrunedToSection(1))
+            ));
+            assert!(oversized.last(1).await.unwrap().is_some());
 
             oversized.destroy().await.expect("Failed to destroy");
         });

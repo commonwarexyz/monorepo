@@ -1,7 +1,7 @@
 use crate::{
     buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBuf, IoBufs, IoBufsMut,
-    RwLock,
 };
+use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -43,7 +43,7 @@ pub struct Write<B: Blob> {
     blob: B,
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
-    buffer: Arc<RwLock<Buffer>>,
+    buffer: Arc<AsyncRwLock<Buffer>>,
 
     /// Buffer pool used for internal allocations.
     pool: BufferPool,
@@ -55,7 +55,11 @@ impl<B: Blob> Write<B> {
     pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: Arc::new(RwLock::new(Buffer::new(size, capacity.get(), pool.clone()))),
+            buffer: Arc::new(AsyncRwLock::new(Buffer::new(
+                size,
+                capacity.get(),
+                pool.clone(),
+            ))),
             pool,
         }
     }

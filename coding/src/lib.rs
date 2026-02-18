@@ -14,7 +14,7 @@ commonware_macros::stability_scope!(ALPHA {
     use commonware_codec::{Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
-    use std::fmt::Debug;
+    use std::{fmt::Debug, num::NonZeroU16};
 
     mod no_coding;
     pub use no_coding::{Error as NoCodingError, NoCoding};
@@ -27,27 +27,26 @@ commonware_macros::stability_scope!(ALPHA {
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
     pub struct Config {
         /// The minimum number of shards needed to encode the data.
-        pub minimum_shards: u16,
+        pub minimum_shards: NonZeroU16,
         /// Extra shards beyond the minimum number.
         ///
         /// Alternatively, one can think of the configuration as having a total number
         /// `N = extra_shards + minimum_shards`, but by specifying the `extra_shards`
         /// rather than `N`, we avoid needing to check that `minimum_shards <= N`.
-        pub extra_shards: u16,
+        pub extra_shards: NonZeroU16,
     }
 
     impl Config {
         /// Returns the total number of shards produced by this configuration.
         pub fn total_shards(&self) -> u32 {
-            u32::from(self.minimum_shards) + u32::from(self.extra_shards)
+            u32::from(self.minimum_shards.get()) + u32::from(self.extra_shards.get())
         }
     }
 
     impl FixedSize for Config {
-        const SIZE: usize = 2 * <u16 as FixedSize>::SIZE;
+        const SIZE: usize = 2 * <NonZeroU16 as FixedSize>::SIZE;
     }
 
     impl Write for Config {
@@ -62,8 +61,20 @@ commonware_macros::stability_scope!(ALPHA {
 
         fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             Ok(Self {
-                minimum_shards: u16::read_cfg(buf, cfg)?,
-                extra_shards: u16::read_cfg(buf, cfg)?,
+                minimum_shards: NonZeroU16::read_cfg(buf, cfg)?,
+                extra_shards: NonZeroU16::read_cfg(buf, cfg)?,
+            })
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    impl<'a> arbitrary::Arbitrary<'a> for Config {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let minimum_shards = commonware_utils::NZU16!(u.int_in_range(1..=u16::MAX)?);
+            let extra_shards = commonware_utils::NZU16!(u.int_in_range(1..=u16::MAX)?);
+            Ok(Self {
+                minimum_shards,
+                extra_shards,
             })
         }
     }
@@ -85,12 +96,16 @@ commonware_macros::stability_scope!(ALPHA {
     /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
     /// use commonware_cryptography::Sha256;
     /// use commonware_parallel::Sequential;
+    /// use commonware_utils::NZU16;
     ///
     /// const STRATEGY: Sequential = Sequential;
     ///
     /// type RS = ReedSolomon<Sha256>;
     ///
-    /// let config = Config { minimum_shards: 2, extra_shards: 1 };
+    /// let config = Config {
+    ///     minimum_shards: NZU16!(2),
+    ///     extra_shards: NZU16!(1),
+    /// };
     /// let data = b"Hello!";
     /// // Turn the data into shards, and a commitment to those shards.
     /// let (commitment, shards) =
@@ -122,6 +137,27 @@ commonware_macros::stability_scope!(ALPHA {
     /// let data3 = RS::decode(&config, &commitment, checking_data, &checked_shards[1..], &STRATEGY).unwrap();
     /// assert_eq!(&data[..], &data3[..]);
     /// ```
+    ///
+    /// # Guarantees
+    ///
+    /// Here are additional properties that implementors of this trait need to
+    /// consider, and that users of this trait can rely on.
+    ///
+    /// ## Reshard vs Check
+    ///
+    /// [`Scheme::reshard`] and [`Scheme::check`] should agree, even for malicious encoders.
+    ///
+    /// It should not be possible for parties A and B to call `reshard` successfully,
+    /// but then have either of them fail on the other's shard when calling `check`.
+    ///
+    /// In other words, if an honest party considers their shard to be correctly
+    /// formed, then other honest parties which have successfully constructed their
+    /// checking data will also agree with the shard being correct.
+    ///
+    /// A violation of this property would be, for example, if a malicious payload
+    /// could convince two parties that they both have valid shards, but then the
+    /// checking data they produce from the malicious payload reports issues with
+    /// those shards.
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
@@ -218,6 +254,7 @@ mod test {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
     use proptest::{
         prelude::{any, prop, Just, ProptestConfig},
         proptest,
@@ -279,8 +316,8 @@ mod test {
         assert_eq!(decoded, data);
     }
 
-    fn roundtrip_strategy(min_extra: u16) -> impl PStrategy<Value = (Config, Vec<u8>, Vec<u16>)> {
-        (1u16..=MAX_SHARDS, min_extra..=MAX_SHARDS).prop_flat_map(|(min_shards, extra_shards)| {
+    fn roundtrip_strategy() -> impl PStrategy<Value = (Config, Vec<u8>, Vec<u16>)> {
+        (1u16..=MAX_SHARDS, 1u16..=MAX_SHARDS).prop_flat_map(|(min_shards, extra_shards)| {
             let total = min_shards + extra_shards;
             let all_indices: Vec<u16> = (0..total).collect();
             let indices = (min_shards as usize..=total as usize)
@@ -288,8 +325,8 @@ mod test {
             let data = prop::collection::vec(any::<u8>(), 0..=MAX_DATA);
             (
                 Just(Config {
-                    minimum_shards: min_shards,
-                    extra_shards,
+                    minimum_shards: NZU16!(min_shards),
+                    extra_shards: NZU16!(extra_shards),
                 }),
                 data,
                 indices,
@@ -300,8 +337,8 @@ mod test {
     #[test]
     fn roundtrip_empty_data() {
         let config = Config {
-            minimum_shards: 30,
-            extra_shards: 70,
+            minimum_shards: NZU16!(30),
+            extra_shards: NZU16!(70),
         };
         let selected: Vec<u16> = (0..30).collect();
 
@@ -314,8 +351,8 @@ mod test {
     #[test]
     fn roundtrip_2_pow_16_25_total_shards() {
         let config = Config {
-            minimum_shards: 8,
-            extra_shards: 17,
+            minimum_shards: NZU16!(8),
+            extra_shards: NZU16!(17),
         };
         let data = vec![0x67; 1 << 16];
         let selected: Vec<u16> = (0..8).collect();
@@ -328,24 +365,23 @@ mod test {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
-        // Reed-Solomon requires extra_shards >= 1 (i.e., total > min).
         #[test]
         fn proptest_roundtrip_reed_solomon(
-            (config, data, selected) in roundtrip_strategy(1)
+            (config, data, selected) in roundtrip_strategy()
         ) {
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
         }
 
         #[test]
         fn proptest_roundtrip_no_coding(
-            (config, data, selected) in roundtrip_strategy(0)
+            (config, data, selected) in roundtrip_strategy()
         ) {
             roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
         }
 
         #[test]
         fn proptest_roundtrip_zoda(
-            (config, data, selected) in roundtrip_strategy(0)
+            (config, data, selected) in roundtrip_strategy()
         ) {
             roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
         }

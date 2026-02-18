@@ -190,8 +190,7 @@ impl<
                     responder,
                 } => {
                     trace!("mailbox: subscribe");
-                    self.handle_subscribe(peer, commitment, digest, responder)
-                        .await;
+                    self.handle_subscribe(peer, commitment, digest, responder);
                 }
                 Message::Get {
                     peer,
@@ -200,7 +199,7 @@ impl<
                     responder,
                 } => {
                     trace!("mailbox: get");
-                    self.handle_get(peer, commitment, digest, responder).await;
+                    self.handle_get(peer, commitment, digest, responder);
                 }
             },
             // Handle incoming messages
@@ -229,7 +228,7 @@ impl<
                     .peer
                     .get_or_create(&SequencerLabel::from(&peer))
                     .inc();
-                self.handle_network(peer, msg).await;
+                self.handle_network(peer, msg);
             },
         }
     }
@@ -304,7 +303,7 @@ impl<
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_subscribe(
+    fn handle_subscribe(
         &mut self,
         peer: Option<P>,
         commitment: M::Commitment,
@@ -327,7 +326,7 @@ impl<
     }
 
     /// Handles a `get` request from the application.
-    async fn handle_get(
+    fn handle_get(
         &mut self,
         peer: Option<P>,
         commitment: M::Commitment,
@@ -339,7 +338,7 @@ impl<
     }
 
     /// Handles a message that was received from a peer.
-    async fn handle_network(&mut self, peer: P, msg: M) {
+    fn handle_network(&mut self, peer: P, msg: M) {
         if !self.insert_message(peer.clone(), msg) {
             debug!(?peer, "message already stored");
             self.metrics.receive.inc(Status::Dropped);
