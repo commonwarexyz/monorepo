@@ -125,7 +125,8 @@ impl<B: Block, A: Acknowledgement> PendingAcks<B, A> {
 
     /// Returns whether we can dispatch another block without exceeding capacity.
     fn has_capacity(&self) -> bool {
-        usize::from(self.current.is_some()) + self.queue.len() < self.max
+        let reserved = usize::from(self.current.is_some());
+        self.queue.len() < self.max - reserved
     }
 
     /// Returns the next height to dispatch while preserving sequential order.
