@@ -64,6 +64,8 @@
 
 pub mod actor;
 pub use actor::Actor;
+mod buffer;
+pub use buffer::{Buffer, NoOp};
 pub mod cache;
 pub mod config;
 pub use config::Config;
@@ -104,6 +106,7 @@ pub mod mocks;
 mod tests {
     use super::{
         actor,
+        buffer::NoOp,
         config::Config,
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
@@ -271,24 +274,6 @@ mod tests {
         };
         let resolver = resolver::init(&context, resolver_cfg, backfill);
 
-        // Optionally create a buffered broadcast engine and mailbox.
-        let buffer = if use_buffer {
-            let broadcast_config = buffered::Config {
-                public_key: validator.clone(),
-                mailbox_size: config.mailbox_size,
-                deque_size: 10,
-                priority: false,
-                codec_config: (),
-            };
-            let (broadcast_engine, buffer) =
-                buffered::Engine::new(context.clone(), broadcast_config);
-            let network = control.register(2, TEST_QUOTA).await.unwrap();
-            broadcast_engine.start(network);
-            Some(buffer)
-        } else {
-            None
-        };
-
         // Initialize finalizations by height
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
@@ -372,6 +357,7 @@ mod tests {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
+        let mailbox_size = config.mailbox_size;
         let (actor, mailbox, processed_height) = actor::Actor::init(
             context.clone(),
             finalizations_by_height,
@@ -380,8 +366,22 @@ mod tests {
         )
         .await;
 
-        // Start the application
-        actor.start(application.clone(), buffer, resolver);
+        // Start the application.
+        if use_buffer {
+            let broadcast_config = buffered::Config {
+                public_key: validator.clone(),
+                mailbox_size,
+                deque_size: 10,
+                priority: false,
+                codec_config: (),
+            };
+            let (broadcast_engine, buffer) = buffered::Engine::new(context, broadcast_config);
+            let network = control.register(2, TEST_QUOTA).await.unwrap();
+            broadcast_engine.start(network);
+            actor.start(application.clone(), buffer, resolver);
+        } else {
+            actor.start(application.clone(), NoOp, resolver);
+        }
 
         (application, mailbox, processed_height)
     }
@@ -1015,7 +1015,7 @@ mod tests {
                     )
                     .await;
                     let application = Application::<B>::default();
-                    actor.start(application.clone(), Some(buffer), resolver);
+                    actor.start(application.clone(), buffer, resolver);
 
                     (mailbox, application)
                 }

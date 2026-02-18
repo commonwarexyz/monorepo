@@ -397,7 +397,7 @@ where
         let buffer_handle = self.buffer.start(broadcast);
         let marshal_handle =
             self.marshal
-                .start(self.dkg_mailbox, Some(self.buffered_mailbox), marshal);
+                .start(self.dkg_mailbox, self.buffered_mailbox, marshal);
         let orchestrator_handle = self.orchestrator.start(votes, certificates, resolver);
 
         if let Err(e) = try_join_all(vec![
