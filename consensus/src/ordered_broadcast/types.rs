@@ -372,6 +372,10 @@ impl Namespace for AckNamespace {
 /// Note: epoch is NOT included here because the p2p channel is already muxed by epoch,
 /// so including it in the signature is redundant. Not signing over epoch allows
 /// certificates to be verified without knowing the epoch.
+///
+/// Replay resistance still holds for the signed statement: signatures are domain
+/// separated with the ack namespace and bind the chunk `(sequencer, height, payload)`.
+/// The protocol also validates sender identity and epoch routing before accepting an ack.
 #[derive(Debug, Clone)]
 pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
@@ -766,7 +770,9 @@ where
 ///
 /// Note: The epoch is included in the message for routing purposes but is NOT
 /// signed over. The p2p channel is already muxed by epoch, making it redundant
-/// to include in the signature.
+/// to include in the signature. Replay resistance comes from signing the
+/// domain-separated chunk statement and from sender/epoch validation during
+/// ack processing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being acknowledged.
