@@ -2019,7 +2019,7 @@ mod tests {
             );
 
             // Verify conflicting evidence was reported via faults
-            let faults = reporter.faults.lock().unwrap();
+            let faults = reporter.faults.lock();
             let has_expected_fault = faults
                 .get(&sender_pk)
                 .and_then(|sf| sf.get(&view))

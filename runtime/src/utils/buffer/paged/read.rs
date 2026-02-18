@@ -333,7 +333,7 @@ impl<B: Blob> Replay<B> {
 
     /// Seeks to `offset` in the blob, returning `Err(BlobInsufficientLength)` if `offset` exceeds
     /// the blob size.
-    pub async fn seek_to(&mut self, offset: u64) -> Result<(), Error> {
+    pub fn seek_to(&mut self, offset: u64) -> Result<(), Error> {
         if offset > self.reader.blob_size() {
             return Err(Error::BlobInsufficientLength);
         }
@@ -557,21 +557,21 @@ mod tests {
             let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
 
             // Seek forward, read, then seek backward
-            replay.seek_to(150).await.unwrap();
+            replay.seek_to(150).unwrap();
             replay.ensure(50).await.unwrap();
             assert_eq!(replay.get_u8(), data[150]);
 
             // Seek back to start
-            replay.seek_to(0).await.unwrap();
+            replay.seek_to(0).unwrap();
             replay.ensure(1).await.unwrap();
             assert_eq!(replay.get_u8(), data[0]);
 
             // Seek beyond blob size should error
-            assert!(replay.seek_to(data.len() as u64 + 1).await.is_err());
+            assert!(replay.seek_to(data.len() as u64 + 1).is_err());
 
             // Test that remaining() is correct after seek by reading all data.
             let seek_offset = 150usize;
-            replay.seek_to(seek_offset as u64).await.unwrap();
+            replay.seek_to(seek_offset as u64).unwrap();
             let expected_remaining = data.len() - seek_offset;
             // Read all bytes and verify content
             let mut collected = Vec::new();

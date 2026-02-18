@@ -7,7 +7,8 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Persistable as JournalPersistable, Reader},
+        contiguous::{Contiguous, Mutable, Reader},
+        Error as JournalError,
     },
     mmr::{Location, Proof},
     qmdb::{
@@ -128,8 +129,8 @@ where
     D: DurabilityState,
     Operation<K, V, U>: Codec,
 {
-    pub async fn root(&self) -> H::Digest {
-        self.log.root().await
+    pub fn root(&self) -> H::Digest {
+        self.log.root()
     }
 
     pub async fn proof(
@@ -181,7 +182,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
@@ -347,7 +348,7 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     M: MerkleizationState<DigestOf<H>>,
@@ -493,19 +494,19 @@ where
     K: Array,
     V: ValueEncoding,
     U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + JournalPersistable,
+    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<K, V, U>: Codec,
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&self) -> Result<(), Error> {
         // No-op, DB already in recoverable state.
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
         Self::sync(self).await
     }
 
@@ -529,8 +530,8 @@ where
     type Digest = H::Digest;
     type Operation = Operation<K, V, U>;
 
-    async fn root(&self) -> H::Digest {
-        self.root().await
+    fn root(&self) -> H::Digest {
+        self.root()
     }
 
     async fn historical_proof(

@@ -173,7 +173,7 @@ mod tests {
 
             // Check that all peers received the message
             for peer in peers.iter() {
-                let mut mailbox = mailboxes.get(peer).unwrap().clone();
+                let mailbox = mailboxes.get(peer).unwrap().clone();
                 let commitment = message.commitment();
                 let receiver = mailbox.subscribe(None, commitment, None).await;
                 let received_message = receiver.await.ok();
@@ -194,7 +194,7 @@ mod tests {
             // Check that all peers received the new message
             let mut found = 0;
             for peer in peers.iter() {
-                let mut mailbox = mailboxes.get(peer).unwrap().clone();
+                let mailbox = mailboxes.get(peer).unwrap().clone();
                 let commitment = message.commitment();
                 let receiver = mailbox.get(None, commitment, None).await;
                 if !receiver.is_empty() {
@@ -285,7 +285,7 @@ mod tests {
                 // Check if all peers received the message
                 let mut all_received = true;
                 for peer in peers.iter() {
-                    let mut mailbox = mailboxes.get(peer).unwrap().clone();
+                    let mailbox = mailboxes.get(peer).unwrap().clone();
                     let receiver = mailbox.subscribe(None, commitment, None).await;
                     let has = match context.timeout(A_JIFFY, receiver).await {
                         Ok(r) => r.is_ok(),
@@ -327,7 +327,7 @@ mod tests {
 
             // Get from cache (should be instant)
             let commitment = message.commitment();
-            let mut mailbox = mailboxes.get(peers.last().unwrap()).unwrap().clone();
+            let mailbox = mailboxes.get(peers.last().unwrap()).unwrap().clone();
             let receiver = mailbox.subscribe(None, commitment, None).await;
             let start = context.current();
             let received = receiver.await.expect("failed to get cached message");
@@ -349,7 +349,7 @@ mod tests {
             let message = TestMessage::shared(b"future message");
             let commitment = message.commitment();
             let mut mailbox1 = mailboxes.get(&peers[0]).unwrap().clone();
-            let mut mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
+            let mailbox2 = mailboxes.get(&peers[1]).unwrap().clone();
             let receiver = mailbox1.subscribe(None, commitment, None).await;
 
             // Create two other requests which are dropped
@@ -394,7 +394,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Check all other messages exist
-            let mut peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
+            let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             for msg in messages.iter().skip(1) {
                 let result = peer_mailbox
                     .subscribe(None, msg.commitment(), None)
@@ -427,7 +427,7 @@ mod tests {
 
             // Assign mailboxes for peers A, B, C
             let mut mailbox_a = mailboxes.get(&peers[0]).unwrap().clone();
-            let mut mailbox_b = mailboxes.get(&peers[1]).unwrap().clone();
+            let mailbox_b = mailboxes.get(&peers[1]).unwrap().clone();
             let mut mailbox_c = mailboxes.get(&peers[2]).unwrap().clone();
 
             // Create and broadcast message M1 from A
@@ -536,7 +536,7 @@ mod tests {
             let sender3 = peers[2].clone();
 
             let mut mb1 = mailboxes.get(&sender1).unwrap().clone();
-            let mut mb2 = mailboxes.get(&sender2).unwrap().clone();
+            let mb2 = mailboxes.get(&sender2).unwrap().clone();
             let mut mb3 = mailboxes.get(&sender3).unwrap().clone();
 
             let msg = TestMessage::shared(b"from-one");
@@ -578,7 +578,7 @@ mod tests {
             let sender2 = peers[1].clone();
 
             let mut mb1 = mailboxes.get(&sender1).unwrap().clone();
-            let mut mb2 = mailboxes.get(&sender2).unwrap().clone();
+            let mb2 = mailboxes.get(&sender2).unwrap().clone();
 
             // Two messages share commitment but have distinct digests.
             let m1 = TestMessage::new(b"id", b"content-1");
@@ -690,7 +690,7 @@ mod tests {
 
             let mut mb0 = mailboxes.get(&p0).unwrap().clone();
             let mut mb1 = mailboxes.get(&p1).unwrap().clone();
-            let mut obs = mailboxes.get(&observer).unwrap().clone();
+            let obs = mailboxes.get(&observer).unwrap().clone();
 
             // the message duplicated by p0 and p1
             let dup = TestMessage::shared(b"dup");
@@ -742,7 +742,7 @@ mod tests {
 
             let mut mb_owner = mailboxes.get(&owner).unwrap().clone();
             let mut mb_spoiler = mailboxes.get(&spoiler).unwrap().clone();
-            let mut mb_waiter = mailboxes.get(&waiter).unwrap().clone();
+            let mb_waiter = mailboxes.get(&waiter).unwrap().clone();
 
             // two messages share commitment but differ in digest
             let wanted = TestMessage::new(b"same-id", b"wanted");
@@ -899,7 +899,7 @@ mod tests {
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Verify message received
-            let mut peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
+            let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             let received = peer_mailbox.get(None, message.commitment(), None).await;
             assert_eq!(received, vec![message]);
 

@@ -8,6 +8,7 @@ use crate::{
         types::{Certificate, Notarize, Proposal, Vote},
     },
     types::{Epoch, Participant, Round, View},
+    Viewable,
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{certificate, Hasher};
@@ -89,12 +90,12 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
             .unwrap()
             {
                 Certificate::Notarization(notarization) => (
-                    notarization.proposal.round.view(),
+                    notarization.view(),
                     notarization.proposal.payload,
                     notarization.certificate,
                 ),
                 Certificate::Finalization(finalization) => (
-                    finalization.proposal.round.view(),
+                    finalization.view(),
                     finalization.proposal.payload,
                     finalization.certificate,
                 ),
@@ -145,8 +146,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 .participants()
                 .key(self.scheme.me().unwrap())
                 .unwrap();
-            self.relay.broadcast(me, (digest_a, payload_a)).await;
-            self.relay.broadcast(me, (digest_b, payload_b)).await;
+            self.relay.broadcast(me, (digest_a, payload_a));
+            self.relay.broadcast(me, (digest_b, payload_b));
 
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");

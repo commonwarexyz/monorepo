@@ -36,7 +36,7 @@
 //! An authenticated database implements [store::LogStore] in every state, and keyed databases
 //! additionally implement [crate::kv::Gettable]. Additional functionality in other states includes:
 //!
-//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [super::Persistable]
+//! - Clean: [store::MerkleizedStore], [store::PrunableStore], [crate::Persistable]
 //! - (Merkleized,NonDurable): [store::MerkleizedStore], [store::PrunableStore]
 //!
 //! Keyed databases additionally implement:

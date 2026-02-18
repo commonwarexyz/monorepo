@@ -142,7 +142,7 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    async fn setup_and_spawn_engine(
+    fn setup_and_spawn_engine(
         context: &deterministic::Context,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
@@ -203,8 +203,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
@@ -219,8 +218,7 @@ mod tests {
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
                 handler,
-            )
-            .await;
+            );
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
@@ -270,8 +268,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
@@ -286,8 +283,7 @@ mod tests {
                 (req_conn, res_conn),
                 MockMonitor::dummy(),
                 handler,
-            )
-            .await;
+            );
 
             // Send request from peer 1 to peer 2
             let request = Request { id: 1, data: 1 };
@@ -339,8 +335,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -355,8 +350,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Setup peer 3
             let scheme3 = schemes.next().unwrap();
@@ -371,8 +365,7 @@ mod tests {
                 (req_conn3, res_conn3),
                 MockMonitor::dummy(),
                 handler3,
-            )
-            .await;
+            );
 
             // Broadcast request
             let request = Request { id: 3, data: 3 };
@@ -433,8 +426,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -449,8 +441,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send the same request multiple times
             let request = Request { id: 5, data: 5 };
@@ -505,8 +496,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
@@ -523,8 +513,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send multiple concurrent requests
             let request1 = Request { id: 10, data: 10 };
@@ -588,8 +577,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2 with handler that doesn't respond
             let scheme2 = schemes.next().unwrap();
@@ -604,8 +592,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Send request
             let request = Request { id: 100, data: 100 };
@@ -654,8 +641,7 @@ mod tests {
                 (req_conn, res_conn),
                 mon,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Send request with empty recipients list
             let request = Request { id: 1, data: 1 };
@@ -790,8 +776,7 @@ mod tests {
                 (req_conn1, res_conn1),
                 mon1,
                 MockHandler::dummy(),
-            )
-            .await;
+            );
 
             // Setup peer 2 (legitimate responder)
             let scheme2 = schemes.next().unwrap();
@@ -806,8 +791,7 @@ mod tests {
                 (req_conn2, res_conn2),
                 MockMonitor::dummy(),
                 handler2,
-            )
-            .await;
+            );
 
             // Setup peer 3 (will respond with same commitment as peer 2's request)
             let conn3 = connections.next().unwrap();

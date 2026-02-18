@@ -2,8 +2,8 @@
 
 use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::{Bytes, BytesMut};
-use commonware_utils::channel::oneshot;
-use std::sync::{Arc, Mutex};
+use commonware_utils::{channel::oneshot, sync::Mutex};
+use std::sync::Arc;
 
 /// Default read buffer size for the stream's local buffer (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
@@ -63,7 +63,7 @@ pub struct Sink {
 impl SinkTrait for Sink {
     async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let (os_send, data) = {
-            let mut channel = self.channel.lock().unwrap();
+            let mut channel = self.channel.lock();
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
@@ -101,7 +101,7 @@ impl SinkTrait for Sink {
 
 impl Drop for Sink {
     fn drop(&mut self) {
-        let mut channel = self.channel.lock().unwrap();
+        let mut channel = self.channel.lock();
         channel.sink_alive = false;
 
         // If there is a waiter, resolve it by dropping the oneshot sender.
@@ -119,7 +119,7 @@ pub struct Stream {
 impl StreamTrait for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let os_recv = {
-            let mut channel = self.channel.lock().unwrap();
+            let mut channel = self.channel.lock();
 
             // Pull data from channel buffer into local buffer.
             if !channel.buffer.is_empty() {
@@ -168,7 +168,7 @@ impl StreamTrait for Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        let mut channel = self.channel.lock().unwrap();
+        let mut channel = self.channel.lock();
         channel.stream_alive = false;
     }
 }

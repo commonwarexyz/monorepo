@@ -357,13 +357,11 @@ impl<
                     }
                 };
                 match msg.payload {
-                    wire::Payload::Request(key) => {
-                        self.handle_network_request(peer, msg.id, key).await
-                    }
+                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
                     wire::Payload::Response(response) => {
                         self.handle_network_response(peer, msg.id, response).await
                     }
-                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
+                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
         }
@@ -399,7 +397,7 @@ impl<
     }
 
     /// Handle a network request from a peer.
-    async fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
+    fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
@@ -446,7 +444,7 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(&mut self, peer: P, id: u64) {
+    fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any

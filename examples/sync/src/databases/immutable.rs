@@ -117,8 +117,8 @@ where
         unreachable!("operations must end with a commit");
     }
 
-    async fn root(&self) -> Key {
-        self.root().await
+    fn root(&self) -> Key {
+        self.root()
     }
 
     async fn size(&self) -> Location {

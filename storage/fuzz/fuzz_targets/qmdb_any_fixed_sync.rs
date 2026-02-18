@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, RwLock,
-};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     qmdb::{
         any::{
@@ -134,7 +132,7 @@ async fn test_sync<
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {
-        let actual_root = synced.root().await;
+        let actual_root = synced.root();
         assert_eq!(
             actual_root, expected_root,
             "Synced root must match target root"
@@ -218,11 +216,11 @@ fn fuzz(mut input: FuzzInput) {
                     let clean_db = durable_db.into_merkleized();
 
                     let target = sync::Target {
-                        root: clean_db.root().await,
+                        root: clean_db.root(),
                         range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(RwLock::new(clean_db));
+                    let wrapped_src = Arc::new(clean_db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -234,7 +232,6 @@ fn fuzz(mut input: FuzzInput) {
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_inner()
                         .into_mutable();
                     sync_id += 1;
                 }

@@ -4,16 +4,20 @@
 //! On init, only the last section needs to be replayed to determine the exact size.
 
 use super::Reader as _;
-use crate::journal::{
-    contiguous::{fixed, Contiguous, Mutable, Persistable},
-    segmented::variable,
-    Error,
+use crate::{
+    journal::{
+        contiguous::{fixed, Contiguous, Mutable},
+        segmented::variable,
+        Error,
+    },
+    Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{
-    buffer::paged::CacheRef, Clock, Metrics, RwLock, RwLockReadGuard, RwLockWriteGuard, Storage,
+use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_utils::{
+    sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock},
+    NZUsize,
 };
-use commonware_utils::NZUsize;
 #[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
 use futures::{stream, Stream, StreamExt as _};
@@ -185,7 +189,7 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     ///
     /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
     /// race conditions while allowing concurrent reads during sync.
-    inner: RwLock<Inner<E, V>>,
+    inner: UpgradableAsyncRwLock<Inner<E, V>>,
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
@@ -202,7 +206,7 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
 pub struct Reader<'a, E: Clock + Storage + Metrics, V: Codec> {
-    guard: RwLockReadGuard<'a, Inner<E, V>>,
+    guard: AsyncRwLockReadGuard<'a, Inner<E, V>>,
     offsets: fixed::Reader<'a, E, u64>,
     items_per_section: u64,
 }
@@ -300,7 +304,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             Self::align_journals(&mut data, &mut offsets, items_per_section).await?;
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: UpgradableAsyncRwLock::new(Inner {
                 data,
                 size,
                 pruning_boundary,
@@ -343,7 +347,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
         .await?;
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: UpgradableAsyncRwLock::new(Inner {
                 data,
                 size,
                 pruning_boundary: size,
@@ -529,7 +533,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 
         // The section was filled and must be synced. Downgrade so readers can continue during the
         // sync while mutators remain blocked.
-        let inner = RwLockWriteGuard::downgrade_to_upgradable(inner);
+        let inner = inner.downgrade_to_upgradable();
         futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
 
         Ok(position)
@@ -914,6 +918,8 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
 }
 
 impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
+    type Error = Error;
+
     async fn commit(&self) -> Result<(), Error> {
         self.commit().await
     }

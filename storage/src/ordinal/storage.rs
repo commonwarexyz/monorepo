@@ -8,7 +8,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     Blob, Buf, BufMut, BufferPooler, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::{bitmap::BitMap, hex};
+use commonware_utils::{bitmap::BitMap, hex, sync::AsyncMutex};
 use futures::future::try_join_all;
 use prometheus_client::metrics::counter::Counter;
 use std::{
@@ -80,8 +80,10 @@ pub struct Ordinal<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cf
     // RMap for interval tracking
     intervals: RMap,
 
-    // Pending index entries to be synced, grouped by section
-    pending: BTreeSet<u64>,
+    // Pending sections to be synced. The async mutex serializes
+    // concurrent sync calls so a second sync cannot return before
+    // the first has finished flushing.
+    pending: AsyncMutex<BTreeSet<u64>>,
 
     // Metrics
     puts: Counter,
@@ -240,7 +242,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
             config,
             blobs,
             intervals,
-            pending: BTreeSet::new(),
+            pending: AsyncMutex::new(BTreeSet::new()),
             puts,
             gets,
             has,
@@ -276,7 +278,7 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::new(value);
         blob.write_at(offset, record.encode_mut()).await?;
-        self.pending.insert(section);
+        self.pending.lock().await.insert(section);
 
         // Add to intervals
         self.intervals.insert(index);
@@ -379,24 +381,33 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixed<Cfg = ()>> Ordin
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
+        self.pending
+            .lock()
+            .await
+            .retain(|&section| section >= min_section);
 
         Ok(())
     }
 
     /// Write all pending entries and sync all modified [Blob]s.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         self.syncs.inc();
 
-        // Sync all modified blobs
-        let mut futures = Vec::with_capacity(self.pending.len());
-        for &section in &self.pending {
-            futures.push(self.blobs.get(&section).unwrap().sync());
+        // Hold the lock across the entire flush so a concurrent sync
+        // cannot return before durability is established.
+        let mut pending = self.pending.lock().await;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut futures = Vec::with_capacity(pending.len());
+        for section in pending.iter() {
+            futures.push(self.blobs.get(section).unwrap().sync());
         }
         try_join_all(futures).await?;
 
-        // Clear pending sections
-        self.pending.clear();
+        // Clear pending sections.
+        pending.clear();
 
         Ok(())
     }
@@ -446,11 +457,11 @@ impl<E: BufferPooler + Storage + Metrics + Clock, V: CodecFixedShared> Persistab
 {
     type Error = Error;
 
-    async fn commit(&mut self) -> Result<(), Self::Error> {
+    async fn commit(&self) -> Result<(), Self::Error> {
         self.sync().await
     }
 
-    async fn sync(&mut self) -> Result<(), Self::Error> {
+    async fn sync(&self) -> Result<(), Self::Error> {
         self.sync().await
     }
 

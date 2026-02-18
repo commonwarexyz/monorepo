@@ -212,7 +212,7 @@ where
     reporters
         .iter()
         .map(|reporter| {
-            let notarizations = reporter.notarizations.lock().unwrap();
+            let notarizations = reporter.notarizations.lock();
             let notarization_data = notarizations
                 .iter()
                 .map(|(view, cert)| {
@@ -229,7 +229,7 @@ where
                 })
                 .collect();
 
-            let nullifications = reporter.nullifications.lock().unwrap();
+            let nullifications = reporter.nullifications.lock();
             let nullification_data = nullifications
                 .iter()
                 .map(|(view, cert)| {
@@ -245,7 +245,7 @@ where
                 })
                 .collect();
 
-            let finalizations = reporter.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock();
             let finalization_data = finalizations
                 .iter()
                 .map(|(view, cert)| {
