@@ -505,12 +505,12 @@ impl<B: Blob> Append<B> {
         &self,
         logical_offset: u64,
         len: usize,
-        buf: impl Into<IoBufMut> + Send,
+        bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        let mut buf = buf.into();
+        let mut bufs = bufs.into();
         if len == 0 {
-            buf.truncate(0);
-            return Ok((buf, 0));
+            bufs.truncate(0);
+            return Ok((bufs, 0));
         }
         let blob_size = self.size().await;
         let available = (blob_size.saturating_sub(logical_offset) as usize).min(len);
@@ -518,10 +518,10 @@ impl<B: Blob> Append<B> {
             return Err(Error::BlobInsufficientLength);
         }
         // SAFETY: read_into below fills all `available` bytes.
-        unsafe { buf.set_len(available) };
-        self.read_into(buf.as_mut(), logical_offset).await?;
+        unsafe { bufs.set_len(available) };
+        self.read_into(bufs.as_mut(), logical_offset).await?;
 
-        Ok((buf, available))
+        Ok((bufs, available))
     }
 
     /// Reads bytes starting at `logical_offset` into `buf`.
@@ -791,25 +791,21 @@ impl<B: Blob> Blob for Append<B> {
         &self,
         logical_offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut buf = buf.into();
+        let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via read_into below.
-        unsafe { buf.set_len(len) };
-        match buf {
-            IoBufsMut::Single(mut single) => {
-                self.read_into(single.as_mut(), logical_offset).await?;
-                Ok(IoBufsMut::Single(single))
-            }
-            IoBufsMut::Chunked(chunks) => {
-                // Read into a temporary buffer and copy back to preserve structure
-                // SAFETY: read_into below initializes all `len` bytes.
-                let mut temp = unsafe { self.cache_ref.pool().alloc_len(len) };
-                self.read_into(temp.as_mut(), logical_offset).await?;
-                let mut bufs = IoBufsMut::Chunked(chunks);
-                bufs.copy_from_slice(temp.as_ref());
-                Ok(bufs)
-            }
+        unsafe { bufs.set_len(len) };
+        if let Some(buf) = bufs.as_single_mut() {
+            self.read_into(buf.as_mut(), logical_offset).await?;
+            Ok(bufs)
+        } else {
+            // Read into a temporary contiguous buffer and copy back to preserve structure.
+            // SAFETY: read_into below initializes all `len` bytes.
+            let mut temp = unsafe { self.cache_ref.pool().alloc_len(len) };
+            self.read_into(temp.as_mut(), logical_offset).await?;
+            bufs.copy_from_slice(temp.as_ref());
+            Ok(bufs)
         }
     }
 
@@ -829,7 +825,7 @@ impl<B: Blob> Blob for Append<B> {
     }
 
     /// This [Blob] trait method is unimplemented by [Append] and unconditionally panics.
-    async fn write_at(&self, _offset: u64, _buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn write_at(&self, _offset: u64, _bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         // TODO(<https://github.com/commonwarexyz/monorepo/issues/1207>): Extend the page cache to
         // support arbitrary writes.
         unimplemented!("append-only blob type does not support write_at")
