@@ -273,7 +273,7 @@ where
                 value_write_buffer: WRITE_BUFFER,
                 block_codec_config: num_participants,
                 max_repair: MAX_REPAIR,
-                max_pending_acks: NZUsize!(16),
+                max_pending_acks: NZUsize!(1),
                 strategy: config.strategy.clone(),
             },
         )
