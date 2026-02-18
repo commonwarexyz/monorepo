@@ -391,7 +391,7 @@ impl IoUringLoop {
                 let op = match self.receiver.try_recv() {
                     Ok(work_item) => work_item,
                     Err(TryRecvError::Disconnected) => {
-                        self.drain(&mut ring);
+                        self.drain_ring(&mut ring);
                         return;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -569,7 +569,7 @@ impl IoUringLoop {
     /// Process `ring` completions until all pending operations are complete or
     /// until `cfg.shutdown_timeout` fires. If `cfg.shutdown_timeout` is None, wait
     /// indefinitely.
-    fn drain(&mut self, ring: &mut IoUring) {
+    fn drain_ring(&mut self, ring: &mut IoUring) {
         while !self.waiters.is_empty() {
             // When op_timeout is set, each operation uses 2 SQ entries
             // (op + linked timeout).
@@ -584,11 +584,7 @@ impl IoUringLoop {
                 .expect("unable to submit to ring");
 
             loop {
-                let cqe = {
-                    let mut completion = ring.completion();
-                    completion.next()
-                };
-                let Some(cqe) = cqe else {
+                let Some(cqe) = ring.completion().next() else {
                     break;
                 };
                 self.handle_cqe(ring, cqe);
