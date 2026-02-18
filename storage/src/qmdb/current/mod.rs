@@ -1870,6 +1870,148 @@ pub mod tests {
         }};
     }
 
+    // Verify that prune() does not discard the "transition" commit -- the commit
+    // where pruned_chunks crosses the min_safe threshold during its dirty period.
+    //
+    // Setup:
+    //   Round 1: write 256 unique keys (fills bitmap chunk 0, all active)
+    //   Round 2: rewrite same 256 keys (chunk 0 becomes all-inactive, chunk 1 active)
+    //            merkleize prunes chunk 0: diff.pruned_chunks=0, post-commit pruned=1
+    //   Round 3: write 1 more key to create a newer commit
+    //   Prune ops to inactivity floor (>= 256), so min_safe >= 1
+    //
+    // The round-2 commit is the transition commit. Its post-commit pruned_chunks (1)
+    // meets min_safe, so it must survive pruning and produce a valid historical proof.
+    macro_rules! test_historical_proof_prune_keeps_transition_commit {
+        ($ctx:expr, $l:literal, $db:ty, $cfg:ident) => {{
+            let p = concat!($l, "_hp_tc");
+            Box::pin(async {
+                let mut hasher = StandardHasher::<Sha256>::new();
+                let db: $db = open_db_fn!($db, $cfg)($ctx.with_label($l), p.into()).await;
+                let mut db = db.into_mutable();
+
+                // Round 1: write 256 unique keys (fills chunk 0).
+                for k in 0u16..256 {
+                    let key = Sha256::fill(k as u8);
+                    let value = Sha256::fill(k.wrapping_add(100) as u8);
+                    db.write_batch([(key, Some(value))]).await.unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let merkleized = durable.into_merkleized().await.unwrap();
+                let size1 = merkleized.size().await;
+
+                // After round 1: record the baseline pruned_chunks and verify
+                // the bitmap commit is recorded.
+                let pruned_after_r1 = merkleized.status.pruned_chunks();
+                assert!(
+                    merkleized.status.commit_exists(*size1),
+                    "round 1: bitmap commit at size1 ({size1}) should exist"
+                );
+
+                db = merkleized.into_mutable();
+
+                // Round 2: rewrite the same 256 keys, deactivating chunk 0.
+                for k in 0u16..256 {
+                    let key = Sha256::fill(k as u8);
+                    let value = Sha256::fill(k.wrapping_add(200) as u8);
+                    db.write_batch([(key, Some(value))]).await.unwrap();
+                }
+                let (durable, _) = db.commit(None).await.unwrap();
+                let merkleized = durable.into_merkleized().await.unwrap();
+                let transition_size = merkleized.size().await;
+                let transition_root = merkleized.root();
+
+                // After round 2: rewrites deactivated the original 256 ops, so
+                // pruned_chunks must have increased (chunk with those ops is now
+                // all-inactive and pruned by into_merkleized).
+                let pruned_after_r2 = merkleized.status.pruned_chunks();
+                assert!(
+                    pruned_after_r2 > pruned_after_r1,
+                    "round 2: pruned_chunks should increase ({pruned_after_r2} > {pruned_after_r1})"
+                );
+                // The transition commit should be recorded at transition_size.
+                assert!(
+                    merkleized.status.commit_exists(*transition_size),
+                    "round 2: bitmap commit at transition_size ({transition_size}) should exist"
+                );
+
+                db = merkleized.into_mutable();
+
+                // Round 3: write one more key to create a newer commit.
+                db.write_batch([(Sha256::fill(0), Some(Sha256::fill(42)))])
+                    .await
+                    .unwrap();
+                let (durable, _) = db.commit(None).await.unwrap();
+                let mut db = durable.into_merkleized().await.unwrap();
+                let size3 = db.size().await;
+
+                // After round 3: transition commit and round 3 commit both exist.
+                assert!(
+                    db.status.commit_exists(*transition_size),
+                    "round 3 (pre-prune): transition commit should exist"
+                );
+                assert!(
+                    db.status.commit_exists(*size3),
+                    "round 3 (pre-prune): round 3 commit should exist"
+                );
+
+                // Prune to inactivity floor.
+                let floor = db.inactivity_floor_loc();
+                assert!(
+                    *floor >= 256,
+                    "floor ({floor}) must be >= 256 to prune chunk 0"
+                );
+                db.prune(floor).await.unwrap();
+
+                // After pruning, the transition commit must survive because its
+                // post-commit pruned_chunks meets min_safe.
+                assert!(
+                    db.status.commit_exists(*transition_size),
+                    "post-prune: transition commit at {transition_size} must survive"
+                );
+                // Round 1 commit should be removed (its post-commit pruned_chunks
+                // is below min_safe).
+                assert!(
+                    !db.status.commit_exists(*size1),
+                    "post-prune: round 1 commit at {size1} should be removed"
+                );
+
+                // Reconstruct the bitmap at the transition commit and verify its
+                // pruned_chunks matches what we observed after round 2.
+                let historical = db.status.get_at_commit(*transition_size)
+                    .expect("transition commit bitmap must be reconstructable");
+                assert_eq!(
+                    historical.pruned_chunks(), pruned_after_r2,
+                    "historical bitmap pruned_chunks should match round 2 state"
+                );
+
+                // The transition commit (round 2) must produce a valid historical proof.
+                let safe_start = Location::new_unchecked(*floor);
+                assert!(
+                    safe_start < transition_size,
+                    "safe_start ({safe_start}) must be < transition_size ({transition_size})"
+                );
+                let max_ops = NZU64!(4);
+                let (proof, ops, chunks) = db
+                    .historical_range_proof(
+                        hasher.inner(),
+                        transition_size,
+                        safe_start,
+                        max_ops,
+                    )
+                    .await
+                    .expect("transition commit should survive pruning");
+                assert!(
+                    proof.verify(hasher.inner(), safe_start, &ops, &chunks, &transition_root),
+                    "proof at transition commit must verify"
+                );
+
+                db.destroy().await.unwrap();
+            })
+            .await
+        }};
+    }
+
     // Macro to run a test on DB variants.
     macro_rules! for_all_variants {
         (simple: $f:expr) => {{
@@ -2075,6 +2217,14 @@ pub mod tests {
                 context,
                 test_historical_proof_prune_advances_grafted_boundary
             );
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_all_variants_historical_proof_prune_keeps_transition_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, test_historical_proof_prune_keeps_transition_commit);
         });
     }
 }

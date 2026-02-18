@@ -993,54 +993,71 @@ fn test_prune_commits_below_pruned_chunks() {
             }
         })
         .unwrap();
-    // Commit 1: diff.pruned_chunks = 0 (base state before commit)
+    // Commit 1: post-commit pruned = 0
 
     let bitmap = bitmap
         .apply_batch(2, |dirty| {
             dirty.prune_to_bit(32);
         })
         .unwrap();
-    // Commit 2: diff.pruned_chunks = 0 (base state had 0 pruned chunks)
+    // Commit 2: post-commit pruned = 1
 
     let bitmap = bitmap
         .apply_batch(3, |dirty| {
             dirty.prune_to_bit(64);
         })
         .unwrap();
-    // Commit 3: diff.pruned_chunks = 1 (base state had 1 pruned chunk)
+    // Commit 3: post-commit pruned = 2
 
     let bitmap = bitmap
         .apply_batch(4, |dirty| {
             dirty.prune_to_bit(96);
         })
         .unwrap();
-    // Commit 4: diff.pruned_chunks = 2 (base state had 2 pruned chunks)
+    // Commit 4: post-commit pruned = 3
 
-    // Diff pruned_chunks values: [0, 0, 1, 2]
+    // Post-commit pruned_chunks values: [0, 1, 2, 3]
 
     // Sanity: all 4 commits exist.
     assert_eq!(bitmap.commits().count(), 4);
     assert!(bitmap.get_at_commit(1).is_some());
 
-    // min = 0 removes nothing (all have pruned_chunks >= 0).
+    // min = 0 removes nothing (all have post-commit pruned >= 0).
     let mut bm = bitmap.clone();
     assert_eq!(bm.prune_commits_below_pruned_chunks(0), 0);
     assert_eq!(bm.commits().count(), 4);
 
-    // min = 1 removes commits 1 and 2 (both have pruned_chunks = 0).
+    // min = 1 removes only commit 1 (post-commit pruned = 0 < 1).
+    // Commit 2 has post-commit pruned = 1 >= 1, so it survives.
     let mut bm = bitmap.clone();
-    assert_eq!(bm.prune_commits_below_pruned_chunks(1), 2);
+    assert_eq!(bm.prune_commits_below_pruned_chunks(1), 1);
+    assert_eq!(bm.commits().count(), 3);
+    assert!(bm.get_at_commit(1).is_none());
+    assert!(bm.get_at_commit(2).is_some());
+    assert!(bm.get_at_commit(3).is_some());
+    assert!(bm.get_at_commit(4).is_some());
+
+    // Verify the surviving commits' post-commit pruned_chunks.
+    assert_eq!(bm.get_at_commit(2).unwrap().pruned_chunks(), 1);
+    assert_eq!(bm.get_at_commit(3).unwrap().pruned_chunks(), 2);
+    assert_eq!(bm.get_at_commit(4).unwrap().pruned_chunks(), 3);
+
+    // min = 2 removes commits 1 and 2 (post-commit pruned 0 and 1).
+    // Commit 3 has post-commit pruned = 2 >= 2, so it survives.
+    let mut bm = bitmap.clone();
+    assert_eq!(bm.prune_commits_below_pruned_chunks(2), 2);
     assert_eq!(bm.commits().count(), 2);
     assert!(bm.get_at_commit(1).is_none());
     assert!(bm.get_at_commit(2).is_none());
     assert!(bm.get_at_commit(3).is_some());
     assert!(bm.get_at_commit(4).is_some());
 
-    // min = 2 removes commits 1, 2, and 3.
+    // min = 3 removes commits 1, 2, and 3.
     let mut bm = bitmap.clone();
-    assert_eq!(bm.prune_commits_below_pruned_chunks(2), 3);
+    assert_eq!(bm.prune_commits_below_pruned_chunks(3), 3);
     assert_eq!(bm.commits().count(), 1);
     assert!(bm.get_at_commit(4).is_some());
+    assert_eq!(bm.get_at_commit(4).unwrap().pruned_chunks(), 3);
 
     // min = 100 removes all commits.
     let mut bm = bitmap;

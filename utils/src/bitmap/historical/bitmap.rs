@@ -93,7 +93,7 @@ pub(super) enum ChunkDiff<const N: usize> {
     Pruned([u8; N]),
 }
 
-/// A reverse diff that describes the state before a commit.
+/// A reverse diff capturing the bitmap state before a commit.
 #[derive(Clone, Debug)]
 pub(super) struct CommitDiff<const N: usize> {
     /// Total length in bits before this commit.
@@ -104,18 +104,19 @@ pub(super) struct CommitDiff<const N: usize> {
     pub(super) chunk_diffs: BTreeMap<usize, ChunkDiff<N>>,
 }
 
-/// A historical bitmap that maintains one actual bitmap plus diffs for history.
+/// A historical bitmap that maintains one actual bitmap plus reverse diffs for
+/// reconstructing past states.
 ///
 /// Uses a type-state pattern to track whether the bitmap is clean (no pending
 /// mutations) or dirty (has pending mutations).
 ///
-/// Commit numbers must be strictly monotonically increasing and < u64::MAX.
+/// Commit numbers must be strictly monotonically increasing and < `u64::MAX`.
 #[derive(Clone, Debug)]
 pub struct BitMap<const N: usize, S: State = Clean> {
     /// The current/HEAD state - the one and only full bitmap.
     current: Prunable<N>,
 
-    /// Historical commits: commit_number -> reverse diff from that commit.
+    /// Historical commits: commit_number -> reverse diff.
     commits: BTreeMap<u64, CommitDiff<N>>,
 
     /// State marker (Clean or Dirty).
@@ -233,7 +234,7 @@ impl<const N: usize> CleanBitMap<N> {
         dirty.commit(commit_number)
     }
 
-    /// Get the bitmap state as it existed at a specific commit.
+    /// Reconstruct the bitmap state as it existed after a specific commit was applied.
     ///
     /// Returns `None` if the commit does not exist or if `commit_number` is `u64::MAX`
     /// (which is reserved and cannot be used as a commit number).
@@ -341,16 +342,26 @@ impl<const N: usize> CleanBitMap<N> {
         count - self.commits.len()
     }
 
-    /// Remove the oldest commits whose `pruned_chunks` is below `min_pruned_chunks`.
+    /// Remove the commits whose post-commit `pruned_chunks` is below `min_pruned_chunks`.
     ///
-    /// Since `pruned_chunks` monotonically increases across commits, this removes
-    /// a contiguous prefix from the commit history.
+    /// A commit's post-commit `pruned_chunks` equals the next commit's pre-commit
+    /// `pruned_chunks`, or `self.current.pruned_chunks()` for the latest commit.
+    /// Since `pruned_chunks` monotonically increases, this removes a contiguous prefix
+    /// of the commit history.
     ///
     /// Returns the number of commits removed.
     pub fn prune_commits_below_pruned_chunks(&mut self, min_pruned_chunks: usize) -> usize {
         let mut removed = 0;
-        while let Some((&commit_num, diff)) = self.commits.iter().next() {
-            if diff.pruned_chunks >= min_pruned_chunks {
+        while let Some((&commit_num, _)) = self.commits.iter().next() {
+            // The post-commit pruned_chunks of this commit is the next commit's
+            // pre-commit value, or the current state for the latest commit.
+            let post_pruned = self
+                .commits
+                .range((commit_num + 1)..)
+                .next()
+                .map(|(_, next_diff)| next_diff.pruned_chunks)
+                .unwrap_or(self.current.pruned_chunks());
+            if post_pruned >= min_pruned_chunks {
                 break;
             }
             self.commits.remove(&commit_num);

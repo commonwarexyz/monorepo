@@ -277,7 +277,7 @@ where
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
 
-        // Reconstruct the bitmap as it was at `historical_size`.
+        // Reconstruct the bitmap's post-commit state at `historical_size`.
         let historical_bitmap = self
             .status
             .get_at_commit(*historical_size)
@@ -286,9 +286,9 @@ where
         // Collect pinned nodes (peaks of the pruned subtree in the grafted MMR).
         //
         // Safe because `prune()` only advances the grafted MMR boundary to the oldest
-        // surviving historical commit's pruned_chunks. Since this commit survived,
-        // its pruned_chunks >= the grafted MMR boundary, and peaks at any boundary
-        // >= the grafted MMR's boundary are always accessible.
+        // surviving historical commit's post-commit pruned_chunks. Since this commit
+        // survived, its post-commit pruned_chunks >= the grafted MMR boundary, and
+        // peaks at any boundary >= the grafted MMR's boundary are always accessible.
         let pinned_nodes = self.collect_pinned_nodes(historical_bitmap.pruned_chunks())?;
 
         // Rebuild the grafted MMR using the historical bitmap.
@@ -399,9 +399,9 @@ where
     /// snapshot.
     ///
     /// After pruning, [historical_range_proof](Self::historical_range_proof) can only serve
-    /// merkleization points whose size > `prune_loc` and whose bitmap's `pruned_chunks`
-    /// is large enough that all required ops MMR nodes remain accessible. Earlier
-    /// merkleization points are discarded and will return [Error::NoBitmapCommit].
+    /// merkleization points whose size > `prune_loc` and whose bitmap's post-commit
+    /// `pruned_chunks` is large enough that all required ops MMR nodes remain accessible.
+    /// Earlier merkleization points are discarded and will return [Error::NoBitmapCommit].
     ///
     /// # Errors
     ///
@@ -414,26 +414,29 @@ where
         // Prune the ops log.
         self.any.prune(prune_loc).await?;
 
-        // Discard historical bitmap commits at or before the prune point.
-        // A commit at `prune_loc` represents the bitmap when the log had
-        // `prune_loc` operations (locations `0..prune_loc`), all of which are
-        // now pruned from the ops log, making that commit unreachable.
-        self.status.prune_commits_before(*prune_loc + 1);
+        // Bitmap commits are removed in two stages:
+        //
+        // 1. By ops boundary: Removes commits whose commit number (= ops count at merkleization)
+        //    is <= `prune_loc`. These commits represent bitmap snapshots whose operations are now
+        //    entirely pruned from the ops log, making them unreachable.
+        //
+        // 2. By pruned_chunks: Removes commits whose post-commit `pruned_chunks` is below
+        //    `min_safe`. `min_safe = ops_boundary / chunk_bits` is the minimum `pruned_chunks`
+        //    needed to avoid reading ops MMR nodes that have been pruned from the journal.
+        //    `build_grafted_mmr` reads ops MMR nodes at the grafting height for every chunk
+        //    >= the historical `pruned_chunks`, so a commit with `pruned_chunks` < `min_safe`
+        //    would try to read pruned nodes and fail.
 
-        // Discard bitmap commits whose pruned_chunks is too small for the
-        // pruned ops MMR. historical_range_proof calls build_grafted_mmr,
-        // which reads ops MMR nodes at the grafting height for every chunk
-        // >= the historical pruned_chunks. After ops log pruning, nodes
-        // below the journal boundary are gone (except pinned peaks), so
-        // commits needing those nodes can no longer produce valid proofs.
+        self.status.prune_commits_before(*prune_loc + 1);
         let ops_boundary = self.any.log.reader().await.bounds().start;
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let min_safe = (ops_boundary / chunk_bits) as usize;
         self.status.prune_commits_below_pruned_chunks(min_safe);
 
         // Advance the grafted MMR's pruning boundary to the oldest surviving
-        // commit's pruned_chunks. Peaks needed by surviving commits remain
-        // accessible since all have pruned_chunks >= this boundary.
+        // commit's post-commit pruned_chunks. All surviving commits have
+        // post-commit pruned_chunks >= this boundary, so their required peaks
+        // remain accessible.
         let grafted_mmr_pruning_boundary = if let Some(earliest) = self.status.earliest_commit() {
             self.status
                 .get_at_commit(earliest)
@@ -607,9 +610,9 @@ where
         // guaranteed to be 0, so we can discard them.
         status.prune_to_bit(*any.inactivity_floor_loc);
 
-        // Committing the bitmap stores a reverse diff so we can reconstruct this bitmap state
-        // later (for historical proofs). The commit number is the current ops count, which
-        // corresponds to the MMR size at this merkleization point.
+        // Committing the bitmap stores a reverse diff keyed by the current ops count.
+        // This allows historical_range_proof to reconstruct the bitmap's post-commit
+        // state at this merkleization point.
         //
         // If the ops count hasn't advanced (i.e. `into_merkleized` called without new
         // writes), abort discards the dirty layer without recording a commit.
@@ -1001,6 +1004,11 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 }
 
 /// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.
+///
+/// For each non-pruned complete chunk (index in `pruned_chunks..complete_chunks`), reads the
+/// ops MMR node at the grafting height to compute `hash(chunk || ops_subtree_root)`. This
+/// means the caller must ensure that all ops MMR nodes for chunks >= `bitmap.pruned_chunks()`
+/// are still accessible in the ops MMR (i.e., not pruned from the journal).
 pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &mut StandardHasher<H>,
     bitmap: &BitMap<N>,
