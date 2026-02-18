@@ -153,6 +153,7 @@ runner.start(|context| async move {
 - read-only ingress runs concurrently on snapshots
 - read-write ingress runs serially on actor state
 - read-write handling is fenced behind read-only work dispatched before the write arrived
+- lane messages may be drained in same-lane batches up to `Actor::max_lane_batch` (default: `1`)
 - returning `Err` from `on_read_only` or `on_read_write` is fatal but `on_shutdown` is still called after draining in-flight reads
 
 `subscribe` detail:
@@ -164,6 +165,7 @@ Optional hooks:
 
 - `on_startup`, `on_shutdown`
 - `preprocess`, `postprocess`
+- `max_lane_batch` to tune same-lane batch size per loop iteration
 - `on_external` to map external signals into read-write ingress
 
 ### External Signals
@@ -286,6 +288,8 @@ let (_mailbox, _service) = ServiceBuilder::new(actor)
 
 Use lanes when you want separate queues (for example, control vs data).
 Lane polling is declaration-order biased.
+When batching is enabled (`max_lane_batch > 1`), the winning lane can process
+multiple ready messages before the loop polls other lanes again.
 
 ```rust,ignore
 use commonware_actor::service::ServiceBuilder;
