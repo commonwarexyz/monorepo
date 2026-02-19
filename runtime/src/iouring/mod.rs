@@ -67,7 +67,8 @@
 //! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
 //! a multishot `PollAdd` on an internal `eventfd`.
 //! - [Submitter::send] coalesces wake writes with an atomic wake-pending latch
-//! - Wake CQEs drain the `eventfd` counter and re-arm when `IORING_CQE_F_MORE` is not set
+//! - Wake CQEs drain `eventfd` readiness and re-arm when `IORING_CQE_F_MORE` is not set
+//! - The loop resets the wake latch immediately before blocking
 //!
 //! ## Shutdown Process
 //!
@@ -317,8 +318,8 @@ impl Waker {
     /// Wake once per producer burst using the pending latch.
     ///
     /// The first caller in a burst flips `wake_pending` and writes to eventfd.
-    /// Subsequent callers skip the syscall until the wake CQE path consumes
-    /// eventfd readiness and clears the latch.
+    /// Subsequent callers skip the syscall until the loop resets the latch
+    /// before the next blocking wait.
     fn wake(&self) {
         if self
             .inner
@@ -330,12 +331,16 @@ impl Waker {
         }
     }
 
-    /// Clear wake state by draining eventfd readiness and resetting the producer
-    /// wake-pending latch.
+    /// Drain eventfd readiness acknowledged by a wake CQE.
+    ///
+    /// This acknowledges kernel-visible wake readiness, but intentionally does
+    /// not touch `wake_pending`. Latch reset is a separate step performed in
+    /// the main loop immediately before `submit_and_wait` to minimize the
+    /// window where producers can skip signaling.
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
-    fn clear(&self) {
+    fn drain(&self) {
         let mut value: u64 = 0;
         loop {
             // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -364,8 +369,14 @@ impl Waker {
             }
             break;
         }
+    }
 
-        // Wake CQE acknowledged, clear the producer wake latch.
+    /// Reset the producer wake-pending latch.
+    ///
+    /// This is called in the main loop immediately before the blocking
+    /// `submit_and_wait` call. After reset, the next successful producer send
+    /// can flip the latch and write to `eventfd` again.
+    fn reset(&self) {
         self.inner.wake_pending.store(false, Ordering::Relaxed);
     }
 
@@ -494,6 +505,12 @@ impl IoUringLoop {
 
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
+            // Reset wake latch immediately before potentially blocking.
+            // Keeping this as late as possible maximizes wake coalescing, so
+            // producers avoid redundant eventfd writes while the loop is still
+            // actively submitting work.
+            self.waker.reset();
+
             // Submit pending SQEs and wait for a completion or wake event.
             self.submit_and_wait(&mut ring, 1, None)
                 .expect("unable to submit to ring");
@@ -614,9 +631,8 @@ impl IoUringLoop {
                     "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
                 );
 
-                // Clear eventfd waker so future wake signals can trigger
-                // notifications.
-                self.waker.clear();
+                // Drain wake readiness from eventfd for this wake CQE.
+                self.waker.drain();
 
                 // Multishot can terminate, so we must re-arm to keep the wake
                 // path live.
