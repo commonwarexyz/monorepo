@@ -892,8 +892,12 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode, EncodeSize};
-    use commonware_utils::NZU64;
+    use crate::types::coding::Commitment;
+    use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize};
+    use commonware_coding::Config as CodingConfig;
+    use commonware_math::algebra::Random;
+    use commonware_utils::{test_rng, Array, Span, NZU16, NZU64};
+    use std::ops::Deref;
 
     #[test]
     fn test_epoch_constructors() {
@@ -1653,6 +1657,102 @@ mod tests {
         assert!(epocher.first(first_invalid_epoch).is_none());
         assert!(epocher.last(first_invalid_epoch).is_none());
         assert!(epocher.containing(last_valid_last.next()).is_none());
+    }
+
+    #[test]
+    fn test_coding_commitment_fallible_digest() {
+        #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        struct Digest([u8; Self::SIZE]);
+
+        impl Random for Digest {
+            fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+                let mut buf = [0u8; Self::SIZE];
+                rng.fill_bytes(&mut buf);
+                Self(buf)
+            }
+        }
+
+        impl commonware_cryptography::Digest for Digest {
+            const EMPTY: Self = Self([0u8; Self::SIZE]);
+        }
+
+        impl Write for Digest {
+            fn write(&self, buf: &mut impl BufMut) {
+                buf.put_slice(&self.0);
+            }
+        }
+
+        impl FixedSize for Digest {
+            const SIZE: usize = 32;
+        }
+
+        impl Read for Digest {
+            type Cfg = ();
+
+            fn read_cfg(
+                _: &mut impl bytes::Buf,
+                _: &Self::Cfg,
+            ) -> Result<Self, commonware_codec::Error> {
+                Err(commonware_codec::Error::Invalid(
+                    "Digest",
+                    "read not implemented",
+                ))
+            }
+        }
+
+        impl AsRef<[u8]> for Digest {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        impl Deref for Digest {
+            type Target = [u8];
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl core::fmt::Display for Digest {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "{}", commonware_utils::hex(self.as_ref()))
+            }
+        }
+
+        impl core::fmt::Debug for Digest {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "Digest({})", commonware_utils::hex(self.as_ref()))
+            }
+        }
+
+        impl Span for Digest {}
+        impl Array for Digest {}
+
+        let digest = Digest::random(test_rng());
+        let commitment = Commitment::from((
+            digest,
+            digest,
+            digest,
+            CodingConfig {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(1),
+            },
+        ));
+
+        // Decoding the commitment should succeed.
+        let encoded = commitment.encode();
+        let decoded = Commitment::decode(encoded).unwrap();
+
+        // Pulling out the digest should panic.
+        let result = std::panic::catch_unwind(|| decoded.block::<Digest>());
+        assert!(result.is_err());
+        let result = std::panic::catch_unwind(|| decoded.root::<Digest>());
+        assert!(result.is_err());
+        let result = std::panic::catch_unwind(|| decoded.context::<Digest>());
+        assert!(result.is_err());
+        let result = std::panic::catch_unwind(|| decoded.config());
+        assert!(result.is_ok());
     }
 
     #[cfg(feature = "arbitrary")]
