@@ -22,6 +22,7 @@ use crate::{
             State as MemState,
         },
         position::Position,
+        proof,
         storage::Storage,
         verification,
         Error::{self, *},
@@ -831,7 +832,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     ///
     /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `range`
     ///   is not provable at that historical size.
-    /// - Returns [Error::Unmerkleized] if `leaves` is greater than `self.merkleized_leaves()`.
+    /// - Returns [Error::Unmerkleized] if generating the proof requires nodes at or beyond the
+    ///   current merkleized frontier.
     /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
     ///   [crate::mmr::MAX_LOCATION].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
@@ -845,9 +847,22 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         if leaves > self.leaves() {
             return Err(Error::RangeOutOfBounds(leaves));
         }
-        if leaves > self.merkleized_leaves() {
+
+        // Validate requested range.
+        proof::nodes_required_for_range_proof(leaves, range.clone())?;
+        let requested_size = Position::try_from(leaves)?;
+        let (merkleized_size, pruned_to_pos) = {
+            let inner = self.inner.read();
+            (inner.merkleized_size, inner.pruned_to_pos)
+        };
+        let start_pos = Position::try_from(range.start)?;
+        if start_pos < pruned_to_pos {
+            return Err(Error::ElementPruned(start_pos));
+        }
+        if requested_size > merkleized_size {
             return Err(Error::Unmerkleized);
         }
+
         verification::historical_range_proof(self, leaves, range).await
     }
 
@@ -1005,6 +1020,12 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for DirtyMmr<E,
     async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         {
             let inner = self.inner.read();
+
+            // Return None for unmerkleized nodes should they be requested.
+            if position >= inner.merkleized_size {
+                return Ok(None);
+            }
+
             // If the requested node is in the mem mmr, use that.
             let mem_bounds = inner.mem_mmr.bounds();
             if position >= mem_bounds.start && position < mem_bounds.end {
@@ -2321,6 +2342,87 @@ mod tests {
             assert_eq!(proof, expected);
 
             clean.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_get_node_unmerkleized_returns_none() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            mmr.add(&mut hasher, &test_digest(0)).unwrap();
+            let mmr = mmr.merkleize(&mut hasher).into_dirty();
+
+            let pos = mmr.add(&mut hasher, &test_digest(1)).unwrap();
+            let node = mmr.get_node(pos).await.unwrap();
+            assert!(
+                node.is_none(),
+                "unmerkleized position should not be readable"
+            );
+
+            mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_dirty_historical_proof_pruned_precedes_unmerkleized() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            let mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..64 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let mut clean = mmr.merkleize(&mut hasher);
+            let prune_pos = Position::try_from(Location::new_unchecked(16)).unwrap();
+            clean.prune_to_pos(prune_pos).await.unwrap();
+
+            let historical_leaves = clean.leaves();
+            let mut pruned_loc = None;
+            for loc_u64 in 0..*historical_leaves {
+                let loc = Location::new_unchecked(loc_u64);
+                let result = clean
+                    .historical_range_proof(historical_leaves, loc..loc + 1)
+                    .await;
+                if matches!(result, Err(Error::ElementPruned(_))) {
+                    pruned_loc = Some(loc);
+                    break;
+                }
+            }
+            let pruned_loc = pruned_loc.expect("expected at least one pruned location");
+
+            let dirty = clean.into_dirty();
+            for i in 0..8 {
+                dirty.add(&mut hasher, &test_digest(10_000 + i)).unwrap();
+            }
+
+            let requested = dirty.leaves();
+            let result = dirty
+                .historical_range_proof(requested, pruned_loc..pruned_loc + 1)
+                .await;
+            assert!(matches!(result, Err(Error::ElementPruned(_))));
+
+            dirty.merkleize(&mut hasher).destroy().await.unwrap();
         });
     }
 

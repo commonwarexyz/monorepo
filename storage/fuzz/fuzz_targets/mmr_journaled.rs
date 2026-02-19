@@ -267,71 +267,89 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = start_loc.clamp(0, u8::MAX - 1);
                     let end_loc = end_loc.clamp(start_loc + 1, u8::MAX) as u64;
                     let start_loc = start_loc as u64;
-                    let state = mmr;
-                    match state {
+                    let range =
+                        Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
+
+                    match mmr {
                         MmrState::Clean(mmr) => {
-                            if mmr.leaves() > 0 {
-                                let start_pos = Position::from(start_loc);
-                                if start_loc < mmr.leaves()
-                                    && end_loc < mmr.leaves()
-                                    && mmr.bounds().contains(&start_pos)
-                                {
-                                    let range = Location::new(start_loc).unwrap()
-                                        ..Location::new(end_loc).unwrap();
-                                    if let Ok(historical_proof) = mmr
-                                        .historical_range_proof(mmr.leaves(), range.clone())
-                                        .await
-                                    {
+                            let leaves_count = mmr.leaves();
+                            let result = mmr.historical_range_proof(leaves_count, range.clone()).await;
+                            if range.end > leaves_count {
+                                assert!(matches!(
+                                    result,
+                                    Err(Error::RangeOutOfBounds(loc)) if loc == range.end
+                                ));
+                            } else {
+                                match result {
+                                    Ok(historical_proof) => {
                                         let root = mmr.root();
                                         assert!(historical_proof.verify_range_inclusion(
                                             &mut hasher,
                                             &leaves[range.to_usize_range()],
-                                            Location::new(start_loc).unwrap(),
+                                            range.start,
                                             &root
                                         ));
                                     }
+                                    Err(Error::ElementPruned(_)) => {}
+                                    Err(err) => panic!(
+                                        "unexpected clean historical_range_proof error: {err:?}"
+                                    ),
                                 }
                             }
                             MmrState::Clean(mmr)
                         }
                         MmrState::Dirty(mmr) => {
-                            if mmr.leaves() > 0 {
-                                let start_pos = Position::from(start_loc);
-                                if start_loc < mmr.leaves()
-                                    && end_loc < mmr.leaves()
-                                    && mmr.bounds().contains(&start_pos)
-                                {
-                                    let leaves_count = mmr.leaves();
-                                    let range = Location::new(start_loc).unwrap()
-                                        ..Location::new(end_loc).unwrap();
-                                    match mmr
-                                        .historical_range_proof(leaves_count, range.clone())
-                                        .await
-                                    {
-                                        Err(Error::Unmerkleized) => {
-                                            let clean = mmr.merkleize(&mut hasher);
-                                            if let Ok(historical_proof) = clean
-                                                .historical_range_proof(leaves_count, range.clone())
-                                                .await
-                                            {
+                            let leaves_count = mmr.leaves();
+                            let result = mmr.historical_range_proof(leaves_count, range.clone()).await;
+                            if range.end > leaves_count {
+                                assert!(matches!(
+                                    result,
+                                    Err(Error::RangeOutOfBounds(loc)) if loc == range.end
+                                ));
+                                MmrState::Dirty(mmr)
+                            } else {
+                                match result {
+                                    Err(Error::Unmerkleized) => {
+                                        let clean = mmr.merkleize(&mut hasher);
+                                        match clean
+                                            .historical_range_proof(leaves_count, range.clone())
+                                            .await
+                                        {
+                                            Ok(historical_proof) => {
                                                 let root = clean.root();
                                                 assert!(historical_proof.verify_range_inclusion(
                                                     &mut hasher,
                                                     &leaves[range.to_usize_range()],
-                                                    Location::new(start_loc).unwrap(),
+                                                    range.start,
                                                     &root
                                                 ));
                                             }
-                                            MmrState::Clean(clean)
+                                            // Retrying after merkleization can still fail if the
+                                            // requested historical proof depends on nodes that are
+                                            // already pruned in persistent storage.
+                                            Err(Error::ElementPruned(_)) => {}
+                                            Err(err) => panic!(
+                                                "unexpected dirty retry historical_range_proof error: {err:?}"
+                                            ),
                                         }
-                                        Err(_) => MmrState::Dirty(mmr),
-                                        Ok(_) => MmrState::Dirty(mmr),
+                                        MmrState::Clean(clean)
                                     }
-                                } else {
-                                    MmrState::Dirty(mmr)
+                                    Ok(historical_proof) => {
+                                        let clean = mmr.merkleize(&mut hasher);
+                                        let root = clean.root();
+                                        assert!(historical_proof.verify_range_inclusion(
+                                            &mut hasher,
+                                            &leaves[range.to_usize_range()],
+                                            range.start,
+                                            &root
+                                        ));
+                                        MmrState::Clean(clean)
+                                    }
+                                    Err(Error::ElementPruned(_)) => MmrState::Dirty(mmr),
+                                    Err(err) => panic!(
+                                        "unexpected dirty historical_range_proof error: {err:?}"
+                                    ),
                                 }
-                            } else {
-                                MmrState::Dirty(mmr)
                             }
                         }
                     }
