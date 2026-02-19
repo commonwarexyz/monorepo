@@ -261,6 +261,7 @@ mod test {
     const MAX_SHARD_SIZE: usize = 1 << 31;
     const MAX_SHARDS: u16 = 32;
     const MAX_DATA: usize = 1024;
+    const MIN_EXTRA_SHARDS: u16 = 1;
 
     fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
         // Encode data into shards.
@@ -314,9 +315,9 @@ mod test {
     }
 
     fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
-        let min_extra = 1;
         let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
-        let extra_shards = min_extra + (u.arbitrary::<u16>()? % (MAX_SHARDS - min_extra + 1));
+        let extra_shards =
+            MIN_EXTRA_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_EXTRA_SHARDS + 1));
         let total_shards = minimum_shards + extra_shards;
 
         let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);

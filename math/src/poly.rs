@@ -484,9 +484,7 @@ mod impl_arbitrary {
             let rest: Vec<F> = u.arbitrary()?;
             let mut coeffs = NonEmptyVec::new(first);
             coeffs.extend(rest);
-            Ok(Self {
-                coeffs,
-            })
+            Ok(Self { coeffs })
         }
     }
 }

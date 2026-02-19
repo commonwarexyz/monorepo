@@ -128,11 +128,7 @@ impl Branch {
 
 impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "0x{:08x}{:08x}{:08x}",
-            self.seed, self.thread, self.size
-        )
+        write!(f, "0x{:08x}{:08x}{:08x}", self.seed, self.thread, self.size)
     }
 }
 
