@@ -108,9 +108,6 @@ const TIMEOUT_WORK_ID: u64 = u64::MAX;
 /// Reserved ID for internal wake poll completions.
 const WAKE_WORK_ID: u64 = u64::MAX - 1;
 
-/// Max loop deferrals before forcing a submit in the wake fast path.
-const MAX_DEFER_LOOPS: usize = 2;
-
 /// Buffer for io_uring operations.
 ///
 /// The variant must match the operation type:
@@ -320,7 +317,8 @@ impl Waker {
     /// Wake once per producer burst using the pending latch.
     ///
     /// The first caller in a burst flips `wake_pending` and writes to eventfd.
-    /// Subsequent callers skip the syscall.
+    /// Subsequent callers skip the syscall until the wake CQE path consumes
+    /// eventfd readiness and clears the latch.
     fn wake(&self) {
         if self
             .inner
@@ -332,19 +330,12 @@ impl Waker {
         }
     }
 
-    /// Clear and return the previous pending state.
-    fn clear(&self) -> bool {
-        self.inner
-            .wake_pending
-            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    /// Consume wake notifications from the eventfd counter.
+    /// Clear wake state by draining eventfd readiness and resetting the producer
+    /// wake-pending latch.
     ///
     /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
     /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
-    fn consume(&self) {
+    fn clear(&self) {
         let mut value: u64 = 0;
         loop {
             // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
@@ -359,7 +350,7 @@ impl Waker {
             if ret == size_of::<u64>() as isize {
                 // eventfd (without EFD_SEMAPHORE) returns the full counter and
                 // resets it to zero in one read.
-                return;
+                break;
             }
             if ret == -1 {
                 match std::io::Error::last_os_error().raw_os_error() {
@@ -367,12 +358,15 @@ impl Waker {
                     Some(libc::EINTR) => continue,
                     // Non-blocking read would block because the counter is zero,
                     // there is nothing left to drain right now.
-                    Some(libc::EAGAIN) => return,
-                    _ => return,
+                    Some(libc::EAGAIN) => break,
+                    _ => break,
                 }
             }
-            return;
+            break;
         }
+
+        // Wake CQE acknowledged, clear the producer wake latch.
+        self.inner.wake_pending.store(false, Ordering::Relaxed);
     }
 
     /// Rearm the wake poll request.
@@ -483,11 +477,6 @@ impl IoUringLoop {
     /// This method blocks the current thread.
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
-
-        // Wake fast path coalescing threshold: scale with ring size while
-        // keeping a small bounded window for predictable latency.
-        let batch_threshold = (self.cfg.size / 32).clamp(1, 32) as usize;
-        let mut defer_loops = 0;
         loop {
             // Process available completions.
             for cqe in ring.completion() {
@@ -495,7 +484,7 @@ impl IoUringLoop {
             }
 
             // Fill submission queue with inbound work.
-            let (submissions, disconnected) = self.fill_submission_queue(&mut ring);
+            let disconnected = self.fill_submission_queue(&mut ring);
 
             if disconnected {
                 // All submitters are gone, drain in-flight ops and shutdown.
@@ -505,41 +494,21 @@ impl IoUringLoop {
 
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // If a producer signaled wake since the last clear, loop again
-            // without blocking.
-            if self.waker.clear() {
-                if submissions == 0 {
-                    defer_loops = 0;
-                } else if submissions >= batch_threshold || defer_loops >= MAX_DEFER_LOOPS {
-                    // Flush once enough SQEs are staged, or after bounded
-                    // deferrals to cap tail latency under steady wakeups.
-                    ring.submit().expect("unable to submit to ring");
-                    defer_loops = 0;
-                } else {
-                    defer_loops += 1;
-                }
-
-                continue;
-            }
-
-            // Sleep until either a completion arrives or wake_fd poll fires.
+            // Always enter IORING_ENTER_GETEVENTS eventually. This guarantees progress
+            // with DEFER_TASKRUN enabled in single-issuer mode.
             self.submit_and_wait(&mut ring, 1, None)
                 .expect("unable to submit to ring");
-
-            defer_loops = 0;
         }
     }
 
     /// Rearm wake poll (if needed) and stage inbound work into the SQ.
     ///
-    /// Returns `(submissions, disconnected)` where:
-    /// - `submissions` is the number of SQEs currently staged in the ring.
-    /// - `disconnected` indicates the inbound channel closed during staging.
+    /// Returns whether the inbound channel closed during staging.
     ///
     /// Staging is limited by `cfg.size` active waiters. This remains correct
     /// when `op_timeout` is enabled because `new_ring` doubles ring size to
     /// accommodate `op + linked timeout` SQE pairs.
-    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> (usize, bool) {
+    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> bool {
         let mut disconnected = false;
         let mut submission_queue = ring.submission();
 
@@ -630,7 +599,7 @@ impl IoUringLoop {
             self.waiters.insert(work_id, (sender, buffer, fd, timespec));
         }
 
-        (submission_queue.len(), disconnected)
+        disconnected
     }
 
     /// Handle a single CQE from the ring.
@@ -646,9 +615,9 @@ impl IoUringLoop {
                     "wake poll CQE failed: requires multishot poll (Linux 5.13+)"
                 );
 
-                // Clear eventfd readiness so future wake signals can trigger
+                // Clear eventfd waker so future wake signals can trigger
                 // notifications.
-                self.waker.consume();
+                self.waker.clear();
 
                 // Multishot can terminate, so we must re-arm to keep the wake
                 // path live.
@@ -769,9 +738,9 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
         // progress. With `DEFER_TASKRUN`, completions are only processed when explicitly
         // requested, reducing overhead and improving CPU cache locality.
         //
-        // This is safe in our implementation since we always call `submit_and_wait()`
-        // (which sets `IORING_ENTER_GETEVENTS`), and we are also enabling
-        // `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
+        // This is safe in our implementation since we eventually call `submit_and_wait()`
+        // (which sets `IORING_ENTER_GETEVENTS`) even on the wake fast-path, and we are
+        // also enabling `IORING_SETUP_SINGLE_ISSUER` here, which is a pre-requisite.
         //
         // This is available since kernel 6.1.
         //
