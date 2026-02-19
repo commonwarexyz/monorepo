@@ -4058,4 +4058,70 @@ mod tests {
             },
         );
     }
+
+    #[test_traced]
+    fn test_leader_unrelated_weak_shard_blocks_peer() {
+        // Regression test: if the leader sends an unrelated/invalid weak shard
+        // (i.e. a shard for a different participant index), the receiver must
+        // block the leader.
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, coding_config| async move {
+                // Commitment being tracked by the receiver.
+                let tracked_block = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let tracked_commitment = tracked_block.commitment();
+
+                // Separate block used to source "unrelated" shard data.
+                let unrelated_block = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
+                    coding_config,
+                    &STRATEGY,
+                );
+
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let leader_idx = 0usize;
+                let leader_pk = peers[leader_idx].public_key.clone();
+
+                // Receiver tracks the commitment with peer0 as leader.
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(
+                        tracked_commitment,
+                        leader_pk.clone(),
+                        Round::new(Epoch::zero(), View::new(1)),
+                    )
+                    .await;
+
+                // Construct an unrelated weak shard from peer1's slot and retarget
+                // its commitment to the tracked commitment so it hits active state.
+                let mut unrelated_weak = unrelated_block
+                    .shard(peers[1].index.get() as u16)
+                    .expect("missing shard")
+                    .verify_into_weak()
+                    .expect("verify_into_weak failed");
+                unrelated_weak.commitment = tracked_commitment;
+
+                // Leader sends this unrelated/invalid weak shard to receiver.
+                // The shard index no longer matches sender's participant index,
+                // so leader must be blocked.
+                peers[leader_idx]
+                    .sender
+                    .send(Recipients::One(receiver_pk), unrelated_weak.encode(), true)
+                    .await
+                    .expect("send failed");
+                context.sleep(config.link.latency * 2).await;
+
+                assert_blocked(&oracle, &peers[receiver_idx].public_key, &leader_pk).await;
+            },
+        );
+    }
 }
