@@ -86,7 +86,7 @@ use commonware_utils::channel::{
 use io_uring::{
     cqueue::Entry as CqueueEntry,
     opcode::{LinkTimeout, PollAdd},
-    squeue::Entry as SqueueEntry,
+    squeue::{Entry as SqueueEntry, SubmissionQueue},
     types::{Fd, SubmitArgs, Timespec},
     IoUring,
 };
@@ -368,7 +368,7 @@ impl Waker {
     ///
     /// This uses multishot poll and is called when a wake CQE indicates the
     /// previous multishot arm is no longer active.
-    fn rearm(&self, ring: &mut IoUring) {
+    fn rearm(&self, submission_queue: &mut SubmissionQueue<'_>) {
         let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
             .multi(true)
             .build()
@@ -376,7 +376,7 @@ impl Waker {
 
         // SAFETY: The poll SQE owns no user pointers and references a valid FD.
         unsafe {
-            ring.submission()
+            submission_queue
                 .push(&wake_poll)
                 .expect("wake poll SQE should always fit in the ring");
         }
@@ -432,6 +432,8 @@ pub(crate) struct IoUringLoop {
     receiver: mpsc::Receiver<Op>,
     waiters: Waiters,
     waker: Waker,
+    wake_rearm_needed: bool,
+    next_work_id: u64,
 }
 
 impl IoUringLoop {
@@ -459,6 +461,8 @@ impl IoUringLoop {
                 receiver,
                 waiters: Waiters::with_capacity(size),
                 waker,
+                wake_rearm_needed: true,
+                next_work_id: 0,
             },
         )
     }
@@ -468,105 +472,27 @@ impl IoUringLoop {
     /// This method blocks the current thread.
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
-        self.waker.rearm(&mut ring);
 
-        let mut next_work_id = 0;
+        // Hybrid flush policy for the wake-fast path:
+        // - flush immediately once a small batch is staged
+        // - otherwise allow a small number of deferrals for batching
+        let batch_threshold = (self.cfg.size / 32).clamp(1, 32) as usize;
+        let max_defer_loops = 2;
+
+        let mut defer_loops = 0;
         loop {
             // Process available completions.
-            let mut wake_rearm_needed = false;
-            while let Some(cqe) = ring.completion().next() {
-                wake_rearm_needed |= self.handle_cqe(cqe);
-            }
-            if wake_rearm_needed {
-                self.waker.rearm(&mut ring);
+            for cqe in ring.completion() {
+                self.handle_cqe(cqe);
             }
 
-            // Try to fill the submission queue with incoming work.
-            // Stop if we are at the max number of processing work.
-            //
-            // NOTE: We can safely use `cfg.size` directly as the limit here, even
-            // when `op_timeout` is enabled, because we already doubled the ring
-            // size in `new_ring()` to account for the fact that each operation
-            // needs 2 SQ entries (op + timeout). This ensures users get the number
-            // of concurrent operations they configured.
-            while self.waiters.len() < self.cfg.size as usize {
-                let op = match self.receiver.try_recv() {
-                    Ok(work) => work,
-                    Err(TryRecvError::Disconnected) => {
-                        self.drain(&mut ring);
-                        return;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                };
+            // Fill submission queue with inbound work.
+            let (submissions, disconnected) = self.fill_submission_queue(&mut ring);
 
-                let Op {
-                    mut work,
-                    sender,
-                    buffer,
-                    fd,
-                } = op;
-
-                // Assign a unique ID, skipping reserved IDs.
-                let work_id = next_work_id;
-                next_work_id += 1;
-                if next_work_id >= WAKE_WORK_ID {
-                    next_work_id = 0;
-                }
-                work = work.user_data(work_id);
-
-                // Submit the operation to the ring, with timeout if configured.
-                let timespec = if let Some(timeout) = &self.cfg.op_timeout {
-                    // Link the operation to the (following) timeout.
-                    work = work.flags(io_uring::squeue::Flags::IO_LINK);
-
-                    // The timespec needs to be allocated on the heap and kept
-                    // alive for the duration of the operation so that the pointer
-                    // stays valid.
-                    let timespec = Box::new(
-                        Timespec::new()
-                            .sec(timeout.as_secs())
-                            .nsec(timeout.subsec_nanos()),
-                    );
-
-                    // Create the timeout.
-                    let timeout = LinkTimeout::new(&*timespec)
-                        .build()
-                        .user_data(TIMEOUT_WORK_ID);
-
-                    // Submit the op and timeout.
-                    //
-                    // SAFETY: `buffer`, `timespec`, and `fd` are stored in `self.waiters`
-                    // until the CQE is processed, ensuring memory referenced by the SQEs
-                    // remains valid and the FD cannot be reused. The ring was doubled in
-                    // size for timeout support, and `self.waiters.len() < cfg.size`
-                    // guarantees space for both entries.
-                    unsafe {
-                        let mut sq = ring.submission();
-                        sq.push(&work).expect("unable to push to queue");
-                        sq.push(&timeout).expect("unable to push timeout to queue");
-                    }
-
-                    Some(timespec)
-                } else {
-                    // No timeout, submit the operation normally.
-                    //
-                    // SAFETY: `buffer` and `fd` are stored in `self.waiters` until the
-                    // CQE is processed, ensuring memory referenced by the SQE remains
-                    // valid and the FD cannot be reused. The loop condition
-                    // `self.waiters.len() < cfg.size` guarantees space in the submission
-                    // queue.
-                    unsafe {
-                        ring.submission()
-                            .push(&work)
-                            .expect("unable to push to queue");
-                    }
-
-                    None
-                };
-
-                // We'll send the result of this operation to `sender`.
-                // `fd` is retained to prevent FD reuse until completion.
-                self.waiters.insert(work_id, (sender, buffer, fd, timespec));
+            if disconnected {
+                // All submitters are gone, drain in-flight ops and shutdown.
+                self.drain(&mut ring);
+                return;
             }
 
             self.metrics.pending_operations.set(self.waiters.len() as _);
@@ -574,22 +500,136 @@ impl IoUringLoop {
             // If producers queued more work since our last channel drain, loop
             // again without blocking.
             if self.waker.clear() {
+                if submissions == 0 {
+                    defer_loops = 0;
+                } else if submissions >= batch_threshold || defer_loops >= max_defer_loops {
+                    // Submit staged SQEs to cap tail latency under steady
+                    // wakeups while still allowing small-batch coalescing.
+                    ring.submit().expect("unable to submit to ring");
+                    defer_loops = 0;
+                } else {
+                    defer_loops += 1;
+                }
+
                 continue;
             }
 
             // Sleep until either a completion arrives or wake_fd poll fires.
             self.submit_and_wait(&mut ring, 1, None)
                 .expect("unable to submit to ring");
+
+            defer_loops = 0;
         }
+    }
+
+    /// Rearm wake poll (if needed) and stage inbound work into the SQ.
+    ///
+    /// Returns `(submissions, disconnected)` where:
+    /// - `submissions` is the number of SQEs currently staged in the ring.
+    /// - `disconnected` indicates the inbound channel closed during staging.
+    ///
+    /// Staging is limited by `cfg.size` active waiters. This remains correct
+    /// when `op_timeout` is enabled because `new_ring` doubles ring size to
+    /// accommodate `op + linked timeout` SQE pairs.
+    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> (usize, bool) {
+        let mut disconnected = false;
+        let mut submission_queue = ring.submission();
+
+        if std::mem::take(&mut self.wake_rearm_needed) {
+            self.waker.rearm(&mut submission_queue);
+        }
+
+        while self.waiters.len() < self.cfg.size as usize {
+            let op = match self.receiver.try_recv() {
+                Ok(work) => work,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+            };
+
+            let Op {
+                mut work,
+                sender,
+                buffer,
+                fd,
+            } = op;
+
+            // Assign a unique ID, skipping reserved IDs.
+            let work_id = self.next_work_id;
+            self.next_work_id += 1;
+            if self.next_work_id >= WAKE_WORK_ID {
+                self.next_work_id = 0;
+            }
+            work = work.user_data(work_id);
+
+            // Submit the operation to the ring, with timeout if configured.
+            let timespec = if let Some(timeout) = &self.cfg.op_timeout {
+                // Link the operation to the (following) timeout.
+                work = work.flags(io_uring::squeue::Flags::IO_LINK);
+
+                // The timespec needs to be allocated on the heap and kept
+                // alive for the duration of the operation so that the pointer
+                // stays valid.
+                let timespec = Box::new(
+                    Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos()),
+                );
+
+                // Create the timeout.
+                let timeout = LinkTimeout::new(&*timespec)
+                    .build()
+                    .user_data(TIMEOUT_WORK_ID);
+
+                // Submit the op and timeout.
+                //
+                // SAFETY: `buffer`, `timespec`, and `fd` are stored in `self.waiters`
+                // until the CQE is processed, ensuring memory referenced by the SQEs
+                // remains valid and the FD cannot be reused. The ring was doubled in
+                // size for timeout support, and `self.waiters.len() < cfg.size`
+                // guarantees space for both entries.
+                unsafe {
+                    submission_queue
+                        .push(&work)
+                        .expect("unable to push to queue");
+                    submission_queue
+                        .push(&timeout)
+                        .expect("unable to push timeout to queue");
+                }
+
+                Some(timespec)
+            } else {
+                // No timeout, submit the operation normally.
+                //
+                // SAFETY: `buffer` and `fd` are stored in `self.waiters` until the
+                // CQE is processed, ensuring memory referenced by the SQE remains
+                // valid and the FD cannot be reused. The loop condition
+                // `self.waiters.len() < cfg.size` guarantees space in the submission
+                // queue.
+                unsafe {
+                    submission_queue
+                        .push(&work)
+                        .expect("unable to push to queue");
+                }
+
+                None
+            };
+
+            // We'll send the result of this operation to `sender`.
+            // `fd` is retained to prevent FD reuse until completion.
+            self.waiters.insert(work_id, (sender, buffer, fd, timespec));
+        }
+
+        (submission_queue.len(), disconnected)
     }
 
     /// Handle a single CQE from the ring.
     ///
     /// Internal wake and timeout CQEs are handled in-place, normal operation
     /// CQEs are matched to `waiters` and forwarded to the original requester.
-    ///
-    /// Returns `true` when the wake multishot poll needs re-arming.
-    fn handle_cqe(&mut self, cqe: CqueueEntry) -> bool {
+    fn handle_cqe(&mut self, cqe: CqueueEntry) {
         let work_id = cqe.user_data();
         match work_id {
             WAKE_WORK_ID => {
@@ -605,7 +645,7 @@ impl IoUringLoop {
                 // Multishot can terminate, so we must re-arm to keep the wake
                 // path live.
                 if !io_uring::cqueue::more(cqe.flags()) {
-                    return true;
+                    self.wake_rearm_needed = true;
                 }
             }
             TIMEOUT_WORK_ID => {
@@ -628,7 +668,6 @@ impl IoUringLoop {
                 let _ = result_sender.send((result, buffer));
             }
         }
-        false
     }
 
     /// Drain in-flight operations during shutdown.
@@ -654,9 +693,8 @@ impl IoUringLoop {
                 .submit_and_wait(ring, 1, timeout)
                 .expect("unable to submit to ring");
 
-            while let Some(cqe) = ring.completion().next() {
-                // No wake re-arm during shutdown drain.
-                let _ = self.handle_cqe(cqe);
+            for cqe in ring.completion() {
+                self.handle_cqe(cqe);
             }
 
             if !got_completion {
