@@ -198,12 +198,10 @@ where
                 Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
-                // The DB is empty. Use the last CommitFloor to prove
-                // emptiness. The Commit proof variant requires the
-                // CommitFloor's floor to equal its own location (genuinely
-                // empty at commit time). If this doesn't hold (e.g. uncommitted
-                // deletes emptied the DB), we can't generate a valid proof until
-                // the next commit.
+                // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
+                // variant requires the CommitFloor's floor to equal its own location (genuinely
+                // empty at commit time). If this doesn't hold (e.g. uncommitted deleted emptied
+                // the DB), we can't generate a valid proof until the next commit.
                 let op = self
                     .any
                     .log
