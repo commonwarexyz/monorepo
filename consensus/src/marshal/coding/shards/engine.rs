@@ -299,7 +299,7 @@ where
     context: ContextCell<E>,
 
     /// Receiver for incoming messages to the actor.
-    mailbox: mpsc::Receiver<Message<B, C, P>>,
+    mailbox: mpsc::Receiver<Message<B, C, H, P>>,
 
     /// The scheme provider.
     scheme_provider: S,
@@ -332,7 +332,7 @@ where
     ///
     /// These blocks are evicted after a durability signal from the marshal.
     /// Wrapped in [`Arc`] to enable cheap cloning when serving multiple subscribers.
-    reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C>>>,
+    reconstructed_blocks: BTreeMap<Commitment, Arc<CodedBlock<B, C, H>>>,
 
     /// Open subscriptions for the receipt of our valid shard corresponding
     /// to the keyed [`Commitment`] from the leader.
@@ -342,7 +342,7 @@ where
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
     block_subscriptions:
-        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C>>>>>,
+        BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics,
@@ -361,7 +361,7 @@ where
     T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, S, X, C, H, B, T>) -> (Self, Mailbox<B, C, P>) {
+    pub fn new(context: E, config: Config<P, S, X, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
@@ -525,7 +525,7 @@ where
                         self.try_advance(&mut sender, commitment).await;
                     }
                 } else {
-                    self.buffer_pre_leader_shard(peer, shard);
+                    self.buffer_peer_shard(peer, shard);
                 }
             },
         }
@@ -538,10 +538,11 @@ where
     /// - `Ok(Some(block))` if reconstruction was successful or the block was already reconstructed.
     /// - `Ok(None)` if reconstruction could not be attempted due to insufficient checked shards.
     /// - `Err(_)` if reconstruction was attempted but failed.
+    #[allow(clippy::type_complexity)]
     fn try_reconstruct(
         &mut self,
         commitment: Commitment,
-    ) -> Result<Option<Arc<CodedBlock<B, C>>>, Error<C>> {
+    ) -> Result<Option<Arc<CodedBlock<B, C, H>>>, Error<C>> {
         if let Some(block) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(Arc::clone(block)));
         }
@@ -574,7 +575,7 @@ where
         let (inner, config): (B, CodingConfig) =
             Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
-        match validate_reconstruction(&inner, config, commitment) {
+        match validate_reconstruction::<H, _>(&inner, config, commitment) {
             Ok(()) => {}
             Err(InvariantError::BlockDigest) => {
                 return Err(Error::DigestMismatch);
@@ -657,7 +658,7 @@ where
     }
 
     /// Buffer a shard from a peer until a leader is known.
-    fn buffer_pre_leader_shard(&mut self, peer: P, shard: Shard<C, H>) {
+    fn buffer_peer_shard(&mut self, peer: P, shard: Shard<C, H>) {
         let queue = self.peer_buffers.entry(peer).or_default();
         if queue.len() >= self.peer_buffer_size.get() {
             let _ = queue.pop_front();
@@ -708,7 +709,7 @@ where
     }
 
     /// Cache a block and notify block subscribers waiting on it.
-    fn cache_block(&mut self, block: Arc<CodedBlock<B, C>>) {
+    fn cache_block(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         self.reconstructed_blocks
             .insert(commitment, Arc::clone(&block));
@@ -720,7 +721,7 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<C, H>>,
         round: Round,
-        mut block: CodedBlock<B, C>,
+        mut block: CodedBlock<B, C, H>,
     ) {
         let commitment = block.commitment();
 
@@ -863,7 +864,7 @@ where
     fn handle_block_subscription(
         &mut self,
         key: BlockSubscriptionKey<B::Digest>,
-        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     ) {
         let block = match key {
             BlockSubscriptionKey::Commitment(commitment) => {
@@ -897,7 +898,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C>>) {
+    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -1594,7 +1595,7 @@ mod tests {
         /// The peer's index in the participant set.
         index: Participant,
         /// The mailbox for sending messages to the peer's shard engine.
-        mailbox: Mailbox<B, S, P>,
+        mailbox: Mailbox<B, S, H, P>,
         /// Raw network sender for injecting messages (e.g., byzantine behavior).
         sender: NetworkSender,
     }
@@ -1724,7 +1725,7 @@ mod tests {
 
         fixture.start(|config, context, _, mut peers, coding_config| async move {
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
             let leader = peers[0].public_key.clone();
@@ -1769,7 +1770,7 @@ mod tests {
 
         fixture.start(|config, context, _, mut peers, coding_config| async move {
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, Zoda<H>>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, Zoda<H>, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
             let leader = peers[0].public_key.clone();
@@ -1814,7 +1815,7 @@ mod tests {
 
         fixture.start(|config, context, _, mut peers, coding_config| async move {
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
             let digest = coded_block.digest();
 
@@ -1863,7 +1864,7 @@ mod tests {
 
         fixture.start(|config, context, _, peers, coding_config| async move {
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
             let digest = coded_block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -1924,7 +1925,7 @@ mod tests {
             // Create an older discovered commitment with subscriptions that should
             // become stale once a newer round successfully reconstructs.
             let old_inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let old_block = CodedBlock::<B, C>::new(old_inner, coding_config, &STRATEGY);
+            let old_block = CodedBlock::<B, C, H>::new(old_inner, coding_config, &STRATEGY);
             let old_commitment = old_block.commitment();
             let old_digest = old_block.digest();
             let old_round = Round::new(Epoch::zero(), View::new(1));
@@ -1957,7 +1958,7 @@ mod tests {
             // Reconstruct a newer commitment. Successful reconstruction prunes all
             // states at or below its round.
             let new_inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-            let new_block = CodedBlock::<B, C>::new(new_inner, coding_config, &STRATEGY);
+            let new_block = CodedBlock::<B, C, H>::new(new_inner, coding_config, &STRATEGY);
             let new_commitment = new_block.commitment();
             let new_round = Round::new(Epoch::zero(), View::new(2));
             peers[receiver_idx]
@@ -1966,9 +1967,7 @@ mod tests {
                 .await;
 
             let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
-            let strong = new_block
-                .shard::<H>(receiver_shard_idx)
-                .expect("missing shard");
+            let strong = new_block.shard(receiver_shard_idx).expect("missing shard");
             peers[0]
                 .sender
                 .send(Recipients::One(receiver_pk.clone()), strong.encode(), true)
@@ -1978,7 +1977,7 @@ mod tests {
             for &idx in &[1usize, 2, 4] {
                 let peer_shard_idx = peers[idx].index.get() as u16;
                 let weak = new_block
-                    .shard::<H>(peer_shard_idx)
+                    .shard(peer_shard_idx)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -2024,13 +2023,11 @@ mod tests {
                 // peers[2] = receiver
 
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let receiver_index = peers[2].index.get() as u16;
 
-                let valid_shard = coded_block
-                    .shard::<H>(receiver_index)
-                    .expect("missing shard");
+                let valid_shard = coded_block.shard(receiver_index).expect("missing shard");
 
                 // corrupt the shard's index
                 let mut invalid_shard = valid_shard.clone();
@@ -2086,17 +2083,17 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(|_, context, _, mut peers, coding_config| async move {
             // Create 3 blocks at heights 1, 2, 3.
-            let block1 = CodedBlock::<B, C>::new(
+            let block1 = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let block2 = CodedBlock::<B, C>::new(
+            let block2 = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 100),
                 coding_config,
                 &STRATEGY,
             );
-            let block3 = CodedBlock::<B, C>::new(
+            let block3 = CodedBlock::<B, C, H>::new(
                 B::new::<H>((), Sha256Digest::EMPTY, Height::new(3), 100),
                 coding_config,
                 &STRATEGY,
@@ -2155,13 +2152,12 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
@@ -2212,21 +2208,21 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment = coded_block1.commitment();
 
                 // Create a second block with different payload to get different shard data.
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard from both blocks.
                 let peer2_index = peers[2].index.get() as u16;
                 let strong_bytes1 = coded_block1
-                    .shard::<H>(peer2_index)
+                    .shard(peer2_index)
                     .expect("missing shard")
                     .encode();
                 let mut equivocating_shard =
-                    coded_block2.shard::<H>(peer2_index).expect("missing shard");
+                    coded_block2.shard(peer2_index).expect("missing shard");
                 // Override the commitment so it targets the same reconstruction state.
                 equivocating_shard.commitment = commitment;
                 let strong_bytes2 = equivocating_shard.encode();
@@ -2269,13 +2265,12 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
@@ -2309,13 +2304,12 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
@@ -2356,13 +2350,12 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
@@ -2442,13 +2435,12 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
@@ -2511,7 +2503,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(|config, context, oracle, peers, coding_config| async move {
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
             let leader = peers[0].public_key.clone();
@@ -2540,7 +2532,7 @@ mod tests {
                 .await;
 
             let peer2_index = peers[2].index.get() as u16;
-            let strong_shard = coded_block.shard::<H>(peer2_index).expect("missing shard");
+            let strong_shard = coded_block.shard(peer2_index).expect("missing shard");
             let weak_shard = strong_shard
                 .verify_into_weak()
                 .expect("verify_into_weak failed");
@@ -2561,7 +2553,7 @@ mod tests {
         let fixture = Fixture::<C>::default();
         fixture.start(|config, context, oracle, peers, coding_config| async move {
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
             let leader = peers[0].public_key.clone();
@@ -2585,7 +2577,7 @@ mod tests {
                 .expect("link should be added");
 
             let peer2_index = peers[2].index.get() as u16;
-            let strong_shard = coded_block.shard::<H>(peer2_index).expect("missing shard");
+            let strong_shard = coded_block.shard(peer2_index).expect("missing shard");
             let weak_shard = strong_shard
                 .verify_into_weak()
                 .expect("verify_into_weak failed");
@@ -2618,17 +2610,15 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard (to initialize their checking_data).
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
 
                 // Get peer 1's weak shard.
                 let peer1_index = peers[1].index.get() as u16;
-                let peer1_strong_shard =
-                    coded_block.shard::<H>(peer1_index).expect("missing shard");
+                let peer1_strong_shard = coded_block.shard(peer1_index).expect("missing shard");
                 let peer1_weak_shard = peer1_strong_shard
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -2701,28 +2691,25 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
 
                 // Create a second block with different payload to get different shard data.
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard from block 1 (to initialize their checking_data).
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block1.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block1.shard(peer2_index).expect("missing shard");
 
                 // Get peer 1's weak shard from block 1.
                 let peer1_index = peers[1].index.get() as u16;
-                let peer1_strong_shard =
-                    coded_block1.shard::<H>(peer1_index).expect("missing shard");
+                let peer1_strong_shard = coded_block1.shard(peer1_index).expect("missing shard");
                 let peer1_weak_shard = peer1_strong_shard
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
 
                 // Get peer 1's weak shard from block 2 (different data, same index).
-                let peer1_strong_shard2 =
-                    coded_block2.shard::<H>(peer1_index).expect("missing shard");
+                let peer1_strong_shard2 = coded_block2.shard(peer1_index).expect("missing shard");
                 let mut peer1_equivocating_shard = peer1_strong_shard2
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -2787,7 +2774,7 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 // Commitment A at lower view (1).
-                let block_a = CodedBlock::<B, C>::new(
+                let block_a = CodedBlock::<B, C, H>::new(
                     B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100),
                     coding_config,
                     &STRATEGY,
@@ -2795,7 +2782,7 @@ mod tests {
                 let commitment_a = block_a.commitment();
 
                 // Commitment B at higher view (2), which we will reconstruct.
-                let block_b = CodedBlock::<B, C>::new(
+                let block_b = CodedBlock::<B, C, H>::new(
                     B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200),
                     coding_config,
                     &STRATEGY,
@@ -2815,7 +2802,7 @@ mod tests {
                     )
                     .await;
                 let peer1_strong_a = block_a
-                    .shard::<H>(peers[1].index.get() as u16)
+                    .shard(peers[1].index.get() as u16)
                     .expect("missing shard");
                 let weak_a = peer1_strong_a
                     .verify_into_weak()
@@ -2839,7 +2826,7 @@ mod tests {
                     .await;
                 // Strong shard for peer2 from leader.
                 let strong_b = block_b
-                    .shard::<H>(peers[2].index.get() as u16)
+                    .shard(peers[2].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -2851,7 +2838,7 @@ mod tests {
                 // Three weak shards for minimum threshold (4 total with strong).
                 for i in [1usize, 3usize, 4usize] {
                     let weak = block_b
-                        .shard::<H>(peers[i].index.get() as u16)
+                        .shard(peers[i].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -2908,20 +2895,19 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 3's strong shard.
                 let peer3_index = peers[3].index.get() as u16;
-                let peer3_strong_shard =
-                    coded_block.shard::<H>(peer3_index).expect("missing shard");
+                let peer3_strong_shard = coded_block.shard(peer3_index).expect("missing shard");
 
                 // Get weak shards from peers 0, 1, and 2 (3 total to meet minimum_shards=4).
                 let weak_shards: Vec<_> = [0, 1, 2]
                     .iter()
                     .map(|&i| {
                         coded_block
-                            .shard::<H>(peers[i].index.get() as u16)
+                            .shard(peers[i].index.get() as u16)
                             .expect("missing shard")
                             .verify_into_weak()
                             .expect("verify_into_weak failed")
@@ -3005,7 +2991,7 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 let receiver_idx = 3usize;
@@ -3021,7 +3007,7 @@ mod tests {
                 // Send one strong shard from the eventual leader and three weak shards,
                 // all before leader announcement.
                 let strong = coded_block
-                    .shard::<H>(peers[receiver_idx].index.get() as u16)
+                    .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -3032,7 +3018,7 @@ mod tests {
 
                 for i in [1usize, 2usize, 4usize] {
                     let weak = coded_block
-                        .shard::<H>(peers[i].index.get() as u16)
+                        .shard(peers[i].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -3096,7 +3082,7 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 let receiver_idx = 3usize;
@@ -3118,7 +3104,7 @@ mod tests {
 
                 // Send leader strong shard after leader is known.
                 let strong = coded_block
-                    .shard::<H>(peers[receiver_idx].index.get() as u16)
+                    .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -3138,7 +3124,7 @@ mod tests {
                 // Send enough weak shards after leader known to reconstruct.
                 for i in [1usize, 2usize, 4usize] {
                     let weak = coded_block
-                        .shard::<H>(peers[i].index.get() as u16)
+                        .shard(peers[i].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -3206,12 +3192,11 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard.
                 let peer2_index = peers[2].index.get() as u16;
-                let peer2_strong_shard =
-                    coded_block.shard::<H>(peer2_index).expect("missing shard");
+                let peer2_strong_shard = coded_block.shard(peer2_index).expect("missing shard");
                 let strong_bytes = peer2_strong_shard.encode();
 
                 let peer2_pk = peers[2].public_key.clone();
@@ -3265,16 +3250,16 @@ mod tests {
                 // Create two different blocks — shard from block2 won't verify
                 // against commitment from block1.
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 2's strong shard from block2, but re-wrap it with
                 // block1's commitment so it fails C::weaken.
                 let peer2_index = peers[2].index.get() as u16;
-                let mut wrong_shard = coded_block2.shard::<H>(peer2_index).expect("missing shard");
+                let mut wrong_shard = coded_block2.shard(peer2_index).expect("missing shard");
                 wrong_shard.commitment = commitment1;
                 let wrong_bytes = wrong_shard.encode();
 
@@ -3313,18 +3298,17 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
 
                 // Get peer 2's strong shard so peer 3 can validate weak shards.
                 let peer3_index = peers[3].index.get() as u16;
-                let peer3_strong_shard =
-                    coded_block.shard::<H>(peer3_index).expect("missing shard");
+                let peer3_strong_shard = coded_block.shard(peer3_index).expect("missing shard");
 
                 // Get peer 1's valid weak shard, then change the index to peer 4's index.
                 let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_index_weak_shard = coded_block
-                    .shard::<H>(peer1_index)
+                    .shard(peer1_index)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -3375,22 +3359,21 @@ mod tests {
             |config, context, oracle, mut peers, coding_config| async move {
                 // Create two different blocks.
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 3's strong shard from block1 (valid).
                 let peer3_index = peers[3].index.get() as u16;
-                let peer3_strong_shard =
-                    coded_block1.shard::<H>(peer3_index).expect("missing shard");
+                let peer3_strong_shard = coded_block1.shard(peer3_index).expect("missing shard");
 
                 // Get peer 1's weak shard from block2, but re-wrap with block1's
                 // commitment so C::check fails.
                 let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_weak_shard = coded_block2
-                    .shard::<H>(peer1_index)
+                    .shard(peer1_index)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -3427,7 +3410,7 @@ mod tests {
                 for &idx in &[2, 4] {
                     let peer_index = peers[idx].index.get() as u16;
                     let weak = coded_block1
-                        .shard::<H>(peer_index)
+                        .shard(peer_index)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -3460,11 +3443,11 @@ mod tests {
         fixture.start(
             |config, context, oracle, mut peers, coding_config| async move {
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 let receiver_idx = 3usize;
                 let receiver_pk = peers[receiver_idx].public_key.clone();
@@ -3472,7 +3455,7 @@ mod tests {
                 // Prepare one invalid weak shard: shard data from block2, commitment from block1.
                 let peer1_index = peers[1].index.get() as u16;
                 let mut invalid_weak = coded_block2
-                    .shard::<H>(peer1_index)
+                    .shard(peer1_index)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -3485,7 +3468,7 @@ mod tests {
                     .discovered(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let receiver_strong = coded_block1
-                    .shard::<H>(peers[receiver_idx].index.get() as u16)
+                    .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
                     .encode();
                 peers[0]
@@ -3509,7 +3492,7 @@ mod tests {
                     .expect("send failed");
                 for idx in [2usize, 4usize] {
                     let weak = coded_block1
-                        .shard::<H>(peers[idx].index.get() as u16)
+                        .shard(peers[idx].index.get() as u16)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed")
@@ -3537,7 +3520,7 @@ mod tests {
 
                 // Send one additional valid weak shard; this should now satisfy checked threshold.
                 let extra_valid = coded_block1
-                    .shard::<H>(peers[5].index.get() as u16)
+                    .shard(peers[5].index.get() as u16)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed")
@@ -3573,16 +3556,16 @@ mod tests {
             |config, context, oracle, mut peers, coding_config| async move {
                 // Create two different blocks.
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
                 let commitment1 = coded_block1.commitment();
 
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
 
                 // Get peer 1's weak shard from block2, but wrap with block1's commitment.
                 let peer1_index = peers[1].index.get() as u16;
                 let mut wrong_weak_shard = coded_block2
-                    .shard::<H>(peer1_index)
+                    .shard(peer1_index)
                     .expect("missing shard")
                     .verify_into_weak()
                     .expect("verify_into_weak failed");
@@ -3610,7 +3593,7 @@ mod tests {
                 for &idx in &[2, 4] {
                     let peer_index = peers[idx].index.get() as u16;
                     let weak = coded_block1
-                        .shard::<H>(peer_index)
+                        .shard(peer_index)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -3634,8 +3617,7 @@ mod tests {
                     .discovered(commitment1, leader, Round::new(Epoch::zero(), View::new(1)))
                     .await;
                 let peer3_index = peers[3].index.get() as u16;
-                let peer3_strong_shard =
-                    coded_block1.shard::<H>(peer3_index).expect("missing shard");
+                let peer3_strong_shard = coded_block1.shard(peer3_index).expect("missing shard");
                 let strong_bytes = peer3_strong_shard.encode();
                 peers[0]
                     .sender
@@ -3734,7 +3716,7 @@ mod tests {
             // Build a coded block using epoch 1's participant set.
             let coding_config = coding_config_for_participants(epoch1_set.len() as u16);
             let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let commitment = coded_block.commitment();
 
             // The future peer creates a weak shard at their epoch 1 index.
@@ -3742,7 +3724,7 @@ mod tests {
                 .index(&future_peer_pk)
                 .expect("future peer must be in epoch 1");
             let strong_shard = coded_block
-                .shard::<H>(future_peer_index.get() as u16)
+                .shard(future_peer_index.get() as u16)
                 .expect("missing shard");
             let weak_shard = strong_shard
                 .verify_into_weak()
@@ -3797,11 +3779,11 @@ mod tests {
             |config, context, _oracle, mut peers, coding_config| async move {
                 // Block 1: the "claimed" block (its digest goes in the fake commitment).
                 let inner1 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block1 = CodedBlock::<B, C>::new(inner1, coding_config, &STRATEGY);
+                let coded_block1 = CodedBlock::<B, C, H>::new(inner1, coding_config, &STRATEGY);
 
                 // Block 2: the actual data behind the shards.
                 let inner2 = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-                let coded_block2 = CodedBlock::<B, C>::new(inner2, coding_config, &STRATEGY);
+                let coded_block2 = CodedBlock::<B, C, H>::new(inner2, coding_config, &STRATEGY);
                 let real_commitment2 = coded_block2.commitment();
 
                 // Build a fake commitment: block1's digest + block2's coding root/context/config.
@@ -3835,7 +3817,7 @@ mod tests {
                 // Send the receiver's strong shard (from block2, with fake commitment).
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
                 let mut strong_shard = coded_block2
-                    .shard::<H>(receiver_shard_idx)
+                    .shard(receiver_shard_idx)
                     .expect("missing shard");
                 strong_shard.commitment = fake_commitment;
                 peers[0]
@@ -3853,7 +3835,7 @@ mod tests {
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let mut weak = coded_block2
-                        .shard::<H>(peer_shard_idx)
+                        .shard(peer_shard_idx)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -3898,7 +3880,7 @@ mod tests {
                     .await;
 
                 let strong1 = coded_block1
-                    .shard::<H>(receiver_shard_idx)
+                    .shard(receiver_shard_idx)
                     .expect("missing shard");
                 peers[0]
                     .sender
@@ -3909,7 +3891,7 @@ mod tests {
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let weak = coded_block1
-                        .shard::<H>(peer_shard_idx)
+                        .shard(peer_shard_idx)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -3945,7 +3927,7 @@ mod tests {
         fixture.start(
             |config, context, _oracle, mut peers, coding_config| async move {
                 let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = CodedBlock::<B, C>::new(inner, coding_config, &STRATEGY);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let real_commitment = coded_block.commitment();
 
                 let wrong_context_hash = Sha256::hash(b"wrong_context");
@@ -3974,7 +3956,7 @@ mod tests {
 
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
                 let mut strong_shard = coded_block
-                    .shard::<H>(receiver_shard_idx)
+                    .shard(receiver_shard_idx)
                     .expect("missing shard");
                 strong_shard.commitment = fake_commitment;
                 peers[0]
@@ -3990,7 +3972,7 @@ mod tests {
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let mut weak = coded_block
-                        .shard::<H>(peer_shard_idx)
+                        .shard(peer_shard_idx)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");
@@ -4025,7 +4007,7 @@ mod tests {
                     .await;
 
                 let strong_real = coded_block
-                    .shard::<H>(receiver_shard_idx)
+                    .shard(receiver_shard_idx)
                     .expect("missing shard");
                 peers[0]
                     .sender
@@ -4040,7 +4022,7 @@ mod tests {
                 for &idx in &[1usize, 2, 4] {
                     let peer_shard_idx = peers[idx].index.get() as u16;
                     let weak = coded_block
-                        .shard::<H>(peer_shard_idx)
+                        .shard(peer_shard_idx)
                         .expect("missing shard")
                         .verify_into_weak()
                         .expect("verify_into_weak failed");

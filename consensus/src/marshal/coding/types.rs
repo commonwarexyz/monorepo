@@ -6,9 +6,7 @@ use crate::{
 };
 use commonware_codec::{EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
-use commonware_cryptography::{
-    sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
-};
+use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, ops::Deref};
@@ -266,7 +264,7 @@ where
 
 /// An envelope type for an erasure coded [`Block`].
 #[derive(Debug)]
-pub struct CodedBlock<B: Block, C: Scheme> {
+pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     /// The inner block type.
     inner: B,
     /// The erasure coding configuration.
@@ -277,9 +275,11 @@ pub struct CodedBlock<B: Block, C: Scheme> {
     ///
     /// These shards are optional to enable lazy construction.
     shards: Option<Vec<C::StrongShard>>,
+    /// Phantom data for the hasher.
+    _hasher: PhantomData<H>,
 }
 
-impl<B: Block, C: Scheme> CodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Erasure codes the block.
     fn encode(
         inner: &B,
@@ -301,6 +301,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
             config,
             commitment,
             shards: Some(shards),
+            _hasher: PhantomData,
         }
     }
 
@@ -311,6 +312,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
             config: commitment.config(),
             commitment: commitment.root(),
             shards: None,
+            _hasher: PhantomData,
         }
     }
 
@@ -340,7 +342,7 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     }
 
     /// Returns a [`Shard`] at the given index, if the index is valid.
-    pub fn shard<H: Hasher>(&self, index: u16) -> Option<Shard<C, H>>
+    pub fn shard(&self, index: u16) -> Option<Shard<C, H>>
     where
         B: CertifiableBlock,
     {
@@ -362,37 +364,40 @@ impl<B: Block, C: Scheme> CodedBlock<B, C> {
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme> From<CodedBlock<B, C>> for StoredCodedBlock<B, C> {
-    fn from(block: CodedBlock<B, C>) -> Self {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
+    for StoredCodedBlock<B, C, H>
+{
+    fn from(block: CodedBlock<B, C, H>) -> Self {
         Self::new(block)
     }
 }
 
-impl<B: Block + Clone, C: Scheme> Clone for CodedBlock<B, C> {
+impl<B: Block + Clone, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             config: self.config,
             commitment: self.commitment,
             shards: self.shards.clone(),
+            _hasher: PhantomData,
         }
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme> Committable for CodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C, H> {
     type Commitment = Commitment;
 
     fn commitment(&self) -> Self::Commitment {
         Commitment::from((
             self.digest(),
             self.commitment,
-            hash_context(&self.inner.context()),
+            hash_context::<H, _>(&self.inner.context()),
             self.config,
         ))
     }
 }
 
-impl<B: Block, C: Scheme> Digestible for CodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Digestible for CodedBlock<B, C, H> {
     type Digest = B::Digest;
 
     fn digest(&self) -> Self::Digest {
@@ -400,20 +405,20 @@ impl<B: Block, C: Scheme> Digestible for CodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Write for CodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Write for CodedBlock<B, C, H> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.inner.write(buf);
         self.config.write(buf);
     }
 }
 
-impl<B: Block, C: Scheme> EncodeSize for CodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
     fn encode_size(&self) -> usize {
         self.inner.encode_size() + self.config.encode_size()
     }
 }
 
-impl<B: Block, C: Scheme> Read for CodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     type Cfg = <B as Read>::Cfg;
 
     fn read_cfg(
@@ -436,23 +441,24 @@ impl<B: Block, C: Scheme> Read for CodedBlock<B, C> {
             config,
             commitment,
             shards: Some(shards),
+            _hasher: PhantomData,
         })
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme> Block for CodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> Block for CodedBlock<B, C, H> {
     fn parent(&self) -> Self::Digest {
         self.inner.parent()
     }
 }
 
-impl<B: Block, C: Scheme> Heightable for CodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Heightable for CodedBlock<B, C, H> {
     fn height(&self) -> Height {
         self.inner.height()
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for CodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> CertifiableBlock for CodedBlock<B, C, H> {
     type Context = B::Context;
 
     fn context(&self) -> Self::Context {
@@ -461,13 +467,13 @@ impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for CodedBlock<B, C> {
 }
 
 /// Hashes a consensus context for inclusion in a [`Commitment`].
-pub fn hash_context<C: EncodeSize + Write>(context: &C) -> Sha256Digest {
+pub fn hash_context<H: Hasher, C: EncodeSize + Write>(context: &C) -> H::Digest {
     let mut buf = Vec::with_capacity(context.encode_size());
     context.write(&mut buf);
-    Sha256::hash(&buf)
+    H::hash(&buf)
 }
 
-impl<B: Block + PartialEq, C: Scheme> PartialEq for CodedBlock<B, C> {
+impl<B: Block + PartialEq, C: Scheme, H: Hasher> PartialEq for CodedBlock<B, C, H> {
     fn eq(&self, other: &Self) -> bool {
         self.inner == other.inner
             && self.config == other.config
@@ -476,7 +482,7 @@ impl<B: Block + PartialEq, C: Scheme> PartialEq for CodedBlock<B, C> {
     }
 }
 
-impl<B: Block + Eq, C: Scheme> Eq for CodedBlock<B, C> {}
+impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 
 /// A [`CodedBlock`] paired with its [`Commitment`] for efficient storage and retrieval.
 ///
@@ -490,18 +496,18 @@ impl<B: Block + Eq, C: Scheme> Eq for CodedBlock<B, C> {}
 ///
 /// The [`Read`] implementation performs a light verification (block digest check)
 /// to detect storage corruption, but does not re-encode the block.
-pub struct StoredCodedBlock<B: Block, C: Scheme> {
+pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: B,
     commitment: Commitment,
-    _scheme: PhantomData<C>,
+    _scheme: PhantomData<(C, H)>,
 }
 
-impl<B: CertifiableBlock, C: Scheme> StoredCodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
     /// Create a [`StoredCodedBlock`] from a verified [`CodedBlock`].
     ///
     /// The caller must ensure the [`CodedBlock`] has been properly verified
     /// (i.e., its commitment was computed or validated against a trusted source).
-    pub fn new(block: CodedBlock<B, C>) -> Self {
+    pub fn new(block: CodedBlock<B, C, H>) -> Self {
         Self {
             commitment: block.commitment(),
             inner: block.inner,
@@ -513,7 +519,7 @@ impl<B: CertifiableBlock, C: Scheme> StoredCodedBlock<B, C> {
     ///
     /// The returned [`CodedBlock`] will have `shards: None`, meaning shards
     /// will be lazily generated if needed via [`CodedBlock::shards`].
-    pub fn into_coded_block(self) -> CodedBlock<B, C> {
+    pub fn into_coded_block(self) -> CodedBlock<B, C, H> {
         CodedBlock::new_trusted(self.inner, self.commitment)
     }
 
@@ -524,13 +530,13 @@ impl<B: CertifiableBlock, C: Scheme> StoredCodedBlock<B, C> {
 }
 
 /// Converts a [`StoredCodedBlock`] back to a [`CodedBlock`].
-impl<B: Block, C: Scheme> From<StoredCodedBlock<B, C>> for CodedBlock<B, C> {
-    fn from(stored: StoredCodedBlock<B, C>) -> Self {
+impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for CodedBlock<B, C, H> {
+    fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
         Self::new_trusted(stored.inner, stored.commitment)
     }
 }
 
-impl<B: Block + Clone, C: Scheme> Clone for StoredCodedBlock<B, C> {
+impl<B: Block + Clone, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
     fn clone(&self) -> Self {
         Self {
             commitment: self.commitment,
@@ -540,7 +546,7 @@ impl<B: Block + Clone, C: Scheme> Clone for StoredCodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Committable for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Committable for StoredCodedBlock<B, C, H> {
     type Commitment = Commitment;
 
     fn commitment(&self) -> Self::Commitment {
@@ -548,7 +554,7 @@ impl<B: Block, C: Scheme> Committable for StoredCodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Digestible for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Digestible for StoredCodedBlock<B, C, H> {
     type Digest = B::Digest;
 
     fn digest(&self) -> Self::Digest {
@@ -556,20 +562,20 @@ impl<B: Block, C: Scheme> Digestible for StoredCodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Write for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Write for StoredCodedBlock<B, C, H> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.inner.write(buf);
         self.commitment.write(buf);
     }
 }
 
-impl<B: Block, C: Scheme> EncodeSize for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> EncodeSize for StoredCodedBlock<B, C, H> {
     fn encode_size(&self) -> usize {
         self.inner.encode_size() + self.commitment.encode_size()
     }
 }
 
-impl<B: Block, C: Scheme> Read for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
     // Note: No concurrency parameter needed since we don't re-encode!
     type Cfg = B::Cfg;
 
@@ -596,13 +602,13 @@ impl<B: Block, C: Scheme> Read for StoredCodedBlock<B, C> {
     }
 }
 
-impl<B: Block, C: Scheme> Block for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Block for StoredCodedBlock<B, C, H> {
     fn parent(&self) -> Self::Digest {
         self.inner.parent()
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for StoredCodedBlock<B, C> {
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> CertifiableBlock for StoredCodedBlock<B, C, H> {
     type Context = B::Context;
 
     fn context(&self) -> Self::Context {
@@ -610,19 +616,19 @@ impl<B: CertifiableBlock, C: Scheme> CertifiableBlock for StoredCodedBlock<B, C>
     }
 }
 
-impl<B: Block, C: Scheme> Heightable for StoredCodedBlock<B, C> {
+impl<B: Block, C: Scheme, H: Hasher> Heightable for StoredCodedBlock<B, C, H> {
     fn height(&self) -> Height {
         self.inner.height()
     }
 }
 
-impl<B: Block + PartialEq, C: Scheme> PartialEq for StoredCodedBlock<B, C> {
+impl<B: Block + PartialEq, C: Scheme, H: Hasher> PartialEq for StoredCodedBlock<B, C, H> {
     fn eq(&self, other: &Self) -> bool {
         self.commitment == other.commitment && self.inner == other.inner
     }
 }
 
-impl<B: Block + Eq, C: Scheme> Eq for StoredCodedBlock<B, C> {}
+impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for StoredCodedBlock<B, C, H> {}
 
 /// Compute the [`CodingConfig`] for a given number of participants.
 ///
@@ -737,10 +743,10 @@ mod test {
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, &Sequential);
+        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
 
         let encoded = coded_block.encode();
-        let decoded = CodedBlock::<Block, RS>::decode_cfg(encoded, &()).unwrap();
+        let decoded = CodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
 
         assert!(coded_block == decoded);
     }
@@ -753,8 +759,8 @@ mod test {
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, &Sequential);
-        let stored = StoredCodedBlock::<Block, RS>::new(coded_block.clone());
+        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block.clone());
 
         assert_eq!(stored.commitment(), coded_block.commitment());
         assert_eq!(stored.digest(), coded_block.digest());
@@ -762,7 +768,7 @@ mod test {
         assert_eq!(stored.parent(), coded_block.parent());
 
         let encoded = stored.encode();
-        let decoded = StoredCodedBlock::<Block, RS>::decode_cfg(encoded, &()).unwrap();
+        let decoded = StoredCodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
 
         assert!(stored == decoded);
         assert_eq!(decoded.commitment(), coded_block.commitment());
@@ -777,13 +783,13 @@ mod test {
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, &Sequential);
+        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
         let original_commitment = coded_block.commitment();
         let original_digest = coded_block.digest();
 
-        let stored = StoredCodedBlock::<Block, RS>::new(coded_block);
+        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
         let encoded = stored.encode();
-        let decoded = StoredCodedBlock::<Block, RS>::decode_cfg(encoded, &()).unwrap();
+        let decoded = StoredCodedBlock::<Block, RS, H>::decode_cfg(encoded, &()).unwrap();
         let restored = decoded.into_coded_block();
 
         assert_eq!(restored.commitment(), original_commitment);
@@ -798,8 +804,8 @@ mod test {
         };
 
         let block = Block::new::<Sha256>((), Sha256::hash(b"parent"), Height::new(42), 1_234_567);
-        let coded_block = CodedBlock::<Block, RS>::new(block, CONFIG, &Sequential);
-        let stored = StoredCodedBlock::<Block, RS>::new(coded_block);
+        let coded_block = CodedBlock::<Block, RS, H>::new(block, CONFIG, &Sequential);
+        let stored = StoredCodedBlock::<Block, RS, H>::new(coded_block);
 
         let mut encoded = stored.encode().to_vec();
 
@@ -808,7 +814,7 @@ mod test {
         encoded[block_size] ^= 0xFF;
 
         // Decoding should fail due to digest mismatch
-        let result = StoredCodedBlock::<Block, RS>::decode_cfg(&mut encoded.as_slice(), &());
+        let result = StoredCodedBlock::<Block, RS, H>::decode_cfg(&mut encoded.as_slice(), &());
         assert!(result.is_err());
     }
 

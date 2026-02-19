@@ -99,8 +99,7 @@ use crate::{
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    sha256::Digest as Sha256Digest,
-    Committable, Digestible,
+    Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
 use commonware_parallel::Strategy;
@@ -117,6 +116,7 @@ use commonware_utils::{
     NZU16,
 };
 use futures::future::{ready, try_join, Either, Ready};
+use prometheus_client::metrics::histogram::Histogram;
 use rand::Rng;
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
@@ -130,10 +130,11 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
-pub struct MarshaledConfig<A, B, C, Z, S, ES>
+pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
@@ -142,9 +143,9 @@ where
     pub application: A,
     /// Mailbox for communicating with the marshal engine.
     pub marshal:
-        core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
+        core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
-    pub shards: shards::Mailbox<B, C, <Z::Scheme as CertificateScheme>::PublicKey>,
+    pub shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
     pub scheme_provider: Z,
     /// Strategy for parallel operations.
@@ -160,26 +161,27 @@ where
 /// re-proposing boundary blocks during epoch transitions.
 #[derive(Clone)]
 #[allow(clippy::type_complexity)]
-pub struct Marshaled<E, A, B, C, Z, S, ES>
+pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
 {
     context: E,
     application: A,
-    marshal: core::Mailbox<Z::Scheme, Coding<B, C, <Z::Scheme as CertificateScheme>::PublicKey>>,
-    shards: shards::Mailbox<B, C, <Z::Scheme as CertificateScheme>::PublicKey>,
+    marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    last_built: LastBuilt<CodedBlock<B, C>>,
+    last_built: LastBuilt<CodedBlock<B, C, H>>,
     verification_tasks: VerificationTasks<Commitment>,
-    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C>)>>,
+    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
 
     build_duration: Timed<E>,
     verify_duration: Timed<E>,
@@ -187,7 +189,7 @@ where
     erasure_encode_duration: Timed<E>,
 }
 
-impl<E, A, B, C, Z, S, ES> Marshaled<E, A, B, C, Z, S, ES>
+impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: VerifyingApplication<
@@ -198,6 +200,7 @@ where
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
@@ -207,7 +210,7 @@ where
     /// # Panics
     ///
     /// Panics if the marshal metadata store cannot be initialized.
-    pub fn new(context: E, cfg: MarshaledConfig<A, B, C, Z, S, ES>) -> Self {
+    pub fn new(context: E, cfg: MarshaledConfig<A, B, C, H, Z, S, ES>) -> Self {
         let MarshaledConfig {
             application,
             marshal,
@@ -216,8 +219,6 @@ where
             strategy,
             epocher,
         } = cfg;
-
-        use prometheus_client::metrics::histogram::Histogram;
 
         let clock = Arc::new(context.clone());
 
@@ -293,7 +294,7 @@ where
         &mut self,
         context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
         commitment: Commitment,
-        prefetched_block: Option<CodedBlock<B, C>>,
+        prefetched_block: Option<CodedBlock<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -367,7 +368,7 @@ where
                     }
                 };
 
-                if let Err(err) = validate_coded_block_for_verification(
+                if let Err(err) = validate_coded_block_for_verification::<H, _, _>(
                     &epocher,
                     &block,
                     &parent,
@@ -424,7 +425,7 @@ where
     }
 }
 
-impl<E, A, B, C, Z, S, ES> Automaton for Marshaled<E, A, B, C, Z, S, ES>
+impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: VerifyingApplication<
@@ -435,6 +436,7 @@ where
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
@@ -456,7 +458,7 @@ where
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         let Some(previous_epoch) = epoch.previous() else {
             let genesis_block = self.application.genesis().await;
-            return genesis_coding_commitment(&genesis_block);
+            return genesis_coding_commitment::<H, _>(&genesis_block);
         };
 
         let last_height = self
@@ -595,7 +597,7 @@ where
                 build_timer.observe();
 
                 let mut erasure_timer = erasure_encode_duration.timer();
-                let coded_block = CodedBlock::<B, C>::new(built_block, coding_config, &strategy);
+                let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
                 erasure_timer.observe();
 
                 let commitment = coded_block.commitment();
@@ -646,7 +648,8 @@ where
         // - coding config must match active participant set
         // - context hash must match unless this is a re-proposal
         let proposal_context = (!is_reproposal).then_some(&context);
-        if let Err(err) = validate_coded_proposal(payload, coding_config, proposal_context) {
+        if let Err(err) = validate_coded_proposal::<H, _>(payload, coding_config, proposal_context)
+        {
             match err {
                 CodedProposalValidationError::CodingConfig => {
                     warn!(
@@ -657,8 +660,8 @@ where
                     );
                 }
                 CodedProposalValidationError::ContextHash => {
-                    let expected = hash_context(&context);
-                    let got = payload.context::<Sha256Digest>();
+                    let expected = hash_context::<H, _>(&context);
+                    let got = payload.context::<H::Digest>();
                     warn!(
                         round = %context.round,
                         expected = ?expected,
@@ -781,7 +784,7 @@ where
     }
 }
 
-impl<E, A, B, C, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, Z, S, ES>
+impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: VerifyingApplication<
@@ -792,6 +795,7 @@ where
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
@@ -891,7 +895,7 @@ where
     }
 }
 
-impl<E, A, B, C, Z, S, ES> Relay for Marshaled<E, A, B, C, Z, S, ES>
+impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<
@@ -901,6 +905,7 @@ where
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
@@ -938,7 +943,7 @@ where
     }
 }
 
-impl<E, A, B, C, Z, S, ES> Reporter for Marshaled<E, A, B, C, Z, S, ES>
+impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<
@@ -948,6 +953,7 @@ where
         > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
+    H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
     S: Strategy,
     ES: Epocher,
@@ -972,24 +978,26 @@ where
 /// the parent block's availability.
 ///
 /// Returns an error if the marshal subscription is cancelled.
-async fn fetch_parent<E, S, A, B, C>(
+#[allow(clippy::type_complexity)]
+async fn fetch_parent<E, S, A, B, C, H>(
     parent_commitment: Commitment,
     parent_round: Option<Round>,
     application: &mut A,
-    marshal: &mut core::Mailbox<S, Coding<B, C, S::PublicKey>>,
-    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C>)>>,
-) -> Either<Ready<Result<CodedBlock<B, C>, RecvError>>, oneshot::Receiver<CodedBlock<B, C>>>
+    marshal: &mut core::Mailbox<S, Coding<B, C, H, S::PublicKey>>,
+    cached_genesis: Arc<OnceLock<(Commitment, CodedBlock<B, C, H>)>>,
+) -> Either<Ready<Result<CodedBlock<B, C, H>, RecvError>>, oneshot::Receiver<CodedBlock<B, C, H>>>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
     A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
 {
     if cached_genesis.get().is_none() {
         let genesis = application.genesis().await;
-        let genesis_coding_commitment = genesis_coding_commitment(&genesis);
-        let coded_genesis = CodedBlock::<B, C>::new_trusted(genesis, genesis_coding_commitment);
+        let genesis_coding_commitment = genesis_coding_commitment::<H, _>(&genesis);
+        let coded_genesis = CodedBlock::<B, C, H>::new_trusted(genesis, genesis_coding_commitment);
         let _ = cached_genesis.set((genesis_coding_commitment, coded_genesis));
     }
 
@@ -1008,11 +1016,11 @@ where
 }
 
 /// Constructs the [`Commitment`] for the genesis block.
-fn genesis_coding_commitment<B: CertifiableBlock>(block: &B) -> Commitment {
+fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
     Commitment::from((
         block.digest(),
         block.digest(),
-        hash_context(&block.context()),
+        hash_context::<H, _>(&block.context()),
         GENESIS_CODING_CONFIG,
     ))
 }

@@ -52,7 +52,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Converts a working block to an application block.
     ///
     /// This conversion cannot use `Into` due to orphan rules when `Block` wraps
-    /// `ApplicationBlock` (e.g., `CodedBlock<B, C> -> B`).
+    /// `ApplicationBlock` (e.g., `CodedBlock<B, C, H> -> B`).
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock;
 }
 

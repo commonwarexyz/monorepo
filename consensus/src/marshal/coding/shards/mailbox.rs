@@ -6,23 +6,24 @@ use crate::{
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
 use std::sync::Arc;
 
 /// A message that can be sent to the coding [`Engine`].
 ///
 /// [`Engine`]: super::Engine
-pub enum Message<B, C, P>
+pub enum Message<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
     P: PublicKey,
 {
     /// A request to broadcast a proposed [`CodedBlock`] to all peers.
     Proposed {
         /// The erasure coded block.
-        block: CodedBlock<B, C>,
+        block: CodedBlock<B, C, H>,
         /// The round in which the block was proposed.
         round: Round,
     },
@@ -40,14 +41,14 @@ where
         /// The [`Commitment`] of the block to get.
         commitment: Commitment,
         /// The response channel.
-        response: oneshot::Sender<Option<Arc<CodedBlock<B, C>>>>,
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
     /// A request to get a reconstructed block by its digest, if available.
     GetByDigest {
         /// The digest of the block to get.
         digest: B::Digest,
         /// The response channel.
-        response: oneshot::Sender<Option<Arc<CodedBlock<B, C>>>>,
+        response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
     /// A request to open a subscription for the receipt of our valid shard from
     /// the leader.
@@ -63,7 +64,7 @@ where
         /// The block's digest.
         commitment: Commitment,
         /// The response channel.
-        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
     /// by its digest.
@@ -71,7 +72,7 @@ where
         /// The block's digest.
         digest: B::Digest,
         /// The response channel.
-        response: oneshot::Sender<Arc<CodedBlock<B, C>>>,
+        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
     /// A request to prune all caches at and below the given commitment.
     Prune {
@@ -84,28 +85,30 @@ where
 ///
 /// [`Engine`]: super::Engine
 #[derive(Clone)]
-pub struct Mailbox<B, C, P>
+pub struct Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
     P: PublicKey,
 {
-    pub(super) sender: mpsc::Sender<Message<B, C, P>>,
+    pub(super) sender: mpsc::Sender<Message<B, C, H, P>>,
 }
 
-impl<B, C, P> Mailbox<B, C, P>
+impl<B, C, H, P> Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
     P: PublicKey,
 {
     /// Create a new [`Mailbox`] with the given sender.
-    pub const fn new(sender: mpsc::Sender<Message<B, C, P>>) -> Self {
+    pub const fn new(sender: mpsc::Sender<Message<B, C, H, P>>) -> Self {
         Self { sender }
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
-    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C>) {
+    pub async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
         let msg = Message::Proposed { block, round };
         self.sender.send_lossy(msg).await;
     }
@@ -121,7 +124,7 @@ where
     }
 
     /// Request a reconstructed block by its [`Commitment`].
-    pub async fn get(&self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C>>> {
+    pub async fn get(&self, commitment: Commitment) -> Option<Arc<CodedBlock<B, C, H>>> {
         self.sender
             .request(|tx| Message::GetByCommitment {
                 commitment,
@@ -132,7 +135,7 @@ where
     }
 
     /// Request a reconstructed block by its digest.
-    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<Arc<CodedBlock<B, C>>> {
+    pub async fn get_by_digest(&self, digest: B::Digest) -> Option<Arc<CodedBlock<B, C, H>>> {
         self.sender
             .request(|tx| Message::GetByDigest {
                 digest,
@@ -157,7 +160,7 @@ where
     pub async fn subscribe(
         &self,
         commitment: Commitment,
-    ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeByCommitment {
             commitment,
@@ -171,7 +174,7 @@ where
     pub async fn subscribe_by_digest(
         &self,
         digest: B::Digest,
-    ) -> oneshot::Receiver<Arc<CodedBlock<B, C>>> {
+    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeByDigest {
             digest,

@@ -323,7 +323,7 @@ use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone, Debug)]
-pub struct Shard<D: Digest> {
+pub struct StrongShard<D: Digest> {
     data_bytes: usize,
     root: D,
     inclusion_proof: Proof<D>,
@@ -331,7 +331,7 @@ pub struct Shard<D: Digest> {
     checksum: Arc<Matrix>,
 }
 
-impl<D: Digest> PartialEq for Shard<D> {
+impl<D: Digest> PartialEq for StrongShard<D> {
     fn eq(&self, other: &Self) -> bool {
         self.data_bytes == other.data_bytes
             && self.root == other.root
@@ -341,9 +341,9 @@ impl<D: Digest> PartialEq for Shard<D> {
     }
 }
 
-impl<D: Digest> Eq for Shard<D> {}
+impl<D: Digest> Eq for StrongShard<D> {}
 
-impl<D: Digest> EncodeSize for Shard<D> {
+impl<D: Digest> EncodeSize for StrongShard<D> {
     fn encode_size(&self) -> usize {
         self.data_bytes.encode_size()
             + self.root.encode_size()
@@ -353,7 +353,7 @@ impl<D: Digest> EncodeSize for Shard<D> {
     }
 }
 
-impl<D: Digest> Write for Shard<D> {
+impl<D: Digest> Write for StrongShard<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.data_bytes.write(buf);
         self.root.write(buf);
@@ -363,7 +363,7 @@ impl<D: Digest> Write for Shard<D> {
     }
 }
 
-impl<D: Digest> Read for Shard<D> {
+impl<D: Digest> Read for StrongShard<D> {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -383,7 +383,7 @@ impl<D: Digest> Read for Shard<D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D: Digest> arbitrary::Arbitrary<'_> for Shard<D>
+impl<D: Digest> arbitrary::Arbitrary<'_> for StrongShard<D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
@@ -623,7 +623,7 @@ impl<H> std::fmt::Debug for Zoda<H> {
 impl<H: Hasher> Scheme for Zoda<H> {
     type Commitment = Summary;
 
-    type StrongShard = Shard<H::Digest>;
+    type StrongShard = StrongShard<H::Digest>;
 
     type WeakShard = WeakShard<H::Digest>;
 
@@ -680,7 +680,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
         let checksum = Arc::new(data.mul(&checking_matrix));
 
         // Step 7: Produce the shards in parallel.
-        let shard_results: Vec<Result<Shard<H::Digest>, Error>> =
+        let shard_results: Vec<Result<StrongShard<H::Digest>, Error>> =
             strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
                 let indices = &shuffled_indices
                     [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
@@ -694,7 +694,7 @@ impl<H: Hasher> Scheme for Zoda<H> {
                 let inclusion_proof = bmt
                     .multi_proof(indices)
                     .map_err(Error::FailedToCreateInclusionProof)?;
-                Ok(Shard {
+                Ok(StrongShard {
                     data_bytes,
                     root,
                     inclusion_proof,
@@ -852,7 +852,7 @@ mod tests {
         use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Shard<Sha256Digest>>,
+            CodecConformance<StrongShard<Sha256Digest>>,
             CodecConformance<WeakShard<Sha256Digest>>,
         }
     }

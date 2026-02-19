@@ -30,21 +30,21 @@ impl<H> std::fmt::Debug for NoCoding<H> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub struct Shard(Vec<u8>);
+pub struct StrongShard(Vec<u8>);
 
-impl EncodeSize for Shard {
+impl EncodeSize for StrongShard {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
     }
 }
 
-impl Write for Shard {
+impl Write for StrongShard {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.0.write(buf)
     }
 }
 
-impl Read for Shard {
+impl Read for StrongShard {
     type Cfg = crate::CodecConfig;
 
     fn read_cfg(
@@ -83,7 +83,7 @@ impl Read for WeakShard {
 impl<H: Hasher> crate::Scheme for NoCoding<H> {
     type Commitment = H::Digest;
 
-    type StrongShard = Shard;
+    type StrongShard = StrongShard;
 
     type WeakShard = WeakShard;
 
@@ -101,7 +101,7 @@ impl<H: Hasher> crate::Scheme for NoCoding<H> {
         let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         let commitment = H::new().update(&data).finalize();
         let shards = (0..config.total_shards())
-            .map(|_| Shard(data.clone()))
+            .map(|_| StrongShard(data.clone()))
             .collect();
         Ok((commitment, shards))
     }
@@ -148,7 +148,7 @@ mod conformance {
     use commonware_codec::conformance::CodecConformance;
 
     commonware_conformance::conformance_tests! {
-        CodecConformance<Shard>,
+        CodecConformance<StrongShard>,
         CodecConformance<WeakShard>
     }
 }

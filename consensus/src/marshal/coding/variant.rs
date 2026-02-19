@@ -10,7 +10,7 @@ use crate::{
     CertifiableBlock,
 };
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
 
@@ -19,14 +19,14 @@ use std::sync::Arc;
 /// This variant distributes blocks as erasure-coded shards, allowing reconstruction
 /// from a subset of shards. This reduces bandwidth requirements for block propagation.
 #[derive(Default, Clone, Copy)]
-pub struct Coding<B: CertifiableBlock, C: CodingScheme, P: PublicKey>(
-    std::marker::PhantomData<(B, C, P)>,
+pub struct Coding<B: CertifiableBlock, C: CodingScheme, H: Hasher, P: PublicKey>(
+    std::marker::PhantomData<(B, C, H, P)>,
 );
 
-impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C, P> {
+impl<B: CertifiableBlock, C: CodingScheme, H: Hasher, P: PublicKey> Variant for Coding<B, C, H, P> {
     type ApplicationBlock = B;
-    type Block = CodedBlock<B, C>;
-    type StoredBlock = StoredCodedBlock<B, C>;
+    type Block = CodedBlock<B, C, H>;
+    type StoredBlock = StoredCodedBlock<B, C, H>;
     type Commitment = Commitment;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
@@ -42,17 +42,18 @@ impl<B: CertifiableBlock, C: CodingScheme, P: PublicKey> Variant for Coding<B, C
     }
 }
 
-impl<B, C, P> Buffer<Coding<B, C, P>> for shards::Mailbox<B, C, P>
+impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
+    H: Hasher,
     P: PublicKey,
 {
-    type CachedBlock = Arc<CodedBlock<B, C>>;
+    type CachedBlock = Arc<CodedBlock<B, C, H>>;
 
     async fn find_by_digest(
         &self,
-        digest: <CodedBlock<B, C> as Digestible>::Digest,
+        digest: <CodedBlock<B, C, H> as Digestible>::Digest,
     ) -> Option<Self::CachedBlock> {
         self.get_by_digest(digest).await
     }
@@ -63,7 +64,7 @@ where
 
     async fn subscribe_by_digest(
         &self,
-        digest: <CodedBlock<B, C> as Digestible>::Digest,
+        digest: <CodedBlock<B, C, H> as Digestible>::Digest,
     ) -> oneshot::Receiver<Self::CachedBlock> {
         self.subscribe_by_digest(digest).await
     }
@@ -79,7 +80,7 @@ where
         self.prune(commitment).await;
     }
 
-    async fn proposed(&self, round: Round, block: CodedBlock<B, C>) {
+    async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
         self.proposed(round, block).await;
     }
 }
