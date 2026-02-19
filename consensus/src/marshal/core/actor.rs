@@ -686,6 +686,10 @@ where
                             error!(?err, %height, "failed to prune finalized archives");
                             return;
                         }
+
+                        // Floor changes may invalidate long-lived waiters for old
+                        // history; cancel all subscriptions so callers can resubscribe.
+                        self.cancel_block_subscriptions();
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor
@@ -699,6 +703,9 @@ where
                             error!(?err, %height, "failed to prune finalized archives");
                             return;
                         }
+
+                        // Pruning finalized history can invalidate pending waiters.
+                        self.cancel_block_subscriptions();
                     }
                 }
             },
@@ -852,6 +859,11 @@ where
             resolver
                 .fetch(Request::<V::Commitment>::Notarized { round })
                 .await;
+        } else if let BlockSubscriptionKey::Commitment(commitment) = key {
+            // Without a round hint, fetch by commitment directly to prevent
+            // commitment-scoped subscriptions from stalling indefinitely.
+            debug!(?commitment, ?digest, "requested block missing without round hint");
+            resolver.fetch(Request::<V::Commitment>::Block(commitment)).await;
         }
 
         // Register subscriber.
@@ -1114,17 +1126,32 @@ where
                     // a notarization then a finalization are received via consensus
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
+                    let block_commitment = V::commitment(&block);
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        wrote |= self
-                            .store_finalization(
-                                height,
-                                digest,
-                                block.clone(),
-                                Some(finalization),
-                                application,
-                                buffer,
-                            )
-                            .await;
+                        let finalization_commitment = finalization.proposal.payload;
+                        if finalization_commitment == block_commitment {
+                            wrote |= self
+                                .store_finalization(
+                                    height,
+                                    digest,
+                                    block.clone(),
+                                    Some(finalization),
+                                    application,
+                                    buffer,
+                                )
+                                .await;
+                        } else {
+                            // Cached finalizations are indexed by inner block digest.
+                            // In coding variants, multiple commitments may share the same
+                            // digest, so mismatched commitments must not be promoted.
+                            warn!(
+                                ?round,
+                                ?digest,
+                                ?block_commitment,
+                                ?finalization_commitment,
+                                "cached finalization commitment mismatched notarized block"
+                            );
+                        }
                     }
 
                     // Cache the notarization and block.
@@ -1167,6 +1194,21 @@ where
                 subscriber.send_lossy(block.clone());
             }
         }
+    }
+
+    /// Cancel all active block subscriptions.
+    ///
+    /// This is used after floor/prune updates to avoid leaving waiters parked
+    /// for history that may no longer be retrievable.
+    fn cancel_block_subscriptions(&mut self) {
+        if self.block_subscriptions.is_empty() {
+            return;
+        }
+        debug!(
+            subscriptions = self.block_subscriptions.len(),
+            "canceling block subscriptions after floor/prune update"
+        );
+        self.block_subscriptions.clear();
     }
 
     // -------------------- Application Dispatch --------------------
@@ -1386,6 +1428,9 @@ where
             if payload == commitment {
                 Some(finalization)
             } else {
+                // Finalizations may be fetched from a digest-indexed cache.
+                // In coding variants, digest equality does not guarantee full
+                // commitment equality.
                 warn!(
                     %height,
                     ?digest,

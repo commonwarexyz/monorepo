@@ -310,10 +310,12 @@ where
                 let round = context.round;
 
                 // Fetch parent block
-                let (parent_view, parent_commitment) = context.parent;
+                let (_, parent_commitment) = context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
-                    Some(Round::new(context.epoch(), parent_view)),
+                    // Parent commitments can cross epoch boundaries, so avoid
+                    // encoding a potentially incorrect round hint here.
+                    None,
                     &mut application,
                     &mut marshal,
                     cached_genesis,
@@ -514,10 +516,12 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                let (parent_view, parent_commitment) = consensus_context.parent;
+                let (_, parent_commitment) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_commitment,
-                    Some(Round::new(consensus_context.epoch(), parent_view)),
+                    // Parent commitments can cross epoch boundaries, so avoid
+                    // encoding a potentially incorrect round hint here.
+                    None,
                     &mut application,
                     &mut marshal,
                     cached_genesis,

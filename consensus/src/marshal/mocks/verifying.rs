@@ -15,11 +15,13 @@ use commonware_runtime::deterministic;
 /// This mock:
 /// - Returns the provided genesis block from `genesis()`
 /// - Returns `None` from `propose()` (never proposes)
-/// - Returns `true` from `verify()` (always accepts)
+/// - Returns a configurable result from `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
     /// The genesis block to return.
     pub genesis: B,
+    /// The result returned by `verify`.
+    pub verify_result: bool,
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -28,6 +30,16 @@ impl<B, S> MockVerifyingApp<B, S> {
     pub fn new(genesis: B) -> Self {
         Self {
             genesis,
+            verify_result: true,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Create a new mock verifying application with a fixed verify result.
+    pub fn with_verify_result(genesis: B, verify_result: bool) -> Self {
+        Self {
+            genesis,
+            verify_result,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -67,6 +79,6 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: AncestorStream<A, Self::Block>,
     ) -> bool {
-        true
+        self.verify_result
     }
 }

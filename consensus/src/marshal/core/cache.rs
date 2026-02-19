@@ -359,7 +359,12 @@ where
             .expect("failed to get notarization")
     }
 
-    /// Get a finalization from the prunable archive by commitment.
+    /// Get a finalization from the prunable archive by block digest.
+    ///
+    /// Note: this lookup is digest-scoped, not full-commitment-scoped. In coding
+    /// variants, distinct commitments can share the same inner block digest, so
+    /// callers must still compare `finalization.proposal.payload` against the
+    /// block's full commitment before promotion/finalization.
     pub(crate) async fn get_finalization_for(
         &self,
         digest: <V::Block as Digestible>::Digest,

@@ -213,10 +213,12 @@ where
             .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                let (parent_view, parent_digest) = context.parent;
+                let (_, parent_digest) = context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
-                    Some(Round::new(context.epoch(), parent_view)),
+                    // Parent digests can cross epoch boundaries, so avoid
+                    // encoding a potentially incorrect round hint here.
+                    None,
                     &mut application,
                     &mut marshal,
                 )
@@ -359,10 +361,12 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                let (parent_view, parent_digest) = consensus_context.parent;
+                let (_, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
-                    Some(Round::new(consensus_context.epoch(), parent_view)),
+                    // Parent digests can cross epoch boundaries, so avoid
+                    // encoding a potentially incorrect round hint here.
+                    None,
                     &mut application,
                     &mut marshal,
                 )
@@ -738,7 +742,7 @@ where
     } else {
         Either::Right(
             marshal
-                .subscribe_by_digest(parent_round, parent_digest)
+                .subscribe_by_commitment(parent_round, parent_digest)
                 .await,
         )
     }

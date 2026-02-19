@@ -134,6 +134,16 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_subscribe_canceled_on_floor_update() {
+        harness::subscribe_canceled_on_floor_update::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_subscribe_canceled_on_prune() {
+        harness::subscribe_canceled_on_prune::<StandardHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_subscribe_blocks_from_different_sources() {
         harness::subscribe_blocks_from_different_sources::<StandardHarness>();
     }
@@ -791,6 +801,79 @@ mod tests {
                     panic!("verify should reject mismatched context hash promptly");
                 },
             }
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_certify_propagates_application_verify_failure() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // 1) Set up a single validator marshal stack.
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let me = participants[0].clone();
+
+            let setup = StandardHarness::setup_validator(
+                context.with_label("validator_0"),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            // 2) Force application verification to fail in deferred verification.
+            let mock_app: MockVerifyingApp<B, S> =
+                MockVerifyingApp::with_verify_result(genesis.clone(), false);
+
+            let mut marshaled = Marshaled::new(
+                context.clone(),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_context = Ctx {
+                round: parent_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
+            let parent_commitment = parent.digest();
+            marshal.clone().proposed(parent_round, parent.clone()).await;
+
+            // 3) Publish a valid child so optimistic verify can succeed.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let verify_context = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_commitment),
+            };
+            let block = B::new::<Sha256>(verify_context.clone(), parent.digest(), Height::new(2), 200);
+            let commitment = block.digest();
+            marshal.clone().proposed(round, block).await;
+
+            context.sleep(Duration::from_millis(10)).await;
+
+            let optimistic = marshaled.verify(verify_context, commitment).await;
+            assert!(
+                optimistic.await.expect("verify result missing"),
+                "optimistic verify should pass pre-checks and schedule deferred verification"
+            );
+
+            // 4) Certify must observe the deferred application failure and return false.
+            let certify = marshaled.certify(round, commitment).await;
+            assert!(
+                !certify.await.expect("certify result missing"),
+                "certify should propagate deferred application verify failure"
+            );
         })
     }
 }
