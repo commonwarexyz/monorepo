@@ -188,13 +188,14 @@ where
         hasher: &mut H,
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
-        let (loc, key_data) = match self.any.get_span(key).await? {
+        match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
                     // Cannot prove exclusion of a key that exists in the db.
                     return Err(Error::KeyExists);
                 }
-                (loc, key_data)
+                let op_proof = self.operation_proof(hasher, loc).await?;
+                Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
                 // The DB is empty. Use the last CommitFloor to prove
@@ -203,22 +204,25 @@ where
                 // empty at commit time). If this doesn't hold (e.g. uncommitted
                 // deletes emptied the DB), we can't generate a valid proof until
                 // the next commit.
-                let loc = self.any.last_commit_loc;
-                let op = self.any.log.reader().await.read(*loc).await?;
+                let op = self
+                    .any
+                    .log
+                    .reader()
+                    .await
+                    .read(*self.any.last_commit_loc)
+                    .await?;
                 let Operation::CommitFloor(value, floor) = op else {
                     unreachable!("last_commit_loc should always point to a CommitFloor");
                 };
-                if floor != loc {
+                if floor != self.any.last_commit_loc {
                     return Err(Error::NotEmpty);
                 }
-                let op_proof = self.operation_proof(hasher, loc).await?;
+                let op_proof = self
+                    .operation_proof(hasher, self.any.last_commit_loc)
+                    .await?;
                 return Ok(super::ExclusionProof::Commit(op_proof, value));
             }
-        };
-
-        let op_proof = self.operation_proof(hasher, loc).await?;
-
-        Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
+        }
     }
 }
 
