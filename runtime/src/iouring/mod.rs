@@ -364,7 +364,10 @@ impl Waker {
         }
     }
 
-    /// Rearm the multishot wake poll request.
+    /// Rearm the wake poll request.
+    ///
+    /// This uses multishot poll and is called when a wake CQE indicates the
+    /// previous multishot arm is no longer active.
     fn rearm(&self, ring: &mut IoUring) {
         let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
             .multi(true)
