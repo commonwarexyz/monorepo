@@ -808,25 +808,17 @@ where
 
         match self.try_reconstruct(commitment) {
             Ok(Some(block)) => {
+                // Do not prune other reconstruction state here. A Byzantine
+                // leader can equivocate by proposing multiple commitments in
+                // the same round, so more than one block may be reconstructed
+                // for a given round. Pruning is deferred to `prune()`, which
+                // is called once a commitment is finalized.
                 debug!(
                     %commitment,
                     parent = %block.parent(),
                     height = %block.height(),
                     "successfully reconstructed block from shards"
                 );
-                let mut pruned_commitments = Vec::new();
-                if let Some(round) = self.state.get(&commitment).map(ReconstructionState::round) {
-                    self.state.retain(|pruned, state| {
-                        let keep = state.round() > round;
-                        if !keep {
-                            pruned_commitments.push(*pruned);
-                        }
-                        keep
-                    });
-                }
-                for pruned in pruned_commitments {
-                    self.drop_subscriptions(pruned);
-                }
             }
             Ok(None) => {
                 debug!(%commitment, "not enough checked shards to reconstruct block");
@@ -940,6 +932,12 @@ where
     /// Prunes all blocks in the reconstructed block cache that are older than the block
     /// with the given commitment. Also cleans up stale reconstruction state
     /// and subscriptions.
+    ///
+    /// This is the only place reconstruction state is pruned by round. We
+    /// intentionally avoid pruning on reconstruction success because a
+    /// Byzantine leader can equivocate, producing multiple valid commitments
+    /// in the same round. Both must remain recoverable until finalization
+    /// determines which one is canonical.
     fn prune(&mut self, min: Commitment) {
         if let Some(height) = self.reconstructed_blocks.get(&min).map(|b| b.height()) {
             self.reconstructed_blocks
@@ -1907,109 +1905,6 @@ mod tests {
             };
             assert_eq!(block_by_digest.commitment(), commitment);
             assert_eq!(block_by_digest.height(), coded_block.height());
-        });
-    }
-
-    #[test_traced]
-    fn test_successful_reconstruction_prunes_and_closes_stale_subscriptions() {
-        let fixture: Fixture<C> = Fixture {
-            num_peers: 10,
-            ..Default::default()
-        };
-
-        fixture.start(|config, context, _, mut peers, coding_config| async move {
-            let receiver_idx = 3usize;
-            let receiver_pk = peers[receiver_idx].public_key.clone();
-            let leader = peers[0].public_key.clone();
-
-            // Create an older discovered commitment with subscriptions that should
-            // become stale once a newer round successfully reconstructs.
-            let old_inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
-            let old_block = CodedBlock::<B, C, H>::new(old_inner, coding_config, &STRATEGY);
-            let old_commitment = old_block.commitment();
-            let old_digest = old_block.digest();
-            let old_round = Round::new(Epoch::zero(), View::new(1));
-            peers[receiver_idx]
-                .mailbox
-                .discovered(old_commitment, leader.clone(), old_round)
-                .await;
-
-            let mut old_shard_sub = peers[receiver_idx]
-                .mailbox
-                .subscribe_shard(old_commitment)
-                .await;
-            let mut old_commitment_sub =
-                peers[receiver_idx].mailbox.subscribe(old_commitment).await;
-            let mut old_digest_sub = peers[receiver_idx]
-                .mailbox
-                .subscribe_by_digest(old_digest)
-                .await;
-
-            assert!(matches!(old_shard_sub.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(
-                old_commitment_sub.try_recv(),
-                Err(TryRecvError::Empty)
-            ));
-            assert!(matches!(
-                old_digest_sub.try_recv(),
-                Err(TryRecvError::Empty)
-            ));
-
-            // Reconstruct a newer commitment. Successful reconstruction prunes all
-            // states at or below its round.
-            let new_inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(2), 200);
-            let new_block = CodedBlock::<B, C, H>::new(new_inner, coding_config, &STRATEGY);
-            let new_commitment = new_block.commitment();
-            let new_round = Round::new(Epoch::zero(), View::new(2));
-            peers[receiver_idx]
-                .mailbox
-                .discovered(new_commitment, leader.clone(), new_round)
-                .await;
-
-            let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
-            let strong = new_block.shard(receiver_shard_idx).expect("missing shard");
-            peers[0]
-                .sender
-                .send(Recipients::One(receiver_pk.clone()), strong.encode(), true)
-                .await
-                .expect("send failed");
-
-            for &idx in &[1usize, 2, 4] {
-                let peer_shard_idx = peers[idx].index.get() as u16;
-                let weak = new_block
-                    .shard(peer_shard_idx)
-                    .expect("missing shard")
-                    .verify_into_weak()
-                    .expect("verify_into_weak failed");
-                peers[idx]
-                    .sender
-                    .send(Recipients::One(receiver_pk.clone()), weak.encode(), true)
-                    .await
-                    .expect("send failed");
-            }
-
-            context.sleep(config.link.latency * 2).await;
-
-            let reconstructed = peers[receiver_idx]
-                .mailbox
-                .get(new_commitment)
-                .await
-                .expect("new block should reconstruct");
-            assert_eq!(reconstructed.commitment(), new_commitment);
-
-            // Stale subscriptions should now be closed, not left hanging.
-            assert!(matches!(
-                old_shard_sub.try_recv(),
-                Err(TryRecvError::Closed)
-            ));
-            assert!(matches!(
-                old_commitment_sub.try_recv(),
-                Err(TryRecvError::Closed)
-            ));
-            assert!(matches!(
-                old_digest_sub.try_recv(),
-                Err(TryRecvError::Closed)
-            ));
         });
     }
 
@@ -4041,6 +3936,125 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior context mismatch");
                 assert_eq!(reconstructed.commitment(), real_commitment);
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_same_round_equivocation_preserves_certifiable_recovery() {
+        // Regression coverage for same-round leader equivocation:
+        // - leader equivocates across two commitments in the same round
+        // - we receive a shard for commitment B (the certifiable one)
+        // - commitment A reconstructs first
+        // - commitment B must still remain recoverable
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _oracle, mut peers, coding_config| async move {
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
+
+                let leader = peers[0].public_key.clone();
+                let round = Round::new(Epoch::zero(), View::new(7));
+
+                // Two different commitments in the same round (equivocation scenario).
+                let block_a = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 111),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment_a = block_a.commitment();
+                let block_b = CodedBlock::<B, C, H>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 222),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment_b = block_b.commitment();
+
+                // Receiver learns both commitments in the same round.
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(commitment_a, leader.clone(), round)
+                    .await;
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(commitment_b, leader.clone(), round)
+                    .await;
+
+                // Subscribe to the certifiable commitment before any reconstruction.
+                let certifiable_sub = peers[receiver_idx].mailbox.subscribe(commitment_b).await;
+
+                // We receive our strong shard for commitment B from the equivocating leader.
+                let strong_b = block_b
+                    .shard(receiver_shard_idx)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), strong_b, true)
+                    .await
+                    .expect("send failed");
+
+                // Reconstruct conflicting commitment A first.
+                let strong_a = block_a
+                    .shard(receiver_shard_idx)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), strong_a, true)
+                    .await
+                    .expect("send failed");
+                for i in [1usize, 2usize, 4usize] {
+                    let weak_a = block_a
+                        .shard(peers[i].index.get() as u16)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed")
+                        .encode();
+                    peers[i]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak_a, true)
+                        .await
+                        .expect("send failed");
+                }
+                context.sleep(config.link.latency * 4).await;
+                let reconstructed_a = peers[receiver_idx]
+                    .mailbox
+                    .get(commitment_a)
+                    .await
+                    .expect("conflicting commitment should reconstruct first");
+                assert_eq!(reconstructed_a.commitment(), commitment_a);
+
+                // Commitment B should still be recoverable after A reconstructed.
+                for i in [1usize, 2usize, 4usize] {
+                    let weak_b = block_b
+                        .shard(peers[i].index.get() as u16)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed")
+                        .encode();
+                    peers[i]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak_b, true)
+                        .await
+                        .expect("send failed");
+                }
+
+                select! {
+                    result = certifiable_sub => {
+                        let reconstructed_b =
+                            result.expect("certifiable commitment should remain recoverable");
+                        assert_eq!(reconstructed_b.commitment(), commitment_b);
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("certifiable commitment was not recoverable after same-round equivocation");
+                    },
+                }
             },
         );
     }
