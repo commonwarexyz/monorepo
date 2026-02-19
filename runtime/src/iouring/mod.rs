@@ -251,24 +251,149 @@ pub struct Op {
     pub fd: Option<OpFd>,
 }
 
-struct SubmitterState {
-    sender: mpsc::Sender<Op>,
-    wake_fd: Arc<OwnedFd>,
-    wake_pending: Arc<AtomicBool>,
+struct WakerInner {
+    wake_fd: OwnedFd,
+    wake_pending: AtomicBool,
 }
 
-impl Drop for SubmitterState {
+/// Internal eventfd-backed wake source for the io_uring loop.
+///
+/// Producers signal this after enqueueing work. The loop consumes wake
+/// notifications from CQEs and re-arms multishot poll when needed.
+#[derive(Clone)]
+struct Waker {
+    inner: Arc<WakerInner>,
+}
+
+impl Waker {
+    /// Create a non-blocking eventfd wake source.
+    fn new() -> Result<Self, std::io::Error> {
+        // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `eventfd` returned a new owned descriptor.
+        let wake_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+        Ok(Self {
+            inner: Arc::new(WakerInner {
+                wake_fd,
+                wake_pending: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    /// Signal wake by incrementing the eventfd counter.
+    fn signal(&self) {
+        let value: u64 = 1;
+        loop {
+            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
+            // to an initialized 8-byte integer for the duration of the call.
+            let ret = unsafe {
+                libc::write(
+                    self.inner.wake_fd.as_raw_fd(),
+                    &value as *const u64 as *const libc::c_void,
+                    size_of::<u64>(),
+                )
+            };
+            if ret == size_of::<u64>() as isize {
+                return;
+            }
+            if ret == -1 {
+                match std::io::Error::last_os_error().raw_os_error() {
+                    // Retry if interrupted by a signal before completion.
+                    Some(libc::EINTR) => continue,
+                    // Non-blocking write would block because the counter is
+                    // saturated: a wake is already pending, so no retry is needed.
+                    Some(libc::EAGAIN) => return,
+                    _ => return,
+                }
+            }
+            return;
+        }
+    }
+
+    /// Signal once per producer burst using the pending latch.
+    fn wake(&self) {
+        if !self.inner.wake_pending.swap(true, Ordering::AcqRel) {
+            self.signal();
+        }
+    }
+
+    /// Clear and return the pending latch.
+    fn clear(&self) -> bool {
+        self.inner.wake_pending.swap(false, Ordering::AcqRel)
+    }
+
+    /// Consume wake notifications from the eventfd counter.
+    ///
+    /// Retries on `EINTR`. Treats `EAGAIN` as "nothing to drain". Without
+    /// `EFD_SEMAPHORE`, one successful read drains the full counter to zero.
+    fn consume(&self) {
+        let mut value: u64 = 0;
+        loop {
+            // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
+            // to writable 8-byte storage for the duration of the call.
+            let ret = unsafe {
+                libc::read(
+                    self.inner.wake_fd.as_raw_fd(),
+                    &mut value as *mut u64 as *mut libc::c_void,
+                    size_of::<u64>(),
+                )
+            };
+            if ret == size_of::<u64>() as isize {
+                // eventfd (without EFD_SEMAPHORE) returns the full counter and
+                // resets it to zero in one read.
+                return;
+            }
+            if ret == -1 {
+                match std::io::Error::last_os_error().raw_os_error() {
+                    // Retry if interrupted by a signal before completion.
+                    Some(libc::EINTR) => continue,
+                    // Non-blocking read would block because the counter is zero,
+                    // there is nothing left to drain right now.
+                    Some(libc::EAGAIN) => return,
+                    _ => return,
+                }
+            }
+            return;
+        }
+    }
+
+    /// Rearm the multishot wake poll request.
+    fn rearm(&self, ring: &mut IoUring) {
+        let wake_poll = PollAdd::new(Fd(self.inner.wake_fd.as_raw_fd()), libc::POLLIN as u32)
+            .multi(true)
+            .build()
+            .user_data(WAKE_WORK_ID);
+
+        // SAFETY: The poll SQE owns no user pointers and references a valid FD.
+        unsafe {
+            ring.submission()
+                .push(&wake_poll)
+                .expect("wake poll SQE should always fit in the ring");
+        }
+    }
+}
+
+struct SubmitterInner {
+    sender: mpsc::Sender<Op>,
+    waker: Waker,
+}
+
+impl Drop for SubmitterInner {
     fn drop(&mut self) {
         // Wake the loop when the last sender is dropped so it can observe
         // channel disconnect and shut down promptly.
-        signal_wake(&self.wake_fd);
+        self.waker.signal();
     }
 }
 
 /// Handle for submitting operations to an [IoUringLoop].
 #[derive(Clone)]
 pub struct Submitter {
-    inner: Arc<SubmitterState>,
+    inner: Arc<SubmitterInner>,
 }
 
 impl Submitter {
@@ -280,9 +405,7 @@ impl Submitter {
         self.inner.sender.send(op).await?;
 
         // Only the first send in a burst performs the eventfd write.
-        if !self.inner.wake_pending.swap(true, Ordering::AcqRel) {
-            signal_wake(&self.inner.wake_fd);
-        }
+        self.inner.waker.wake();
 
         Ok(())
     }
@@ -294,8 +417,7 @@ pub(crate) struct IoUringLoop {
     metrics: Arc<Metrics>,
     receiver: mpsc::Receiver<Op>,
     waiters: Waiters,
-    wake_fd: Arc<OwnedFd>,
-    wake_pending: Arc<AtomicBool>,
+    waker: Waker,
 }
 
 impl IoUringLoop {
@@ -306,14 +428,12 @@ impl IoUringLoop {
         let size = cfg.size as usize;
         let metrics = Arc::new(Metrics::new(registry));
         let (sender, receiver) = mpsc::channel(size);
-        let wake_fd = Arc::new(new_wake_fd().expect("unable to create wake eventfd"));
-        let wake_pending = Arc::new(AtomicBool::new(false));
+        let waker = Waker::new().expect("unable to create wake eventfd");
 
         let submitter = Submitter {
-            inner: Arc::new(SubmitterState {
+            inner: Arc::new(SubmitterInner {
                 sender,
-                wake_fd: wake_fd.clone(),
-                wake_pending: wake_pending.clone(),
+                waker: waker.clone(),
             }),
         };
 
@@ -324,8 +444,7 @@ impl IoUringLoop {
                 metrics,
                 receiver,
                 waiters: Waiters::with_capacity(size),
-                wake_fd,
-                wake_pending,
+                waker,
             },
         )
     }
@@ -335,16 +454,17 @@ impl IoUringLoop {
     /// This method blocks the current thread.
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
-        self.arm_wake_poll(&mut ring);
+        self.waker.rearm(&mut ring);
 
-        let mut next_work_id: u64 = 0;
+        let mut next_work_id = 0;
         loop {
             // Process available completions.
-            loop {
-                let Some(cqe) = ring.completion().next() else {
-                    break;
-                };
-                self.handle_cqe(&mut ring, cqe);
+            let mut wake_rearm_needed = false;
+            while let Some(cqe) = ring.completion().next() {
+                wake_rearm_needed |= self.handle_cqe(cqe);
+            }
+            if wake_rearm_needed {
+                self.waker.rearm(&mut ring);
             }
 
             // Try to fill the submission queue with incoming work.
@@ -439,7 +559,7 @@ impl IoUringLoop {
 
             // If producers queued more work since our last channel drain, loop
             // again without blocking.
-            if self.wake_pending.swap(false, Ordering::AcqRel) {
+            if self.waker.clear() {
                 continue;
             }
 
@@ -453,7 +573,9 @@ impl IoUringLoop {
     ///
     /// Internal wake and timeout CQEs are handled in-place, normal operation
     /// CQEs are matched to `waiters` and forwarded to the original requester.
-    fn handle_cqe(&mut self, ring: &mut IoUring, cqe: CqueueEntry) {
+    ///
+    /// Returns `true` when the wake multishot poll needs re-arming.
+    fn handle_cqe(&mut self, cqe: CqueueEntry) -> bool {
         let work_id = cqe.user_data();
         match work_id {
             WAKE_WORK_ID => {
@@ -464,12 +586,12 @@ impl IoUringLoop {
 
                 // Clear eventfd readiness so future wake signals can trigger
                 // notifications.
-                self.drain_wake_fd();
+                self.waker.consume();
 
                 // Multishot can terminate, so we must re-arm to keep the wake
                 // path live.
                 if !io_uring::cqueue::more(cqe.flags()) {
-                    self.arm_wake_poll(ring);
+                    return true;
                 }
             }
             TIMEOUT_WORK_ID => {
@@ -492,50 +614,7 @@ impl IoUringLoop {
                 let _ = result_sender.send((result, buffer));
             }
         }
-    }
-
-    /// Arm the multishot wake poll request.
-    fn arm_wake_poll(&self, ring: &mut IoUring) {
-        let wake_poll = PollAdd::new(Fd(self.wake_fd.as_raw_fd()), libc::POLLIN as u32)
-            .multi(true)
-            .build()
-            .user_data(WAKE_WORK_ID);
-
-        // SAFETY: The poll SQE owns no user pointers and references a valid FD.
-        unsafe {
-            ring.submission()
-                .push(&wake_poll)
-                .expect("wake poll SQE should always fit in the ring");
-        }
-    }
-
-    /// Drain the eventfd counter so future wake readiness reflects new signals.
-    fn drain_wake_fd(&self) {
-        let mut value: u64 = 0;
-        loop {
-            // SAFETY: `self.wake_fd` is a valid eventfd descriptor and `value`
-            // points to writable 8-byte storage for the duration of the call.
-            let ret = unsafe {
-                libc::read(
-                    self.wake_fd.as_raw_fd(),
-                    &mut value as *mut u64 as *mut libc::c_void,
-                    size_of::<u64>(),
-                )
-            };
-            if ret == size_of::<u64>() as isize {
-                // eventfd (without EFD_SEMAPHORE) returns the full counter and
-                // resets it to zero in one read.
-                return;
-            }
-            if ret == -1 {
-                match std::io::Error::last_os_error().raw_os_error() {
-                    Some(libc::EINTR) => continue,
-                    Some(libc::EAGAIN) => return,
-                    _ => return,
-                }
-            }
-            return;
-        }
+        false
     }
 
     /// Perform a single shutdown wait/drain pass.
@@ -560,11 +639,9 @@ impl IoUringLoop {
             .submit_and_wait(ring, pending, self.cfg.shutdown_timeout)
             .expect("unable to submit to ring");
 
-        loop {
-            let Some(cqe) = ring.completion().next() else {
-                break;
-            };
-            self.handle_cqe(ring, cqe);
+        while let Some(cqe) = ring.completion().next() {
+            // No wake re-arm during shutdown drain
+            let _ = self.handle_cqe(cqe);
         }
     }
 
@@ -646,46 +723,6 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     };
 
     builder.build(ring_size)
-}
-
-/// Create the internal non-blocking eventfd used by the wake path.
-fn new_wake_fd() -> Result<OwnedFd, std::io::Error> {
-    // SAFETY: `eventfd` is called with valid flags and no aliasing pointers.
-    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-    if fd < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        // SAFETY: `eventfd` returned a new owned descriptor.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-}
-
-/// Signal the loop wake source by incrementing the eventfd counter.
-fn signal_wake(wake_fd: &OwnedFd) {
-    let value: u64 = 1;
-    loop {
-        // SAFETY: `wake_fd` is a valid eventfd descriptor and `value` points
-        // to an initialized 8-byte integer for the duration of the call.
-        let ret = unsafe {
-            libc::write(
-                wake_fd.as_raw_fd(),
-                &value as *const u64 as *const libc::c_void,
-                size_of::<u64>(),
-            )
-        };
-        if ret == size_of::<u64>() as isize {
-            return;
-        }
-        if ret == -1 {
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EINTR) => continue,
-                // Counter already saturated means a wake is already pending.
-                Some(libc::EAGAIN) => return,
-                _ => return,
-            }
-        }
-        return;
-    }
 }
 
 /// Returns whether some result should be retried due to a transient error.
