@@ -883,8 +883,8 @@ where
         self.send_certificate_bytes(signer_idx, msg).await;
     }
 
-    // The goal of this function is to unlock the honest node using
-    // finalize votes for the votes that were notarized by the honest node.
+    // Boost progress after an honest notarize by injecting byzantine support for that
+    // proposal, and sometimes fast-forwarding with notarization/finalization certificates.
     async fn inject_finalize_quorum_for_honest_notarize_views(&mut self) {
         let notarized: Vec<_> = self
             .honest_notarize_votes
@@ -900,13 +900,25 @@ where
         if notarized.is_empty() {
             return;
         }
-        let budget = self.context.gen_range(1..=notarized.len());
 
-        for (view, proposal) in notarized.into_iter().take(budget) {
+        for (view, proposal) in notarized {
+            // Intuition: if we observe an honest notarize, quickly add byzantine nodes support so the
+            // honest node can make progress as in the real protocol and keep advancing height under heavy load.
             for signer_idx in 0..self.schemes.len() {
-                self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
+                self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
                     .await;
             }
+
+            if !self.schemes.is_empty() && self.context.gen_bool(0.4) {
+                self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                    .await;
+            }
+            if !self.schemes.is_empty() && self.context.gen_bool(0.2) {
+                self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                    .await;
+            }
+
+            // Keep existing one-shot-per-view behavior.
             self.injected_finalize_views.insert(view);
         }
     }
