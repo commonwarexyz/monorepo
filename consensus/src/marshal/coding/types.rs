@@ -288,7 +288,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         config: CodingConfig,
         strategy: &impl Strategy,
     ) -> (C::Commitment, Vec<C::StrongShard>) {
-        let mut buf = Vec::with_capacity(config.encode_size() + inner.encode_size());
+        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
 
