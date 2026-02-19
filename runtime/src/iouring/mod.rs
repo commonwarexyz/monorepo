@@ -679,7 +679,7 @@ impl IoUringLoop {
         let deadline = self
             .cfg
             .shutdown_timeout
-            .map(|timeout| Instant::now() + timeout);
+            .and_then(|timeout| Instant::now().checked_add(timeout));
 
         while !self.waiters.is_empty() {
             let timeout =
@@ -702,6 +702,8 @@ impl IoUringLoop {
                 break;
             }
         }
+
+        self.metrics.pending_operations.set(self.waiters.len() as _);
     }
 
     /// Submits pending operations and waits for completions.
