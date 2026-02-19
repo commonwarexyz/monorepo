@@ -228,7 +228,7 @@ pub enum Error<C: CodingScheme> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BlockSubscriptionKey<D> {
     Commitment(Commitment),
-    Block(D),
+    Digest(D),
 }
 
 /// Configuration for the [`Engine`].
@@ -320,10 +320,10 @@ where
     state: BTreeMap<Commitment, ReconstructionState<P, C, H>>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
-    pre_leader_buffers: BTreeMap<P, VecDeque<Shard<C, H>>>,
+    peer_buffers: BTreeMap<P, VecDeque<Shard<C, H>>>,
 
     /// Maximum buffered pre-leader shards per peer.
-    pre_leader_buffer_size: NonZeroUsize,
+    peer_buffer_size: NonZeroUsize,
 
     /// Capacity of the background receiver channel.
     background_channel_capacity: usize,
@@ -374,8 +374,8 @@ where
                 block_codec_cfg: config.block_codec_cfg,
                 strategy: config.strategy,
                 state: BTreeMap::new(),
-                pre_leader_buffers: BTreeMap::new(),
-                pre_leader_buffer_size: config.peer_buffer_size,
+                peer_buffers: BTreeMap::new(),
+                peer_buffer_size: config.peer_buffer_size,
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 shard_subscriptions: BTreeMap::new(),
@@ -486,7 +486,7 @@ where
                     );
                 }
                 Message::SubscribeByDigest { digest, response } => {
-                    self.handle_block_subscription(BlockSubscriptionKey::Block(digest), response);
+                    self.handle_block_subscription(BlockSubscriptionKey::Digest(digest), response);
                 }
                 Message::Prune { min } => {
                     self.prune(min);
@@ -658,8 +658,8 @@ where
 
     /// Buffer a shard from a peer until a leader is known.
     fn buffer_pre_leader_shard(&mut self, peer: P, shard: Shard<C, H>) {
-        let queue = self.pre_leader_buffers.entry(peer).or_default();
-        if queue.len() >= self.pre_leader_buffer_size.get() {
+        let queue = self.peer_buffers.entry(peer).or_default();
+        if queue.len() >= self.peer_buffer_size.get() {
             let _ = queue.pop_front();
         }
         queue.push_back(shard);
@@ -669,7 +669,7 @@ where
     async fn ingest_buffered_shards(&mut self, commitment: Commitment) -> bool {
         let mut buffered_weak = Vec::new();
         let mut buffered_strong = Vec::new();
-        for (peer, queue) in self.pre_leader_buffers.iter_mut() {
+        for (peer, queue) in self.peer_buffers.iter_mut() {
             let mut i = 0;
             while i < queue.len() {
                 if queue[i].commitment() != commitment {
@@ -684,7 +684,7 @@ where
                 }
             }
         }
-        self.pre_leader_buffers.retain(|_, queue| !queue.is_empty());
+        self.peer_buffers.retain(|_, queue| !queue.is_empty());
 
         let Some(state) = self.state.get_mut(&commitment) else {
             return false;
@@ -869,7 +869,7 @@ where
             BlockSubscriptionKey::Commitment(commitment) => {
                 self.reconstructed_blocks.get(&commitment)
             }
-            BlockSubscriptionKey::Block(digest) => self
+            BlockSubscriptionKey::Digest(digest) => self
                 .reconstructed_blocks
                 .iter()
                 .find_map(|(_, block)| (block.digest() == digest).then_some(block)),
@@ -914,7 +914,7 @@ where
         // Notify by-digest subscribers.
         if let Some(mut subscribers) = self
             .block_subscriptions
-            .remove(&BlockSubscriptionKey::Block(digest))
+            .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(Arc::clone(&block));
@@ -931,7 +931,7 @@ where
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
         self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Block(
+            .remove(&BlockSubscriptionKey::Digest(
                 commitment.block::<B::Digest>(),
             ));
     }
@@ -939,12 +939,8 @@ where
     /// Prunes all blocks in the reconstructed block cache that are older than the block
     /// with the given commitment. Also cleans up stale reconstruction state
     /// and subscriptions.
-    fn prune(&mut self, commitment: Commitment) {
-        if let Some(height) = self
-            .reconstructed_blocks
-            .get(&commitment)
-            .map(|b| b.height())
-        {
+    fn prune(&mut self, min: Commitment) {
+        if let Some(height) = self.reconstructed_blocks.get(&min).map(|b| b.height()) {
             self.reconstructed_blocks
                 .retain(|_, block| block.height() > height);
         }
@@ -952,8 +948,8 @@ where
         // Always clear direct state/subscriptions for the pruned commitment.
         // This avoids dangling waiters when prune is called for a commitment
         // that was never reconstructed locally.
-        self.drop_subscriptions(commitment);
-        let Some(round) = self.state.remove(&commitment).map(|state| state.round()) else {
+        self.drop_subscriptions(min);
+        let Some(round) = self.state.remove(&min).map(|state| state.round()) else {
             return;
         };
 
@@ -1099,7 +1095,7 @@ where
             index,
             data,
         } = shard;
-        self.common.received_strong = Some(data.clone());
+        let received_strong = data.clone();
         let Ok((checking_data, checked, weak_shard_data)) =
             C::weaken(&commitment.config(), &commitment.root(), index, data)
         else {
@@ -1108,6 +1104,10 @@ where
             return false;
         };
 
+        // Only persist the strong shard (for later equivocation detection) after
+        // it has passed `C::weaken` verification.
+        self.common.received_strong = Some(received_strong);
+        self.common.contributed.set(u64::from(index), true);
         self.common.checked_shards.push(checked);
         self.common.our_weak_shard = Some(Shard::new(
             commitment,
@@ -1412,10 +1412,7 @@ where
         }
 
         match self {
-            Self::AwaitingQuorum(state) => {
-                state.common.contributed.set(u64::from(me.get()), true);
-                state.verify_strong_shard(sender, shard, blocker).await
-            }
+            Self::AwaitingQuorum(state) => state.verify_strong_shard(sender, shard, blocker).await,
             Self::Ready(_) => false,
         }
     }
