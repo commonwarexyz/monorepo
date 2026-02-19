@@ -494,8 +494,7 @@ impl IoUringLoop {
 
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // Always enter IORING_ENTER_GETEVENTS eventually. This guarantees progress
-            // with DEFER_TASKRUN enabled in single-issuer mode.
+            // Submit pending SQEs and wait for a completion or wake event.
             self.submit_and_wait(&mut ring, 1, None)
                 .expect("unable to submit to ring");
         }
