@@ -246,9 +246,7 @@ where
         if start_loc >= historical_leaves {
             return Err(MmrError::RangeOutOfBounds(start_loc).into());
         }
-        if *start_loc < bounds.start {
-            return Err(JournalError::ItemPruned(*start_loc).into());
-        }
+
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
         let proof = self
