@@ -314,14 +314,17 @@ impl Waker {
         }
     }
 
-    /// Signal once per producer burst using the pending latch.
+    /// Wake once per producer burst using the pending latch.
+    ///
+    /// The first caller in a burst flips `wake_pending` and writes to eventfd.
+    /// Subsequent callers skip the syscall.
     fn wake(&self) {
         if !self.inner.wake_pending.swap(true, Ordering::AcqRel) {
             self.signal();
         }
     }
 
-    /// Clear and return the pending latch.
+    /// Clear and return the previous pending state.
     fn clear(&self) -> bool {
         self.inner.wake_pending.swap(false, Ordering::AcqRel)
     }
@@ -378,14 +381,17 @@ impl Waker {
 }
 
 struct SubmitterInner {
-    sender: mpsc::Sender<Op>,
+    sender: Option<mpsc::Sender<Op>>,
     waker: Waker,
 }
 
 impl Drop for SubmitterInner {
     fn drop(&mut self) {
-        // Wake the loop when the last sender is dropped so it can observe
-        // channel disconnect and shut down promptly.
+        // Disconnect first, then wake. This avoids a race where the loop
+        // handles a wake CQE before channel closure becomes observable.
+        drop(self.sender.take());
+
+        // Wake the loop so shutdown observes disconnect promptly.
         self.waker.signal();
     }
 }
@@ -402,7 +408,12 @@ impl Submitter {
     /// On success, this may signal the loop's `eventfd` wake source. Wake writes are coalesced
     /// with an atomic wake-pending latch so bursts of submissions usually trigger a single wake.
     pub async fn send(&self, op: Op) -> Result<(), mpsc::error::SendError<Op>> {
-        self.inner.sender.send(op).await?;
+        self.inner
+            .sender
+            .as_ref()
+            .expect("submitter sender is only taken on drop")
+            .send(op)
+            .await?;
 
         // Only the first send in a burst performs the eventfd write.
         self.inner.waker.wake();
@@ -432,7 +443,7 @@ impl IoUringLoop {
 
         let submitter = Submitter {
             inner: Arc::new(SubmitterInner {
-                sender,
+                sender: Some(sender),
                 waker: waker.clone(),
             }),
         };
@@ -479,7 +490,7 @@ impl IoUringLoop {
                 let op = match self.receiver.try_recv() {
                     Ok(work) => work,
                     Err(TryRecvError::Disconnected) => {
-                        self.drain_ring(&mut ring);
+                        self.drain(&mut ring);
                         return;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -622,7 +633,7 @@ impl IoUringLoop {
     /// This waits once for up to the current pending operation count, then drains
     /// currently available CQEs and returns. Remaining waiters, if any, are
     /// abandoned as part of shutdown.
-    fn drain_ring(&mut self, ring: &mut IoUring) {
+    fn drain(&mut self, ring: &mut IoUring) {
         if self.waiters.is_empty() {
             return;
         }
