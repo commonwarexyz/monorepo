@@ -94,7 +94,7 @@ where
             invalid: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
-            strict: Arc::new(Mutex::new(true))
+            strict: Arc::new(Mutex::new(true)),
         }
     }
 
