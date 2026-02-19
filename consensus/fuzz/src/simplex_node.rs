@@ -1073,6 +1073,13 @@ where
         conflicting = self
             .strategy
             .proposal_with_view(&conflicting, base.view().get());
+        if conflicting == base {
+            conflicting = Proposal::new(
+                conflicting.round,
+                conflicting.parent,
+                self.strategy.random_payload(&mut self.context),
+            );
+        }
         Some(Finalization {
             proposal: conflicting,
             certificate: valid.certificate,
