@@ -3,8 +3,8 @@
 //!
 //! # Pruning
 //!
-//! A log based store maintains a location before which all operations are inactive, called the
-//! _inactivity floor_. These operations can be cleaned from storage by calling [PrunableStore::prune].
+//! Maintains a location before which all operations are inactive, called the _inactivity floor_.
+//! These operations can be cleaned from storage by calling [PrunableStore::prune].
 
 use crate::{
     mmr::{Location, Proof},
@@ -50,21 +50,14 @@ impl State for NonDurable {}
 pub trait LogStore: Send + Sync {
     type Value: CodecShared + Clone;
 
-    /// Returns true if there are no active keys in the database.
-    fn is_empty(&self) -> bool;
-
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    fn bounds(&self) -> std::ops::Range<Location>;
+    fn bounds(&self) -> impl Future<Output = std::ops::Range<Location>> + Send;
 
     /// Return the Location of the next operation appended to this db.
-    fn size(&self) -> Location {
-        self.bounds().end
+    fn size(&self) -> impl Future<Output = Location> + Send {
+        async { self.bounds().await.end }
     }
-
-    /// Return the inactivity floor location. This is the location before which all operations are
-    /// known to be inactive. Operations before this point can be safely pruned.
-    fn inactivity_floor_loc(&self) -> Location;
 
     /// Get the metadata associated with the last commit.
     fn get_metadata(&self) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send;
@@ -74,6 +67,10 @@ pub trait LogStore: Send + Sync {
 pub trait PrunableStore: LogStore {
     /// Prune historical operations prior to `loc`.
     fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// The location before which all operations can be pruned without affecting the state of the
+    /// database.
+    fn inactivity_floor_loc(&self) -> impl Future<Output = Location> + Send;
 }
 
 /// A trait for stores that support authentication through merkleization and inclusion proofs.
@@ -105,7 +102,10 @@ pub trait MerkleizedStore: LogStore {
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
     {
-        self.historical_proof(self.bounds().end, start_loc, max_ops)
+        async move {
+            self.historical_proof(self.bounds().await.end, start_loc, max_ops)
+                .await
+        }
     }
 
     /// Generate and return:

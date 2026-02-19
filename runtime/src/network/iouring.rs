@@ -23,7 +23,7 @@
 //! This implementation is only available on Linux systems that support io_uring.
 
 use crate::{
-    iouring::{self, should_retry, OpBuffer},
+    iouring::{self, should_retry, OpBuffer, OpFd},
     BufferPool, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{mpsc, oneshot};
@@ -34,6 +34,7 @@ use std::{
     net::SocketAddr,
     os::fd::{AsRawFd, OwnedFd},
     sync::Arc,
+    time::Duration,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tracing::warn;
@@ -46,6 +47,15 @@ pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     pub tcp_nodelay: Option<bool>,
+    /// Whether or not to set the `SO_LINGER` socket option.
+    ///
+    /// When `None`, the system default is used. When
+    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
+    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// `TIME_WAIT` state. This is useful in adversarial environments to
+    /// reclaim socket resources immediately when closing connections to
+    /// misbehaving peers.
+    pub so_linger: Option<Duration>,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
     /// Size of the read buffer for batching network reads.
@@ -59,6 +69,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tcp_nodelay: None,
+            so_linger: None,
             iouring_config: iouring::Config::default(),
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
         }
@@ -71,6 +82,8 @@ pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
+    /// Whether or not to set the `SO_LINGER` socket option.
+    so_linger: Option<Duration>,
     /// Used to submit send operations to the send io_uring event loop.
     send_submitter: mpsc::Sender<iouring::Op>,
     /// Used to submit recv operations to the recv io_uring event loop.
@@ -119,6 +132,7 @@ impl Network {
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
+            so_linger: cfg.so_linger,
             send_submitter,
             recv_submitter,
             read_buffer_size: cfg.read_buffer_size,
@@ -136,6 +150,7 @@ impl crate::Network for Network {
             .map_err(|_| crate::Error::BindFailed)?;
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
+            so_linger: self.so_linger,
             inner: listener,
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
@@ -150,8 +165,6 @@ impl crate::Network for Network {
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), crate::Error> {
         let stream = TcpStream::connect(socket)
             .await
-            .map_err(|_| crate::Error::ConnectionFailed)?
-            .into_std()
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Set TCP_NODELAY if configured
@@ -160,6 +173,18 @@ impl crate::Network for Network {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
         }
+
+        // Set SO_LINGER if configured
+        if let Some(so_linger) = self.so_linger {
+            if let Err(err) = stream.set_linger(Some(so_linger)) {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
+        // Convert the stream to a std::net::TcpStream
+        let stream = stream
+            .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Explicitly set non-blocking mode to true
         stream
@@ -184,6 +209,8 @@ pub struct Listener {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
+    /// Whether or not to set the `SO_LINGER` socket option.
+    so_linger: Option<Duration>,
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
     send_submitter: mpsc::Sender<iouring::Op>,
@@ -206,16 +233,24 @@ impl crate::Listener for Listener {
             .await
             .map_err(|_| crate::Error::ConnectionFailed)?;
 
-        let stream = stream
-            .into_std()
-            .map_err(|_| crate::Error::ConnectionFailed)?;
-
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
         }
+
+        // Set SO_LINGER if configured
+        if let Some(so_linger) = self.so_linger {
+            if let Err(err) = stream.set_linger(Some(so_linger)) {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
+        // Convert the stream to a std::net::TcpStream
+        let stream = stream
+            .into_std()
+            .map_err(|_| crate::Error::ConnectionFailed)?;
 
         // Explicitly set non-blocking mode to true
         stream
@@ -265,11 +300,11 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
         // Convert to contiguous IoBuf for io_uring send
         // (zero-copy if single buffer, copies if multiple)
         // TODO(#2705): Use writev to avoid this copy.
-        let mut buf = buf.into().coalesce_with_pool(&self.pool);
+        let mut buf = bufs.into().coalesce_with_pool(&self.pool);
         let mut bytes_sent = 0;
         let buf_len = buf.len();
 
@@ -294,6 +329,7 @@ impl crate::Sink for Sink {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Write(buf)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
                 })
                 .await
                 .map_err(|_| crate::Error::SendFailed)?;
@@ -387,6 +423,7 @@ impl Stream {
                     work: op,
                     sender: tx,
                     buffer: Some(OpBuffer::Read(buffer)),
+                    fd: Some(OpFd::Fd(self.fd.clone())),
                 })
                 .await
                 .is_err()
@@ -442,9 +479,8 @@ impl Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, crate::Error> {
-        let mut owned_buf = self.pool.alloc(len);
         // SAFETY: `len` bytes are written by the recv loop below.
-        unsafe { owned_buf.set_len(len) };
+        let mut owned_buf = unsafe { self.pool.alloc_len(len) };
         let mut bytes_received = 0;
 
         while bytes_received < len {
@@ -496,9 +532,12 @@ mod tests {
         },
         BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
     };
-    use commonware_macros::test_group;
+    use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     fn test_pool() -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
@@ -681,6 +720,58 @@ mod tests {
         // Verify we got the right data
         assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
         assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
+    }
+
+    #[tokio::test]
+    async fn test_op_fd_keeps_descriptor_alive() {
+        // When a recv future is cancelled (e.g. via select!) after the Op has
+        // been sent to the io_uring channel, the Stream can be dropped while
+        // the Op is still queued. The Op's `fd` field keeps the socket alive
+        // so the OS cannot reuse the FD number.
+        let op_timeout = Duration::from_millis(200);
+        let network = Network::start(
+            Config {
+                iouring_config: iouring::Config {
+                    force_poll: Duration::from_millis(10),
+                    op_timeout: Some(op_timeout),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+        let (_addr, _server_sink, _server_stream) = listener.accept().await.unwrap();
+
+        // Sink + stream + our clone.
+        let fd = client_stream.fd.clone();
+        assert_eq!(Arc::strong_count(&fd), 3);
+
+        // Cancel a recv mid-flight (blocks because no data arrives).
+        // Polling the future submits the Op (with an fd clone) to the
+        // io_uring channel, the timeout then cancels the future.
+        select! {
+            _ = client_stream.recv(1) => unreachable!("no data was sent"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
+
+        // The queued Op holds an additional clone.
+        assert_eq!(Arc::strong_count(&fd), 4);
+
+        // Drop all handles. The queued Op still retains the fd.
+        drop(client_sink);
+        drop(client_stream);
+        assert_eq!(Arc::strong_count(&fd), 2); // our clone + Op
+
+        // After op_timeout, the Op completes and releases its fd clone.
+        tokio::time::sleep(op_timeout).await;
+        assert_eq!(Arc::strong_count(&fd), 1);
     }
 
     #[tokio::test]

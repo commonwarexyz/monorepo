@@ -134,8 +134,7 @@ pub mod partitioned {
 #[cfg(test)]
 mod test {
     use crate::{
-        bitmap::MerkleizedBitMap,
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{hasher::Hasher as _, Location, StandardHasher},
         qmdb::{
             any::ordered::variable::Operation,
@@ -157,7 +156,7 @@ mod test {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::NZU64;
+    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
 
     /// A type alias for the concrete [Db] type used in these unit tests (Merkleized, Durable).
@@ -173,9 +172,8 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CleanCurrentTest {
-        CleanCurrentTest::init(context, variable_config::<OneCap>(&partition_prefix))
-            .await
-            .unwrap()
+        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        CleanCurrentTest::init(context, cfg).await.unwrap()
     }
 
     /// Build a tiny database and make sure we can't convince the verifier that some old value of a
@@ -186,13 +184,13 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".into();
             let mut db = open_db(context, partition).await.into_mutable();
 
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            db.update(k, v1).await.unwrap();
+            db.write_batch([(k, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
 
@@ -231,7 +229,7 @@ mod test {
 
             // Update the key to a new value (v2), which inactivates the previous operation.
             let mut db = db.into_mutable();
-            db.update(k, v2).await.unwrap();
+            db.write_batch([(k, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -309,10 +307,8 @@ mod test {
             // The new location should differ but still be in the same chunk.
             assert_ne!(active_loc, proof_inactive.proof.loc);
             assert_eq!(
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(*active_loc),
-                MerkleizedBitMap::<deterministic::Context, Digest, 32>::leaf_pos(
-                    *proof_inactive.proof.loc
-                )
+                BitMap::<32>::to_chunk_index(*active_loc),
+                BitMap::<32>::to_chunk_index(*proof_inactive.proof.loc)
             );
             let mut fake_proof = proof_inactive.clone();
             fake_proof.proof.loc = active_loc;
@@ -352,7 +348,7 @@ mod test {
     pub fn test_current_db_range_proofs() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".into();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition).await;
             let root = db.root();
@@ -383,7 +379,7 @@ mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = 4;
-            let end_loc = db.size();
+            let end_loc = db.size().await;
             let start_loc = db.any.inactivity_floor_loc();
 
             for loc in *start_loc..*end_loc {
@@ -424,7 +420,7 @@ mod test {
     pub fn test_current_db_key_value_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let partition = "range_proofs".to_string();
+            let partition = "range-proofs".to_string();
             let mut hasher = StandardHasher::<Sha256>::new();
             let db = open_db(context.clone(), partition.clone())
                 .await
@@ -516,7 +512,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "build_small".to_string();
+            let partition = "build-small".into();
             let mut db = open_db(context, partition).await;
 
             // Add one key.
@@ -525,7 +521,7 @@ mod test {
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
                 let mut dirty_db = db.into_mutable();
-                dirty_db.update(k, v).await.unwrap();
+                dirty_db.write_batch([(k, Some(v))]).await.unwrap();
                 assert_eq!(dirty_db.get(&k).await.unwrap().unwrap(), v);
                 let (dirty_db, _) = dirty_db.commit(None).await.unwrap();
                 let clean_db = dirty_db.into_merkleized().await.unwrap();
@@ -560,7 +556,7 @@ mod test {
     fn test_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let prefix = format!("current_ordered_variable_batch_{seed}");
+            let prefix = format!("current-ordered-variable-batch-{seed}");
             open_db(ctx, prefix).await.into_mutable()
         });
     }
@@ -571,7 +567,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut hasher = StandardHasher::<Sha256>::new();
-            let partition = "exclusion_proofs".to_string();
+            let partition = "exclusion-proofs".into();
             let db = open_db(context, partition).await;
 
             let key_exists_1 = Sha256::fill(0x10);
@@ -592,7 +588,7 @@ mod test {
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
             let mut db = db.into_mutable();
-            db.update(key_exists_1, v1).await.unwrap();
+            db.write_batch([(key_exists_1, Some(v1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -642,7 +638,7 @@ mod test {
             let v2 = Sha256::fill(0xB2);
 
             let mut db = db.into_mutable();
-            db.update(key_exists_2, v2).await.unwrap();
+            db.write_batch([(key_exists_2, Some(v2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
             let root = db.root();
@@ -735,16 +731,16 @@ mod test {
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
             let mut db = db.into_mutable();
-            db.delete(key_exists_1).await.unwrap();
-            db.delete(key_exists_2).await.unwrap();
+            db.write_batch([(key_exists_1, None)]).await.unwrap();
+            db.write_batch([(key_exists_2, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
-            let mut db = db.into_merkleized().await.unwrap();
+            let db = db.into_merkleized().await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a
             // non-zero number of operations.
             assert!(db.is_empty());
-            assert_ne!(db.bounds().end, 0);
+            assert_ne!(db.bounds().await.end, 0);
             assert_ne!(root, empty_root);
 
             let proof = db
@@ -797,9 +793,7 @@ mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableCurrentTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
         assert_batchable(db, key, value);
     }
 

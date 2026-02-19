@@ -146,7 +146,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_gettable, assert_send},
         mmr::{Location, Position, StandardHasher},
         qmdb::{
             any::{
@@ -191,17 +191,15 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, fixed_db_config::<TwoCap>("partition"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config::<TwoCap>("partition", &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        AnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string()))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -235,10 +233,10 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 Operation::Update(Update(key, value)) => {
-                    db.update(key, value).await.unwrap();
+                    db.write_batch([(key, Some(value))]).await.unwrap();
                 }
                 Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 Operation::CommitFloor(_, _) => {
                     panic!("CommitFloor not supported in apply_ops");
@@ -305,7 +303,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
@@ -330,7 +328,7 @@ pub(crate) mod test {
             apply_ops(&mut db, ops.clone()).await;
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root_hash = db.root();
-            let original_op_count = db.bounds().end;
+            let original_op_count = db.bounds().await.end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -382,8 +380,12 @@ pub(crate) mod test {
             // Try to get historical proof with op_count > number of operations and confirm it
             // returns RangeOutOfBounds error.
             assert!(matches!(
-                db.historical_proof(db.bounds().end + 1, Location::new_unchecked(6), NZU64!(10))
-                    .await,
+                db.historical_proof(
+                    db.bounds().await.end + 1,
+                    Location::new_unchecked(6),
+                    NZU64!(10)
+                )
+                .await,
                 Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
@@ -543,9 +545,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut DirtyAnyTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
+        assert_send(db.write_batch([(key, None)]));
         assert_batchable(db, key, value);
         assert_send(db.get_with_loc(&key));
     }
@@ -597,15 +598,13 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 2>;
 
     async fn open_partitioned_db_p1(context: deterministic::Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(context, fixed_db_config("unordered_partitioned_p1"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("unordered-partitioned-p1", &context);
+        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_db_p2(context: deterministic::Context) -> PartitionedAnyTestP2 {
-        PartitionedAnyTestP2::init(context, fixed_db_config("unordered_partitioned_p2"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("unordered-partitioned-p2", &context);
+        PartitionedAnyTestP2::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]

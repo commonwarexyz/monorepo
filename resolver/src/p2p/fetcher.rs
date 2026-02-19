@@ -580,9 +580,9 @@ mod tests {
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
         deterministic::{self, Context, Runner},
-        IoBufMut, KeyedRateLimiter, Quota, Runner as _, RwLock,
+        BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _,
     };
-    use commonware_utils::NZU32;
+    use commonware_utils::{sync::RwLock, NZU32};
     use std::{fmt, sync::Arc, time::Duration};
 
     // Mock error type for testing
@@ -609,7 +609,7 @@ mod tests {
 
         async fn send(
             self,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             self.sender.send(self.recipients, message, priority).await
@@ -626,7 +626,7 @@ mod tests {
         async fn send(
             &mut self,
             _recipients: Recipients<Self::PublicKey>,
-            _message: impl Into<IoBufMut> + Send,
+            _message: impl Into<IoBufs> + Send,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             Ok(vec![])
@@ -663,7 +663,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            _message: impl Into<IoBufMut> + Send,
+            _message: impl Into<IoBufs> + Send,
             _priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             match recipients {
@@ -724,7 +724,7 @@ mod tests {
             };
 
             {
-                let rate_limiter = self.rate_limiter.write().await;
+                let rate_limiter = self.rate_limiter.write();
                 if let Err(not_until) = rate_limiter.check_key(peer) {
                     return Err(not_until.earliest_possible());
                 }
@@ -1295,7 +1295,10 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
                 Fetcher::new(context.clone(), config);
             fetcher.reconcile(&[public_key, other_public_key]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                FailMockSender::default(),
+            );
 
             // Add a key to pending
             fetcher.add_ready(MockKey(1));
@@ -1341,7 +1344,10 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey, FailMockSender> =
                 Fetcher::new(context.clone(), config);
             fetcher.reconcile(&[public_key, peer1.clone()]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                FailMockSender::default(),
+            );
 
             // Block the peer we'll use as target, so fetch has no eligible participants
             fetcher.block(blocked_peer.clone());
@@ -1396,7 +1402,10 @@ mod tests {
                 Fetcher::new(context.clone(), config);
             // Add peers (FailMockSender doesn't rate limit, just fails sends)
             fetcher.reconcile(&[public_key, peer1, peer2]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                FailMockSender::default(),
+            );
 
             // Add key and attempt fetch - all sends will fail
             fetcher.add_ready(MockKey(1));
@@ -1587,7 +1596,10 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                FailMockSender::default(),
+            );
 
             // Add targets and attempt fetch
             fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
@@ -1609,7 +1621,10 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
-            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
 
             // Timeout does not remove target
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
@@ -1664,7 +1679,10 @@ mod tests {
             fetcher.add_ready(MockKey(1));
 
             // Fetch should not fallback to any peer - it should wait for targets
-            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                SuccessMockSender::default(),
+            );
             fetcher.fetch(&mut sender).await;
 
             // Targets should still exist (no fallback cleared them)
@@ -1727,7 +1745,10 @@ mod tests {
                 Fetcher::new(context.clone(), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let quota = Quota::per_second(NZU32!(1));
-            let mut sender = WrappedSender::new(LimitedMockSender::new(quota, context.clone()));
+            let mut sender = WrappedSender::new(
+                context.network_buffer_pool().clone(),
+                LimitedMockSender::new(quota, context.clone()),
+            );
 
             // Add three keys with different targets:
             // - MockKey(1) targeted to peer1

@@ -2,12 +2,13 @@
 
 use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut};
 use bytes::Buf;
+use commonware_utils::sync::{Mutex, RwLock};
 use rand::Rng;
 use std::{
     io::Error as IoError,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex, RwLock,
+        Arc,
     },
 };
 
@@ -142,13 +143,13 @@ struct Oracle {
 impl Oracle {
     /// Check if a fault should be injected for the given operation.
     fn should_fail(&self, op: Op) -> bool {
-        self.roll(Some(self.config.read().unwrap().rate_for(op)))
+        self.roll(Some(self.config.read().rate_for(op)))
     }
 
     /// Check if a write fault should be injected. Returns (should_fail, partial_rate).
     /// Reads config once to avoid nested lock acquisition.
     fn check_write_fault(&self) -> (bool, Option<f64>) {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
         let fail = self.roll(Some(config.rate_for(Op::Write)));
         (fail, config.partial_write_rate)
     }
@@ -156,7 +157,7 @@ impl Oracle {
     /// Check if a resize fault should be injected. Returns (should_fail, partial_rate).
     /// Reads config once to avoid nested lock acquisition.
     fn check_resize_fault(&self) -> (bool, Option<f64>) {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
         let fail = self.roll(Some(config.rate_for(Op::Resize)));
         (fail, config.partial_resize_rate)
     }
@@ -170,7 +171,7 @@ impl Oracle {
         if rate >= 1.0 {
             return true;
         }
-        self.rng.lock().unwrap().gen::<f64>() < rate
+        self.rng.lock().gen::<f64>() < rate
     }
 
     /// Generate a random value strictly between `from` and `to`, or None if not possible.
@@ -182,7 +183,7 @@ impl Oracle {
         if max - min <= 1 {
             return None;
         }
-        Some(self.rng.lock().unwrap().gen_range(min + 1..max))
+        Some(self.rng.lock().gen_range(min + 1..max))
     }
 
     /// Try to generate a partial operation target. Returns Some if both the rate
@@ -296,24 +297,24 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
         if self.ctx.should_fail(Op::Read) {
             return Err(Error::Io(injected_io_error()));
         }
-        self.inner.read_at_buf(offset, len, buf.into()).await
+        self.inner.read_at_buf(offset, len, bufs.into()).await
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf: IoBufs = buf.into();
-        let total_bytes = buf.remaining() as u64;
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let total_bytes = bufs.remaining() as u64;
 
         let (should_fail, partial_rate) = self.ctx.check_write_fault();
         if should_fail {
             if let Some(bytes) = self.ctx.try_partial(partial_rate, 0, total_bytes) {
                 // Partial write: write some bytes, sync, then fail
                 self.inner
-                    .write_at(offset, buf.coalesce().slice(..bytes as usize))
+                    .write_at(offset, bufs.coalesce().slice(..bytes as usize))
                     .await?;
                 self.inner.sync().await?;
                 self.size
@@ -323,7 +324,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Err(Error::Io(injected_io_error()));
         }
 
-        self.inner.write_at(offset, buf).await?;
+        self.inner.write_at(offset, bufs).await?;
         self.size
             .fetch_max(offset.saturating_add(total_bytes), Ordering::Relaxed);
         Ok(())
@@ -436,7 +437,7 @@ mod tests {
         blob.sync().await.unwrap();
 
         // Enable read faults
-        h.config.write().unwrap().read_rate = Some(1.0);
+        h.config.write().read_rate = Some(1.0);
 
         assert!(matches!(blob.read_at(0, 4).await, Err(Error::Io(_))));
     }
@@ -462,7 +463,7 @@ mod tests {
         drop(blob);
 
         // Enable remove faults
-        h.config.write().unwrap().remove_rate = Some(1.0);
+        h.config.write().remove_rate = Some(1.0);
 
         assert!(matches!(
             h.storage.remove("partition", Some(b"test")).await,
@@ -483,7 +484,7 @@ mod tests {
         }
 
         // Enable scan faults
-        h.config.write().unwrap().scan_rate = Some(1.0);
+        h.config.write().scan_rate = Some(1.0);
 
         assert!(matches!(
             h.storage.scan("partition").await,
@@ -530,10 +531,10 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.sync().await.unwrap();
 
-        h.config.write().unwrap().sync_rate = Some(1.0);
+        h.config.write().sync_rate = Some(1.0);
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
 
-        h.config.write().unwrap().sync_rate = Some(0.0);
+        h.config.write().sync_rate = Some(0.0);
         blob.sync().await.unwrap();
     }
 
@@ -616,7 +617,7 @@ mod tests {
         blob.sync().await.unwrap();
 
         {
-            let mut cfg = h.config.write().unwrap();
+            let mut cfg = h.config.write();
             cfg.resize_rate = Some(1.0);
             cfg.partial_resize_rate = Some(1.0);
         }
@@ -673,7 +674,7 @@ mod tests {
         assert_eq!(size_after_write, 50);
 
         {
-            let mut cfg = h.config.write().unwrap();
+            let mut cfg = h.config.write();
             cfg.resize_rate = Some(1.0);
             cfg.partial_resize_rate = Some(1.0);
         }

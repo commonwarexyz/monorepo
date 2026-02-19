@@ -5,9 +5,9 @@
 
 use crate::{
     index::Ordered as OrderedIndex,
-    journal::contiguous::{Contiguous, MutableContiguous},
+    journal::contiguous::{Contiguous, Mutable, Reader},
     kv::{self, Batchable},
-    mmr::{grafting::Storage as GraftingStorage, Location},
+    mmr::Location,
     qmdb::{
         any::{
             ordered::{Operation, Update},
@@ -24,7 +24,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Prunable as BitMap, Array};
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -77,9 +77,7 @@ where
             next_key: proof.next_key.clone(),
         });
 
-        proof
-            .proof
-            .verify(hasher, Self::grafting_height(), op, root)
+        proof.proof.verify(hasher, op, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -114,7 +112,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>, S::AnyState, D>::span_contains(
+                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>, S::MerkleizationState, D>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,
@@ -138,14 +136,14 @@ where
             }
         };
 
-        op_proof.verify(hasher, Self::grafting_height(), op, root)
+        op_proof.verify(hasher, op, root)
     }
 }
 
 // Functionality for any Merkleized state (both Durable and NonDurable).
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
@@ -173,10 +171,7 @@ where
         let Some((data, loc)) = op_loc else {
             return Err(Error::KeyNotFound);
         };
-        let height = Self::grafting_height();
-        let mmr = &self.any.log.mmr;
-        let proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, mmr, loc).await?;
+        let proof = self.operation_proof(hasher, loc).await?;
 
         Ok(KeyValueProof {
             proof,
@@ -194,10 +189,6 @@ where
         hasher: &mut H,
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
-        let height = Self::grafting_height();
-        let grafted_mmr =
-            GraftingStorage::<'_, H, _, _>::new(&self.status, &self.any.log.mmr, height);
-
         let span = self.any.get_span(key).await?;
         let loc = match &span {
             Some((loc, key_data)) => {
@@ -207,17 +198,19 @@ where
                 }
                 *loc
             }
-            None => self.size().checked_sub(1).expect("db shouldn't be empty"),
+            None => self
+                .size()
+                .await
+                .checked_sub(1)
+                .expect("db shouldn't be empty"),
         };
 
-        let op_proof =
-            OperationProof::<H::Digest, N>::new(hasher, &self.status, height, &grafted_mmr, loc)
-                .await?;
+        let op_proof = self.operation_proof(hasher, loc).await?;
 
         Ok(match span {
             Some((_, key_data)) => super::ExclusionProof::KeyValue(op_proof, key_data),
             None => {
-                let value = match self.any.log.read(loc).await? {
+                let value = match self.any.log.reader().await.read(*loc).await? {
                     Operation::CommitFloor(value, _) => value,
                     _ => unreachable!("last commit is not a CommitFloor operation"),
                 };
@@ -230,7 +223,7 @@ where
 // Functionality for the Mutable state.
 impl<
         E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<K, V>>,
         K: Array,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location>,
@@ -241,49 +234,30 @@ where
     Operation<K, V>: Codec,
     V::Value: Send + Sync,
 {
-    /// Updates `key` to have value `value`. The operation is reflected in the snapshot, but will be
-    /// subject to rollback until the next successful `commit`.
-    pub async fn update(&mut self, key: K, value: V::Value) -> Result<(), Error> {
+    /// Writes a batch of key-value pairs to the database.
+    ///
+    /// For each item in the iterator:
+    /// - `(key, Some(value))` updates or creates the key with the given value
+    /// - `(key, None)` deletes the key
+    pub async fn write_batch(
+        &mut self,
+        iter: impl IntoIterator<Item = (K, Option<V::Value>)>,
+    ) -> Result<(), Error> {
+        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
+        let status = &mut self.status;
+        let dirty_chunks = &mut self.state.dirty_chunks;
         self.any
-            .update_with_callback(key, value, |loc| {
-                self.status.push(true);
+            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
+                status.push(append);
                 if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
+                    status.set_bit(*loc, false);
+                    let chunk = BitMap::<N>::to_chunk_index(*loc);
+                    if chunk < old_grafted_leaves {
+                        dirty_chunks.insert(chunk);
+                    }
                 }
             })
             .await
-    }
-
-    /// Creates a new key-value pair in the db. The operation is reflected in the snapshot, but will
-    /// be subject to rollback until the next successful `commit`. Returns true if the key was
-    /// created, false if it already existed.
-    pub async fn create(&mut self, key: K, value: V::Value) -> Result<bool, Error> {
-        self.any
-            .create_with_callback(key, value, |loc| {
-                self.status.push(true);
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-            })
-            .await
-    }
-
-    /// Delete `key` and its value from the db. Deleting a key that already has no value is a no-op.
-    /// The operation is reflected in the snapshot, but will be subject to rollback until the next
-    /// successful `commit`. Returns true if the key was deleted, false if it was already inactive.
-    pub async fn delete(&mut self, key: K) -> Result<bool, Error> {
-        let mut r = false;
-        self.any
-            .delete_with_callback(key, |append, loc| {
-                if let Some(loc) = loc {
-                    self.status.set_bit(*loc, false);
-                }
-                self.status.push(append);
-                r = true;
-            })
-            .await?;
-
-        Ok(r)
     }
 }
 
@@ -312,50 +286,12 @@ where
     }
 }
 
-// StoreMut for (Unmerkleized, NonDurable) (aka mutable) state
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location> + 'static,
-        H: Hasher,
-        const N: usize,
-    > kv::Updatable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn update(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
-        self.update(key, value).await
-    }
-}
-
-// StoreDeletable for (Unmerkleized, NonDurable) (aka mutable) state
-impl<
-        E: Storage + Clock + Metrics,
-        C: MutableContiguous<Item = Operation<K, V>>,
-        K: Array,
-        V: ValueEncoding,
-        I: OrderedIndex<Value = Location> + 'static,
-        H: Hasher,
-        const N: usize,
-    > kv::Deletable for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
-where
-    Operation<K, V>: Codec,
-    V::Value: Send + Sync,
-{
-    async fn delete(&mut self, key: Self::Key) -> Result<bool, Self::Error> {
-        self.delete(key).await
-    }
-}
-
 // Batchable for (Unmerkleized, NonDurable) (aka mutable) state
 impl<E, C, K, V, I, H, const N: usize> Batchable
     for Db<E, C, K, V, I, H, N, Unmerkleized, NonDurable>
 where
     E: Storage + Clock + Metrics,
-    C: MutableContiguous<Item = Operation<K, V>>,
+    C: Mutable<Item = Operation<K, V>>,
     K: Array,
     V: ValueEncoding,
     I: OrderedIndex<Value = Location> + 'static,
@@ -365,16 +301,9 @@ where
 {
     async fn write_batch<'a, Iter>(&'a mut self, iter: Iter) -> Result<(), Error>
     where
-        Iter: Iterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter: IntoIterator<Item = (K, Option<V::Value>)> + Send + 'a,
+        Iter::IntoIter: Send,
     {
-        let status = &mut self.status;
-        self.any
-            .write_batch_with_callback(iter, move |append: bool, loc: Option<Location>| {
-                status.push(append);
-                if let Some(loc) = loc {
-                    status.set_bit(*loc, false);
-                }
-            })
-            .await
+        self.write_batch(iter).await
     }
 }

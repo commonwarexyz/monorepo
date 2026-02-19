@@ -80,11 +80,11 @@ mod tests {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
-    use commonware_utils::{channel::mpsc, NZUsize, NZU16};
+    use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
     use tracing::Level;
@@ -191,7 +191,7 @@ mod tests {
             activity_timeout: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         let (voter, mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -341,7 +341,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -577,7 +577,7 @@ mod tests {
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), voter_config);
 
@@ -876,7 +876,7 @@ mod tests {
             // Wait for a finalization to be recorded
             loop {
                 {
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock();
                     // Finalization must match the signatures recovered from finalize votes
                     if matches!(
                         finalizations.get(&view),
@@ -889,7 +889,7 @@ mod tests {
             }
 
             // Verify no notarization certificate was recorded
-            let notarizations = reporter.notarizations.lock().unwrap();
+            let notarizations = reporter.notarizations.lock();
             assert!(notarizations.is_empty());
         });
     }
@@ -1013,7 +1013,7 @@ mod tests {
             // Wait for notarization B to be recorded (not A)
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     if matches!(
                         notarizations.get(&view),
                         Some(notarization) if notarization == &notarization_b
@@ -1137,7 +1137,7 @@ mod tests {
             // Wait for notarization A to be recorded
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     if matches!(
                         notarizations.get(&view),
                         Some(notarization) if notarization == &notarization_a
@@ -1251,7 +1251,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1319,7 +1319,7 @@ mod tests {
             // Wait for notarization to be recorded
             loop {
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     if matches!(
                         notarizations.get(&view),
                         Some(n) if n == &notarization
@@ -1446,7 +1446,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -1651,7 +1651,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
@@ -1741,7 +1741,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
@@ -1893,7 +1893,7 @@ mod tests {
             }
 
             // Verify finalization was recorded by checking reporter
-            let finalizations = reporter.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock();
             let recorded = finalizations
                 .get(&view)
                 .expect("finalization should be recorded");
@@ -2008,7 +2008,7 @@ mod tests {
             }
 
             // Verify finalization was recorded
-            let finalizations = reporter.finalizations.lock().unwrap();
+            let finalizations = reporter.finalizations.lock();
             let recorded = finalizations
                 .get(&view)
                 .expect("finalization should be recorded");
@@ -2111,7 +2111,7 @@ mod tests {
                 activity_timeout,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.clone(), voter_cfg);
 
@@ -2215,7 +2215,7 @@ mod tests {
                     .as_slice(),
             );
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents)).await;
+            relay.broadcast(&leader, (proposal.payload, contents));
             mailbox.proposal(proposal).await;
 
             // Wait for nullify vote for target_view. Since timeouts are 10s, receiving it
@@ -2317,7 +2317,7 @@ mod tests {
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
-                    tracker.lock().unwrap().push(d);
+                    tracker.lock().push(d);
                     true
                 })),
             };
@@ -2341,7 +2341,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.with_label("voter"), voter_cfg);
 
@@ -2397,7 +2397,7 @@ mod tests {
             }
 
             assert_eq!(
-                certify_calls.lock().unwrap().len(),
+                certify_calls.lock().len(),
                 0,
                 "certify should not be called for finalization"
             );
@@ -2409,7 +2409,7 @@ mod tests {
 
             // Broadcast payload and send proposal
             let contents = (proposal3.round, proposal2.payload, 0u64).encode();
-            relay.broadcast(&me, (digest3, contents)).await;
+            relay.broadcast(&me, (digest3, contents));
             mailbox.proposal(proposal3.clone()).await;
 
             // Send notarization
@@ -2432,7 +2432,7 @@ mod tests {
             }
 
             assert_eq!(
-                certify_calls.lock().unwrap().len(),
+                certify_calls.lock().len(),
                 1,
                 "certify should be called once for notarization"
             );
@@ -2450,7 +2450,7 @@ mod tests {
                 verify_latency: (1.0, 0.0),
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Custom(Box::new(move |d| {
-                    tracker.lock().unwrap().push(d);
+                    tracker.lock().push(d);
                     true
                 })),
             };
@@ -2474,7 +2474,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
@@ -2509,7 +2509,7 @@ mod tests {
 
             // Verify no additional certify calls after replay
             assert_eq!(
-                certify_calls.lock().unwrap().len(),
+                certify_calls.lock().len(),
                 1,
                 "certify should not be called again after replay"
             );
@@ -2607,7 +2607,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.clone(), cfg);
 
@@ -2644,7 +2644,7 @@ mod tests {
 
             // Broadcast payload
             let contents = (proposal5.round, Sha256::hash(b"genesis"), 42u64).encode();
-            relay.broadcast(&me, (digest5, contents)).await;
+            relay.broadcast(&me, (digest5, contents));
 
             // Send proposal to verify
             mailbox.proposal(proposal5.clone()).await;
@@ -2932,7 +2932,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
-            relay.broadcast(&leader, (proposal.payload, contents)).await;
+            relay.broadcast(&leader, (proposal.payload, contents));
             mailbox.proposal(proposal.clone()).await;
 
             // Wait for notarize vote
@@ -3241,8 +3241,7 @@ mod tests {
             let leader = participants[1].clone();
             let contents = (proposal.round, parent_payload, 0u64).encode();
             relay
-                .broadcast(&leader, (proposal.payload, contents))
-                .await;
+                .broadcast(&leader, (proposal.payload, contents));
             mailbox.proposal(proposal.clone()).await;
 
             // Build and send notarization so the voter tries to certify
@@ -3386,9 +3385,7 @@ mod tests {
             );
             let leader = participants[1].clone();
             let contents = (proposal_3.round, parent_payload, 0u64).encode();
-            relay
-                .broadcast(&leader, (proposal_3.payload, contents))
-                .await;
+            relay.broadcast(&leader, (proposal_3.payload, contents));
             mailbox.proposal(proposal_3.clone()).await;
 
             let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);

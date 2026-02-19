@@ -22,7 +22,7 @@
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry, OpBuffer},
+    iouring::{self, should_retry, OpBuffer, OpFd},
     BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
@@ -278,22 +278,20 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut input_buf = buf.into();
+        let mut input_bufs = bufs.into();
         // SAFETY: `len` bytes are filled via io_uring read loop below.
-        unsafe { input_buf.set_len(len) };
+        unsafe { input_bufs.set_len(len) };
 
         // For single buffers, read directly into them (zero-copy).
-        // For chunked buffers, use a temporary and copy to preserve the input structure.
-        let (mut io_buf, original_bufs) = match input_buf {
-            IoBufsMut::Single(buf) => (buf, None),
-            IoBufsMut::Chunked(bufs) => {
-                let mut tmp = self.pool.alloc(len);
-                // SAFETY: `len` bytes are filled via io_uring read loop below.
-                unsafe { tmp.set_len(len) };
-                (tmp, Some(bufs))
-            }
+        // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
+        let (mut io_buf, original_bufs) = if input_bufs.is_single() {
+            (input_bufs.coalesce(), None)
+        } else {
+            // SAFETY: `len` bytes are filled via io_uring read loop below.
+            let tmp = unsafe { self.pool.alloc_len(len) };
+            (tmp, Some(input_bufs))
         };
 
         let fd = types::Fd(self.file.as_raw_fd());
@@ -325,6 +323,7 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: Some(OpBuffer::Read(io_buf)),
+                    fd: Some(OpFd::File(self.file.clone())),
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
@@ -351,20 +350,19 @@ impl crate::Blob for Blob {
 
         // Return the same buffer structure as input
         match original_bufs {
-            None => Ok(IoBufsMut::Single(io_buf)),
-            Some(bufs) => {
-                // Copy from temporary buffer to the original chunked buffers
-                let mut result = IoBufsMut::Chunked(bufs);
-                result.copy_from_slice(io_buf.as_ref());
-                Ok(result)
+            None => Ok(io_buf.into()),
+            Some(mut bufs) => {
+                // Copy from temporary buffer to the original multi-chunk buffers.
+                bufs.copy_from_slice(io_buf.as_ref());
+                Ok(bufs)
             }
         }
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         // Convert to contiguous IoBuf for io_uring write
         // (zero-copy if single buffer, copies if multiple)
-        let mut buf = buf.into().coalesce();
+        let mut buf = bufs.into().coalesce_with_pool(&self.pool);
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
         let buf_len = buf.len();
@@ -395,6 +393,7 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: Some(OpBuffer::Write(buf)),
+                    fd: Some(OpFd::File(self.file.clone())),
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
@@ -441,6 +440,7 @@ impl crate::Blob for Blob {
                     work: op,
                     sender,
                     buffer: None,
+                    fd: Some(OpFd::File(self.file.clone())),
                 })
                 .await
                 .map_err(|_| {

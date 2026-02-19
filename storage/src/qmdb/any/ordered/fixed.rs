@@ -150,7 +150,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         kv::{
-            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            tests::{assert_batchable, assert_gettable, assert_send},
             Batchable as _, Deletable as _, Updatable as _,
         },
         mmr::{Location, StandardHasher as Standard},
@@ -195,17 +195,15 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> CleanAnyTest {
-        CleanAnyTest::init(context, fixed_db_config("partition"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("partition", &context);
+        CleanAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> CleanAnyTest {
         let seed = context.next_u64();
-        CleanAnyTest::init(context, fixed_db_config::<TwoCap>(&seed.to_string()))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        CleanAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -244,10 +242,12 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.update(data.key, data.value).await.unwrap();
+                    db.write_batch([(data.key, Some(data.value))])
+                        .await
+                        .unwrap();
                 }
                 Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 Operation::CommitFloor(_, _) => {
                     // CommitFloor consumes self - not supported in this helper.
@@ -265,7 +265,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let seed = context.next_u64();
-            let config = fixed_db_config::<OneCap>(&seed.to_string());
+            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
             let db = Db::<
                 Context,
                 FixedBytes<2>,
@@ -274,7 +274,7 @@ pub(crate) mod test {
                 OneCap,
                 Merkleized<Sha256>,
                 Durable,
-            >::init(context.clone(), config)
+            >::init(context, config)
             .await
             .unwrap();
             let mut db = db.into_mutable();
@@ -285,8 +285,8 @@ pub(crate) mod test {
             let late_key = FixedBytes::<2>::new([3u8, 0u8]);
             let middle_key = FixedBytes::<2>::new([1u8, 2u8]);
 
-            db.update(key1.clone(), 1).await.unwrap();
-            db.update(key2.clone(), 2).await.unwrap();
+            db.write_batch([(key1.clone(), Some(1))]).await.unwrap();
+            db.write_batch([(key2.clone(), Some(2))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
@@ -297,14 +297,14 @@ pub(crate) mod test {
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
             let mut db = db.into_mutable();
-            db.delete(key1.clone()).await.unwrap();
+            db.write_batch([(key1.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key2.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key2.clone());
 
-            db.delete(key2.clone()).await.unwrap();
+            db.write_batch([(key2.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
 
@@ -313,8 +313,8 @@ pub(crate) mod test {
 
             // Update the keys in opposite order from earlier.
             let mut db = db.into_mutable();
-            db.update(key2.clone(), 2).await.unwrap();
-            db.update(key1.clone(), 1).await.unwrap();
+            db.write_batch([(key2.clone(), Some(2))]).await.unwrap();
+            db.write_batch([(key1.clone(), Some(1))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get_all(&key1).await.unwrap().unwrap(), (1, key2.clone()));
             assert_eq!(db.get_all(&key2).await.unwrap().unwrap(), (2, key1.clone()));
@@ -326,14 +326,14 @@ pub(crate) mod test {
 
             // Delete the keys in opposite order from earlier.
             let mut db = db.into_mutable();
-            db.delete(key2.clone()).await.unwrap();
+            db.write_batch([(key2.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&key2).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&early_key).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&middle_key).await.unwrap().unwrap().1.next_key == key1.clone());
             assert!(db.get_span(&late_key).await.unwrap().unwrap().1.next_key == key1.clone());
 
-            db.delete(key1.clone()).await.unwrap();
+            db.write_batch([(key1.clone(), None)]).await.unwrap();
             assert!(db.get_span(&key1).await.unwrap().is_none());
             assert!(db.get_span(&key2).await.unwrap().is_none());
             let (db, _) = db.commit(None).await.unwrap();
@@ -358,7 +358,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -369,7 +369,7 @@ pub(crate) mod test {
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
                 map.insert(k, v);
             }
 
@@ -379,13 +379,14 @@ pub(crate) mod test {
                     continue;
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
-                db.delete(k).await.unwrap();
+                db.write_batch([(k, None)]).await.unwrap();
                 map.remove(&k);
             }
 
-            assert_eq!(db.bounds().end, 2620);
+            let bounds = db.bounds().await;
+            assert_eq!(bounds.end, 2620);
             assert_eq!(db.inactivity_floor_loc(), 0);
-            assert_eq!(db.bounds().end, 2620);
+            assert_eq!(bounds.end, 2620);
             assert_eq!(db.snapshot.items(), 857);
 
             // Test that commit + sync w/ pruning will raise the activity floor.
@@ -393,7 +394,7 @@ pub(crate) mod test {
             let mut db = db.into_merkleized();
             db.sync().await.unwrap();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.bounds().end, 4241);
+            assert_eq!(db.bounds().await.end, 4241);
             assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -403,7 +404,7 @@ pub(crate) mod test {
             drop(db);
             let db = open_db(context.with_label("second")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, 4241);
+            assert_eq!(db.bounds().await.end, 4241);
             assert_eq!(db.inactivity_floor_loc(), 3383);
             assert_eq!(db.snapshot.items(), 857);
 
@@ -423,7 +424,7 @@ pub(crate) mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = NZU64!(4);
-            let end_loc = db.size();
+            let end_loc = db.size().await;
             let start_pos = db.log.mmr.bounds().start;
             let start_loc = Location::try_from(start_pos).unwrap();
             // Raise the inactivity floor via commit and make sure historical inactive operations
@@ -458,18 +459,18 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
             let mut db = db.into_merkleized();
             db.prune(db.inactivity_floor_loc()).await.unwrap();
             let root = db.root();
-            let op_count = db.bounds().end;
+            let op_count = db.bounds().await.end;
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.bounds().end, op_count);
+            assert_eq!(db.bounds().await.end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -477,7 +478,7 @@ pub(crate) mod test {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                    db.update(k, v).await.unwrap();
+                    db.write_batch([(k, Some(v))]).await.unwrap();
                 }
             }
 
@@ -486,7 +487,7 @@ pub(crate) mod test {
             apply_more_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("third")).await;
-            assert_eq!(db.bounds().end, op_count);
+            assert_eq!(db.bounds().await.end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -495,7 +496,7 @@ pub(crate) mod test {
             apply_more_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("fourth")).await;
-            assert_eq!(db.bounds().end, op_count);
+            assert_eq!(db.bounds().await.end, op_count);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -504,7 +505,7 @@ pub(crate) mod test {
             apply_more_ops(&mut db).await;
             apply_more_ops(&mut db).await;
             let db = open_db(context.with_label("fifth")).await;
-            assert_eq!(db.bounds().end, op_count);
+            assert_eq!(db.bounds().await.end, op_count);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -512,7 +513,7 @@ pub(crate) mod test {
             apply_more_ops(&mut db).await;
             let _ = db.commit(None).await.unwrap();
             let db = open_db(context.with_label("sixth")).await;
-            assert!(db.bounds().end > op_count);
+            assert!(db.bounds().await.end > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
 
@@ -532,14 +533,14 @@ pub(crate) mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let db = open_db(context.with_label("second")).await;
-            assert_eq!(db.bounds().end, 1);
+            assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.root(), root);
 
             async fn apply_ops(db: &mut MutableAnyTest) {
                 for i in 0u64..1000 {
                     let k = Sha256::hash(&i.to_be_bytes());
                     let v = Sha256::hash(&((i + 1) * 10000).to_be_bytes());
-                    db.update(k, v).await.unwrap();
+                    db.write_batch([(k, Some(v))]).await.unwrap();
                 }
             }
 
@@ -548,7 +549,7 @@ pub(crate) mod test {
             apply_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("third")).await;
-            assert_eq!(db.bounds().end, 1);
+            assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.root(), root);
 
             // Repeat, drop without cleanup again.
@@ -556,7 +557,7 @@ pub(crate) mod test {
             apply_ops(&mut db).await;
             drop(db);
             let db = open_db(context.with_label("fourth")).await;
-            assert_eq!(db.bounds().end, 1);
+            assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -565,7 +566,7 @@ pub(crate) mod test {
             apply_ops(&mut db).await;
             apply_ops(&mut db).await;
             let db = open_db(context.with_label("fifth")).await;
-            assert_eq!(db.bounds().end, 1);
+            assert_eq!(db.bounds().await.end, 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -573,7 +574,7 @@ pub(crate) mod test {
             apply_ops(&mut db).await;
             let _ = db.commit(None).await.unwrap();
             let db = open_db(context.with_label("sixth")).await;
-            assert!(db.bounds().end > 1);
+            assert!(db.bounds().await.end > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -594,7 +595,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&UPDATES.to_be_bytes());
             for i in 0u64..UPDATES {
                 let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                db.update(k, v).await.unwrap();
+                db.write_batch([(k, Some(v))]).await.unwrap();
             }
             let (db, _) = db.commit(None).await.unwrap();
             let db = db.into_merkleized();
@@ -626,7 +627,7 @@ pub(crate) mod test {
                 for i in 0u64..ELEMENTS {
                     let k = Sha256::hash(&(j * 1000 + i).to_be_bytes());
                     let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                    db.update(k, v).await.unwrap();
+                    db.write_batch([(k, Some(v))]).await.unwrap();
                     map.insert(k, v);
                 }
                 let (new_db, _) = db.commit(Some(metadata)).await.unwrap();
@@ -637,14 +638,14 @@ pub(crate) mod test {
 
             // Do one last delete operation which will be above the inactivity
             // floor, to make sure it gets replayed on restart.
-            db.delete(k).await.unwrap();
+            db.write_batch([(k, None)]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
             assert!(db.get(&k).await.unwrap().is_none());
 
             // Drop & reopen the db, making sure the re-opened db has exactly the same state.
             let (db, _) = db.into_mutable().commit(None).await.unwrap();
-            let mut db = db.into_merkleized();
+            let db = db.into_merkleized();
             let root = db.root();
             db.sync().await.unwrap();
             drop(db);
@@ -668,7 +669,7 @@ pub(crate) mod test {
             let db = db.into_merkleized();
             let mut hasher = Standard::<Sha256>::new();
             let root_hash = db.root();
-            let original_op_count = db.bounds().end;
+            let original_op_count = db.bounds().await.end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -808,7 +809,7 @@ pub(crate) mod test {
             let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
 
             // Now keep adding operations and make sure we can still generate a historical proof that matches the original.
-            let historical_size = db.bounds().end;
+            let historical_size = db.bounds().await.end;
 
             let mut db = db.into_mutable();
             for i in 1..10 {
@@ -857,7 +858,7 @@ pub(crate) mod test {
                 for i in 0..1000 {
                     let key = Digest::random(&mut *rng);
                     keys.insert(key, i);
-                    db.update(key, i).await.unwrap();
+                    db.write_batch([(key, Some(i))]).await.unwrap();
                 }
 
                 let (db, _) = db.commit(None).await.unwrap();
@@ -879,7 +880,7 @@ pub(crate) mod test {
                 for _ in 0..500 {
                     let key = keys.keys().choose(rng).cloned().unwrap();
                     keys.remove(&key);
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
 
                 let mut iter = keys.iter();
@@ -897,7 +898,7 @@ pub(crate) mod test {
                 for _ in 0..500 {
                     let key = keys.keys().choose(rng).cloned().unwrap();
                     keys.remove(&key);
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 assert_eq!(keys.len(), 0);
                 assert!(db.is_empty());
@@ -909,7 +910,7 @@ pub(crate) mod test {
             let seed = context.next_u64();
 
             // Use a OneCap to ensure many collisions.
-            let config = fixed_db_config::<OneCap>(&seed.to_string());
+            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
             let db = Db::<Context, Digest, i32, Sha256, OneCap, Merkleized<Sha256>, Durable>::init(
                 context.with_label("first"),
                 config,
@@ -921,7 +922,7 @@ pub(crate) mod test {
             db.into_merkleized().destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
-            let config = fixed_db_config::<TwoCap>(&seed.to_string());
+            let config = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
             let db = Db::<Context, Digest, i32, Sha256, TwoCap, Merkleized<Sha256>, Durable>::init(
                 context.with_label("second"),
                 config,
@@ -966,9 +967,8 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        FixedDb::init(context, fixed_db_config("fixed_bytes_partition"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("fixed-bytes-partition", &context);
+        FixedDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -1009,7 +1009,9 @@ pub(crate) mod test {
 
             let mid_key = FixedBytes::from([0xAAu8; 4]);
             let val = Sha256::fill(1u8);
-            db.create(mid_key.clone(), val).await.unwrap();
+            db.write_batch([(mid_key.clone(), Some(val))])
+                .await
+                .unwrap();
             let (db, _) = db.commit(None).await.unwrap();
 
             // Batch-insert a preceeding non-translated-colliding key.
@@ -1047,9 +1049,9 @@ pub(crate) mod test {
             let val = Sha256::fill(1u8);
 
             // Create three keys in order: A -> B -> C -> A (circular)
-            db.create(key_a.clone(), val).await.unwrap();
-            db.create(key_b.clone(), val).await.unwrap();
-            db.create(key_c.clone(), val).await.unwrap();
+            db.write_batch([(key_a.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key_b.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key_c.clone(), Some(val))]).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             // Verify initial spans
@@ -1091,7 +1093,7 @@ pub(crate) mod test {
             let val = Sha256::fill(1u8);
 
             // Test the single-bucket case.
-            db.create(key1.clone(), val).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val))]).await.unwrap();
             let db = db.commit(None).await.unwrap().0;
 
             // Start key is in the DB.
@@ -1137,9 +1139,9 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
 
             let mut db = db.into_mutable();
-            db.create(key2_1.clone(), val).await.unwrap();
-            db.create(key2_2.clone(), val).await.unwrap();
-            db.create(key3.clone(), val).await.unwrap();
+            db.write_batch([(key2_1.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key2_2.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key3.clone(), Some(val))]).await.unwrap();
             let db = db.commit(None).await.unwrap().0;
 
             // Start key is in the DB.
@@ -1207,9 +1209,8 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        PartitionedAnyTest::init(context, fixed_db_config("ordered_partitioned_p1"))
-            .await
-            .unwrap()
+        let cfg = fixed_db_config("ordered-partitioned-p1", &context);
+        PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -1251,9 +1252,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableAnyTest, key: Digest, value: Digest) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value));
-        assert_send(db.create(key, value));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value))]));
+        assert_send(db.write_batch([(key, None)]));
         assert_batchable(db, key, value);
         assert_send(db.get_all(&key));
         assert_send(db.get_with_loc(&key));

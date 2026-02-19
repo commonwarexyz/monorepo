@@ -30,7 +30,7 @@ use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{Blob as _, BufMut, Error as RError, Metrics, Storage};
+use commonware_runtime::{Blob as _, BufMut, BufferPooler, Error as RError, Metrics, Storage};
 use std::{io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -55,7 +55,7 @@ pub struct Config<C> {
 /// Uses [`buffer::Write`](commonware_runtime::buffer::Write) for batching writes.
 /// Reads go directly to blobs without any caching (ideal for large values that
 /// shouldn't pollute a page cache).
-pub struct Glob<E: Storage + Metrics, V: Codec> {
+pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec> {
     manager: Manager<E, WriteFactory>,
 
     /// Compression level (if enabled).
@@ -65,13 +65,14 @@ pub struct Glob<E: Storage + Metrics, V: Codec> {
     codec_config: V::Cfg,
 }
 
-impl<E: Storage + Metrics, V: CodecShared> Glob<E, V> {
+impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
+                pool: context.storage_buffer_pool().clone(),
             },
         };
         let manager = Manager::init(context, manager_cfg).await?;
@@ -235,7 +236,7 @@ mod tests {
 
     fn test_cfg() -> Config<()> {
         Config {
-            partition: "test_partition".to_string(),
+            partition: "test-partition".into(),
             compression: None,
             codec_config: (),
             write_buffer: NZUsize!(1024),
@@ -300,7 +301,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: Some(3), // zstd level 3
                 codec_config: (),
                 write_buffer: NZUsize!(1024),

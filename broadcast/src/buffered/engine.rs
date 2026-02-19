@@ -10,7 +10,7 @@ use commonware_p2p::{
 use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::status::{CounterExt, GaugeExt, Status},
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use std::collections::{BTreeMap, VecDeque};
@@ -45,7 +45,11 @@ struct Pair<Dc, Dd> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec> {
+pub struct Engine<
+    E: BufferPooler + Clock + Spawner + Metrics,
+    P: PublicKey,
+    M: Committable + Digestible + Codec,
+> {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -106,8 +110,11 @@ pub struct Engine<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + D
     metrics: metrics::Metrics,
 }
 
-impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + Codec>
-    Engine<E, P, M>
+impl<
+        E: BufferPooler + Clock + Spawner + Metrics,
+        P: PublicKey,
+        M: Committable + Digestible + Codec,
+    > Engine<E, P, M>
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
@@ -145,7 +152,12 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
+        let (mut sender, mut receiver) = wrap(
+            self.codec_config.clone(),
+            self.context.network_buffer_pool().clone(),
+            network.0,
+            network.1,
+        );
 
         select_loop! {
             self.context,
@@ -178,8 +190,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                     responder,
                 } => {
                     trace!("mailbox: subscribe");
-                    self.handle_subscribe(peer, commitment, digest, responder)
-                        .await;
+                    self.handle_subscribe(peer, commitment, digest, responder);
                 }
                 Message::Get {
                     peer,
@@ -188,7 +199,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                     responder,
                 } => {
                     trace!("mailbox: get");
-                    self.handle_get(peer, commitment, digest, responder).await;
+                    self.handle_get(peer, commitment, digest, responder);
                 }
             },
             // Handle incoming messages
@@ -217,7 +228,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
                     .peer
                     .get_or_create(&SequencerLabel::from(&peer))
                     .inc();
-                self.handle_network(peer, msg).await;
+                self.handle_network(peer, msg);
             },
         }
     }
@@ -292,7 +303,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    async fn handle_subscribe(
+    fn handle_subscribe(
         &mut self,
         peer: Option<P>,
         commitment: M::Commitment,
@@ -315,7 +326,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     }
 
     /// Handles a `get` request from the application.
-    async fn handle_get(
+    fn handle_get(
         &mut self,
         peer: Option<P>,
         commitment: M::Commitment,
@@ -327,7 +338,7 @@ impl<E: Clock + Spawner + Metrics, P: PublicKey, M: Committable + Digestible + C
     }
 
     /// Handles a message that was received from a peer.
-    async fn handle_network(&mut self, peer: P, msg: M) {
+    fn handle_network(&mut self, peer: P, msg: M) {
         if !self.insert_message(peer.clone(), msg) {
             debug!(?peer, "message already stored");
             self.metrics.receive.inc(Status::Dropped);

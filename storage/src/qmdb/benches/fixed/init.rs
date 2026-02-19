@@ -6,12 +6,12 @@ use crate::fixed::{
     get_any_unordered_fixed, get_any_unordered_variable, get_current_ordered_fixed,
     get_current_ordered_variable, get_current_unordered_fixed, get_current_unordered_variable,
     variable_any_cfg, variable_current_cfg, Digest, OCurrentDb, OFixedDb, OVAnyDb, OVCurrentDb,
-    UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, THREADS, VARIANTS,
+    UCurrentDb, UFixedDb, UVAnyDb, UVCurrentDb, Variant, VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _, ThreadPooler,
+    Runner as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -45,7 +45,10 @@ where
     let mutable = db.into_mutable();
     let durable = gen_random_kv(mutable, elements, operations, Some(COMMIT_FREQUENCY)).await;
     let mut clean = durable.into_merkleized().await.unwrap();
-    clean.prune(clean.inactivity_floor_loc()).await.unwrap();
+    clean
+        .prune(clean.inactivity_floor_loc().await)
+        .await
+        .unwrap();
     clean.sync().await.unwrap();
     drop(clean);
 }
@@ -108,11 +111,10 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.create_thread_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(pool.clone());
-                            let current_cfg = current_cfg(pool.clone());
-                            let variable_any_cfg = variable_any_cfg(pool.clone());
-                            let variable_current_cfg = variable_current_cfg(pool);
+                            let any_cfg = any_cfg(&ctx);
+                            let current_cfg = current_cfg(&ctx);
+                            let variable_any_cfg = variable_any_cfg(&ctx);
+                            let variable_current_cfg = variable_current_cfg(&ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
                                 match variant {
@@ -120,39 +122,39 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         let db = UFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::AnyOrderedFixed => {
                                         let db = OFixedDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentUnorderedFixed => {
                                         let db = UCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentOrderedFixed => {
                                         let db = OCurrentDb::init(ctx.clone(), current_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::AnyUnorderedVariable => {
                                         let db =
                                             UVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::AnyOrderedVariable => {
                                         let db =
                                             OVAnyDb::init(ctx.clone(), variable_any_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentUnorderedVariable => {
                                         let db = UVCurrentDb::init(
@@ -161,7 +163,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         )
                                         .await
                                         .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentOrderedVariable => {
                                         let db = OVCurrentDb::init(
@@ -170,7 +172,7 @@ fn bench_fixed_init(c: &mut Criterion) {
                                         )
                                         .await
                                         .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                 }
                             }

@@ -3,14 +3,16 @@
 //! Fuzz test for journal crash recovery (both fixed and variable journals).
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{deterministic, Metrics as _, Runner};
+use commonware_runtime::{deterministic, BufferPooler, Metrics as _, Runner};
 use commonware_storage::journal::contiguous::{
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
+    Reader,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
+    future::Future,
     num::{NonZeroU16, NonZeroUsize},
     ops::Range,
 };
@@ -113,32 +115,42 @@ struct FuzzInput {
 
 fn fixed_config(
     partition: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
 ) -> FixedConfig {
     FixedConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         items_per_blob: NZU64!(items_per_section),
-        page_cache: commonware_runtime::buffer::paged::CacheRef::new(page_size, page_cache_size),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            pooler,
+            page_size,
+            page_cache_size,
+        ),
         write_buffer,
     }
 }
 
 fn variable_config(
     partition: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_section: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<()> {
     VariableConfig {
-        partition: partition.to_string(),
+        partition: partition.into(),
         items_per_section: NZU64!(items_per_section),
         compression: None,
         codec_config: (),
-        page_cache: commonware_runtime::buffer::paged::CacheRef::new(page_size, page_cache_size),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            pooler,
+            page_size,
+            page_cache_size,
+        ),
         write_buffer,
     }
 }
@@ -149,6 +161,7 @@ trait FuzzJournal: Sized {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
@@ -158,49 +171,48 @@ trait FuzzJournal: Sized {
     fn init(
         ctx: deterministic::Context,
         cfg: Self::Config,
-    ) -> impl std::future::Future<Output = Result<Self, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, commonware_storage::journal::Error>> + Send;
 
-    fn size(&self) -> u64;
-    fn bounds(&self) -> Range<u64>;
+    fn size(&self) -> impl Future<Output = u64> + Send;
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send;
 
     fn append(
         &mut self,
         item: Item,
-    ) -> impl std::future::Future<Output = Result<u64, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<u64, commonware_storage::journal::Error>> + Send;
 
     fn read(
         &self,
         pos: u64,
-    ) -> impl std::future::Future<Output = Result<Item, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send;
 
     fn sync(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
     fn rewind(
         &mut self,
         size: u64,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
     fn prune(
         &mut self,
         min_pos: u64,
-    ) -> impl std::future::Future<Output = Result<bool, commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<bool, commonware_storage::journal::Error>> + Send;
 
     // Return value is ignored in the fuzz test.
     fn replay(
         &mut self,
         buffer: NonZeroUsize,
         start_pos: u64,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
     fn commit(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    ) -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 
-    fn destroy(
-        self,
-    ) -> impl std::future::Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
+    fn destroy(self)
+        -> impl Future<Output = Result<(), commonware_storage::journal::Error>> + Send;
 }
 
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
@@ -208,6 +220,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
@@ -215,6 +228,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     ) -> Self::Config {
         fixed_config(
             partition,
+            pooler,
             page_size,
             page_cache_size,
             items_per_section,
@@ -229,20 +243,27 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::init(ctx, cfg).await
     }
 
-    fn size(&self) -> u64 {
-        FixedJournal::size(self)
+    async fn size(&self) -> u64 {
+        FixedJournal::size(self).await
     }
 
-    fn bounds(&self) -> Range<u64> {
-        FixedJournal::bounds(self)
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
+    #[allow(clippy::manual_async_fn)]
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
+        async { self.reader().await.bounds() }
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
         FixedJournal::append(self, item).await
     }
 
-    async fn read(&self, pos: u64) -> Result<Item, commonware_storage::journal::Error> {
-        FixedJournal::read(self, pos).await
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
+    #[allow(clippy::manual_async_fn)]
+    fn read(
+        &self,
+        pos: u64,
+    ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send {
+        async move { self.reader().await.read(pos).await }
     }
 
     async fn sync(&mut self) -> Result<(), commonware_storage::journal::Error> {
@@ -262,7 +283,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = FixedJournal::replay(self, buffer, start_pos).await?;
+        let _ = self.reader().await.replay(buffer, start_pos).await?;
         Ok(())
     }
 
@@ -281,6 +302,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     fn config(
         partition: &str,
+        pooler: &impl BufferPooler,
         page_size: NonZeroU16,
         page_cache_size: NonZeroUsize,
         items_per_section: u64,
@@ -288,6 +310,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     ) -> Self::Config {
         variable_config(
             partition,
+            pooler,
             page_size,
             page_cache_size,
             items_per_section,
@@ -302,20 +325,27 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::init(ctx, cfg).await
     }
 
-    fn size(&self) -> u64 {
-        VariableJournal::size(self)
+    async fn size(&self) -> u64 {
+        VariableJournal::size(self).await
     }
 
-    fn bounds(&self) -> Range<u64> {
-        VariableJournal::bounds(self)
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
+    #[allow(clippy::manual_async_fn)]
+    fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
+        async { self.reader().await.bounds() }
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, commonware_storage::journal::Error> {
         VariableJournal::append(self, item).await
     }
 
-    async fn read(&self, pos: u64) -> Result<Item, commonware_storage::journal::Error> {
-        VariableJournal::read(self, pos).await
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
+    #[allow(clippy::manual_async_fn)]
+    fn read(
+        &self,
+        pos: u64,
+    ) -> impl Future<Output = Result<Item, commonware_storage::journal::Error>> + Send {
+        async move { self.reader().await.read(pos).await }
     }
 
     async fn sync(&mut self) -> Result<(), commonware_storage::journal::Error> {
@@ -335,7 +365,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<(), commonware_storage::journal::Error> {
-        let _ = VariableJournal::replay(self, start_pos, buffer).await?;
+        let _ = self.reader().await.replay(buffer, start_pos).await?;
         Ok(())
     }
 
@@ -353,19 +383,19 @@ async fn run_operations<J: FuzzJournal>(
     operations: &[JournalOperation],
 ) -> (u64, u64, u64, u64) {
     let mut min_expected_size = 0u64;
-    let mut max_expected_size = journal.size();
+    let mut max_expected_size = journal.size().await;
     let mut min_expected_oldest = 0u64;
-    let mut max_expected_oldest = journal.bounds().start;
+    let mut max_expected_oldest = journal.bounds().await.start;
 
     for op in operations.iter() {
         let step_result: Result<(), ()> = match op {
             JournalOperation::Append { value } => {
-                let size_before = journal.size();
+                let size_before = journal.size().await;
                 if journal.append(Item::from(*value)).await.is_err() {
                     max_expected_size = max_expected_size.max(size_before + 1);
                     Err(())
                 } else {
-                    max_expected_size = max_expected_size.max(journal.size());
+                    max_expected_size = max_expected_size.max(journal.size().await);
                     Ok(())
                 }
             }
@@ -379,10 +409,10 @@ async fn run_operations<J: FuzzJournal>(
                 if journal.sync().await.is_err() {
                     Err(())
                 } else {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     min_expected_size = size;
                     max_expected_size = max_expected_size.max(size);
-                    let oldest = journal.bounds().start;
+                    let oldest = journal.bounds().await.start;
                     min_expected_oldest = oldest;
                     max_expected_oldest = max_expected_oldest.max(oldest);
                     Ok(())
@@ -390,7 +420,7 @@ async fn run_operations<J: FuzzJournal>(
             }
 
             JournalOperation::Rewind { size } => {
-                let prev_size = journal.size();
+                let prev_size = journal.size().await;
                 if *size >= prev_size {
                     Ok(())
                 } else if journal.rewind(*size).await.is_err() {
@@ -404,12 +434,13 @@ async fn run_operations<J: FuzzJournal>(
 
             JournalOperation::Prune { min_pos } => match journal.prune(*min_pos).await {
                 Err(_) => {
-                    max_expected_oldest = max_expected_oldest.max((*min_pos).min(journal.size()));
+                    max_expected_oldest =
+                        max_expected_oldest.max((*min_pos).min(journal.size().await));
                     Err(())
                 }
                 Ok(false) => Ok(()),
                 Ok(true) => {
-                    let new_oldest = journal.bounds().start;
+                    let new_oldest = journal.bounds().await.start;
                     min_expected_oldest = new_oldest;
                     max_expected_oldest = new_oldest;
                     Ok(())
@@ -429,10 +460,10 @@ async fn run_operations<J: FuzzJournal>(
                 if journal.commit().await.is_err() {
                     Err(())
                 } else {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     min_expected_size = size;
                     max_expected_size = size;
-                    let oldest = journal.bounds().start;
+                    let oldest = journal.bounds().await.start;
                     min_expected_oldest = oldest;
                     max_expected_oldest = oldest;
                     Ok(())
@@ -460,8 +491,8 @@ async fn verify_recovery<J: FuzzJournal>(
     min_expected_oldest: u64,
     max_expected_oldest: u64,
 ) {
-    let size = journal.size();
-    let oldest = journal.bounds().start;
+    let size = journal.size().await;
+    let oldest = journal.bounds().await.start;
     assert!(size >= oldest);
 
     assert!(
@@ -498,7 +529,7 @@ where
     let items_per_section = input.items_per_section;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_name = format!("{}_{}", partition_prefix, input.seed);
+    let partition_name = format!("{}-{}", partition_prefix, input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;
@@ -515,6 +546,7 @@ where
                 ctx.with_label("journal"),
                 J::config(
                     &partition_name,
+                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_section,
@@ -524,13 +556,12 @@ where
             .await
             .unwrap();
 
-            let fault_config = deterministic::FaultConfig {
+            let storage_fault_cfg = ctx.storage_fault_config();
+            *storage_fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(write_failure_rate),
                 ..Default::default()
             };
-            let faults = ctx.storage_faults();
-            *faults.write().unwrap() = fault_config;
 
             run_operations(&mut journal, &operations).await
         }
@@ -538,12 +569,13 @@ where
 
     let runner = deterministic::Runner::from(checkpoint);
     runner.start(|ctx| async move {
-        *ctx.storage_faults().write().unwrap() = deterministic::FaultConfig::default();
+        *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let mut journal = J::init(
             ctx.with_label("recovered"),
             J::config(
                 &partition_name,
+                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_section,
@@ -578,13 +610,13 @@ fn fuzz(input: FuzzInput) {
         JournalType::Fixed => {
             fuzz_journal::<FixedJournal<deterministic::Context, Item>>(
                 &input,
-                "fixed_crash_recovery",
+                "fixed-crash-recovery",
             );
         }
         JournalType::Variable => {
             fuzz_journal::<VariableJournal<deterministic::Context, Item>>(
                 &input,
-                "variable_crash_recovery",
+                "variable-crash-recovery",
             );
         }
     }

@@ -116,7 +116,7 @@ mod tests {
             types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
-        Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication,
+        Automaton, CertifiableAutomaton, Heightable, Reporter, VerifyingApplication, Viewable,
     };
     use commonware_broadcast::buffered;
     use commonware_cryptography::{
@@ -213,19 +213,43 @@ mod tests {
         crate::marshal::ingress::mailbox::Mailbox<S, B>,
         Height,
     ) {
+        setup_validator_with(
+            context,
+            oracle,
+            validator,
+            provider,
+            NZUsize!(1),
+            Application::default(),
+        )
+        .await
+    }
+
+    async fn setup_validator_with(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<B>,
+    ) -> (
+        Application<B>,
+        crate::marshal::ingress::mailbox::Mailbox<S, B>,
+        Height,
+    ) {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             mailbox_size: 100,
             view_retention_timeout: ViewDelta::new(10),
             max_repair: NZUsize!(10),
+            max_pending_acks,
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -347,7 +371,6 @@ mod tests {
             config,
         )
         .await;
-        let application = Application::<B>::default();
 
         // Start the application
         actor.start(application.clone(), buffer, resolver);
@@ -604,6 +627,162 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_ack_pipeline_backlog() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(0xA11CE)
+                .with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let validator = participants[0].clone();
+            let application = Application::<B>::manual_ack();
+            let (application, mut actor, _processed_height) = setup_validator_with(
+                context.with_label("validator_0"),
+                &mut oracle,
+                validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                application,
+            )
+            .await;
+
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=5 {
+                let block = make_block(parent, Height::new(i), i);
+                parent = block.digest();
+                let round = Round::new(
+                    epocher.containing(block.height()).unwrap().epoch(),
+                    View::new(i),
+                );
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i.saturating_sub(1)),
+                    payload: block.digest(),
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+            }
+
+            // Backlog should fill to configured capacity before any ack is released.
+            while application.blocks().len() < 3 || application.pending_ack_heights().len() < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(1), Height::new(2), Height::new(3)]
+            );
+            assert!(!application.blocks().contains_key(&Height::new(4)));
+            assert!(!application.blocks().contains_key(&Height::new(5)));
+
+            // Releasing acks should preserve FIFO order and allow further dispatch.
+            for expected in 1..=5 {
+                let expected = Height::new(expected);
+                while application.pending_ack_heights().first().copied() != Some(expected) {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                let acknowledged = application
+                    .acknowledge_next()
+                    .expect("pending ack should be present");
+                assert_eq!(acknowledged, expected);
+            }
+
+            // All finalized blocks should eventually be delivered after draining the backlog.
+            while application.blocks().len() < 5 || !application.pending_ack_heights().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_ack_pipeline_backlog_persists_on_restart() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(0xA11CF)
+                .with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let validator = participants[0].clone();
+            let application = Application::<B>::manual_ack();
+            let (application, mut actor, _processed_height) = setup_validator_with(
+                context.with_label("validator_0"),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                application,
+            )
+            .await;
+
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=3 {
+                let block = make_block(parent, Height::new(i), i);
+                parent = block.digest();
+                let round = Round::new(
+                    epocher.containing(block.height()).unwrap().epoch(),
+                    View::new(i),
+                );
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i.saturating_sub(1)),
+                    payload: block.digest(),
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+            }
+
+            while application.pending_ack_heights().len() < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(1), Height::new(2), Height::new(3)]
+            );
+
+            // Acknowledge all pending blocks without yielding so marshal can
+            // drain them in one ack arm and then sync metadata once.
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+            assert_eq!(application.acknowledge_next(), Some(Height::new(2)));
+            assert_eq!(application.acknowledge_next(), Some(Height::new(3)));
+
+            // Yield to marshal
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Assert that the application has processed up to height 3.
+            assert_eq!(application.tip().unwrap().0, Height::new(3));
+
+            // Restart marshal and confirm the processed height restored from metadata.
+            let (_restart_application, _restart_actor, restart_height) = setup_validator_with(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                Application::manual_ack(),
+            )
+            .await;
+            assert_eq!(restart_height, Height::new(3));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_sync_height_floor() {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
@@ -797,7 +976,7 @@ mod tests {
 
             let validator = participants[0].clone();
             let partition_prefix = format!("prune-test-{}", validator.clone());
-            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let control = oracle.control(validator.clone());
 
             // Closure to initialize marshal with prunable archives
@@ -817,6 +996,7 @@ mod tests {
                         mailbox_size: 100,
                         view_retention_timeout: ViewDelta::new(10),
                         max_repair: NZUsize!(10),
+                        max_pending_acks: NZUsize!(1),
                         block_codec_config: (),
                         partition_prefix: partition_prefix.clone(),
                         prunable_items_per_section: NZU64!(10),
@@ -1668,7 +1848,7 @@ mod tests {
                 .expect("missing finalization by height");
             assert_eq!(finalization.proposal.parent, View::new(0));
             assert_eq!(
-                finalization.proposal.round,
+                finalization.round(),
                 Round::new(Epoch::new(0), View::new(1))
             );
             assert_eq!(finalization.proposal.payload, commitment);
@@ -1759,7 +1939,7 @@ mod tests {
                 .get_finalization(Height::new(5))
                 .await
                 .expect("finalization should be fetched");
-            assert_eq!(finalization.proposal.round.view(), View::new(5));
+            assert_eq!(finalization.view(), View::new(5));
         })
     }
 

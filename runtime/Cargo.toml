@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
-async-lock.workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true

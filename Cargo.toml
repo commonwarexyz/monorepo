@@ -63,6 +63,7 @@ option-if-let-else = "warn"
 disallowed_types = "deny"
 disallowed_macros = "deny"
 undocumented_unsafe_blocks = "deny"
+unused-async = "warn"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
 suspicious_op_assign_impl = "allow"
@@ -70,7 +71,6 @@ suspicious_op_assign_impl = "allow"
 [workspace.dependencies]
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
-async-lock = "3.4.0"
 aws-config = "1.8.12"
 aws-lc-rs = "1.15.2"
 aws-sdk-ec2 = "1.200.0"
@@ -130,6 +130,7 @@ opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
 p256 = { version = "0.13.2", default-features = false }
+parking_lot = "0.12.5"
 paste = "1.0.15"
 pin-project = "1.1.10"
 proc-macro-crate = "3.4.0"

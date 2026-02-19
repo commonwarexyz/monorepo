@@ -270,7 +270,7 @@ fn fuzz(input: FuzzInput) {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let sender_key = sender.map(|sender_idx| {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()
@@ -291,7 +291,7 @@ fn fuzz(input: FuzzInput) {
                     let clamped_peer_idx = peer_index % peers.len();
                     let peer = peers[clamped_peer_idx].clone();
 
-                    if let Some(mut mailbox) = mailboxes.get(&peer).cloned() {
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let sender_key = sender.map(|sender_idx| {
                             let clamped_sender_idx = sender_idx % peers.len();
                             peers[clamped_sender_idx].clone()

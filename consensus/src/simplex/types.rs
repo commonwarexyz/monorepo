@@ -930,6 +930,24 @@ where
     }
 }
 
+/// Batch-verifies certificates and returns a per-item result.
+///
+/// Uses bisection to efficiently identify invalid certificates when batch
+/// verification fails.
+pub fn verify_certificates<'a, R, S, D>(
+    rng: &mut R,
+    scheme: &S,
+    certificates: &[(Subject<'a, D>, &'a S::Certificate)],
+    strategy: &impl Strategy,
+) -> Vec<bool>
+where
+    R: CryptoRngCore,
+    S: scheme::Scheme<D>,
+    D: Digest,
+{
+    scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
+}
+
 /// Aggregated notarization certificate recovered from notarize votes.
 /// When a proposal is notarized, it means at least 2f+1 validators have voted for it.
 ///

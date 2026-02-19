@@ -41,7 +41,7 @@ where
     }
 
     /// Deletes `key` from the batch without checking if it is present in the batch or store.
-    pub async fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
+    pub fn delete_unchecked(&mut self, key: K) -> Result<(), Error> {
         self.diff.insert(key, None);
 
         Ok(())
@@ -126,9 +126,7 @@ where
 }
 
 /// A k/v store that supports making batched changes.
-pub trait Batchable:
-    Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> + Updatable + Deletable
-{
+pub trait Batchable: Gettable<Key: Array, Value: CodecShared + Clone, Error = Error> {
     /// Returns a new empty batch of changes.
     fn start_batch(&self) -> Batch<'_, Self::Key, Self::Value, Self>
     where
@@ -148,26 +146,15 @@ pub trait Batchable:
     ) -> impl Future<Output = Result<(), Error>> + Send + use<'a, Self, Iter>
     where
         Self: Send,
-        Iter: Iterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
-    {
-        async move {
-            for (key, value) in iter {
-                if let Some(value) = value {
-                    self.update(key, value).await?;
-                } else {
-                    self.delete(key).await?;
-                }
-            }
-            Ok(())
-        }
-    }
+        Iter: IntoIterator<Item = (Self::Key, Option<Self::Value>)> + Send + 'a,
+        Iter::IntoIter: Send;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        kv::tests::{assert_deletable, assert_gettable, assert_send, assert_updatable},
+        kv::tests::{assert_deletable, assert_gettable, assert_updatable},
         qmdb::store::db::Db,
         translator::TwoCap,
     };
@@ -182,10 +169,5 @@ mod tests {
         assert_gettable(batch, &key);
         assert_updatable(batch, key, vec![]);
         assert_deletable(batch, key);
-    }
-
-    #[allow(dead_code)]
-    fn assert_batch_delete_unchecked_is_send(batch: &mut TestBatch<'_>, key: Digest) {
-        assert_send(batch.delete_unchecked(key));
     }
 }

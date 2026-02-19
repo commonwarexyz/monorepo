@@ -180,7 +180,7 @@ mod tests {
             .unwrap();
     }
 
-    async fn setup_and_spawn_actor(
+    fn setup_and_spawn_actor(
         context: &deterministic::Context,
         provider: impl Provider<PublicKey = PublicKey>,
         blocker: impl Blocker<PublicKey = PublicKey>,
@@ -241,8 +241,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -253,8 +252,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             mailbox1.fetch(key.clone()).await;
 
@@ -291,8 +289,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 prod1,
-            )
-            .await;
+            );
 
             let key = Key(3);
             mailbox1.fetch(key.clone()).await;
@@ -339,8 +336,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 prod1,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -351,8 +347,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -363,8 +358,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             mailbox1.fetch(key.clone()).await;
 
@@ -402,8 +396,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 prod1,
-            )
-            .await;
+            );
 
             let key = Key(4);
             mailbox1.fetch(key.clone()).await;
@@ -450,8 +443,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -462,8 +454,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -474,8 +465,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Add choppy links between the requester and the two producers
             add_link(&mut oracle, LINK_UNRELIABLE.clone(), &peers, 0, 1).await;
@@ -542,8 +532,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -554,8 +543,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Cancel before sending the fetch request, expecting no effect
             mailbox1.cancel(key.clone()).await;
@@ -644,8 +632,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -656,8 +643,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -668,8 +654,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Fetch keyA multiple times to ensure that Peer2 is blocked.
             for _ in 0..20 {
@@ -740,8 +725,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -752,8 +736,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Send duplicate fetch requests for the same key
             mailbox1.fetch(key.clone()).await;
@@ -814,8 +797,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -826,8 +808,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Fetch key1 from peer 2
             mailbox1.fetch(key1.clone()).await;
@@ -852,8 +833,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Need to wait for the peer set change to propagate
             context.sleep(Duration::from_millis(200)).await;
@@ -907,8 +887,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -919,8 +898,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -931,8 +909,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -997,8 +974,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1009,8 +985,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 Producer::default(), // no data
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -1021,8 +996,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 Producer::default(), // no data
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox4 = setup_and_spawn_actor(
@@ -1033,8 +1007,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod4,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -1103,8 +1076,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1115,8 +1087,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -1127,8 +1098,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox4 = setup_and_spawn_actor(
@@ -1139,8 +1109,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod4,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -1211,8 +1180,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1223,8 +1191,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 Producer::default(), // no data
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -1235,8 +1202,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -1292,8 +1258,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1304,8 +1269,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 Producer::default(), // no data
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
@@ -1316,8 +1280,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -1369,8 +1332,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1381,8 +1343,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Retain before fetching should have no effect
             mailbox1.retain(|_| true).await;
@@ -1452,8 +1413,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1464,8 +1424,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Clear before fetching should have no effect
             mailbox1.clear().await;
@@ -1550,8 +1509,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             // Set up peer 2 (has data)
             let scheme = schemes.remove(0);
@@ -1563,8 +1521,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Set up peer 3 (also has data)
             let scheme = schemes.remove(0);
@@ -1576,8 +1533,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod3,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -1657,8 +1613,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 Producer::default(),
-            )
-            .await;
+            );
 
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
@@ -1669,8 +1624,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
@@ -1746,8 +1700,7 @@ mod tests {
                 connections.remove(0),
                 cons1,
                 prod1, // peer 1 has the data
-            )
-            .await;
+            );
 
             // Set up peer 2 - also has the data
             let scheme = schemes.remove(0);
@@ -1759,8 +1712,7 @@ mod tests {
                 connections.remove(0),
                 Consumer::dummy(),
                 prod2,
-            )
-            .await;
+            );
 
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;

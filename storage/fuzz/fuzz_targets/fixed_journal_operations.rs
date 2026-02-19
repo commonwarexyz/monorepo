@@ -3,7 +3,10 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
-use commonware_storage::journal::contiguous::fixed::{Config as JournalConfig, Journal};
+use commonware_storage::journal::contiguous::{
+    fixed::{Config as JournalConfig, Journal},
+    Reader,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
@@ -71,10 +74,10 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = JournalConfig {
-            partition: "fixed_journal_operations_fuzz_test".to_string(),
+            partition: "fixed-journal-operations-fuzz-test".into(),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
-            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -94,12 +97,12 @@ fn fuzz(input: FuzzInput) {
 
                 JournalOperation::Read { pos } => {
                     if *pos >= oldest_retained_pos && *pos < journal_size {
-                        journal.read(*pos).await.unwrap();
+                        journal.reader().await.read(*pos).await.unwrap();
                     }
                 }
 
                 JournalOperation::Size => {
-                    let size = journal.size();
+                    let size = journal.size().await;
                     assert_eq!(journal_size, size, "unexpected size");
                 }
 
@@ -116,7 +119,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::Bounds => {
-                    let _bounds = journal.bounds();
+                    let _bounds = journal.reader().await.bounds();
                 }
 
                 JournalOperation::Prune { min_pos } => {
@@ -134,7 +137,12 @@ fn fuzz(input: FuzzInput) {
                     } else {
                         oldest_retained_pos
                     };
-                    match journal.replay(NZUsize!(*buffer), start_pos).await {
+                    match journal
+                        .reader()
+                        .await
+                        .replay(NZUsize!(*buffer), start_pos)
+                        .await
+                    {
                         Ok(stream) => {
                             pin_mut!(stream);
                             // Consume first few items to test stream - panic on stream errors
@@ -163,8 +171,8 @@ fn fuzz(input: FuzzInput) {
                     .unwrap();
                     restarts += 1;
                     // Reset tracking variables to match recovered state
-                    journal_size = journal.size();
-                    let bounds = journal.bounds();
+                    journal_size = journal.size().await;
+                    let bounds = journal.reader().await.bounds();
                     oldest_retained_pos = if bounds.is_empty() { 0 } else { bounds.start };
                 }
 

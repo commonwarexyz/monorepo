@@ -55,7 +55,7 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     ///
     /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
     pub async fn subscribe(
-        &mut self,
+        &self,
         peer: Option<P>,
         commitment: M::Commitment,
         digest: Option<M::Digest>,
@@ -81,7 +81,7 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     ///
     /// If the engine has shut down, this is a no-op.
     pub async fn subscribe_prepared(
-        &mut self,
+        &self,
         peer: Option<P>,
         commitment: M::Commitment,
         digest: Option<M::Digest>,
@@ -101,7 +101,7 @@ impl<P: PublicKey, M: Committable + Digestible + Codec> Mailbox<P, M> {
     ///
     /// If the engine has shut down, returns an empty vector.
     pub async fn get(
-        &mut self,
+        &self,
         peer: Option<P>,
         commitment: M::Commitment,
         digest: Option<M::Digest>,

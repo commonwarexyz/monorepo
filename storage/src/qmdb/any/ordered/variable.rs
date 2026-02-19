@@ -160,7 +160,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         kv::{
-            tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+            tests::{assert_batchable, assert_gettable, assert_send},
             Batchable as _, Deletable as _, Updatable as _,
         },
         mmr::{Location, Position},
@@ -184,7 +184,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Runner as _,
+        BufferPooler, Runner as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -201,27 +201,27 @@ pub(crate) mod test {
     type MutableAnyTest =
         Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Unmerkleized, NonDurable>;
 
-    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("mmr_journal_{seed}"),
-            mmr_metadata_partition: format!("mmr_metadata_{seed}"),
+            mmr_journal_partition: format!("mmr-journal-{seed}"),
+            mmr_metadata_partition: format!("mmr-metadata-{seed}"),
             mmr_items_per_blob: NZU64!(12), // intentionally small and janky size
             mmr_write_buffer: NZUsize!(64),
-            log_partition: format!("log_journal_{seed}"),
+            log_partition: format!("log-journal-{seed}"),
             log_items_per_blob: NZU64!(14), // intentionally small and janky size
             log_write_buffer: NZUsize!(64),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed);
+        let config = create_test_config(seed, &context);
         AnyTest::init(context, config).await.unwrap()
     }
 
@@ -267,10 +267,12 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 Operation::Update(data) => {
-                    db.update(data.key, data.value).await.unwrap();
+                    db.write_batch([(data.key, Some(data.value))])
+                        .await
+                        .unwrap();
                 }
                 Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 Operation::CommitFloor(_, _) => {
                     // CommitFloor consumes self - not supported in this helper.
@@ -288,9 +290,8 @@ pub(crate) mod test {
 
     /// Return a variable db with Digest keys and values for generic tests.
     async fn open_digest_variable_db(context: Context) -> DigestVariableDb {
-        DigestVariableDb::init(context, variable_db_config("digest_partition"))
-            .await
-            .unwrap()
+        let cfg = variable_db_config("digest-partition", &context);
+        DigestVariableDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -324,9 +325,8 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        VariableDb::init(context, variable_db_config("fixed_bytes_var_partition"))
-            .await
-            .unwrap()
+        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
+        VariableDb::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -371,8 +371,8 @@ pub(crate) mod test {
             let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 7u8, 0u8]);
             let val = Sha256::fill(1u8);
 
-            db.update(key1.clone(), val).await.unwrap();
-            db.update(key3.clone(), val).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val))]).await.unwrap();
+            db.write_batch([(key3.clone(), Some(val))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
@@ -419,8 +419,8 @@ pub(crate) mod test {
             let mut db = open_variable_db(context.with_label("first"))
                 .await
                 .into_mutable();
-            db.update(key1.clone(), val1).await.unwrap();
-            db.update(key3.clone(), val3).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
+            db.write_batch([(key3.clone(), Some(val3))]).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             let mut batch = db.start_batch();
@@ -442,8 +442,8 @@ pub(crate) mod test {
             let mut db = open_variable_db(context.with_label("second"))
                 .await
                 .into_mutable();
-            db.update(key1.clone(), val1).await.unwrap();
-            db.update(key3.clone(), val3).await.unwrap();
+            db.write_batch([(key1.clone(), Some(val1))]).await.unwrap();
+            db.write_batch([(key3.clone(), Some(val3))]).await.unwrap();
             let mut db = db.commit(None).await.unwrap().0.into_mutable();
 
             let mut batch = db.start_batch();
@@ -469,9 +469,8 @@ pub(crate) mod test {
         super::partitioned::Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 1>;
 
     async fn open_partitioned_db(context: deterministic::Context) -> PartitionedAnyTest {
-        PartitionedAnyTest::init(context, variable_db_config("ordered_partitioned_var_p1"))
-            .await
-            .unwrap()
+        let cfg = variable_db_config("ordered-partitioned-var-p1", &context);
+        PartitionedAnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -513,9 +512,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableAnyTest, key: Digest, value: Vec<u8>) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value.clone()));
-        assert_send(db.create(key, value.clone()));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value.clone()))]));
+        assert_send(db.write_batch([(key, None)]));
         assert_batchable(db, key, value);
         assert_send(db.get_all(&key));
         assert_send(db.get_with_loc(&key));

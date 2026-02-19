@@ -1,23 +1,29 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::Contiguous;
+use super::{Contiguous, Reader as _};
 use crate::{
-    journal::{contiguous::MutableContiguous, Error},
+    journal::{contiguous::Mutable, Error},
     Persistable,
 };
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Helper trait for tests combining [MutableContiguous] and [Persistable].
-pub(super) trait PersistableContiguous<I>:
-    MutableContiguous<Item = I> + Persistable<Error = Error>
+pub(super) trait PersistableContiguous:
+    Mutable<Item = u64> + Persistable<Error = Error>
 {
 }
 
-impl<I, T: MutableContiguous<Item = I> + Persistable<Error = Error>> PersistableContiguous<I>
-    for T
-{
+impl<T> PersistableContiguous for T where T: Mutable<Item = u64> + Persistable<Error = Error> {}
+
+async fn get_bounds<J: Contiguous>(journal: &J) -> std::ops::Range<u64> {
+    let reader = journal.reader().await;
+    reader.bounds()
+}
+
+async fn read_item<J: Contiguous>(journal: &J, position: u64) -> Result<J::Item, Error> {
+    let reader = journal.reader().await;
+    reader.read(position).await
 }
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.
@@ -34,7 +40,7 @@ impl<I, T: MutableContiguous<Item = I> + Persistable<Error = Error>> Persistable
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
     let counter = AtomicUsize::new(0);
     let indexed_factory = |name: String| {
@@ -80,10 +86,10 @@ where
 async fn test_empty_journal_bounds<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let journal = factory("empty".to_string()).await.unwrap();
-    let bounds = journal.bounds();
+    let journal = factory("empty".into()).await.unwrap();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 0);
     assert_eq!(bounds.end, 0);
     assert!(bounds.is_empty());
@@ -94,16 +100,16 @@ where
 async fn test_bounds_with_items<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("bounds_with_items".to_string()).await.unwrap();
+    let mut journal = factory("bounds-with-items".into()).await.unwrap();
 
     // Append some items
     for i in 0..10 {
         journal.append(i * 100).await.unwrap();
     }
 
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 0);
     assert_eq!(bounds.end, 10);
     assert!(!bounds.is_empty());
@@ -116,9 +122,9 @@ where
 async fn test_bounds_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("bounds_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("bounds-after-prune".into()).await.unwrap();
 
     // Append items across multiple sections
     for i in 0..30 {
@@ -126,7 +132,7 @@ where
     }
 
     // Initially bounds should be 0..30
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 0);
     assert_eq!(bounds.end, 30);
 
@@ -134,7 +140,7 @@ where
     journal.prune(10).await.unwrap();
 
     // Assumed section-aligned pruning and items_per_section = 10
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 10);
     assert_eq!(bounds.end, 30);
 
@@ -142,13 +148,13 @@ where
     journal.prune(25).await.unwrap();
 
     // bounds.start should have advanced to 20 (section-aligned)
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 20);
     assert_eq!(bounds.end, 30);
 
     // Prune all
     journal.prune(30).await.unwrap();
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 30);
     assert_eq!(bounds.end, 30);
     assert!(bounds.is_empty());
@@ -156,10 +162,9 @@ where
     // Drop and reopen
     journal.sync().await.unwrap();
     drop(journal);
-    let journal = factory("bounds_after_prune".to_string()).await.unwrap();
-    let bounds = journal.bounds();
+    let journal = factory("bounds-after-prune".into()).await.unwrap();
+    let bounds = get_bounds(&journal).await;
     assert!(bounds.is_empty());
-
     journal.destroy().await.unwrap();
 }
 
@@ -167,9 +172,9 @@ where
 async fn test_append_and_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("append_and_size".to_string()).await.unwrap();
+    let mut journal = factory("append-and-size".into()).await.unwrap();
 
     let pos1 = journal.append(100).await.unwrap();
     let pos2 = journal.append(200).await.unwrap();
@@ -178,12 +183,12 @@ where
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
     assert_eq!(pos3, 2);
-    assert_eq!(journal.bounds().end, 3);
+    assert_eq!(get_bounds(&journal).await.end, 3);
 
     // Verify values can be read back
-    assert_eq!(journal.read(0).await.unwrap(), 100);
-    assert_eq!(journal.read(1).await.unwrap(), 200);
-    assert_eq!(journal.read(2).await.unwrap(), 300);
+    assert_eq!(read_item(&journal, 0).await.unwrap(), 100);
+    assert_eq!(read_item(&journal, 1).await.unwrap(), 200);
+    assert_eq!(read_item(&journal, 2).await.unwrap(), 300);
 
     journal.destroy().await.unwrap();
 }
@@ -192,19 +197,19 @@ where
 async fn test_sequential_appends<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("sequential_appends".to_string()).await.unwrap();
+    let mut journal = factory("sequential-appends".into()).await.unwrap();
 
     for i in 0..25u64 {
         let pos = journal.append(i * 10).await.unwrap();
         assert_eq!(pos, i);
     }
 
-    assert_eq!(journal.bounds().end, 25);
+    assert_eq!(get_bounds(&journal).await.end, 25);
 
     for i in 0..25u64 {
-        assert_eq!(journal.read(i).await.unwrap(), i * 10);
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 10);
     }
 
     journal.destroy().await.unwrap();
@@ -214,16 +219,17 @@ where
 async fn test_replay_from_start<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("replay_from_start".to_string()).await.unwrap();
+    let mut journal = factory("replay-from-start".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i * 10).await.unwrap();
     }
 
     {
-        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -245,16 +251,17 @@ where
 async fn test_replay_from_middle<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("replay_from_middle".to_string()).await.unwrap();
+    let mut journal = factory("replay-from-middle".into()).await.unwrap();
 
     for i in 0..15u64 {
         journal.append(i * 10).await.unwrap();
     }
 
     {
-        let stream = journal.replay(7, NZUsize!(1024)).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 7).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -276,30 +283,30 @@ where
 async fn test_prune_retains_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("prune_retains_size".to_string()).await.unwrap();
+    let mut journal = factory("prune-retains-size".into()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
     }
 
-    let size_before = journal.bounds().end;
+    let size_before = get_bounds(&journal).await.end;
     journal.prune(10).await.unwrap();
-    let size_after = journal.bounds().end;
+    let size_after = get_bounds(&journal).await.end;
 
     assert_eq!(size_before, size_after);
     assert_eq!(size_after, 20);
 
     journal.prune(20).await.unwrap();
-    let size_after_all = journal.bounds().end;
+    let size_after_all = get_bounds(&journal).await.end;
     assert_eq!(size_after, size_after_all);
 
     journal.sync().await.unwrap();
     drop(journal);
 
-    let journal = factory("prune_retains_size".to_string()).await.unwrap();
-    let size_after_close = journal.bounds().end;
+    let journal = factory("prune-retains-size".into()).await.unwrap();
+    let size_after_close = get_bounds(&journal).await.end;
     assert_eq!(size_after_close, size_after_all);
 
     journal.destroy().await.unwrap();
@@ -309,18 +316,18 @@ where
 async fn test_through_trait<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("through_trait".to_string()).await.unwrap();
+    let mut journal = factory("through-trait".into()).await.unwrap();
 
-    let pos1 = MutableContiguous::append(&mut journal, 42).await.unwrap();
-    let pos2 = MutableContiguous::append(&mut journal, 100).await.unwrap();
+    let pos1 = Mutable::append(&mut journal, 42).await.unwrap();
+    let pos2 = Mutable::append(&mut journal, 100).await.unwrap();
 
     assert_eq!(pos1, 0);
     assert_eq!(pos2, 1);
 
-    let bounds = Contiguous::bounds(&journal);
-    assert_eq!(bounds.end, 2);
+    let size = Contiguous::size(&journal).await;
+    assert_eq!(size, 2);
 
     journal.destroy().await.unwrap();
 }
@@ -329,9 +336,9 @@ where
 async fn test_replay_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("replay_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("replay-after-prune".into()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i * 10).await.unwrap();
@@ -342,7 +349,8 @@ where
     {
         // Replay from a position that may or may not be pruned (section-aligned)
         // We replay from position 10 which should be safe
-        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -367,9 +375,9 @@ where
 async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("prune_then_append".to_string()).await.unwrap();
+    let mut journal = factory("prune-then-append".into()).await.unwrap();
 
     // Append exactly one section (10 items)
     for i in 0..10u64 {
@@ -378,13 +386,13 @@ where
 
     // Prune all items (prune at section boundary)
     journal.prune(10).await.unwrap();
-    assert!(journal.bounds().is_empty());
+    assert!(get_bounds(&journal).await.is_empty());
 
     // Append new items after pruning - position should continue from 10
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
 
-    assert_eq!(journal.bounds().end, 11);
+    assert_eq!(get_bounds(&journal).await.end, 11);
 
     journal.destroy().await.unwrap();
 }
@@ -393,9 +401,9 @@ where
 async fn test_position_stability<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("position_stability".to_string()).await.unwrap();
+    let mut journal = factory("position-stability".into()).await.unwrap();
 
     // Append initial items
     for i in 0..20u64 {
@@ -412,14 +420,15 @@ where
     }
 
     // Verify reads work for retained items after pruning
-    assert_eq!(journal.read(10).await.unwrap(), 1000);
-    assert_eq!(journal.read(15).await.unwrap(), 1500);
-    assert_eq!(journal.read(20).await.unwrap(), 2000);
-    assert_eq!(journal.read(24).await.unwrap(), 2400);
+    assert_eq!(read_item(&journal, 10).await.unwrap(), 1000);
+    assert_eq!(read_item(&journal, 15).await.unwrap(), 1500);
+    assert_eq!(read_item(&journal, 20).await.unwrap(), 2000);
+    assert_eq!(read_item(&journal, 24).await.unwrap(), 2400);
 
     {
         // Replay from position 10 and verify positions
-        let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -442,9 +451,9 @@ where
 async fn test_sync_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("sync_behavior".to_string()).await.unwrap();
+    let mut journal = factory("sync-behavior".into()).await.unwrap();
 
     for i in 0..5u64 {
         journal.append(i).await.unwrap();
@@ -453,12 +462,12 @@ where
     journal.sync().await.unwrap();
 
     // Verify operations work after sync
-    assert_eq!(journal.read(0).await.unwrap(), 0);
+    assert_eq!(read_item(&journal, 0).await.unwrap(), 0);
     let pos = journal.append(100).await.unwrap();
     assert_eq!(pos, 5);
-    assert_eq!(journal.read(5).await.unwrap(), 100);
+    assert_eq!(read_item(&journal, 5).await.unwrap(), 100);
 
-    assert_eq!(journal.bounds().end, 6);
+    assert_eq!(get_bounds(&journal).await.end, 6);
 
     journal.destroy().await.unwrap();
 }
@@ -467,12 +476,13 @@ where
 async fn test_replay_on_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let journal = factory("replay_on_empty".to_string()).await.unwrap();
+    let journal = factory("replay-on-empty".into()).await.unwrap();
 
     {
-        let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -490,18 +500,19 @@ where
 async fn test_replay_at_exact_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("replay_at_exact_size".to_string()).await.unwrap();
+    let mut journal = factory("replay-at-exact-size".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
     }
 
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
 
     {
-        let stream = journal.replay(bounds.end, NZUsize!(1024)).await.unwrap();
+        let reader = journal.reader().await;
+        let stream = reader.replay(NZUsize!(1024), bounds.end).await.unwrap();
         futures::pin_mut!(stream);
 
         let mut items = Vec::new();
@@ -519,9 +530,9 @@ where
 async fn test_multiple_prunes<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("multiple_prunes".to_string()).await.unwrap();
+    let mut journal = factory("multiple-prunes".into()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -533,9 +544,9 @@ where
     assert!(pruned1);
     assert!(!pruned2); // Second prune should return false (nothing to prune)
 
-    assert_eq!(journal.bounds().end, 20);
-    assert_eq!(journal.read(10).await.unwrap(), 10);
-    assert_eq!(journal.read(19).await.unwrap(), 19);
+    assert_eq!(get_bounds(&journal).await.end, 20);
+    assert_eq!(read_item(&journal, 10).await.unwrap(), 10);
+    assert_eq!(read_item(&journal, 19).await.unwrap(), 19);
 
     journal.destroy().await.unwrap();
 }
@@ -544,9 +555,9 @@ where
 async fn test_prune_beyond_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("prune_beyond_size".to_string()).await.unwrap();
+    let mut journal = factory("prune-beyond-size".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -556,11 +567,11 @@ where
     journal.prune(100).await.unwrap();
 
     // Verify journal still works
-    assert_eq!(journal.bounds().end, 10);
+    assert_eq!(get_bounds(&journal).await.end, 10);
 
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.read(10).await.unwrap(), 999);
+    assert_eq!(read_item(&journal, 10).await.unwrap(), 999);
 
     journal.destroy().await.unwrap();
 }
@@ -569,9 +580,9 @@ where
 async fn test_persistence_basic<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let test_name = "persistence_basic".to_string();
+    let test_name = "persistence-basic".to_string();
 
     // Create journal and append items
     {
@@ -582,7 +593,7 @@ where
             assert_eq!(pos, i);
         }
 
-        assert_eq!(journal.bounds().end, 15);
+        assert_eq!(get_bounds(&journal).await.end, 15);
 
         journal.sync().await.unwrap();
     }
@@ -591,16 +602,17 @@ where
     {
         let journal = factory(test_name.clone()).await.unwrap();
 
-        assert_eq!(journal.bounds().end, 15);
+        assert_eq!(get_bounds(&journal).await.end, 15);
 
         // Verify reads work after persistence
         for i in 0..15u64 {
-            assert_eq!(journal.read(i).await.unwrap(), i * 10);
+            assert_eq!(read_item(&journal, i).await.unwrap(), i * 10);
         }
 
         // Replay and verify all items
         {
-            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -623,9 +635,9 @@ where
 async fn test_persistence_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let test_name = "persistence_after_prune".to_string();
+    let test_name = "persistence-after-prune".to_string();
 
     // Create journal, append items, and prune
     {
@@ -639,7 +651,7 @@ where
         let pruned = journal.prune(10).await.unwrap();
         assert!(pruned);
 
-        assert_eq!(journal.bounds().end, 25);
+        assert_eq!(get_bounds(&journal).await.end, 25);
 
         journal.sync().await.unwrap();
     }
@@ -649,21 +661,25 @@ where
         let mut journal = factory(test_name.clone()).await.unwrap();
 
         // size should still be 25
-        assert_eq!(journal.bounds().end, 25);
+        assert_eq!(get_bounds(&journal).await.end, 25);
 
         // Verify pruned positions cannot be read
         for i in 0..10u64 {
-            assert!(matches!(journal.read(i).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(
+                read_item(&journal, i).await,
+                Err(Error::ItemPruned(_))
+            ));
         }
 
         // Verify non-pruned positions can be read
         for i in 10..25u64 {
-            assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            assert_eq!(read_item(&journal, i).await.unwrap(), i * 100);
         }
 
         // Replay from position 10 (first non-pruned position)
         {
-            let stream = journal.replay(10, NZUsize!(1024)).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();
@@ -684,7 +700,7 @@ where
         assert_eq!(pos, 25);
 
         // Verify the newly appended item can be read
-        assert_eq!(journal.read(25).await.unwrap(), 999);
+        assert_eq!(read_item(&journal, 25).await.unwrap(), 999);
 
         journal.destroy().await.unwrap();
     }
@@ -694,18 +710,18 @@ where
 pub(super) async fn test_read_by_position<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("read_by_position".to_string()).await.unwrap();
+    let mut journal = factory("read-by-position".into()).await.unwrap();
 
     for i in 0..1000u64 {
         journal.append(i * 100).await.unwrap();
-        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 100);
     }
 
     // Verify we can still read all items
     for i in 0..1000u64 {
-        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 100);
     }
 
     journal.destroy().await.unwrap();
@@ -715,14 +731,14 @@ where
 pub(super) async fn test_read_out_of_range<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("read_out_of_range".to_string()).await.unwrap();
+    let mut journal = factory("read-out-of-range".into()).await.unwrap();
 
     journal.append(42).await.unwrap();
 
     // Try to read beyond size
-    let result = journal.read(10).await;
+    let result = read_item(&journal, 10).await;
     assert!(matches!(result, Err(Error::ItemOutOfRange(_))));
 
     journal.destroy().await.unwrap();
@@ -732,9 +748,9 @@ where
 pub(super) async fn test_read_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("read_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("read-after-prune".into()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -742,8 +758,8 @@ where
 
     journal.prune(10).await.unwrap();
 
-    let bounds = journal.bounds();
-    let result = journal.read(bounds.start - 1).await;
+    let bounds = get_bounds(&journal).await;
+    let result = read_item(&journal, bounds.start - 1).await;
     assert!(matches!(result, Err(Error::ItemPruned(_))));
 
     journal.destroy().await.unwrap();
@@ -753,9 +769,9 @@ where
 async fn test_rewind_to_middle<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_to_middle".to_string()).await.unwrap();
+    let mut journal = factory("rewind-to-middle".into()).await.unwrap();
 
     // Append 20 items
     for i in 0..20u64 {
@@ -765,17 +781,17 @@ where
     // Rewind to 12 items
     journal.rewind(12).await.unwrap();
 
-    assert_eq!(journal.bounds().end, 12);
+    assert_eq!(get_bounds(&journal).await.end, 12);
 
     // Verify first 12 items are still readable
     for i in 0..12u64 {
-        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 100);
     }
 
     // Verify items 12-19 are gone
     for i in 12..20u64 {
         assert!(matches!(
-            journal.read(i).await,
+            read_item(&journal, i).await,
             Err(Error::ItemOutOfRange(_))
         ));
     }
@@ -783,7 +799,7 @@ where
     // Next append should get position 12
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 12);
-    assert_eq!(journal.read(12).await.unwrap(), 999);
+    assert_eq!(read_item(&journal, 12).await.unwrap(), 999);
 
     journal.destroy().await.unwrap();
 }
@@ -792,9 +808,9 @@ where
 async fn test_rewind_to_zero<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_to_zero".to_string()).await.unwrap();
+    let mut journal = factory("rewind-to-zero".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -802,7 +818,7 @@ where
 
     journal.rewind(0).await.unwrap();
 
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.end, 0);
     assert!(bounds.is_empty());
 
@@ -817,9 +833,9 @@ where
 async fn test_rewind_current_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_current_size".to_string()).await.unwrap();
+    let mut journal = factory("rewind-current-size".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -827,7 +843,7 @@ where
 
     // Rewind to current size should be no-op
     journal.rewind(10).await.unwrap();
-    assert_eq!(journal.bounds().end, 10);
+    assert_eq!(get_bounds(&journal).await.end, 10);
 
     journal.destroy().await.unwrap();
 }
@@ -836,9 +852,9 @@ where
 async fn test_rewind_invalid_forward<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_invalid_forward".to_string()).await.unwrap();
+    let mut journal = factory("rewind-invalid-forward".into()).await.unwrap();
 
     for i in 0..10u64 {
         journal.append(i).await.unwrap();
@@ -855,9 +871,9 @@ where
 async fn test_rewind_invalid_pruned<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_invalid_pruned".to_string()).await.unwrap();
+    let mut journal = factory("rewind-invalid-pruned".into()).await.unwrap();
 
     for i in 0..20u64 {
         journal.append(i).await.unwrap();
@@ -878,9 +894,9 @@ where
 async fn test_rewind_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_then_append".to_string()).await.unwrap();
+    let mut journal = factory("rewind-then-append".into()).await.unwrap();
 
     // Append across section boundary (15 items = 1.5 sections)
     for i in 0..15u64 {
@@ -896,8 +912,8 @@ where
 
     assert_eq!(pos1, 8);
     assert_eq!(pos2, 9);
-    assert_eq!(journal.read(8).await.unwrap(), 888);
-    assert_eq!(journal.read(9).await.unwrap(), 999);
+    assert_eq!(read_item(&journal, 8).await.unwrap(), 888);
+    assert_eq!(read_item(&journal, 9).await.unwrap(), 999);
 
     journal.destroy().await.unwrap();
 }
@@ -906,11 +922,9 @@ where
 async fn test_rewind_zero_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_zero_then_append".to_string())
-        .await
-        .unwrap();
+    let mut journal = factory("rewind-zero-then-append".into()).await.unwrap();
 
     // Append some items
     for i in 0..10u64 {
@@ -921,15 +935,15 @@ where
     journal.rewind(0).await.unwrap();
 
     // Verify journal is empty
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.end, 0);
     assert!(bounds.is_empty());
 
     // Append should work
     let pos = journal.append(42).await.unwrap();
     assert_eq!(pos, 0);
-    assert_eq!(journal.bounds().end, 1);
-    assert_eq!(journal.read(0).await.unwrap(), 42);
+    assert_eq!(get_bounds(&journal).await.end, 1);
+    assert_eq!(read_item(&journal, 0).await.unwrap(), 42);
 
     journal.destroy().await.unwrap();
 }
@@ -939,9 +953,9 @@ where
 async fn test_rewind_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("rewind_after_prune".to_string()).await.unwrap();
+    let mut journal = factory("rewind-after-prune".into()).await.unwrap();
 
     // Append items across 3 sections (30 items, assuming items_per_section = 10)
     for i in 0..30u64 {
@@ -950,18 +964,18 @@ where
 
     // Prune first section (items 0-9)
     journal.prune(10).await.unwrap();
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 10);
 
     // Rewind to position 20 (still in retained range)
     journal.rewind(20).await.unwrap();
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.end, 20);
     assert_eq!(bounds.start, 10);
 
     // Verify items in range [bounds.start, 20) are still readable
     for i in bounds.start..20 {
-        assert_eq!(journal.read(i).await.unwrap(), i * 100);
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 100);
     }
 
     // Attempt to rewind to a pruned position should fail
@@ -969,15 +983,15 @@ where
     assert!(matches!(result, Err(Error::ItemPruned(5))));
 
     // Verify journal state is unchanged after failed rewind
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.end, 20);
     assert_eq!(bounds.start, 10);
 
     // Append should continue from position 20
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 20);
-    assert_eq!(journal.read(20).await.unwrap(), 999);
-    assert_eq!(journal.bounds().start, 10);
+    assert_eq!(read_item(&journal, 20).await.unwrap(), 999);
+    assert_eq!(get_bounds(&journal).await.start, 10);
 
     journal.destroy().await.unwrap();
 }
@@ -987,9 +1001,9 @@ where
 async fn test_section_boundary_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let mut journal = factory("section_boundary".to_string()).await.unwrap();
+    let mut journal = factory("section-boundary".into()).await.unwrap();
 
     // Append exactly one section worth of items (10 items)
     for i in 0..10u64 {
@@ -998,39 +1012,42 @@ where
     }
 
     // Verify we're at a section boundary
-    assert_eq!(journal.bounds().end, 10);
+    assert_eq!(get_bounds(&journal).await.end, 10);
 
     // Append one more item to cross the boundary
     let pos = journal.append(999).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.bounds().end, 11);
+    assert_eq!(get_bounds(&journal).await.end, 11);
 
     // Prune exactly at the section boundary
     journal.prune(10).await.unwrap();
-    assert_eq!(journal.bounds().start, 10);
+    assert_eq!(get_bounds(&journal).await.start, 10);
 
     // Verify only the item after the boundary is readable
-    assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
-    assert_eq!(journal.read(10).await.unwrap(), 999);
+    assert!(matches!(
+        read_item(&journal, 9).await,
+        Err(Error::ItemPruned(_))
+    ));
+    assert_eq!(read_item(&journal, 10).await.unwrap(), 999);
 
     // Append another item to move past the boundary
     let pos = journal.append(888).await.unwrap();
     assert_eq!(pos, 11);
-    assert_eq!(journal.bounds().end, 12);
+    assert_eq!(get_bounds(&journal).await.end, 12);
 
     // Rewind to exactly the section boundary (position 10)
     // This leaves bounds.end=10, bounds.start=10, making the journal fully pruned
     journal.rewind(10).await.unwrap();
-    let bounds = journal.bounds();
+    let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.end, 10);
     assert!(bounds.is_empty());
 
     // Append after rewinding to boundary should continue from position 10
     let pos = journal.append(777).await.unwrap();
     assert_eq!(pos, 10);
-    assert_eq!(journal.bounds().end, 11);
-    assert_eq!(journal.read(10).await.unwrap(), 777);
-    assert_eq!(journal.bounds().start, 10);
+    assert_eq!(get_bounds(&journal).await.end, 11);
+    assert_eq!(read_item(&journal, 10).await.unwrap(), 777);
+    assert_eq!(get_bounds(&journal).await.start, 10);
 
     journal.destroy().await.unwrap();
 }
@@ -1042,9 +1059,9 @@ where
 async fn test_destroy_and_reinit<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: PersistableContiguous<u64>,
+    J: PersistableContiguous,
 {
-    let test_name = "destroy_and_reinit".to_string();
+    let test_name = "destroy-and-reinit".to_string();
 
     // Create journal and add data
     {
@@ -1055,8 +1072,8 @@ where
         }
 
         journal.prune(10).await.unwrap();
-        assert_eq!(journal.bounds().end, 20);
-        assert!(!journal.bounds().is_empty());
+        assert_eq!(get_bounds(&journal).await.end, 20);
+        assert!(!get_bounds(&journal).await.is_empty());
 
         // Explicitly destroy the journal
         journal.destroy().await.unwrap();
@@ -1067,13 +1084,14 @@ where
         let journal = factory(test_name.clone()).await.unwrap();
 
         // Journal should be completely empty, not contain previous data
-        let bounds = journal.bounds();
+        let bounds = get_bounds(&journal).await;
         assert_eq!(bounds.end, 0);
         assert!(bounds.is_empty());
 
         // Replay should yield no items
         {
-            let stream = journal.replay(0, NZUsize!(1024)).await.unwrap();
+            let reader = journal.reader().await;
+            let stream = reader.replay(NZUsize!(1024), 0).await.unwrap();
             futures::pin_mut!(stream);
 
             let mut items = Vec::new();

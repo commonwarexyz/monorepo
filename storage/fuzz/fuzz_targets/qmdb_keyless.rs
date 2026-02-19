@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     mmr::{hasher::Standard, Location},
     qmdb::{
@@ -124,19 +124,22 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 type CleanDb = Keyless<deterministic::Context, Vec<u8>, Sha256>;
 
-fn test_config(test_name: &str) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+fn test_config(
+    test_name: &str,
+    pooler: &impl BufferPooler,
+) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}-log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -145,7 +148,8 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Standard::<Sha256>::new();
-        let mut db = CleanDb::init(context.clone(), test_config("keyless_fuzz_test"))
+        let cfg = test_config("keyless-fuzz-test", &context);
+        let mut db = CleanDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init keyless db")
             .into_mutable();
@@ -167,7 +171,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Get { loc_offset } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count > 0 {
                         let loc = (*loc_offset as u64) % op_count.as_u64();
                         let _ = db.get(loc.into()).await;
@@ -194,7 +198,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    let _ = db.bounds().await.end;
                 }
 
                 Operation::LastCommitLoc => {
@@ -202,7 +206,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OldestRetainedLoc => {
-                    let _ = db.bounds().start;
+                    let _ = db.bounds().await.start;
                 }
 
                 Operation::Root => {
@@ -215,7 +219,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count == 0 {
                         continue;
                     }
@@ -238,7 +242,7 @@ fn fuzz(input: FuzzInput) {
                     start_offset,
                     max_ops,
                 } => {
-                    let op_count = db.bounds().end;
+                    let op_count = db.bounds().await.end;
                     if op_count == 0 {
                         continue;
                     }
@@ -263,10 +267,14 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure{} => {
                     drop(db);
 
-                    db = CleanDb::init(context.with_label("db").with_attribute("instance", restarts), test_config("keyless_fuzz_test"))
-                        .await
-                        .expect("Failed to init keyless db")
-                        .into_mutable();
+                    let cfg = test_config("keyless-fuzz-test", &context);
+                    db = CleanDb::init(
+                        context.with_label("db").with_attribute("instance", restarts),
+                        cfg,
+                    )
+                    .await
+                    .expect("Failed to init keyless db")
+                    .into_mutable();
                     restarts += 1;
                 }
             }

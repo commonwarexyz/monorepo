@@ -673,7 +673,6 @@ where
             .mutate_resolver_bytes(&mut self.context, &[0u8]);
         self.relay
             .broadcast(&sender, (proposal.payload, contents.into()))
-            .await;
     }
 
     async fn send_notarize_vote(&mut self, signer_idx: usize) {

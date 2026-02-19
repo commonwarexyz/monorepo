@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner, RwLock};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     qmdb::{
         any::{
@@ -89,18 +89,18 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str) -> Config<TwoCap> {
+fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     Config {
-        mmr_journal_partition: format!("{test_name}_mmr"),
-        mmr_metadata_partition: format!("{test_name}_meta"),
+        mmr_journal_partition: format!("{test_name}-mmr"),
+        mmr_metadata_partition: format!("{test_name}-meta"),
         mmr_items_per_blob: NZU64!(3),
         mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}_log"),
+        log_journal_partition: format!("{test_name}-log"),
         log_items_per_blob: NZU64!(3),
         log_write_buffer: NZUsize!(1024),
         translator: TwoCap,
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(1)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 
@@ -117,7 +117,7 @@ async fn test_sync<
     test_name: &str,
     sync_id: usize,
 ) -> bool {
-    let db_config = test_config(test_name);
+    let db_config = test_config(test_name, &context);
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
@@ -144,13 +144,14 @@ async fn test_sync<
     }
 }
 
-const TEST_NAME: &str = "qmdb_any_fixed_fuzz_test";
+const TEST_NAME: &str = "qmdb-any-fixed-fuzz-test";
 
 fn fuzz(mut input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = FixedDb::init(context.clone(), test_config(TEST_NAME))
+        let cfg = test_config(TEST_NAME, &context);
+        let mut db = FixedDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db")
             .into_mutable();
@@ -161,13 +162,13 @@ fn fuzz(mut input: FuzzInput) {
         for op in &input.ops {
             match op {
                 Operation::Update { key, value } => {
-                    db.update(Key::new(*key), Value::new(*value))
+                    db.write_batch([(Key::new(*key), Some(Value::new(*value)))])
                         .await
                         .expect("Update should not fail");
                 }
 
                 Operation::Delete { key } => {
-                    db.delete(Key::new(*key))
+                    db.write_batch([(Key::new(*key), None)])
                         .await
                         .expect("Delete should not fail");
                 }
@@ -202,7 +203,7 @@ fn fuzz(mut input: FuzzInput) {
                 }
 
                 Operation::SyncFull { fetch_batch_size } => {
-                    if db.bounds().end == 0 {
+                    if db.bounds().await.end == 0 {
                         continue;
                     }
                     input.commit_counter += 1;
@@ -216,10 +217,10 @@ fn fuzz(mut input: FuzzInput) {
 
                     let target = sync::Target {
                         root: clean_db.root(),
-                        range: clean_db.inactivity_floor_loc()..clean_db.bounds().end,
+                        range: clean_db.inactivity_floor_loc()..clean_db.bounds().await.end,
                     };
 
-                    let wrapped_src = Arc::new(RwLock::new(clean_db));
+                    let wrapped_src = Arc::new(clean_db);
                     let _result = test_sync(
                         context.clone(),
                         wrapped_src.clone(),
@@ -231,7 +232,6 @@ fn fuzz(mut input: FuzzInput) {
                     .await;
                     db = Arc::try_unwrap(wrapped_src)
                         .unwrap_or_else(|_| panic!("Failed to unwrap src"))
-                        .into_inner()
                         .into_mutable();
                     sync_id += 1;
                 }
@@ -240,11 +240,12 @@ fn fuzz(mut input: FuzzInput) {
                     // Simulate unclean shutdown by dropping the db without committing
                     drop(db);
 
+                    let cfg = test_config(TEST_NAME, &context);
                     db = FixedDb::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config(TEST_NAME),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init source db")

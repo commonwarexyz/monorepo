@@ -62,17 +62,17 @@ impl Archive {
         match variant {
             Variant::Immutable => {
                 let cfg = immutable::Config {
-                    metadata_partition: "archive_bench_metadata".into(),
-                    freezer_table_partition: "archive_bench_table".into(),
+                    metadata_partition: "archive-bench-metadata".into(),
+                    freezer_table_partition: "archive-bench-table".into(),
                     freezer_table_initial_size: 131_072,
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
-                    freezer_key_partition: "archive_bench_key".into(),
-                    freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    freezer_value_partition: "archive_bench_value".into(),
+                    freezer_key_partition: "archive-bench-key".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_value_partition: "archive-bench-value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
-                    ordinal_partition: "archive_bench_ordinal".into(),
+                    ordinal_partition: "archive-bench-ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     freezer_key_write_buffer: NZUsize!(WRITE_BUFFER),
                     freezer_value_write_buffer: NZUsize!(WRITE_BUFFER),
@@ -85,9 +85,9 @@ impl Archive {
             Variant::Prunable => {
                 let cfg = prunable::Config {
                     translator: TwoCap,
-                    key_partition: "archive_bench_key".into(),
-                    key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    value_partition: "archive_bench_value".into(),
+                    key_partition: "archive-bench-key".into(),
+                    key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    value_partition: "archive-bench-value".into(),
                     compression,
                     codec_config: (RangeCfg::new(..), ()),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),

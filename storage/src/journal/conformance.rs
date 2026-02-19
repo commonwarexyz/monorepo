@@ -26,10 +26,10 @@ impl Conformance for ContiguousFixed {
             let config = fixed::Config {
                 partition: format!("contiguous-fixed-conformance-{seed}"),
                 items_per_blob: ITEMS_PER_BLOB,
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
             };
-            let mut journal = fixed::Journal::<_, u64>::init(context.with_label("journal"), config)
+            let journal = fixed::Journal::<_, u64>::init(context.with_label("journal"), config)
                 .await
                 .unwrap();
 
@@ -57,12 +57,12 @@ impl Conformance for ContiguousVariable {
             let config = variable::Config {
                 partition: format!("contiguous-variable-conformance-{seed}"),
                 items_per_section: ITEMS_PER_BLOB,
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let mut journal =
+            let journal =
                 variable::Journal::<_, Vec<u8>>::init(context.with_label("journal"), config)
                     .await
                     .unwrap();
@@ -94,7 +94,7 @@ impl Conformance for SegmentedFixed {
         runner.start(|mut context| async move {
             let config = segmented_fixed::Config {
                 partition: format!("segmented-fixed-conformance-{seed}"),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
             };
             let mut journal =
@@ -174,7 +174,7 @@ impl Conformance for SegmentedVariable {
         runner.start(|mut context| async move {
             let config = segmented_variable::Config {
                 partition: format!("segmented-variable-conformance-{seed}"),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
@@ -268,7 +268,7 @@ impl Conformance for SegmentedOversized {
             let config = oversized::Config {
                 index_partition: format!("segmented-oversized-index-conformance-{seed}"),
                 value_partition: format!("segmented-oversized-value-conformance-{seed}"),
-                index_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 index_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
                 compression: None,

@@ -92,6 +92,10 @@ pub(crate) enum Message<S: Scheme, B: Block> {
     /// This is fire-and-forget: the finalization will be stored in marshal and
     /// delivered via the normal finalization flow when available.
     ///
+    /// The height must be covered by both the epocher and the provider. If the
+    /// epocher cannot map the height to an epoch, or the provider cannot supply
+    /// a scheme for that epoch, the hint is silently dropped.
+    ///
     /// Targets are required because this is typically called when a peer claims to
     /// be ahead. If a target returns invalid data, the resolver will block them.
     /// Sending this message multiple times with different targets adds to the
@@ -232,6 +236,10 @@ impl<S: Scheme, B: Block> Mailbox<S, B> {
     ///
     /// This is fire-and-forget: the finalization will be stored in marshal and delivered
     /// via the normal finalization flow when available.
+    ///
+    /// The height must be covered by both the epocher and the provider. If the
+    /// epocher cannot map the height to an epoch, or the provider cannot supply
+    /// a scheme for that epoch, the hint is silently dropped.
     pub async fn hint_finalized(&mut self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         self.sender
             .send_lossy(Message::HintFinalized { height, targets })

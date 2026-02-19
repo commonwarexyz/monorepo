@@ -17,12 +17,15 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         // Time out if we take too long to write
-        timeout(self.write_timeout, self.sink.write_all_buf(&mut buf.into()))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
+        timeout(
+            self.write_timeout,
+            self.sink.write_all_buf(&mut bufs.into()),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }
@@ -40,9 +43,8 @@ pub struct Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         let read_fut = async {
-            let mut buf = self.pool.alloc(len);
             // SAFETY: `len` bytes are written by read_exact below.
-            unsafe { buf.set_len(len) };
+            let mut buf = unsafe { self.pool.alloc_len(len) };
             self.stream
                 .read_exact(buf.as_mut())
                 .await
@@ -85,6 +87,13 @@ impl crate::Listener for Listener {
             }
         }
 
+        // Set SO_LINGER if configured
+        if let Some(so_linger) = self.cfg.so_linger {
+            if let Err(err) = stream.set_linger(Some(so_linger)) {
+                warn!(?err, "failed to set SO_LINGER");
+            }
+        }
+
         // Return the sink and stream
         let (stream, sink) = stream.into_split();
         Ok((
@@ -116,10 +125,16 @@ pub struct Config {
     /// be efficient on slow, congested networks. However, to do so the algorithm introduces
     /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
     /// consider disabling it to send the packets as soon as possible to reduce latency.
-    ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
     tcp_nodelay: Option<bool>,
+    /// Whether or not to set the `SO_LINGER` socket option.
+    ///
+    /// When `None`, the system default is used. When
+    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
+    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// `TIME_WAIT` state. This is useful in adversarial environments to
+    /// reclaim socket resources immediately when closing connections to
+    /// misbehaving peers.
+    so_linger: Option<Duration>,
     /// Read timeout for connections, after which the connection will be closed
     read_timeout: Duration,
     /// Write timeout for connections, after which the connection will be closed
@@ -137,6 +152,11 @@ impl Config {
     /// See [Config]
     pub const fn with_tcp_nodelay(mut self, tcp_nodelay: Option<bool>) -> Self {
         self.tcp_nodelay = tcp_nodelay;
+        self
+    }
+    /// See [Config]
+    pub const fn with_so_linger(mut self, so_linger: Option<Duration>) -> Self {
+        self.so_linger = so_linger;
         self
     }
     /// See [Config]
@@ -161,6 +181,10 @@ impl Config {
         self.tcp_nodelay
     }
     /// See [Config]
+    pub const fn so_linger(&self) -> Option<Duration> {
+        self.so_linger
+    }
+    /// See [Config]
     pub const fn read_timeout(&self) -> Duration {
         self.read_timeout
     }
@@ -178,6 +202,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tcp_nodelay: None,
+            so_linger: None,
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             read_buffer_size: 64 * 1024, // 64 KB
@@ -226,6 +251,13 @@ impl crate::Network for Network {
         if let Some(tcp_nodelay) = self.cfg.tcp_nodelay {
             if let Err(err) = stream.set_nodelay(tcp_nodelay) {
                 warn!(?err, "failed to set TCP_NODELAY");
+            }
+        }
+
+        // Set SO_LINGER if configured
+        if let Some(so_linger) = self.cfg.so_linger {
+            if let Err(err) = stream.set_linger(Some(so_linger)) {
+                warn!(?err, "failed to set SO_LINGER");
             }
         }
 

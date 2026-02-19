@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     qmdb::store::db::{Config, Db},
     translator::TwoCap,
@@ -90,15 +90,18 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(test_name: &str) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+fn test_config(
+    test_name: &str,
+    pooler: &impl BufferPooler,
+) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
     Config {
-        log_partition: format!("{test_name}_log"),
+        log_partition: format!("{test_name}-log"),
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: NZU64!(7),
         translator: TwoCap,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -106,7 +109,8 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut db = StoreDb::init(context.clone(), test_config("store_fuzz_test"))
+        let cfg = test_config("store-fuzz-test", &context);
+        let mut db = StoreDb::init(context.clone(), cfg)
             .await
             .expect("Failed to init db")
             .into_dirty();
@@ -115,13 +119,13 @@ fn fuzz(input: FuzzInput) {
         for op in &input.ops {
             match op {
                 Operation::Update { key, value_bytes } => {
-                    db.update(Digest(*key), value_bytes.clone())
+                    db.write_batch([(Digest(*key), Some(value_bytes.clone()))])
                         .await
                         .expect("Update should not fail");
                 }
 
                 Operation::Delete { key } => {
-                    db.delete(Digest(*key))
+                    db.write_batch([(Digest(*key), None)])
                         .await
                         .expect("Delete should not fail");
                 }
@@ -143,7 +147,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::Sync => {
-                    let (mut clean_db, _) = db.commit(None).await.expect("Commit should not fail");
+                    let (clean_db, _) = db.commit(None).await.expect("Commit should not fail");
                     clean_db.sync().await.expect("Sync should not fail");
                     db = clean_db.into_dirty();
                 }
@@ -155,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::OpCount => {
-                    let _ = db.bounds().end;
+                    let _ = db.bounds().await.end;
                 }
 
                 Operation::InactivityFloorLoc => {
@@ -165,11 +169,12 @@ fn fuzz(input: FuzzInput) {
                 Operation::SimulateFailure => {
                     drop(db);
 
+                    let cfg = test_config("store-fuzz-test", &context);
                     db = StoreDb::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
-                        test_config("store_fuzz_test"),
+                        cfg,
                     )
                     .await
                     .expect("Failed to init db")

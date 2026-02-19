@@ -1,12 +1,11 @@
 //! Benchmark the generation of a large randomly generated keyless database.
 
 use commonware_cryptography::Sha256;
-use commonware_parallel::ThreadPool;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    ThreadPooler as _,
+    BufferPooler, ThreadPooler,
 };
 use commonware_storage::qmdb::{
     keyless::{Config as KConfig, Keyless},
@@ -23,7 +22,7 @@ use std::{
 const NUM_OPERATIONS: u64 = 10_000;
 const COMMIT_FREQUENCY: u32 = 25;
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-const PARTITION_SUFFIX: &str = "keyless_bench_partition";
+const PARTITION_SUFFIX: &str = "keyless-bench-partition";
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
@@ -35,19 +34,21 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 /// configured to provide 8 cores.
 const THREADS: NonZeroUsize = NZUsize!(8);
 
-fn keyless_cfg(pool: ThreadPool) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
+fn keyless_cfg(
+    context: &(impl BufferPooler + ThreadPooler),
+) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
     KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
-        mmr_journal_partition: format!("journal_{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata_{PARTITION_SUFFIX}"),
+        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("log_journal_{PARTITION_SUFFIX}"),
+        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
         log_codec_config: ((0..=10000).into(), ()),
         log_items_per_section: ITEMS_PER_BLOB,
         log_write_buffer: NZUsize!(1024),
         log_compression: None,
-        thread_pool: Some(pool),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
+        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -60,8 +61,7 @@ type KeylessMutable = Keyless<Context, Vec<u8>, Sha256, Unmerkleized, NonDurable
 /// Generate a keyless db by appending `num_operations` random values in total. The database is
 /// committed after every `COMMIT_FREQUENCY` operations.
 async fn gen_random_keyless(ctx: Context, num_operations: u64) -> KeylessDb {
-    let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-    let keyless_cfg = keyless_cfg(pool);
+    let keyless_cfg = keyless_cfg(&ctx);
     let clean = KeylessDb::init(ctx, keyless_cfg).await.unwrap();
 
     // Convert to mutable state for operations.

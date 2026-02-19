@@ -12,6 +12,8 @@ use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
+const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const MIN_EFFECTIVE_CACHE_SLOT_BYTES: usize = 16 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
 
@@ -130,7 +132,12 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
 
-                    read_buffer = Some(Read::new(blob, blob_size.min(size), NZUsize!(buffer_size)));
+                    read_buffer = Some(Read::from_pooler(
+                        &context,
+                        blob,
+                        blob_size.min(size),
+                        NZUsize!(buffer_size),
+                    ));
                 }
 
                 FuzzOperation::CreateWrite {
@@ -144,7 +151,12 @@ fn fuzz(input: FuzzInput) {
                         .await
                         .expect("cannot open context");
 
-                    write_buffer = Some(Write::new(blob, initial_size as u64, NZUsize!(capacity)));
+                    write_buffer = Some(Write::from_pooler(
+                        &context,
+                        blob,
+                        initial_size as u64,
+                        NZUsize!(capacity),
+                    ));
                 }
 
                 FuzzOperation::CreateAppend {
@@ -154,7 +166,14 @@ fn fuzz(input: FuzzInput) {
                     cache_capacity,
                 } => {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
-                    let cache_capacity = NZUsize!((cache_capacity as usize).clamp(1, MAX_SIZE));
+                    let cache_page_size = (cache_page_size as usize).clamp(1, u16::MAX as usize);
+                    let max_cache_capacity = (MAX_CACHE_BYTES
+                        / cache_page_size
+                            .max(MIN_EFFECTIVE_CACHE_SLOT_BYTES)
+                            .next_power_of_two())
+                    .max(1);
+                    let cache_capacity =
+                        NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));
 
                     let (blob, _) = context
                         .open("test_partition", b"append_blob")
@@ -165,9 +184,12 @@ fn fuzz(input: FuzzInput) {
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
                     if cache_ref.is_none() {
-                        let cache_page_size = cache_page_size.clamp(1, u16::MAX);
-                        cache_ref = Some(CacheRef::new(NZU16!(cache_page_size), cache_capacity));
-                        cache_page_size_ref = Some(cache_page_size);
+                        cache_ref = Some(CacheRef::from_pooler(
+                            &context,
+                            NZU16!(cache_page_size as u16),
+                            cache_capacity,
+                        ));
+                        cache_page_size_ref = Some(cache_page_size as u16);
                     }
 
                     if let Some(ref cache) = cache_ref {
@@ -275,7 +297,7 @@ fn fuzz(input: FuzzInput) {
                             if let Some(cache_page_size) = cache_page_size_ref {
                                 let aligned_offset =
                                     (offset / cache_page_size as u64) * cache_page_size as u64;
-                                let _ = cache.cache(blob_id as u64, data, aligned_offset).await;
+                                let _ = cache.cache(blob_id as u64, data, aligned_offset);
                             }
                         }
                     }

@@ -60,12 +60,15 @@
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
+//!     // Create a page cache
+//!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+//!
 //!     // Create a journal
-//!     let mut journal = Journal::init(context, Config{
-//!         partition: "partition".to_string(),
+//!     let mut journal = Journal::init(context, Config {
+//!         partition: "partition".into(),
 //!         compression: None,
 //!         codec_config: (),
-//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+//!         page_cache,
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!     }).await.unwrap();
 //!
@@ -679,10 +682,10 @@ mod tests {
         executor.start(|context| async move {
             // Initialize the journal
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
@@ -742,10 +745,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -814,10 +817,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -908,10 +911,10 @@ mod tests {
 
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1012,10 +1015,10 @@ mod tests {
 
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1071,10 +1074,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1103,10 +1106,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1158,10 +1161,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1215,10 +1218,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1277,10 +1280,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1349,10 +1352,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1498,10 +1501,10 @@ mod tests {
         executor.start(|context| async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1565,10 +1568,10 @@ mod tests {
         executor.start(|context| async move {
             // Create journal
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1620,10 +1623,10 @@ mod tests {
         executor.start(|context| async move {
             // Create journal
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -1673,10 +1676,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1734,10 +1737,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1797,10 +1800,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1845,10 +1848,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1885,10 +1888,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1947,10 +1950,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.clone(), cfg.clone()).await.unwrap();
@@ -1992,10 +1995,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2068,10 +2071,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2142,10 +2145,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2261,10 +2264,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2354,10 +2357,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -2431,10 +2434,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "test_partition".into(),
+                partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(SMALL_PAGE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal: Journal<_, [u8; 128]> =
@@ -2499,10 +2502,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "clear_test".into(),
+                partition: "clear-test".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 

@@ -269,8 +269,8 @@ mod topology {
 
         /// Figure out what size different values will have, based on the config and the data.
         pub fn reckon(config: &Config, data_bytes: usize) -> Self {
-            let n = config.minimum_shards as usize;
-            let k = config.extra_shards as usize;
+            let n = config.minimum_shards.get() as usize;
+            let k = config.extra_shards.get() as usize;
             // The following calculations don't tolerate data_bytes = 0, so we
             // temporarily correct that to be at least 1, then make sure to adjust
             // it back again to 0.
@@ -322,7 +322,7 @@ mod topology {
 use topology::Topology;
 
 /// A shard of data produced by the encoding scheme.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Shard<D: Digest> {
     data_bytes: usize,
     root: D,
@@ -606,8 +606,7 @@ pub enum Error {
     FailedToCreateInclusionProof(BmtError),
 }
 
-// TODO (#2506): rename this to `_COMMONWARE_CODING_ZODA`
-const NAMESPACE: &[u8] = b"commonware-zoda";
+const NAMESPACE: &[u8] = b"_COMMONWARE_CODING_ZODA";
 
 #[derive(Clone, Copy)]
 pub struct Zoda<H> {
@@ -790,18 +789,18 @@ impl<H: Hasher> ValidatingScheme for Zoda<H> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CodecConfig, Config};
-    use bytes::BytesMut;
-    use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
+    use crate::Config;
+    use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_utils::NZU16;
 
     const STRATEGY: Sequential = Sequential;
 
     #[test]
     fn topology_reckon_handles_small_extra_shards() {
         let config = Config {
-            minimum_shards: 3,
-            extra_shards: 1,
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(1),
         };
         let topology = Topology::reckon(&config, 16);
         assert_eq!(topology.min_shards, 3);
@@ -820,38 +819,10 @@ mod tests {
     }
 
     #[test]
-    fn reshard_roundtrip_handles_field_packing() {
-        let config = Config {
-            minimum_shards: 3,
-            extra_shards: 2,
-        };
-        let data = vec![0xAA; 64];
-
-        let (commitment, shards) =
-            Zoda::<Sha256>::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-        let shard = shards.into_iter().next().unwrap();
-
-        let (_, _, reshard) = Zoda::<Sha256>::reshard(&config, &commitment, 0, shard).unwrap();
-
-        let mut buf = BytesMut::new();
-        reshard.write(&mut buf);
-        let mut bytes = buf.freeze();
-        let decoded = ReShard::<Sha256Digest>::read_cfg(
-            &mut bytes,
-            &CodecConfig {
-                maximum_shard_size: data.len(),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(decoded, reshard);
-    }
-
-    #[test]
     fn decode_rejects_duplicate_indices() {
         let config = Config {
-            minimum_shards: 2,
-            extra_shards: 0,
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
         };
         let data = b"duplicate shard coverage";
         let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
@@ -877,6 +848,7 @@ mod tests {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Shard<Sha256Digest>>,

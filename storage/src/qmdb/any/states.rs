@@ -2,7 +2,8 @@
 //! benchmark code across the variants.
 
 use crate::{
-    kv::{Batchable, Deletable, Gettable},
+    journal::contiguous::Mutable,
+    kv::{Batchable, Gettable},
     mmr::Location,
     qmdb::{
         store::{LogStore, MerkleizedStore, PrunableStore},
@@ -14,6 +15,17 @@ use commonware_codec::Codec;
 use commonware_cryptography::Digest;
 use commonware_utils::Array;
 use std::{future::Future, ops::Range};
+
+/// A mutable operation log that can be durably persisted.
+pub(crate) trait PersistableMutableLog<O>:
+    Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
+
+impl<T, O> PersistableMutableLog<O> for T where
+    T: Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+{
+}
 
 /// Trait for the (Merkleized,Durable) state.
 ///
@@ -88,11 +100,11 @@ pub trait MerkleizedNonDurableAny:
 
 /// Trait for the (Unmerkleized,NonDurable) state.
 ///
-/// This is the only state that allows mutations (create/update/delete). Use `commit` to transition
+/// This is the only state that allows mutations via write_batch. Use `commit` to transition
 /// to the Unmerkleized, Durable state, or `into_merkleized` to transition to the Merkleized,
 /// NonDurable state.
 pub trait MutableAny:
-    LogStore + Deletable<Key: Array, Value = <Self as LogStore>::Value, Error = Error> + Batchable
+    LogStore + Batchable<Key: Array, Value = <Self as LogStore>::Value, Error = Error>
 {
     /// The digest type used by Merkleized states in this database's state machine.
     type Digest: Digest;

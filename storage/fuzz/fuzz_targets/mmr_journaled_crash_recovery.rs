@@ -4,7 +4,9 @@
 
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics as _, Runner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
+};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr},
     Location, Position, StandardHasher,
@@ -87,18 +89,19 @@ struct FuzzInput {
 
 fn mmr_config(
     partition_suffix: &str,
+    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> Config {
     Config {
-        journal_partition: format!("mmr_journal_{partition_suffix}"),
-        metadata_partition: format!("mmr_metadata_{partition_suffix}"),
+        journal_partition: format!("mmr-journal-{partition_suffix}"),
+        metadata_partition: format!("mmr-metadata-{partition_suffix}"),
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         thread_pool: None,
-        page_cache: CacheRef::new(page_size, page_cache_size),
+        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
     }
 }
 
@@ -129,7 +132,7 @@ async fn run_operations(
             MmrOperation::Add { data } => {
                 let leaves_before = mmr.leaves().as_u64();
 
-                if mmr.add(hasher, data).await.is_err() {
+                if mmr.add(hasher, data).is_err() {
                     // Partial write possible: max is size after one leaf added
                     max_size = max_size.max(
                         Position::try_from(Location::new(leaves_before).unwrap() + 1)
@@ -175,7 +178,7 @@ async fn run_operations(
             }
 
             MmrOperation::Sync => {
-                let mut clean_mmr = mmr.merkleize(hasher);
+                let clean_mmr = mmr.merkleize(hasher);
                 if clean_mmr.sync().await.is_err() {
                     Err(())
                 } else {
@@ -273,7 +276,7 @@ fn fuzz(input: FuzzInput) {
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let cfg = deterministic::Config::default().with_seed(input.seed);
-    let partition_suffix = format!("crash_recovery_{}", input.seed);
+    let partition_suffix = format!("crash-recovery-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations;
     let sync_failure_rate = input.sync_failure_rate;
@@ -290,6 +293,7 @@ fn fuzz(input: FuzzInput) {
                 &mut hasher,
                 mmr_config(
                     &partition_suffix,
+                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_blob,
@@ -299,8 +303,8 @@ fn fuzz(input: FuzzInput) {
             .await
             .unwrap();
 
-            let faults = ctx.storage_faults();
-            *faults.write().unwrap() = deterministic::FaultConfig {
+            let storage_fault_cfg = ctx.storage_fault_config();
+            *storage_fault_cfg.write() = deterministic::FaultConfig {
                 sync_rate: Some(sync_failure_rate),
                 write_rate: Some(write_failure_rate),
                 ..Default::default()
@@ -313,7 +317,7 @@ fn fuzz(input: FuzzInput) {
     // Phase 2: Recover and verify consistency
     let runner = deterministic::Runner::from(checkpoint);
     runner.start(|ctx| async move {
-        *ctx.storage_faults().write().unwrap() = deterministic::FaultConfig::default();
+        *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
         let mut hasher = StandardHasher::<Sha256>::new();
         let mmr = MerkleizedMmr::init(
@@ -321,6 +325,7 @@ fn fuzz(input: FuzzInput) {
             &mut hasher,
             mmr_config(
                 &partition_suffix,
+                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_blob,
@@ -376,7 +381,6 @@ fn fuzz(input: FuzzInput) {
         let test_data = [0xABu8; DATA_SIZE];
         let mut mmr = mmr.into_dirty();
         mmr.add(&mut hasher, &test_data)
-            .await
             .expect("Should be able to add after recovery");
         let mmr = mmr.merkleize(&mut hasher);
         mmr.destroy().await.expect("Should be able to destroy MMR");

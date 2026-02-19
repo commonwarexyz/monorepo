@@ -11,7 +11,8 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::codec::wrap, Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{
-    spawn_cell, telemetry::metrics::status::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner,
+    spawn_cell, telemetry::metrics::status::GaugeExt, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc, oneshot},
@@ -24,7 +25,7 @@ use tracing::{debug, error, warn};
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<E, B, Rq, Rs, P, M, H>
 where
-    E: Clock + Spawner,
+    E: BufferPooler + Clock + Spawner,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -56,7 +57,7 @@ where
 
 impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
 where
-    E: Clock + Spawner + Metrics,
+    E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -121,8 +122,18 @@ where
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
+        let (mut req_tx, mut req_rx) = wrap(
+            self.request_codec,
+            self.context.network_buffer_pool().clone(),
+            requests.0,
+            requests.1,
+        );
+        let (mut res_tx, mut res_rx) = wrap(
+            self.response_codec,
+            self.context.network_buffer_pool().clone(),
+            responses.0,
+            responses.1,
+        );
 
         // Create futures pool
         let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();

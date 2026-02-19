@@ -1,13 +1,12 @@
 use super::Header;
 use crate::{BufferPool, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
-use commonware_utils::hex;
-use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeMap,
-    ops::RangeInclusive,
-    sync::{Arc, Mutex, RwLock},
+use commonware_utils::{
+    hex,
+    sync::{Mutex, RwLock},
 };
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
 /// In-memory storage implementation for the commonware runtime.
 #[derive(Clone)]
@@ -28,7 +27,7 @@ impl Storage {
 impl Storage {
     /// Compute a [Sha256] digest of all blob contents.
     pub fn audit(&self) -> [u8; 32] {
-        let partitions = self.partitions.lock().unwrap();
+        let partitions = self.partitions.lock();
         let mut hasher = Sha256::new();
 
         for (partition_name, blobs) in partitions.iter() {
@@ -54,7 +53,7 @@ impl crate::Storage for Storage {
     ) -> Result<(Self::Blob, u64, u16), crate::Error> {
         super::validate_partition_name(partition)?;
 
-        let mut partitions = self.partitions.lock().unwrap();
+        let mut partitions = self.partitions.lock();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
 
@@ -89,7 +88,7 @@ impl crate::Storage for Storage {
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
         super::validate_partition_name(partition)?;
 
-        let mut partitions = self.partitions.lock().unwrap();
+        let mut partitions = self.partitions.lock();
         match name {
             Some(name) => {
                 partitions
@@ -110,7 +109,7 @@ impl crate::Storage for Storage {
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, crate::Error> {
         super::validate_partition_name(partition)?;
 
-        let partitions = self.partitions.lock().unwrap();
+        let partitions = self.partitions.lock();
         let partition = partitions
             .get(partition)
             .ok_or(crate::Error::PartitionMissing(partition.into()))?;
@@ -161,39 +160,39 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, crate::Error> {
-        let mut buf = buf.into();
+        let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
-        unsafe { buf.set_len(len) };
+        unsafe { bufs.set_len(len) };
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
-        let content = self.content.read().unwrap();
+        let content = self.content.read();
         let content_len = content.len();
         if offset + len > content_len {
             return Err(crate::Error::BlobInsufficientLength);
         }
-        buf.copy_from_slice(&content[offset..offset + len]);
-        Ok(buf)
+        bufs.copy_from_slice(&content[offset..offset + len]);
+        Ok(bufs)
     }
 
     async fn write_at(
         &self,
         offset: u64,
-        buf: impl Into<IoBufs> + Send,
+        bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), crate::Error> {
-        let buf = buf.into().coalesce();
+        let buf = bufs.into().coalesce();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
         let offset: usize = offset
             .try_into()
             .map_err(|_| crate::Error::OffsetOverflow)?;
-        let mut content = self.content.write().unwrap();
+        let mut content = self.content.write();
         let required = offset + buf.len();
         if required > content.len() {
             content.resize(required, 0);
@@ -207,17 +206,17 @@ impl crate::Blob for Blob {
             .checked_add(Header::SIZE_U64)
             .ok_or(crate::Error::OffsetOverflow)?;
         let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
-        let mut content = self.content.write().unwrap();
+        let mut content = self.content.write();
         content.resize(len, 0);
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
         // Create new content for partition
-        let new_content = self.content.read().unwrap().clone();
+        let new_content = self.content.read().clone();
 
         // Update partition content
-        let mut partitions = self.partitions.lock().unwrap();
+        let mut partitions = self.partitions.lock();
         let partition = partitions
             .get_mut(&self.partition)
             .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
@@ -260,7 +259,7 @@ mod tests {
 
         // Verify raw storage has 8 bytes (header only)
         {
-            let partitions = storage.partitions.lock().unwrap();
+            let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(
@@ -277,7 +276,7 @@ mod tests {
 
         // Verify raw storage layout
         {
-            let partitions = storage.partitions.lock().unwrap();
+            let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"test".to_vec()).unwrap();
             assert_eq!(raw_content.len(), Header::SIZE + data.len());
@@ -291,7 +290,7 @@ mod tests {
 
         // Corrupted blob recovery (0 < raw_size < 8)
         {
-            let mut partitions = storage.partitions.lock().unwrap();
+            let mut partitions = storage.partitions.lock();
             let partition = partitions.get_mut("partition").unwrap();
             partition.insert(b"corrupted".to_vec(), vec![0u8; 2]);
         }
@@ -302,7 +301,7 @@ mod tests {
 
         // Verify raw storage now has proper 8-byte header
         {
-            let partitions = storage.partitions.lock().unwrap();
+            let partitions = storage.partitions.lock();
             let partition = partitions.get("partition").unwrap();
             let raw_content = partition.get(&b"corrupted".to_vec()).unwrap();
             assert_eq!(
@@ -319,7 +318,7 @@ mod tests {
 
         // Manually insert a blob with invalid magic bytes
         {
-            let mut partitions = storage.partitions.lock().unwrap();
+            let mut partitions = storage.partitions.lock();
             let partition = partitions.entry("partition".into()).or_default();
             partition.insert(b"bad_magic".to_vec(), vec![0u8; Header::SIZE]);
         }

@@ -428,7 +428,7 @@ fn spawn_honest_validator_with_network<P: simplex::Simplex>(
         fetch_concurrent: 1,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
@@ -452,7 +452,6 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
-    use crate::network::ByzantineFirstReceiver;
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
     let (certificate_sender, certificate_receiver) = certificate_network;
@@ -784,7 +783,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);

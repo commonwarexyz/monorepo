@@ -1,10 +1,10 @@
 use crate::{mocks, Error, IoBufs};
-use commonware_utils::channel::mpsc;
+use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// Range of ephemeral ports assigned to dialers.
@@ -16,8 +16,8 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sender.send(buf).await.map_err(|_| Error::SendFailed)
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        self.sender.send(bufs).await.map_err(|_| Error::SendFailed)
     }
 }
 
@@ -96,7 +96,7 @@ impl crate::Network for Network {
         }
 
         // Ensure the port is not already bound
-        let mut listeners = self.listeners.lock().unwrap();
+        let mut listeners = self.listeners.lock();
         if listeners.contains_key(&socket) {
             return Err(Error::BindFailed);
         }
@@ -113,7 +113,7 @@ impl crate::Network for Network {
     async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
         // Assign dialer a port from the ephemeral range
         let dialer = {
-            let mut ephemeral = self.ephemeral.lock().unwrap();
+            let mut ephemeral = self.ephemeral.lock();
             let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
             *ephemeral = ephemeral
                 .checked_add(1)
@@ -123,7 +123,7 @@ impl crate::Network for Network {
 
         // Get listener
         let sender = {
-            let listeners = self.listeners.lock().unwrap();
+            let listeners = self.listeners.lock();
             let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
             sender.clone()
         };

@@ -162,6 +162,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Read the last item in a section, if any.
+    ///
+    /// Returns `Ok(None)` if the section is empty.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    /// - [Error::SectionOutOfRange] if the section doesn't exist.
     pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         let blob = self
             .manager
@@ -199,7 +206,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                 if start > blob_size {
                     return Err(Error::ItemOutOfRange(start_position));
                 }
-                replay.seek_to(start).await?;
+                replay.seek_to(start)?;
                 start_position
             } else {
                 0
@@ -355,7 +362,9 @@ mod tests {
     use super::*;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner,
+    };
     use commonware_utils::{NZUsize, NZU16};
     use core::num::NonZeroU16;
     use futures::{pin_mut, StreamExt};
@@ -367,10 +376,10 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    fn test_cfg() -> Config {
+    fn test_cfg(pooler: &impl BufferPooler) -> Config {
         Config {
-            partition: "test_partition".into(),
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            partition: "test-partition".into(),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -379,7 +388,7 @@ mod tests {
     fn test_segmented_fixed_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -425,7 +434,7 @@ mod tests {
     fn test_segmented_fixed_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -488,7 +497,7 @@ mod tests {
         // Test that replay with a non-zero start_position correctly skips items.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -608,7 +617,7 @@ mod tests {
     fn test_segmented_fixed_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -640,7 +649,7 @@ mod tests {
     fn test_segmented_fixed_rewind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -686,7 +695,7 @@ mod tests {
     fn test_segmented_fixed_rewind_many_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -743,7 +752,7 @@ mod tests {
     fn test_segmented_fixed_rewind_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
 
             // Create sections 1-5
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -794,7 +803,7 @@ mod tests {
     fn test_segmented_fixed_corruption_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -843,7 +852,7 @@ mod tests {
     fn test_segmented_fixed_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
 
             // Create and populate journal
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
@@ -877,7 +886,7 @@ mod tests {
     fn test_segmented_fixed_section_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -904,7 +913,7 @@ mod tests {
         // Sections 1, 5, 10 should all be independent and accessible.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -995,7 +1004,7 @@ mod tests {
         // Section 1 has data, section 2 is empty, section 3 has data.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1096,7 +1105,7 @@ mod tests {
         // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
+            let cfg = test_cfg(&context);
             let mut journal = Journal::init(context.with_label("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1162,8 +1171,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "clear_test".into(),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                partition: "clear-test".into(),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1215,6 +1224,75 @@ mod tests {
                 journal.get(0, 0).await,
                 Err(Error::SectionOutOfRange(0))
             ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_missing_section_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            assert!(matches!(
+                journal.last(0).await,
+                Err(Error::SectionOutOfRange(0))
+            ));
+            assert!(matches!(
+                journal.last(99).await,
+                Err(Error::SectionOutOfRange(99))
+            ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_after_rewind_to_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            journal.append(0, test_digest(0)).await.unwrap();
+            journal.append(0, test_digest(1)).await.unwrap();
+            journal.sync(0).await.unwrap();
+
+            assert!(journal.last(0).await.unwrap().is_some());
+
+            journal.rewind(0, 0).await.unwrap();
+            assert_eq!(journal.last(0).await.unwrap(), None);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_last_pruned_section_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::<_, Digest>::init(context.clone(), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            journal.append(0, test_digest(0)).await.unwrap();
+            journal.append(1, test_digest(1)).await.unwrap();
+            journal.sync_all().await.unwrap();
+
+            journal.prune(1).await.unwrap();
+
+            assert!(matches!(
+                journal.last(0).await,
+                Err(Error::AlreadyPrunedToSection(1))
+            ));
+            assert!(journal.last(1).await.unwrap().is_some());
 
             journal.destroy().await.unwrap();
         });

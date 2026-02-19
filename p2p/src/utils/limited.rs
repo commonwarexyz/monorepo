@@ -2,9 +2,9 @@
 
 use crate::{Recipients, UnlimitedSender};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, IoBufMut, KeyedRateLimiter, Quota};
-use commonware_utils::channel::ring;
-use futures::{lock::Mutex, Future, FutureExt, StreamExt};
+use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
+use commonware_utils::{channel::ring, sync::Mutex};
+use futures::{Future, FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer subscriptions for resolving [`Recipients::All`].
@@ -101,7 +101,7 @@ where
             self.peer_subscription = Some(self.peers.subscribe().await);
         }
 
-        let rate_limit = self.rate_limit.lock().await;
+        let rate_limit = self.rate_limit.lock();
 
         // Update known peers from subscription if available (non-blocking)
         if let Some(ref mut subscription) = self.peer_subscription {
@@ -203,7 +203,7 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
 
     async fn send(
         self,
-        message: impl Into<IoBufMut> + Send,
+        message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         self.sender.send(self.recipients, message, priority).await
@@ -238,8 +238,8 @@ mod tests {
             }
         }
 
-        async fn sent_messages(&self) -> Vec<SentMessage> {
-            self.sent.lock().await.clone()
+        fn sent_messages(&self) -> Vec<SentMessage> {
+            self.sent.lock().clone()
         }
     }
 
@@ -250,7 +250,7 @@ mod tests {
         async fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
-            message: impl Into<IoBufMut> + Send,
+            message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> Result<Vec<Self::PublicKey>, Self::Error> {
             let sent_to = match &recipients {
@@ -258,8 +258,8 @@ mod tests {
                 Recipients::Some(pks) => pks.clone(),
                 Recipients::All => Vec::new(),
             };
-            let message = message.into().freeze();
-            self.sent.lock().await.push((recipients, message, priority));
+            let message = message.into().coalesce();
+            self.sent.lock().push((recipients, message, priority));
             Ok(sent_to)
         }
     }
@@ -446,7 +446,7 @@ mod tests {
             assert!(sent_to.is_empty());
 
             // Verify that the sender received the message with empty Recipients::Some
-            let messages = sender.sent_messages().await;
+            let messages = sender.sent_messages();
             assert_eq!(messages.len(), 1);
             match &messages[0].0 {
                 Recipients::Some(pks) => assert!(pks.is_empty()),
@@ -565,7 +565,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let messages = sender.sent_messages().await;
+            let messages = sender.sent_messages();
             assert_eq!(messages.len(), 1);
             assert!(messages[0].2); // priority flag
         });

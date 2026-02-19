@@ -9,7 +9,8 @@ use commonware_p2p::{
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
-    deterministic, Clock, Handle, Metrics, Network as RNetwork, Quota, Runner, Spawner,
+    deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
+    Runner, Spawner,
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use estimator::{
@@ -286,7 +287,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + RngCore>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -304,7 +305,12 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
     );
     network.start();
 
-    let identities = setup_network_identities(&mut oracle, distribution).await;
+    let identities = setup_network_identities(
+        context.network_buffer_pool().clone(),
+        &mut oracle,
+        distribution,
+    )
+    .await;
     setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
@@ -330,6 +336,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Metrics + RNetwork + RngCore>
 
 /// Set up network identities for all peers across regions
 async fn setup_network_identities<C: Clock>(
+    pool: BufferPool,
     oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
 ) -> Vec<PeerIdentity<C>> {
@@ -347,7 +354,8 @@ async fn setup_network_identities<C: Clock>(
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());
-            let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
+            let (sender, receiver) =
+                wrap::<_, _, Message>(codec_config, pool.clone(), sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }

@@ -5,7 +5,7 @@ use crate::{
     Channel, Message, Recipients,
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Clock, IoBufMut, Quota};
+use commonware_runtime::{Clock, IoBufs, Quota};
 use commonware_utils::channel::mpsc;
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
@@ -26,7 +26,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
     async fn send(
         &mut self,
         recipients: Recipients<Self::PublicKey>,
-        message: impl Into<IoBufMut> + Send,
+        message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> Result<Vec<Self::PublicKey>, Self::Error> {
         let message = message.into();

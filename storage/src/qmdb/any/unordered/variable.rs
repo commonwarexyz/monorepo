@@ -159,7 +159,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        kv::tests::{assert_batchable, assert_deletable, assert_gettable, assert_send},
+        kv::tests::{assert_batchable, assert_gettable, assert_send},
         qmdb::{
             any::{
                 test::variable_db_config,
@@ -182,7 +182,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Runner as _,
+        BufferPooler, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -191,20 +191,20 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
+    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("journal_{seed}"),
-            mmr_metadata_partition: format!("metadata_{seed}"),
+            mmr_journal_partition: format!("journal-{seed}"),
+            mmr_metadata_partition: format!("metadata-{seed}"),
             mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log_journal_{seed}"),
+            log_partition: format!("log-journal-{seed}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -223,15 +223,14 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed);
+        let config = create_test_config(seed, &context);
         AnyTest::init(context, config).await.unwrap()
     }
 
     /// Return a Digest-valued variable database for generic tests.
     async fn open_digest_db(context: Context) -> DigestAnyTest {
-        DigestAnyTest::init(context, variable_db_config("digest_partition"))
-            .await
-            .unwrap()
+        let cfg = variable_db_config("digest-partition", &context);
+        DigestAnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -279,10 +278,10 @@ pub(crate) mod test {
         for op in ops {
             match op {
                 unordered::Operation::Update(unordered::Update(key, value)) => {
-                    db.update(key, value).await.unwrap();
+                    db.write_batch([(key, Some(value))]).await.unwrap();
                 }
                 unordered::Operation::Delete(key) => {
-                    db.delete(key).await.unwrap();
+                    db.write_batch([(key, None)]).await.unwrap();
                 }
                 unordered::Operation::CommitFloor(_, _) => {
                     panic!("CommitFloor not supported in apply_ops");
@@ -293,7 +292,8 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        AnyTest::init(context, create_test_config(0)).await.unwrap()
+        let cfg = create_test_config(0, &context);
+        AnyTest::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -320,12 +320,14 @@ pub(crate) mod test {
             let db = open_db(context.with_label("open1")).await;
             let root = db.root();
             let mut db = db.into_mutable();
-
-            for i in 0u64..ELEMENTS {
-                let k = Sha256::hash(&i.to_be_bytes());
-                let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.update(k, v.clone()).await.unwrap();
-            }
+            db.write_batch((0..ELEMENTS).map(|i| {
+                (
+                    Sha256::hash(&i.to_be_bytes()),
+                    Some(vec![(i % 255) as u8; ((i % 13) + 7) as usize]),
+                )
+            }))
+            .await
+            .unwrap();
 
             // Simulate a failure and test that we rollback to the previous root.
             drop(db);
@@ -337,7 +339,7 @@ pub(crate) mod test {
             for i in 0u64..ELEMENTS {
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
-                db.update(k, v.clone()).await.unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
@@ -350,7 +352,7 @@ pub(crate) mod test {
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
-                db.update(k, v.clone()).await.unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
 
             // Simulate a failure and test that we rollback to the previous root.
@@ -366,7 +368,7 @@ pub(crate) mod test {
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
                 let v = vec![((i + 1) % 255) as u8; ((i % 13) + 8) as usize];
-                db.update(k, v.clone()).await.unwrap();
+                db.write_batch([(k, Some(v.clone()))]).await.unwrap();
             }
             let db = db.commit(None).await.unwrap().0.into_merkleized();
             let root = db.root();
@@ -378,7 +380,7 @@ pub(crate) mod test {
                     continue;
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
-                db.delete(k).await.unwrap();
+                db.write_batch([(k, None)]).await.unwrap();
             }
 
             // Simulate a failure and test that we rollback to the previous root.
@@ -393,12 +395,12 @@ pub(crate) mod test {
                     continue;
                 }
                 let k = Sha256::hash(&i.to_be_bytes());
-                db.delete(k).await.unwrap();
+                db.write_batch([(k, None)]).await.unwrap();
             }
             let mut db = db.commit(None).await.unwrap().0.into_merkleized();
 
             let root = db.root();
-            assert_eq!(db.bounds().end, 1961);
+            assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
                 Some(Location::new_unchecked(1961))
@@ -406,7 +408,7 @@ pub(crate) mod test {
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
             db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
+            assert_eq!(db.bounds().await.start, Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.sync().await.unwrap();
@@ -415,13 +417,13 @@ pub(crate) mod test {
             // Confirm state is preserved after reopen.
             let db = open_db(context.with_label("open5")).await;
             assert_eq!(root, db.root());
-            assert_eq!(db.bounds().end, 1961);
+            assert_eq!(db.bounds().await.end, 1961);
             assert_eq!(
                 Location::try_from(db.log.mmr.size()).ok(),
                 Some(Location::new_unchecked(1961))
             );
             assert_eq!(db.inactivity_floor_loc(), Location::new_unchecked(756));
-            assert_eq!(db.log.bounds().start, Location::new_unchecked(756));
+            assert_eq!(db.bounds().await.start, Location::new_unchecked(756));
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -468,9 +470,9 @@ pub(crate) mod test {
             let key2 = Digest::random(&mut context);
             let key3 = Digest::random(&mut context);
 
-            db.update(key1, vec![10]).await.unwrap();
-            db.update(key2, vec![20]).await.unwrap();
-            db.update(key3, vec![30]).await.unwrap();
+            db.write_batch([(key1, Some(vec![10]))]).await.unwrap();
+            db.write_batch([(key2, Some(vec![20]))]).await.unwrap();
+            db.write_batch([(key3, Some(vec![30]))]).await.unwrap();
             let (db, _) = db.commit(None).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
@@ -493,7 +495,7 @@ pub(crate) mod test {
     fn test_any_unordered_variable_batch() {
         batch_tests::test_batch(|mut ctx| async move {
             let seed = ctx.next_u64();
-            let cfg = create_test_config(seed);
+            let cfg = create_test_config(seed, &ctx);
             AnyTest::init(ctx, cfg).await.unwrap().into_mutable()
         });
     }
@@ -564,9 +566,8 @@ pub(crate) mod test {
     fn assert_mutable_db_futures_are_send(db: &mut MutableDb, key: Digest, value: Vec<u8>) {
         assert_gettable(db, &key);
         assert_log_store(db);
-        assert_send(db.update(key, value.clone()));
-        assert_send(db.create(key, value.clone()));
-        assert_deletable(db, key);
+        assert_send(db.write_batch([(key, Some(value.clone()))]));
+        assert_send(db.write_batch([(key, None)]));
         assert_batchable(db, key, value);
         assert_send(db.get_with_loc(&key));
     }
@@ -580,20 +581,20 @@ pub(crate) mod test {
 
     type PartitionedVarConfig = VariableConfig<TwoCap, (commonware_codec::RangeCfg<usize>, ())>;
 
-    fn partitioned_config(suffix: &str) -> PartitionedVarConfig {
+    fn partitioned_config(suffix: &str, pooler: &impl BufferPooler) -> PartitionedVarConfig {
         VariableConfig {
-            mmr_journal_partition: format!("pv_journal_{suffix}"),
-            mmr_metadata_partition: format!("pv_metadata_{suffix}"),
+            mmr_journal_partition: format!("pv-journal-{suffix}"),
+            mmr_metadata_partition: format!("pv-metadata-{suffix}"),
             mmr_items_per_blob: NZU64!(13),
             mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("pv_log_journal_{suffix}"),
+            log_partition: format!("pv-log-journal-{suffix}"),
             log_items_per_blob: NZU64!(7),
             log_write_buffer: NZUsize!(1024),
             log_compression: None,
             log_codec_config: ((0..=10000).into(), ()),
             translator: TwoCap,
             thread_pool: None,
-            page_cache: CacheRef::new(NZU16!(77), NZUsize!(9)),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(77), NZUsize!(9)),
         }
     }
 
@@ -610,18 +611,15 @@ pub(crate) mod test {
 
     #[inline]
     async fn open_partitioned_db_p1(context: Context) -> PartitionedAnyTestP1 {
-        PartitionedAnyTestP1::init(context, partitioned_config("partition_p1"))
-            .await
-            .unwrap()
+        let cfg = partitioned_config("partition-p1", &context);
+        PartitionedAnyTestP1::init(context, cfg).await.unwrap()
     }
 
     async fn open_partitioned_digest_db_p1(context: Context) -> PartitionedAnyTestDigestP1 {
-        PartitionedAnyTestDigestP1::init(
-            context,
-            variable_db_config("unordered_partitioned_var_p1"),
-        )
-        .await
-        .unwrap()
+        let cfg = variable_db_config("unordered-partitioned-var-p1", &context);
+        PartitionedAnyTestDigestP1::init(context, cfg)
+            .await
+            .unwrap()
     }
 
     #[test_traced("WARN")]

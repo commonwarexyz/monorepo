@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
@@ -82,14 +82,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str) -> Config {
+fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config {
     Config {
-        journal_partition: format!("journal_{partition_suffix}"),
-        metadata_partition: format!("metadata_{partition_suffix}"),
+        journal_partition: format!("journal-{partition_suffix}"),
+        metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         thread_pool: None,
-        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
         let mmr = Mmr::init(
             context.clone(),
             &mut hasher,
-            test_config("fuzz_test_mmr_journaled"),
+            test_config("fuzz-test-mmr-journaled", &context),
         )
         .await
         .unwrap();
@@ -139,7 +139,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
+                    let pos = mmr.add(&mut hasher, limited_data).unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.size());
                     assert!(mmr.size() > size_before);
@@ -165,7 +165,7 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let pos = mmr.add(&mut hasher, limited_data).await.unwrap();
+                    let pos = mmr.add(&mut hasher, limited_data).unwrap();
                     assert!(mmr.size() > size_before);
 
                     leaves.push(limited_data.to_vec());
@@ -303,7 +303,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 MmrJournaledOperation::Sync => {
-                    let mut mmr = match mmr {
+                    let mmr = match mmr {
                         MmrState::Clean(m) => m,
                         MmrState::Dirty(m) => m.merkleize(&mut hasher),
                     };
@@ -433,7 +433,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
                         &mut hasher,
-                        test_config("fuzz_test_mmr_journaled"),
+                        test_config("fuzz-test-mmr-journaled", &context),
                     )
                     .await
                     .unwrap();
@@ -459,7 +459,7 @@ fn fuzz(input: FuzzInput) {
                     );
 
                     let sync_config = SyncConfig {
-                        config: test_config("sync"),
+                        config: test_config("sync", &context),
                         range: lower_bound_pos..upper_bound_pos,
                         pinned_nodes: None,
                     };

@@ -359,14 +359,14 @@ mod tests {
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _};
     use std::{
         collections::{BTreeMap, HashMap},
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
-        sync::{Arc, Mutex},
+        sync::Arc,
         time::Duration,
     };
     use tracing::{debug, info, warn};
@@ -685,7 +685,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -713,19 +713,19 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure certificates for all views
                 {
-                    let certified = reporter.certified.lock().unwrap();
+                    let certified = reporter.certified.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure certificate for every view
                         if !certified.contains(&view) {
@@ -738,7 +738,7 @@ mod tests {
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
@@ -758,7 +758,7 @@ mod tests {
                     }
                 }
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
@@ -771,7 +771,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
@@ -796,7 +796,7 @@ mod tests {
                         }
 
                         // Ensure no nullifies for any finalizers
-                        let nullifies = reporter.nullifies.lock().unwrap();
+                        let nullifies = reporter.nullifies.lock();
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
@@ -810,7 +810,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
@@ -955,7 +955,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -982,11 +982,11 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -1124,7 +1124,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1153,19 +1153,19 @@ mod tests {
                     _ = context.sleep(wait) => {
                         // Collect reporters to check faults
                         {
-                            let mut shutdowns = shutdowns.lock().unwrap();
+                            let mut shutdowns = shutdowns.lock();
                             debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                             *shutdowns += 1;
                         }
-                        supervised.lock().unwrap().push(reporters);
+                        supervised.lock().push(reporters);
                         false
                     },
                     _ = join_all(finalizers) => {
                         // Check reporters for faults activity
-                        let supervised = supervised.lock().unwrap();
+                        let supervised = supervised.lock();
                         for reporters in supervised.iter() {
                             for (_, reporter) in reporters.iter() {
-                                let faults = reporter.faults.lock().unwrap();
+                                let faults = reporter.faults.lock();
                                 assert!(faults.is_empty());
                             }
                         }
@@ -1316,7 +1316,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1436,7 +1436,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1579,7 +1579,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1608,20 +1608,20 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure offline node is never active
                 let mut exceptions = 0;
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(offline) {
@@ -1631,7 +1631,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifies = reporter.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock();
                     for (view, participants) in nullifies.iter() {
                         if participants.contains(offline) {
                             panic!("view: {view}");
@@ -1639,7 +1639,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(offline) {
@@ -1652,7 +1652,7 @@ mod tests {
                 // Identify offline views
                 let mut offline_views = Vec::new();
                 {
-                    let leaders = reporter.leaders.lock().unwrap();
+                    let leaders = reporter.leaders.lock();
                     for (view, leader) in leaders.iter() {
                         if leader == offline {
                             offline_views.push(*view);
@@ -1663,7 +1663,7 @@ mod tests {
 
                 // Ensure nullifies/nullification collected for offline node
                 {
-                    let nullifies = reporter.nullifies.lock().unwrap();
+                    let nullifies = reporter.nullifies.lock();
                     for view in offline_views.iter() {
                         let nullifies = nullifies.get(view).map_or(0, |n| n.len());
                         if nullifies < quorum {
@@ -1673,7 +1673,7 @@ mod tests {
                     }
                 }
                 {
-                    let nullifications = reporter.nullifications.lock().unwrap();
+                    let nullifications = reporter.nullifications.lock();
                     for view in offline_views.iter() {
                         if !nullifications.contains_key(view) {
                             warn!("missing expected view nullifies: {}", view);
@@ -1824,7 +1824,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -1852,20 +1852,20 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
                 // Ensure slow node still emits notarizes and finalizes (when receiving certificates)
                 let mut observed = false;
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for (_, payloads) in notarizes.iter() {
                         for (_, participants) in payloads.iter() {
                             if participants.contains(slow) {
@@ -1876,7 +1876,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for (_, payloads) in finalizes.iter() {
                         for (_, finalizers) in payloads.iter() {
                             if finalizers.contains(slow) {
@@ -2003,7 +2003,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2042,7 +2042,7 @@ mod tests {
             // Get latest view
             let mut latest = View::zero();
             for reporter in reporters.iter() {
-                let nullifies = reporter.nullifies.lock().unwrap();
+                let nullifies = reporter.nullifies.lock();
                 let max = nullifies.keys().max().unwrap();
                 if *max > latest {
                     latest = *max;
@@ -2073,13 +2073,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -2092,7 +2092,7 @@ mod tests {
                     // We don't check for finalization since some of the blocks may fail to be
                     // certified for the purposes of testing.
                     let mut found = 0;
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     for view in View::range(latest, latest.saturating_add(activity_timeout)) {
                         if notarizations.contains_key(&view) {
                             found += 1;
@@ -2219,7 +2219,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2297,13 +2297,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2432,7 +2432,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -2459,13 +2459,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2699,7 +2699,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -2724,7 +2724,7 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -2744,7 +2744,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -2888,7 +2888,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 let (pending, recovered, resolver) = registrations
@@ -2914,13 +2914,13 @@ mod tests {
             for reporter in reporters.iter().skip(1) {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Count invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     if *invalid > 0 {
                         invalid_count += 1;
                     }
@@ -3069,7 +3069,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3093,13 +3093,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3246,7 +3246,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engines.push(engine.start(pending, recovered, resolver));
@@ -3336,7 +3336,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
             engine.start(pending, recovered, resolver);
@@ -3570,7 +3570,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3594,13 +3594,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3739,7 +3739,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3764,7 +3764,7 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure only faults for byz
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for (_, faults) in faulter.iter() {
@@ -3781,7 +3781,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -3922,7 +3922,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine.start(pending, recovered, resolver);
@@ -3945,13 +3945,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -4074,7 +4074,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4101,13 +4101,13 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -4253,7 +4253,7 @@ mod tests {
                 fetch_concurrent: 4,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4478,7 +4478,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -4505,20 +4505,20 @@ mod tests {
             for reporter in reporters.iter() {
                 // Ensure no faults (normal operation)
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty(), "No faults should be reported");
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0, "No invalid signatures");
                 }
 
                 // Check that we have certificates reported
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
+                    let finalizations = reporter.finalizations.lock();
                     assert!(
                         !notarizations.is_empty() || !finalizations.is_empty(),
                         "Certificates should be reported"
@@ -4526,7 +4526,7 @@ mod tests {
                 }
 
                 // Check notarizes
-                let notarizes = reporter.notarizes.lock().unwrap();
+                let notarizes = reporter.notarizes.lock();
                 let last_view = notarizes.keys().max().cloned().unwrap_or_default();
                 for (view, payloads) in notarizes.iter() {
                     if *view == last_view {
@@ -4545,7 +4545,7 @@ mod tests {
                 }
 
                 // Check finalizes
-                let finalizes = reporter.finalizes.lock().unwrap();
+                let finalizes = reporter.finalizes.lock();
                 for (_, payloads) in finalizes.iter() {
                     let signers: usize = payloads.values().map(|signers| signers.len()).sum();
 
@@ -4724,7 +4724,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine =
                         Engine::new(context.with_label(&format!("engine_{}", *validator)), cfg);
@@ -4858,7 +4858,7 @@ mod tests {
             // All participants should have finalized B_0
             let view = View::new(f_view);
             for reporter in honest_reporters.iter() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 assert!(finalizations.contains_key(&view));
             }
 
@@ -4867,10 +4867,10 @@ mod tests {
             // All other participants should have nullified F+1
             let view = View::new(f_view + 1);
             for (i, reporter) in honest_reporters.iter().enumerate() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 assert!(!finalizations.contains_key(&view));
-                let nullifications = reporter.nullifications.lock().unwrap();
-                let notarizations = reporter.notarizations.lock().unwrap();
+                let nullifications = reporter.nullifications.lock();
+                let notarizations = reporter.notarizations.lock();
                 match get_type(i) {
                     ParticipantType::Group1 => {
                         assert!(notarizations.contains_key(&view));
@@ -4888,10 +4888,10 @@ mod tests {
             // All other participants should have nullified F+2
             let view = View::new(f_view + 2);
             for (i, reporter) in honest_reporters.iter().enumerate() {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 assert!(!finalizations.contains_key(&view));
-                let nullifications = reporter.nullifications.lock().unwrap();
-                let notarizations = reporter.notarizations.lock().unwrap();
+                let nullifications = reporter.nullifications.lock();
+                let notarizations = reporter.notarizations.lock();
                 match get_type(i) {
                     ParticipantType::Group2 => {
                         assert!(notarizations.contains_key(&view));
@@ -4907,7 +4907,7 @@ mod tests {
             // Assert no members have yet nullified view F+3
             let next_view = View::new(f_view + 3);
             for (i, reporter) in honest_reporters.iter().enumerate() {
-                let nullifies = reporter.nullifies.lock().unwrap();
+                let nullifies = reporter.nullifies.lock();
                 assert!(!nullifies.contains_key(&next_view), "reporter {i}");
             }
 
@@ -4936,11 +4936,11 @@ mod tests {
             // Sanity checks: no faults/invalid signatures, and no peers blocked
             for reporter in honest_reporters.iter() {
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
             }
@@ -5022,7 +5022,7 @@ mod tests {
                     mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
                 reporters.push(reporter.clone());
                 if idx == 0 {
-                    *monitor_reporter.lock().unwrap() = Some(reporter.clone());
+                    *monitor_reporter.lock() = Some(reporter.clone());
                 }
 
                 // Configure application
@@ -5061,7 +5061,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5080,11 +5080,11 @@ mod tests {
             let ciphertext = schemes[0].encrypt(&mut context, target, *message);
 
             // Wait for consensus to reach the target view and then decrypt
-            let reporter = monitor_reporter.lock().unwrap().clone().unwrap();
+            let reporter = monitor_reporter.lock().clone().unwrap();
             loop {
                 // Wait for notarization
                 context.sleep(Duration::from_millis(100)).await;
-                let notarizations = reporter.notarizations.lock().unwrap();
+                let notarizations = reporter.notarizations.lock();
                 let Some(notarization) = notarizations.get(&target.view()) else {
                     continue;
                 };
@@ -5211,7 +5211,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5307,7 +5307,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
@@ -5331,13 +5331,13 @@ mod tests {
             for (_, reporter) in reporters.iter() {
                 // Ensure no faults
                 {
-                    let faults = reporter.faults.lock().unwrap();
+                    let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock().unwrap();
+                    let invalid = reporter.invalid.lock();
                     assert_eq!(*invalid, 0);
                 }
 
@@ -5345,7 +5345,7 @@ mod tests {
                 let mut notarized = HashMap::new();
                 let mut finalized = HashMap::new();
                 {
-                    let notarizes = reporter.notarizes.lock().unwrap();
+                    let notarizes = reporter.notarizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = notarizes.get(&view) else {
@@ -5359,7 +5359,7 @@ mod tests {
                     }
                 }
                 {
-                    let notarizations = reporter.notarizations.lock().unwrap();
+                    let notarizations = reporter.notarizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure notarization matches digest from notarizes
                         let Some(notarization) = notarizations.get(&view) else {
@@ -5372,7 +5372,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizes = reporter.finalizes.lock().unwrap();
+                    let finalizes = reporter.finalizes.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure only one payload proposed per view
                         let Some(payloads) = finalizes.get(&view) else {
@@ -5390,7 +5390,7 @@ mod tests {
                         }
 
                         // Ensure no nullifies for any finalizers
-                        let nullifies = reporter.nullifies.lock().unwrap();
+                        let nullifies = reporter.nullifies.lock();
                         let Some(nullifies) = nullifies.get(&view) else {
                             continue;
                         };
@@ -5404,7 +5404,7 @@ mod tests {
                     }
                 }
                 {
-                    let finalizations = reporter.finalizations.lock().unwrap();
+                    let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
                         let Some(finalization) = finalizations.get(&view) else {
@@ -5751,7 +5751,7 @@ mod tests {
                         fetch_concurrent: 4,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                     };
                     let engine = Engine::new(context.with_label("engine"), cfg);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
@@ -5808,7 +5808,7 @@ mod tests {
                     fetch_concurrent: 4,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
                 let engine = Engine::new(context.with_label("engine"), cfg);
 
@@ -5834,7 +5834,7 @@ mod tests {
             let honest_start = faults as usize * 2; // Each twin produces 2 reporters
             let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
             for reporter in reporters.iter().skip(honest_start) {
-                let finalizations = reporter.finalizations.lock().unwrap();
+                let finalizations = reporter.finalizations.lock();
                 for (view, finalization) in finalizations.iter() {
                     let digest = finalization.proposal.payload;
                     if let Some(existing) = finalized_at_view.get(view) {
@@ -5850,14 +5850,14 @@ mod tests {
 
             // Verify no invalid signatures were observed
             for reporter in reporters.iter().skip(honest_start) {
-                let invalid = reporter.invalid.lock().unwrap();
+                let invalid = reporter.invalid.lock();
                 assert_eq!(*invalid, 0, "invalid signatures detected");
             }
 
             // Ensure faults are attributable to twins
             let twin_identities: Vec<_> = participants.iter().take(faults as usize).collect();
             for reporter in reporters.iter().skip(honest_start) {
-                let faults = reporter.faults.lock().unwrap();
+                let faults = reporter.faults.lock();
                 for (faulter, _) in faults.iter() {
                     assert!(
                         twin_identities.contains(&faulter),

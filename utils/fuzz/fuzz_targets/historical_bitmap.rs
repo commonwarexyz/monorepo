@@ -95,7 +95,7 @@ fn apply_op(
             }
 
             // Can't pop into pruned region
-            let chunk_idx = Prunable::<4>::unpruned_chunk(*current_len - 1);
+            let chunk_idx = Prunable::<4>::to_chunk_index(*current_len - 1);
             if chunk_idx < *current_pruned {
                 return;
             }
@@ -112,7 +112,7 @@ fn apply_op(
             }
 
             // Bit's chunk must not be pruned
-            let chunk_idx = Prunable::<4>::unpruned_chunk(*bit);
+            let chunk_idx = Prunable::<4>::to_chunk_index(*bit);
             if chunk_idx < *current_pruned {
                 return;
             }

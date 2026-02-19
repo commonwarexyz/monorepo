@@ -5,22 +5,14 @@
 //! - [OperationProof]: Proves a specific operation is active in the database.
 
 use crate::{
-    bitmap::{partial_chunk_root, MerkleizedBitMap},
-    journal::contiguous::Contiguous,
-    mmr::{
-        grafting::{Storage as GraftingStorage, Verifier},
-        hasher::Hasher,
-        journaled::Mmr,
-        mem::Clean,
-        storage::Storage,
-        verification, Location, Proof,
-    },
-    qmdb::Error,
+    bitmap::partial_chunk_root,
+    journal::contiguous::{Contiguous, Reader as _},
+    mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof},
+    qmdb::{current::grafting, Error},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::bitmap::BitMap;
+use commonware_utils::bitmap::Prunable as BitMap;
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
@@ -38,23 +30,16 @@ pub struct RangeProof<D: Digest> {
 
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<
-        E: RStorage + Clock + Metrics,
-        H: CHasher<Digest = D>,
-        S: Storage<D>,
-        const N: usize,
-    >(
+    pub async fn new<H: CHasher<Digest = D>, S: Storage<D>, const N: usize>(
         hasher: &mut H,
-        status: &MerkleizedBitMap<E, D, N>,
-        grafting_height: u32,
-        mmr: &S,
+        status: &BitMap<N>,
+        storage: &S,
         range: Range<Location>,
     ) -> Result<Self, Error> {
-        let grafted_mmr = GraftingStorage::<'_, H, _, _>::new(status, mmr, grafting_height);
-        let proof = verification::range_proof(&grafted_mmr, range).await?;
+        let proof = verification::range_proof(storage, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
-        let partial_chunk_digest = if next_bit != MerkleizedBitMap::<E, D, N>::CHUNK_SIZE_BITS {
+        let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
             // in the proof.
             hasher.update(last_chunk);
@@ -78,34 +63,34 @@ impl<D: Digest> RangeProof<D> {
     /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn new_with_ops<
-        E: RStorage + Clock + Metrics,
         H: CHasher<Digest = D>,
         C: Contiguous,
+        S: Storage<D>,
         const N: usize,
     >(
         hasher: &mut H,
-        status: &MerkleizedBitMap<E, D, N>,
-        height: u32,
-        mmr: &Mmr<E, D, Clean<D>>,
+        status: &BitMap<N>,
+        storage: &S,
         log: &C,
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> Result<(Self, Vec<C::Item>, Vec<[u8; N]>), Error> {
         // Compute the start and end locations & positions of the range.
-        let leaves = mmr.leaves();
+        let leaves = Location::new_unchecked(status.len());
         if start_loc >= leaves {
             return Err(crate::mmr::Error::RangeOutOfBounds(start_loc).into());
         }
         let max_loc = start_loc.saturating_add(max_ops.get());
         let end_loc = core::cmp::min(max_loc, leaves);
 
-        // Generate the proof from the grafted MMR.
-        let proof = Self::new(hasher, status, height, mmr, start_loc..end_loc).await?;
+        // Generate the proof from the grafted storage.
+        let proof = Self::new(hasher, status, storage, start_loc..end_loc).await?;
 
         // Collect the operations necessary to verify the proof.
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
+        let reader = log.reader().await;
         let futures = (*start_loc..*end_loc)
-            .map(|i| log.read(i))
+            .map(|i| reader.read(i))
             .collect::<Vec<_>>();
         try_join_all(futures)
             .await?
@@ -118,9 +103,7 @@ impl<D: Digest> RangeProof<D> {
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
-            let bit_offset = i * chunk_bits;
-            let chunk = *status.get_chunk_containing(bit_offset);
-            chunks.push(chunk);
+            chunks.push(*status.get_chunk(i as usize));
         }
 
         Ok((proof, ops, chunks))
@@ -131,7 +114,6 @@ impl<D: Digest> RangeProof<D> {
     pub fn verify<H: CHasher<Digest = D>, O: Codec, const N: usize>(
         &self,
         hasher: &mut H,
-        grafting_height: u32,
         start_loc: Location,
         ops: &[O],
         chunks: &[[u8; N]],
@@ -171,12 +153,9 @@ impl<D: Digest> RangeProof<D> {
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let start_chunk_loc = *start_loc / BitMap::<N>::CHUNK_SIZE_BITS;
-        let mut verifier = Verifier::<H>::new(
-            grafting_height,
-            Location::new_unchecked(start_chunk_loc),
-            chunk_vec,
-        );
+        let start_chunk_idx = *start_loc / BitMap::<N>::CHUNK_SIZE_BITS;
+        let mut verifier =
+            grafting::Verifier::<H>::new(grafting::height::<N>(), start_chunk_idx, chunk_vec);
 
         let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
         if next_bit == 0 {
@@ -206,7 +185,7 @@ impl<D: Digest> RangeProof<D> {
             }
         }
 
-        // Reconstruct the MMR root.
+        // Reconstruct the MMR root and combine with partial chunk to get the full root.
         let mmr_root = match self
             .proof
             .reconstruct_root(&mut verifier, &elements, start_loc)
@@ -245,18 +224,15 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// # Panics
     ///
     /// - Panics if `loc` is out of bounds.
-    pub async fn new<E: RStorage + Clock + Metrics, H: CHasher<Digest = D>, S: Storage<D>>(
+    pub async fn new<H: CHasher<Digest = D>, S: Storage<D>>(
         hasher: &mut H,
-        status: &MerkleizedBitMap<E, D, N>,
-        grafting_height: u32,
-        mmr: &S,
+        status: &BitMap<N>,
+        storage: &S,
         loc: Location,
     ) -> Result<Self, Error> {
         // Since `loc` is assumed to be in-bounds, `loc + 1` won't overflow.
-        let range_proof =
-            RangeProof::<D>::new(hasher, status, grafting_height, mmr, loc..loc + 1).await?;
+        let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1).await?;
         let chunk = *status.get_chunk_containing(*loc);
-
         Ok(Self {
             loc,
             chunk,
@@ -269,7 +245,6 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     pub fn verify<H: CHasher<Digest = D>, O: Codec>(
         &self,
         hasher: &mut H,
-        grafting_height: u32,
         operation: O,
         root: &D,
     ) -> bool {
@@ -283,13 +258,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
             return false;
         }
 
-        self.range_proof.verify(
-            hasher,
-            grafting_height,
-            self.loc,
-            &[operation],
-            &[self.chunk],
-            root,
-        )
+        self.range_proof
+            .verify(hasher, self.loc, &[operation], &[self.chunk], root)
     }
 }

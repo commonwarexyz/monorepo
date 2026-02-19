@@ -131,13 +131,14 @@ fn fuzz(input: FuzzInput) {
     let executor = deterministic::Runner::seeded(input.seed);
     executor.start(|context| async move {
         let cfg = Config {
-            partition: "fuzz_cache".into(),
+            partition: "fuzz-cache".into(),
             codec_config: (),
             compression: input.config.compression,
             write_buffer: NZUsize!(input.config.write_buffer),
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
-            page_cache: CacheRef::new(
+            page_cache: CacheRef::from_pooler(
+                &context,
                 input.config.page_cache_page_size,
                 NZUsize!(input.config.page_cache_capacity),
             ),

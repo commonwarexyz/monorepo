@@ -5,7 +5,7 @@ use crate::{
     ordinal::{self, Ordinal},
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage};
+use commonware_runtime::{Buf, BufMut, BufferPooler, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::BitMap, sequence::prefixed_u64::U64, Array};
 use futures::join;
 use prometheus_client::metrics::counter::Counter;
@@ -83,7 +83,7 @@ impl EncodeSize for Record {
 }
 
 /// An immutable key-value store for ordered data with a minimal memory footprint.
-pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
+pub struct Archive<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> {
     /// Number of items per section.
     items_per_section: u64,
 
@@ -102,7 +102,7 @@ pub struct Archive<E: Storage + Metrics + Clock, K: Array, V: CodecShared> {
     syncs: Counter,
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metadata
@@ -219,7 +219,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
     }
 
     /// Initialize the section.
-    async fn initialize_section(&mut self, section: u64) {
+    fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
         let bits = BitMap::zeroes(self.items_per_section);
 
@@ -230,7 +230,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> Archive<E, K, V> {
     }
 }
 
-impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Archive
+impl<E: BufferPooler + Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Archive
     for Archive<E, K, V>
 {
     type Key = K;
@@ -246,7 +246,7 @@ impl<E: Storage + Metrics + Clock, K: Array, V: CodecShared> crate::archive::Arc
         let section = index / self.items_per_section;
         let ordinal_key = U64::new(ORDINAL_PREFIX, section);
         if self.metadata.get(&ordinal_key).is_none() {
-            self.initialize_section(section).await;
+            self.initialize_section(section);
         }
         let record = self.metadata.get_mut(&ordinal_key).unwrap();
 

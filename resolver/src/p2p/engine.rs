@@ -18,7 +18,7 @@ use commonware_runtime::{
         histogram,
         status::{CounterExt, GaugeExt, Status},
     },
-    Clock, ContextCell, Handle, Metrics, Spawner,
+    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -40,7 +40,7 @@ struct Serve<E: Clock, P: PublicKey> {
 
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<
-    E: Clock + Spawner + Rng + Metrics,
+    E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -94,7 +94,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Spawner + Rng + Metrics,
+        E: BufferPooler + Clock + Spawner + Rng + Metrics,
         P: PublicKey,
         D: Provider<PublicKey = P>,
         B: Blocker<PublicKey = P>,
@@ -157,7 +157,12 @@ impl<
         let peer_set_subscription = &mut self.provider.subscribe().await;
 
         // Wrap channel
-        let (mut sender, mut receiver) = wrap((), network.0, network.1);
+        let (mut sender, mut receiver) = wrap(
+            (),
+            self.context.network_buffer_pool().clone(),
+            network.0,
+            network.1,
+        );
 
         select_loop! {
             self.context,
@@ -352,13 +357,11 @@ impl<
                     }
                 };
                 match msg.payload {
-                    wire::Payload::Request(key) => {
-                        self.handle_network_request(peer, msg.id, key).await
-                    }
+                    wire::Payload::Request(key) => self.handle_network_request(peer, msg.id, key),
                     wire::Payload::Response(response) => {
                         self.handle_network_response(peer, msg.id, response).await
                     }
-                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id).await,
+                    wire::Payload::Error => self.handle_network_error_response(peer, msg.id),
                 };
             },
         }
@@ -394,7 +397,7 @@ impl<
     }
 
     /// Handle a network request from a peer.
-    async fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
+    fn handle_network_request(&mut self, peer: P, id: u64, key: Key) {
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
@@ -441,7 +444,7 @@ impl<
     }
 
     /// Handle a network response from a peer that did not have the data.
-    async fn handle_network_error_response(&mut self, peer: P, id: u64) {
+    fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
         // Get the key associated with the response, if any

@@ -1,4 +1,7 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, Error, IoBufMut, IoBufs, IoBufsMut, RwLock};
+use crate::{
+    buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBuf, IoBufs, IoBufsMut,
+};
+use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// A writer that buffers the raw content of a [Blob] to optimize the performance of appending or
@@ -7,7 +10,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, BufferPooler, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
 /// use commonware_utils::NZUsize;
 ///
 /// let executor = deterministic::Runner::default();
@@ -17,7 +20,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::new(blob, 0, NZUsize!(16));
+///     let mut blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
 ///     blob.write_at(0, b"hello").await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
@@ -28,7 +31,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 ///
 ///     // Read back the data to verify
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
-///     let mut reader = Read::new(blob, size, NZUsize!(8));
+///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
 ///     let mut buf = vec![0u8; size as usize];
 ///     reader.read_exact(&mut buf, size as usize).await.expect("read failed");
 ///     assert_eq!(&buf, b"hello world!");
@@ -40,21 +43,35 @@ pub struct Write<B: Blob> {
     blob: B,
 
     /// The buffer containing the data yet to be appended to the tip of the underlying blob.
-    buffer: Arc<RwLock<Buffer>>,
+    buffer: Arc<AsyncRwLock<Buffer>>,
+
+    /// Buffer pool used for internal allocations.
+    pool: BufferPool,
 }
 
 impl<B: Blob> Write<B> {
     /// Creates a new [Write] that buffers up to `capacity` bytes of data to be appended to the tip
     /// of `blob` with the provided `size`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity` is zero.
-    pub fn new(blob: B, size: u64, capacity: NonZeroUsize) -> Self {
+    pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
         Self {
             blob,
-            buffer: Arc::new(RwLock::new(Buffer::new(size, capacity.get()))),
+            buffer: Arc::new(AsyncRwLock::new(Buffer::new(
+                size,
+                capacity.get(),
+                pool.clone(),
+            ))),
+            pool,
         }
+    }
+
+    /// Creates a new [Write], extracting the storage [BufferPool] from a [BufferPooler].
+    pub fn from_pooler(
+        pooler: &impl BufferPooler,
+        blob: B,
+        size: u64,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        Self::new(blob, size, capacity, pooler.storage_buffer_pool().clone())
     }
 
     /// Returns the current logical size of the blob including any buffered data.
@@ -69,19 +86,20 @@ impl<B: Blob> Write<B> {
 
 impl<B: Blob> Blob for Write<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
-            .await
+        self.read_at_buf(offset, len, self.pool.alloc(len)).await
     }
 
     async fn read_at_buf(
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let mut buf = buf.into();
-        // SAFETY: `len` bytes are filled via extract + blob read below.
-        unsafe { buf.set_len(len) };
+        let mut bufs = bufs.into();
+        // SAFETY: Uninitialized bytes are never read. On success, all `len`
+        // bytes are filled via extract + blob read. On error, the buffer is
+        // dropped without being read.
+        unsafe { bufs.set_len(len) };
 
         // Ensure the read doesn't overflow.
         let end_offset = offset
@@ -96,47 +114,54 @@ impl<B: Blob> Blob for Write<B> {
             return Err(Error::BlobInsufficientLength);
         }
 
-        match buf {
-            // For single buffers, work directly to avoid copies.
-            IoBufsMut::Single(mut single) => {
-                // Extract any bytes from the buffer that overlap with the requested range.
-                let remaining = buffer.extract(single.as_mut(), offset);
+        // For single buffers, work directly to avoid copies.
+        if let Some(buf) = bufs.as_single_mut() {
+            // Extract any bytes from the buffer that overlap with the requested range.
+            let remaining = buffer.extract(buf.as_mut(), offset);
 
-                // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-                // of the range.
-                if remaining > 0 {
-                    let blob_result = self.blob.read_at(offset, remaining).await?;
-                    single.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
-                }
-                Ok(IoBufsMut::Single(single))
+            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+            // of the range.
+            if remaining > 0 {
+                let blob_result = self
+                    .blob
+                    .read_at_buf(offset, remaining, self.pool.alloc(remaining))
+                    .await?;
+                // `remaining` starts at `len` and only decreases, so this prefix slice
+                // is always in-bounds and exactly matches the blob bytes we just read.
+                buf.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
             }
-            // For chunked buffers, read into temp and copy back to preserve structure.
-            IoBufsMut::Chunked(chunks) => {
-                let mut temp = vec![0u8; len];
-                // Extract any bytes from the buffer that overlap with the
-                // requested range, into a temporary contiguous buffer
-                let remaining = buffer.extract(&mut temp, offset);
+            Ok(bufs)
+        } else {
+            // For multi-chunk buffers, read into temp and copy back to preserve structure.
+            // SAFETY: Uninitialized bytes are never read. On success, all bytes
+            // are initialized via extract + blob read before copying out. On
+            // error, the buffer is dropped without being read.
+            let mut temp = unsafe { self.pool.alloc_len(len) };
+            // Extract any bytes from the buffer that overlap with the
+            // requested range, into a temporary contiguous buffer.
+            let remaining = buffer.extract(temp.as_mut(), offset);
 
-                // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
-                // of the range.
-                if remaining > 0 {
-                    let blob_result = self.blob.read_at(offset, remaining).await?;
-                    temp[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
-                }
-                // Copy back to original chunks
-                let mut bufs = IoBufsMut::Chunked(chunks);
-                bufs.copy_from_slice(&temp);
-                Ok(bufs)
+            // If bytes remain, read directly from the blob. Any remaining bytes reside at the beginning
+            // of the range.
+            if remaining > 0 {
+                let blob_result = self
+                    .blob
+                    .read_at_buf(offset, remaining, self.pool.alloc(remaining))
+                    .await?;
+                temp.as_mut()[..remaining].copy_from_slice(blob_result.coalesce().as_ref());
             }
+            // Copy back to original chunks.
+            bufs.copy_from_slice(temp.as_ref());
+            Ok(bufs)
         }
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let mut buf = buf.into();
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
         offset
-            .checked_add(buf.remaining() as u64)
+            .checked_add(bufs.remaining() as u64)
             .ok_or(Error::OffsetOverflow)?;
 
         // Acquire a write lock on the buffer.
@@ -145,13 +170,13 @@ impl<B: Blob> Blob for Write<B> {
         // Process each chunk of the input buffer, attempting to merge into the tip buffer
         // or writing directly to the underlying blob.
         let mut current_offset = offset;
-        while buf.has_remaining() {
-            let chunk = buf.chunk();
+        while bufs.has_remaining() {
+            let chunk = bufs.chunk();
             let chunk_len = chunk.len();
 
             // Chunk falls entirely within the buffer's current range and can be merged.
             if buffer.merge(chunk, current_offset) {
-                buf.advance(chunk_len);
+                bufs.advance(chunk_len);
                 current_offset += chunk_len as u64;
                 continue;
             }
@@ -163,7 +188,7 @@ impl<B: Blob> Blob for Write<B> {
                 if let Some((old_buf, old_offset)) = buffer.take() {
                     self.blob.write_at(old_offset, old_buf).await?;
                     if buffer.merge(chunk, current_offset) {
-                        buf.advance(chunk_len);
+                        bufs.advance(chunk_len);
                         current_offset += chunk_len as u64;
                         continue;
                     }
@@ -174,8 +199,10 @@ impl<B: Blob> Blob for Write<B> {
             // write directly. Note that we may end up writing an intersecting range twice:
             // once when the buffer is flushed above, then again when we write the chunk
             // below. Removing this inefficiency may not be worth the additional complexity.
-            self.blob.write_at(current_offset, chunk.to_vec()).await?;
-            buf.advance(chunk_len);
+            self.blob
+                .write_at(current_offset, IoBuf::copy_from_slice(chunk))
+                .await?;
+            bufs.advance(chunk_len);
             current_offset += chunk_len as u64;
 
             // Maintain the "buffer at tip" invariant by advancing offset to the end of this

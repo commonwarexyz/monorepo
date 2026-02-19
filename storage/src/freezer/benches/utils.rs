@@ -25,13 +25,13 @@ const TABLE_RESIZE_CHUNK_SIZE: u32 = 1024;
 const TABLE_REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Partition for [Freezer] keys.
-pub const KEY_PARTITION: &str = "freezer_bench_key";
+pub const KEY_PARTITION: &str = "freezer-bench-key";
 
 /// Partition for [Freezer] values.
-pub const VALUE_PARTITION: &str = "freezer_bench_value";
+pub const VALUE_PARTITION: &str = "freezer-bench-value";
 
 /// Partition for [Freezer] table benchmarks.
-pub const TABLE_PARTITION: &str = "freezer_bench_table";
+pub const TABLE_PARTITION: &str = "freezer-bench-table";
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
@@ -51,7 +51,7 @@ pub async fn init(ctx: Context) -> FreezerType {
     let cfg = Config {
         key_partition: KEY_PARTITION.into(),
         key_write_buffer: NZUsize!(WRITE_BUFFER),
-        key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: VALUE_PARTITION.into(),
         value_compression: None,
         value_write_buffer: NZUsize!(WRITE_BUFFER),

@@ -1,5 +1,14 @@
 # Disallow futures::channel types - use commonware_utils::channel instead
 disallowed-types = [
+    { path = "std::sync::Condvar", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "std::sync::Mutex", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "std::sync::Once", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "std::sync::RwLock", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "futures::lock::Mutex", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "async_lock::RwLock", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "async_lock::RwLockReadGuard", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "async_lock::RwLockWriteGuard", reason = "prefer commonware_utils::sync", allow-invalid = true },
+    { path = "async_lock::RwLockUpgradableReadGuard", reason = "prefer commonware_utils::sync", allow-invalid = true },
     { path = "futures::channel::mpsc::Sender", reason = "prefer commonware_utils::channel", allow-invalid = true },
     { path = "futures::channel::mpsc::Receiver", reason = "prefer commonware_utils::channel", allow-invalid = true },
     { path = "futures::channel::mpsc::UnboundedSender", reason = "prefer commonware_utils::channel", allow-invalid = true },

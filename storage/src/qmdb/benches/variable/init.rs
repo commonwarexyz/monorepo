@@ -4,12 +4,12 @@
 use crate::variable::{
     any_cfg, current_cfg, gen_random_kv, get_any_ordered, get_any_unordered, get_current_ordered,
     get_current_unordered, Digest, OVCurrentDb, OVariableDb, UVCurrentDb, UVariableDb, Variant,
-    THREADS, VARIANTS,
+    VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Runner},
-    Runner as _, ThreadPooler as _,
+    Runner as _,
 };
 use commonware_storage::qmdb::{
     any::states::{CleanAny, MutableAny, UnmerkleizedDurableAny},
@@ -43,7 +43,10 @@ where
     let mutable = db.into_mutable();
     let durable = gen_random_kv(mutable, elements, operations, COMMIT_FREQUENCY).await;
     let mut clean = durable.into_merkleized().await.unwrap();
-    clean.prune(clean.inactivity_floor_loc()).await.unwrap();
+    clean
+        .prune(clean.inactivity_floor_loc().await)
+        .await
+        .unwrap();
     clean.sync().await.unwrap();
     drop(clean);
 }
@@ -90,9 +93,8 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let pool = ctx.clone().create_thread_pool(THREADS).unwrap();
-                            let any_cfg = any_cfg(pool.clone());
-                            let current_cfg = current_cfg(pool);
+                            let any_cfg = any_cfg(&ctx);
+                            let current_cfg = current_cfg(&ctx);
 
                             // Start the timer here to avoid including time to allocate page cache,
                             // thread pool, and other shared structures.
@@ -103,27 +105,27 @@ fn bench_variable_init(c: &mut Criterion) {
                                         let db = UVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::AnyOrdered => {
                                         let db = OVariableDb::init(ctx.clone(), any_cfg.clone())
                                             .await
                                             .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentUnordered => {
                                         let db =
                                             UVCurrentDb::init(ctx.clone(), current_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                     Variant::CurrentOrdered => {
                                         let db =
                                             OVCurrentDb::init(ctx.clone(), current_cfg.clone())
                                                 .await
                                                 .unwrap();
-                                        assert_ne!(db.bounds().end, 0);
+                                        assert_ne!(db.bounds().await.end, 0);
                                     }
                                 }
                             }

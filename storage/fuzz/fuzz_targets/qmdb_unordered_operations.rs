@@ -4,6 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
+    kv::{Batchable, Deletable as _, Updatable as _},
     mmr::{Location, StandardHasher as Standard},
     qmdb::{
         any::{unordered::fixed::Db, FixedConfig as Config},
@@ -49,16 +50,20 @@ fn fuzz(data: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = Config::<EightCap> {
-            mmr_journal_partition: "test_qmdb_mmr_journal".into(),
+            mmr_journal_partition: "test-qmdb-mmr-journal".into(),
             mmr_items_per_blob: NZU64!(500000),
             mmr_write_buffer: NZUsize!(1024),
-            mmr_metadata_partition: "test_qmdb_mmr_metadata".into(),
-            log_journal_partition: "test_qmdb_log_journal".into(),
+            mmr_metadata_partition: "test-qmdb-mmr-metadata".into(),
+            log_journal_partition: "test-qmdb-log-journal".into(),
             log_items_per_blob: NZU64!(500000),
             log_write_buffer: NZUsize!(1024),
             translator: EightCap,
             thread_pool: None,
-            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::from_pooler(
+                &context,
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
         };
 
         let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
@@ -76,7 +81,9 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    db.update(k, v).await.expect("update should not fail");
+                    let mut batch = db.start_batch();
+                    batch.update(k, v).await.expect("update should not fail");
+                    db.write_batch(batch.into_iter()).await.expect("write_batch should not fail");
                     expected_state.insert(*key, Some(*value));
                     all_keys.insert(*key);
                     uncommitted_ops += 1;
@@ -84,16 +91,18 @@ fn fuzz(data: FuzzInput) {
 
                 QmdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    if db.delete(k).await.expect("delete should not fail") {
+                    let mut batch = db.start_batch();
+                    if batch.delete(k).await.expect("delete should not fail") {
                         // Delete succeeded - mark as deleted, not remove
                         assert!(all_keys.contains(key), "there was no key");
                         expected_state.insert(*key, None);
                         uncommitted_ops += 1;
                     }
+                    db.write_batch(batch.into_iter()).await.expect("write_batch should not fail");
                 }
 
                 QmdbOperation::OpCount => {
-                    let actual_count = db.bounds().end;
+                    let actual_count = db.bounds().await.end;
                     // The count should have increased by the number of uncommitted operations
                     let expected_count = last_known_op_count + uncommitted_ops;
                     assert_eq!(actual_count, expected_count,
@@ -103,7 +112,7 @@ fn fuzz(data: FuzzInput) {
                 QmdbOperation::Commit => {
                     let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
                     // After commit, update our last known count since commit may add more operations
-                    last_known_op_count = durable_db.bounds().end;
+                    last_known_op_count = durable_db.bounds().await.end;
                     uncommitted_ops = 0; // Reset uncommitted operations counter
                     db = durable_db.into_mutable();
                 }
@@ -116,7 +125,7 @@ fn fuzz(data: FuzzInput) {
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
-                    let actual_op_count = db.bounds().end;
+                    let actual_op_count = db.bounds().await.end;
                     // Only generate proof if proof will have operations.
                     if actual_op_count == 0 || *max_ops == 0 {
                         continue;
