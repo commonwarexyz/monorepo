@@ -331,7 +331,10 @@ impl Waker {
 
     /// Clear and return the previous pending state.
     fn clear(&self) -> bool {
-        self.inner.wake_pending.swap(false, Ordering::Relaxed)
+        self.inner
+            .wake_pending
+            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Consume wake notifications from the eventfd counter.
