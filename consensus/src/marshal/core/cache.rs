@@ -361,10 +361,13 @@ where
 
     /// Get a finalization from the prunable archive by block digest.
     ///
-    /// Note: this lookup is digest-scoped, not full-commitment-scoped. In coding
-    /// variants, distinct commitments can share the same inner block digest, so
-    /// callers must still compare `finalization.proposal.payload` against the
-    /// block's full commitment before promotion/finalization.
+    /// Protocol invariant: in valid executions, a certifiable block digest maps to
+    /// exactly one finalizable payload commitment.
+    ///
+    /// We keep this lookup digest-scoped for that invariant and perform an explicit
+    /// payload-vs-block commitment check at promotion sites as a defensive guard.
+    /// A mismatch indicates invariant violation (bug, corruption, or adversarial
+    /// behavior), not an expected runtime path.
     pub(crate) async fn get_finalization_for(
         &self,
         digest: <V::Block as Digestible>::Digest,

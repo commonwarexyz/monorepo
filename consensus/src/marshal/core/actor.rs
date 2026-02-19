@@ -1123,9 +1123,10 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        // Protocol invariant: for a valid certifiable block digest, any
-                        // matching finalization payload should reference the same commitment.
-                        // `store_finalization` performs the commitment check in one place.
+                        // Protocol invariant: this digest's cached finalization payload must
+                        // match `V::commitment(&block)`. We still re-check in
+                        // `store_finalization` as a defensive guard against invariant
+                        // violations; that branch should be unreachable in valid execution.
                         wrote |= self
                             .store_finalization(
                                 height,
@@ -1397,9 +1398,10 @@ where
             if payload == commitment {
                 Some(finalization)
             } else {
-                // Finalizations may be fetched from a digest-indexed cache.
-                // In coding variants, digest equality does not guarantee full
-                // commitment equality.
+                // Defensive-only path: this should be unreachable under protocol
+                // invariants (finalization payload must match this block's commitment
+                // for the same digest). We do not panic here to avoid remote-triggered
+                // process abort on invariant violations.
                 warn!(
                     %height,
                     ?digest,
