@@ -17,6 +17,7 @@ commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-p2p.workspace = true
 commonware-parallel.workspace = true
+commonware-resolver.workspace = true
 commonware-runtime.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
@@ -145,6 +146,48 @@ bench = false
 [[bin]]
 name = "simplex_secp256r1_adv"
 path = "fuzz_targets/simplex_secp256r1_adv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_node"
+path = "fuzz_targets/simplex_ed25519_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_secp256r1_node"
+path = "fuzz_targets/simplex_secp256r1_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minpk_node"
+path = "fuzz_targets/simplex_bls12381_multisig_minpk_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_multisig_minsig_node"
+path = "fuzz_targets/simplex_bls12381_multisig_minsig_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minpk_node"
+path = "fuzz_targets/simplex_bls12381_threshold_minpk_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_bls12381_threshold_minsig_node"
+path = "fuzz_targets/simplex_bls12381_threshold_minsig_node.rs"
 test = false
 doc = false
 bench = false

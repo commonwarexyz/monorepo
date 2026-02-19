@@ -3,6 +3,7 @@ pub mod disrupter;
 pub mod invariants;
 pub mod network;
 pub mod simplex;
+pub mod simplex_node;
 pub mod strategy;
 pub mod types;
 pub mod utils;
@@ -447,10 +448,11 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     participants: &[Ed25519PublicKey],
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
-    byzantine_router: network::Router<Ed25519PublicKey, deterministic::Context>,
+    byzantine_router: crate::network::Router<Ed25519PublicKey, deterministic::Context>,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    use crate::network::ByzantineFirstReceiver;
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
     let (certificate_sender, certificate_receiver) = certificate_network;
