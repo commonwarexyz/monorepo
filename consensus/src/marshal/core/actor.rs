@@ -687,9 +687,9 @@ where
                             return;
                         }
 
-                        // Floor changes may invalidate long-lived waiters for old
-                        // history; cancel all subscriptions so callers can resubscribe.
-                        self.cancel_block_subscriptions();
+                        // Intentionally keep existing block subscriptions alive. Canceling
+                        // certify waiters here can split honest validators across views.
+
                     }
                     Message::Prune { height } => {
                         // Only allow pruning at or below the current floor
@@ -704,8 +704,9 @@ where
                             return;
                         }
 
-                        // Pruning finalized history can invalidate pending waiters.
-                        self.cancel_block_subscriptions();
+                        // Intentionally keep existing block subscriptions alive. Canceling
+                        // certify waiters here can split honest validators across views.
+
                     }
                 }
             },
@@ -1194,21 +1195,6 @@ where
                 subscriber.send_lossy(block.clone());
             }
         }
-    }
-
-    /// Cancel all active block subscriptions.
-    ///
-    /// This is used after floor/prune updates to avoid leaving waiters parked
-    /// for history that may no longer be retrievable.
-    fn cancel_block_subscriptions(&mut self) {
-        if self.block_subscriptions.is_empty() {
-            return;
-        }
-        debug!(
-            subscriptions = self.block_subscriptions.len(),
-            "canceling block subscriptions after floor/prune update"
-        );
-        self.block_subscriptions.clear();
     }
 
     // -------------------- Application Dispatch --------------------

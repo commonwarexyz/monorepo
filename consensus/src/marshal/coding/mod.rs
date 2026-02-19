@@ -173,16 +173,6 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_subscribe_canceled_on_floor_update() {
-        harness::subscribe_canceled_on_floor_update::<CodingHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_coding_subscribe_canceled_on_prune() {
-        harness::subscribe_canceled_on_prune::<CodingHarness>();
-    }
-
-    #[test_traced("WARN")]
     fn test_coding_subscribe_blocks_from_different_sources() {
         harness::subscribe_blocks_from_different_sources::<CodingHarness>();
     }

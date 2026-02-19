@@ -134,16 +134,6 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_subscribe_canceled_on_floor_update() {
-        harness::subscribe_canceled_on_floor_update::<StandardHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_subscribe_canceled_on_prune() {
-        harness::subscribe_canceled_on_prune::<StandardHarness>();
-    }
-
-    #[test_traced("WARN")]
     fn test_standard_subscribe_blocks_from_different_sources() {
         harness::subscribe_blocks_from_different_sources::<StandardHarness>();
     }
