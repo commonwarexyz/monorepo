@@ -210,6 +210,9 @@ pub struct Config {
     /// loop. This is useful to prevent starvation if some task never yields.
     cycle: Duration,
 
+    /// Time the runtime starts at.
+    start_time: SystemTime,
+
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
@@ -246,6 +249,7 @@ impl Config {
         Self {
             rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
+            start_time: UNIX_EPOCH,
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
@@ -273,6 +277,11 @@ impl Config {
     /// See [Config]
     pub const fn with_cycle(mut self, cycle: Duration) -> Self {
         self.cycle = cycle;
+        self
+    }
+    /// See [Config]
+    pub const fn with_start_time(mut self, start_time: SystemTime) -> Self {
+        self.start_time = start_time;
         self
     }
     /// See [Config]
@@ -310,6 +319,10 @@ impl Config {
     /// See [Config]
     pub const fn cycle(&self) -> Duration {
         self.cycle
+    }
+    /// See [Config]
+    pub const fn start_time(&self) -> SystemTime {
+        self.start_time
     }
     /// See [Config]
     pub const fn timeout(&self) -> Option<Duration> {
@@ -909,7 +922,7 @@ impl Context {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let start_time = UNIX_EPOCH;
+        let start_time = cfg.start_time;
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
@@ -1919,6 +1932,28 @@ mod tests {
             assert_eq!(
                 context.current().duration_since(UNIX_EPOCH).unwrap(),
                 Duration::ZERO
+            );
+        });
+    }
+
+    #[test]
+    fn test_start_time() {
+        // Initialize runtime with default config
+        let executor_default = deterministic::Runner::default();
+        executor_default.start(|context| async move {
+            assert_eq!(context.current(), UNIX_EPOCH);
+        });
+
+        // Initialize runtime with custom start time
+        let start_time = UNIX_EPOCH + Duration::from_secs(100);
+        let cfg = Config::default().with_start_time(start_time);
+        let executor = deterministic::Runner::new(cfg);
+
+        executor.start(move |context| async move {
+            // Check that the time matches the custom start time
+            assert_eq!(
+                context.current(),
+                start_time
             );
         });
     }
