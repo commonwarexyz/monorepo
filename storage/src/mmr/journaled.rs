@@ -906,11 +906,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()`.
     /// - Returns [Error::Empty] if the provable range would be empty.
     ///
-    /// # Warning
+    /// # Warnings
     ///
-    /// - Holding a prover will block `pop()` and `merkleize()`, but `add` can proceed concurrently.
-    /// - If the MMR isn't fully merkleized for the requested historical state, the MMR will be
-    ///   merkleized to the current tip before returning. This can be CPU intensive.
+    /// - Holding a prover will block `pop()` and `merkleize()`, but `add()` can proceed
+    ///   concurrently.
+    /// - If the MMR isn't fully merkleized for the requested historical state (`leaves >
+    ///   merkleized_leaves()`), the MMR will be merkleized to the current tip before returning.
+    ///   This can be CPU intensive.
     pub fn prover(
         &self,
         hasher: &mut impl Hasher<Digest = D>,
@@ -956,11 +958,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         }
     }
 
-    /// Add an element to the MMR and return its position in the MMR. Elements added to the MMR
-    /// aren't persisted to disk until `sync` is called.
+    /// Add an element to the MMR and return its position in the MMR.
     ///
-    /// This method takes `&self` so appends can proceed while immutable historical provers exist.
-    /// Destructive operations such as `pop` and `prune` still require `&mut self`.
+    /// # Warnings
+    ///
+    /// - Added nodes are not guaranteed to be durable until the MMR is merkelized and a `sync` call
+    ///   succeeds.
+    /// - Memory usage grows by O(log2(n)) with each node added until data is flushed to disk by
+    ///   `sync`.
     pub fn add(&self, h: &mut impl Hasher<Digest = D>, element: &[u8]) -> Result<Position, Error> {
         Ok(self.inner.write().mem_mmr.add(h, element))
     }
