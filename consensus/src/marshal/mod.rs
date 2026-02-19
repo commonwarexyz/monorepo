@@ -1223,6 +1223,202 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_reject_stale_block_delivery_after_floor_update() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(0xBADC0DE)
+                .with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), Some(1));
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let victim = participants[0].clone();
+            let attacker = participants[1].clone();
+            let peers = vec![victim.clone(), attacker.clone()];
+
+            let mut manager = oracle.manager();
+            manager.track(0, peers.clone().try_into().unwrap()).await;
+
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let init_marshal = |label: &str, validator: K, scheme: S| {
+                let ctx = context.with_label(label);
+                let partition_prefix = format!("stale-floor-{validator}");
+                let page_cache = page_cache.clone();
+                let control = oracle.control(validator.clone());
+                let oracle_manager = oracle.manager();
+                async move {
+                    let provider = ConstantProvider::new(scheme);
+                    let config = Config {
+                        provider,
+                        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                        mailbox_size: 100,
+                        view_retention_timeout: ViewDelta::new(10),
+                        max_repair: NZUsize!(10),
+                        max_pending_acks: NZUsize!(1),
+                        block_codec_config: (),
+                        partition_prefix: partition_prefix.clone(),
+                        prunable_items_per_section: NZU64!(10),
+                        replay_buffer: NZUsize!(1024),
+                        key_write_buffer: NZUsize!(1024),
+                        value_write_buffer: NZUsize!(1024),
+                        page_cache: page_cache.clone(),
+                        strategy: Sequential,
+                    };
+
+                    let backfill = control.register(0, TEST_QUOTA).await.unwrap();
+                    let resolver_cfg = resolver::Config {
+                        public_key: validator.clone(),
+                        provider: oracle_manager,
+                        blocker: control.clone(),
+                        mailbox_size: config.mailbox_size,
+                        initial: Duration::from_secs(1),
+                        timeout: Duration::from_secs(2),
+                        fetch_retry_timeout: Duration::from_millis(100),
+                        priority_requests: false,
+                        priority_responses: false,
+                    };
+                    let resolver = resolver::init(&ctx, resolver_cfg, backfill);
+
+                    let (broadcast_engine, buffer) = buffered::Engine::new(
+                        ctx.clone(),
+                        buffered::Config {
+                            public_key: validator.clone(),
+                            mailbox_size: config.mailbox_size,
+                            deque_size: 10,
+                            priority: false,
+                            codec_config: (),
+                        },
+                    );
+                    let network = control.register(1, TEST_QUOTA).await.unwrap();
+                    broadcast_engine.start(network);
+
+                    let finalizations_by_height = prunable::Archive::init(
+                        ctx.with_label("finalizations_by_height"),
+                        prunable::Config {
+                            translator: EightCap,
+                            key_partition: format!(
+                                "{}-finalizations-by-height-key",
+                                partition_prefix
+                            ),
+                            key_page_cache: page_cache.clone(),
+                            value_partition: format!(
+                                "{}-finalizations-by-height-value",
+                                partition_prefix
+                            ),
+                            compression: None,
+                            codec_config: S::certificate_codec_config_unbounded(),
+                            items_per_section: NZU64!(10),
+                            key_write_buffer: config.key_write_buffer,
+                            value_write_buffer: config.value_write_buffer,
+                            replay_buffer: config.replay_buffer,
+                        },
+                    )
+                    .await
+                    .expect("failed to initialize finalizations by height archive");
+
+                    let finalized_blocks = prunable::Archive::init(
+                        ctx.with_label("finalized_blocks"),
+                        prunable::Config {
+                            translator: EightCap,
+                            key_partition: format!("{}-finalized-blocks-key", partition_prefix),
+                            key_page_cache: page_cache.clone(),
+                            value_partition: format!("{}-finalized-blocks-value", partition_prefix),
+                            compression: None,
+                            codec_config: config.block_codec_config,
+                            items_per_section: NZU64!(10),
+                            key_write_buffer: config.key_write_buffer,
+                            value_write_buffer: config.value_write_buffer,
+                            replay_buffer: config.replay_buffer,
+                        },
+                    )
+                    .await
+                    .expect("failed to initialize finalized blocks archive");
+
+                    let (actor, mailbox, _processed_height) = actor::Actor::init(
+                        ctx.clone(),
+                        finalizations_by_height,
+                        finalized_blocks,
+                        config,
+                    )
+                    .await;
+                    actor.start(Application::<B>::default(), buffer, resolver);
+                    mailbox
+                }
+            };
+
+            let mut victim_mailbox =
+                init_marshal("victim", victim.clone(), schemes[0].clone()).await;
+            let mut attacker_mailbox =
+                init_marshal("attacker", attacker.clone(), schemes[1].clone()).await;
+
+            setup_network_links(&mut oracle, &peers, LINK).await;
+            oracle
+                .remove_link(attacker.clone(), victim.clone())
+                .await
+                .unwrap();
+
+            let stale_height = Height::new(5);
+            let round = Round::new(Epoch::zero(), View::new(stale_height.get()));
+            let stale_block = make_block(Sha256::hash(b"stale-parent"), stale_height, 5);
+            let commitment = stale_block.commitment();
+
+            attacker_mailbox.proposed(round, stale_block.clone()).await;
+            attacker_mailbox.verified(round, stale_block).await;
+
+            let proposal = Proposal {
+                round,
+                parent: View::new(stale_height.get() - 1),
+                payload: commitment,
+            };
+            let finalization = make_finalization(proposal, &schemes, QUORUM);
+            victim_mailbox
+                .report(Activity::Finalization(finalization))
+                .await;
+
+            // Allow the block request to be issued while responses are still blocked.
+            context.sleep(Duration::from_millis(500)).await;
+
+            let floor = Height::new(10);
+            victim_mailbox.set_floor(floor).await;
+
+            // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
+            // has been processed before re-enabling delayed deliveries.
+            let _ = victim_mailbox.get_finalization(floor).await;
+
+            oracle
+                .add_link(attacker.clone(), victim.clone(), LINK)
+                .await
+                .unwrap();
+            context.sleep(Duration::from_secs(3)).await;
+
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                !blocked
+                    .iter()
+                    .any(|(blocker, blocked)| blocker == &victim && blocked == &attacker),
+                "stale delivery below floor must not block the serving peer"
+            );
+
+            assert!(
+                victim_mailbox.get_block(stale_height).await.is_none(),
+                "stale block below floor must not be persisted"
+            );
+            assert!(
+                victim_mailbox
+                    .get_finalization(stale_height)
+                    .await
+                    .is_none(),
+                "stale finalization below floor must not be persisted"
+            );
+        })
+    }
+
+    #[test_traced("WARN")]
     fn test_subscribe_basic_block_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {

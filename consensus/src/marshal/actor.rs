@@ -794,6 +794,16 @@ where
 
                 // Persist the block, also storing the finalization if we have it
                 let height = block.height();
+                if height <= self.last_processed_height {
+                    debug!(
+                        %height,
+                        floor = %self.last_processed_height,
+                        "dropping block delivery at or below processed height floor"
+                    );
+                    // Stale due to local floor/pruning. Do not treat as invalid peer data.
+                    response.send_lossy(true);
+                    return false;
+                }
                 let finalization = self.cache.get_finalization_for(commitment).await;
                 self.store_finalization(height, commitment, block, finalization, application)
                     .await;
@@ -1208,6 +1218,16 @@ where
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
     ) {
+        if height <= self.last_processed_height {
+            debug!(
+                %height,
+                floor = %self.last_processed_height,
+                ?commitment,
+                "dropping finalization at or below processed height floor"
+            );
+            return;
+        }
+
         self.notify_subscribers(commitment, &block);
 
         // Extract round before finalization is moved into try_join
