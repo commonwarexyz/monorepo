@@ -91,7 +91,10 @@ use crate::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::metrics::histogram::{Buckets, Timed},
+    Clock, Metrics, Spawner,
+};
 use commonware_utils::{
     channel::{
         fallible::OneshotExt,
@@ -168,8 +171,7 @@ where
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         use prometheus_client::metrics::histogram::Histogram;
 
-        let build_histogram =
-            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
+        let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",

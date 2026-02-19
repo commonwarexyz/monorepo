@@ -104,7 +104,10 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_parallel::Strategy;
-use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    telemetry::metrics::histogram::{Buckets, Timed},
+    Clock, Metrics, Spawner, Storage,
+};
 use commonware_utils::{
     channel::{
         fallible::OneshotExt,
@@ -218,8 +221,7 @@ where
 
         let clock = Arc::new(context.clone());
 
-        let build_histogram =
-            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
+        let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "build_duration",
             "Histogram of time taken for the application to build a new block, in seconds",
@@ -227,8 +229,7 @@ where
         );
         let build_duration = Timed::new(build_histogram, clock.clone());
 
-        let verify_histogram =
-            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
+        let verify_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "verify_duration",
             "Histogram of time taken for the application to verify a block, in seconds",
@@ -236,8 +237,7 @@ where
         );
         let verify_duration = Timed::new(verify_histogram, clock.clone());
 
-        let parent_fetch_histogram =
-            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
+        let parent_fetch_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "parent_fetch_duration",
             "Histogram of time taken to fetch a parent block in proposal, in seconds",
@@ -245,8 +245,7 @@ where
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram, clock.clone());
 
-        let erasure_histogram =
-            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
+        let erasure_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a block, in seconds",

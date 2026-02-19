@@ -1,6 +1,6 @@
 //! Metrics for the shard engine.
 
-use commonware_runtime::Metrics as MetricsTrait;
+use commonware_runtime::{telemetry::metrics::histogram::Buckets, Metrics as MetricsTrait};
 use commonware_utils::Array;
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -40,8 +40,7 @@ pub struct ShardMetrics {
 impl ShardMetrics {
     /// Create and register metrics with the given context.
     pub fn new(context: &impl MetricsTrait) -> Self {
-        let erasure_decode_duration =
-            Histogram::new([0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]);
+        let erasure_decode_duration = Histogram::new(Buckets::LOCAL);
         let reconstructed_blocks_cache_count = Gauge::default();
         let reconstruction_states_count = Gauge::default();
         let shards_received = Family::<Peer, Counter>::default();
