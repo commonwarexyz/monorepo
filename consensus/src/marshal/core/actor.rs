@@ -860,11 +860,6 @@ where
             resolver
                 .fetch(Request::<V::Commitment>::Notarized { round })
                 .await;
-        } else if let BlockSubscriptionKey::Commitment(commitment) = key {
-            // Without a round hint, fetch by commitment directly to prevent
-            // commitment-scoped subscriptions from stalling indefinitely.
-            debug!(?commitment, ?digest, "requested block missing without round hint");
-            resolver.fetch(Request::<V::Commitment>::Block(commitment)).await;
         }
 
         // Register subscriber.
