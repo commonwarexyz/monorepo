@@ -10,6 +10,7 @@ pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
+    network::ByzantineFirstReceiver,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{link_peers, register, Action, Partition},
 };
@@ -166,7 +167,7 @@ impl Arbitrary<'_> for FuzzInput {
         let fault_rounds_bound = u.int_in_range(1..=required_containers)?;
         let max_fault_rounds = fault_rounds_bound / FAULT_INJECTION_RATIO;
         let min_fault_rounds = MIN_NUMBER_OF_FAULTS.min(fault_rounds_bound);
-        let fault_rounds = u.int_in_range(0..=max_fault_rounds)?.max(min_fault_rounds);
+        let fault_rounds = u.int_in_range(min_fault_rounds..=max_fault_rounds)?;
         let strategy = match u.int_in_range(0..=9)? {
             0 => StrategyChoice::AnyScope,
             1 => StrategyChoice::FutureScope {
@@ -370,16 +371,16 @@ fn spawn_honest_validator_with_network<P: simplex::Simplex>(
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
     vote_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let elector = P::Elector::default();
@@ -452,7 +453,6 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
     channels: NetworkChannels,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     use crate::network::ByzantineFirstReceiver;
-
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
     let (certificate_sender, certificate_receiver) = certificate_network;
@@ -460,22 +460,22 @@ fn spawn_honest_validator_in_adversarial_network<P: simplex::Simplex>(
 
     let vote_router = byzantine_router.clone();
     let (vote_primary, vote_secondary) = vote_receiver
-        .split_with(context.with_label("byz_first_vote"), move |msg| {
+        .split_with(context.with_label("byzantine_first_vote"), move |msg| {
             vote_router.route(msg)
         });
     let vote_receiver = ByzantineFirstReceiver::new(vote_primary, vote_secondary);
 
     let certificate_router = byzantine_router.clone();
-    let (certificate_primary, certificate_secondary) = certificate_receiver
-        .split_with(context.with_label("byz_first_certificate"), move |msg| {
-            certificate_router.route(msg)
-        });
+    let (certificate_primary, certificate_secondary) = certificate_receiver.split_with(
+        context.with_label("byzantine_first_certificate"),
+        move |msg| certificate_router.route(msg),
+    );
     let certificate_receiver =
         ByzantineFirstReceiver::new(certificate_primary, certificate_secondary);
 
     let resolver_router = byzantine_router;
     let (resolver_primary, resolver_secondary) = resolver_receiver
-        .split_with(context.with_label("byz_first_resolver"), move |msg| {
+        .split_with(context.with_label("byzantine_first_resolver"), move |msg| {
             resolver_router.route(msg)
         });
     let resolver_receiver = ByzantineFirstReceiver::new(resolver_primary, resolver_secondary);
