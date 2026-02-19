@@ -220,7 +220,7 @@ where
                 let op_proof = self
                     .operation_proof(hasher, self.any.last_commit_loc)
                     .await?;
-                return Ok(super::ExclusionProof::Commit(op_proof, value));
+                Ok(super::ExclusionProof::Commit(op_proof, value))
             }
         }
     }
