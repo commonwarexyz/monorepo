@@ -213,12 +213,14 @@ where
             .with_label("deferred_verify")
             .with_attribute("round", context.round)
             .spawn(move |runtime_context| async move {
-                let (_, parent_digest) = context.parent;
+                let (parent_view, parent_digest) = context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
-                    // Parent digests can cross epoch boundaries, so avoid
-                    // encoding a potentially incorrect round hint here.
-                    None,
+                    // This context is produced by simplex for the active epoch, so
+                    // `(context.epoch(), parent_view)` is a trusted hint for parent
+                    // lookup. Epoch-boundary ancestry is represented via epoch
+                    // genesis in the current epoch's view space.
+                    Some(Round::new(context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                 )
@@ -361,12 +363,13 @@ where
             .with_label("propose")
             .with_attribute("round", consensus_context.round)
             .spawn(move |runtime_context| async move {
-                let (_, parent_digest) = consensus_context.parent;
+                let (parent_view, parent_digest) = consensus_context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
-                    // Parent digests can cross epoch boundaries, so avoid
-                    // encoding a potentially incorrect round hint here.
-                    None,
+                    // This context comes from simplex for the active epoch, so
+                    // `(consensus_context.epoch(), parent_view)` is a trusted
+                    // parent hint.
+                    Some(Round::new(consensus_context.epoch(), parent_view)),
                     &mut application,
                     &mut marshal,
                 )
@@ -721,6 +724,9 @@ where
 /// block. If the parent digest matches the genesis block, it returns the genesis block
 /// directly without querying the marshal. Otherwise, it subscribes to the marshal to await
 /// the parent block's availability.
+///
+/// `parent_round` is an optional resolver hint. Callers should only provide a hint when
+/// the source context is trusted/validated. Untrusted paths should pass `None`.
 ///
 /// Returns an error if the marshal subscription is cancelled.
 #[inline]
