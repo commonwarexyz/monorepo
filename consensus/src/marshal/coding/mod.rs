@@ -1641,6 +1641,9 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let coding_config_a = coding_config_for_participants(NUM_VALIDATORS as u16);
+            // Deliberately pick a different config to synthesize a second commitment
+            // over the same inner block digest. Normal protocol execution uses a single
+            // derived config per epoch.
             let coding_config_b = commonware_coding::Config {
                 minimum_shards: coding_config_a.minimum_shards.checked_add(1).unwrap(),
                 extra_shards: NZU16!(coding_config_a.extra_shards.get() - 1),

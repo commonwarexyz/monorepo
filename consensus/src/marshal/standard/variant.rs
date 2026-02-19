@@ -29,10 +29,12 @@ where
     type Commitment = <B as Digestible>::Digest;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
+        // Standard variant commitment is exactly the block digest.
         block.digest()
     }
 
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
+        // Trivial left-inverse: digest == commitment in this variant.
         commitment
     }
 

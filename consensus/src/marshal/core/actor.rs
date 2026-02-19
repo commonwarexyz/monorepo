@@ -1396,13 +1396,14 @@ where
 
         // Convert block to storage format
         let commitment = V::commitment(&block);
+        // Variant mapping rule (1): commitment_to_inner(commitment(block)) == block.digest().
         assert_eq!(
             V::commitment_to_inner(commitment),
             digest,
             "variant commitment_to_inner(commitment(block)) must equal block digest"
         );
         let finalization = finalization.map(|finalization| {
-            // Protocol invariant: for a given block digest in this variant, a valid
+            // Variant/protocol rule (2): for a given block digest in this variant, a valid
             // finalization payload must match `V::commitment(&block)`.
             //
             // This invariant comes from the `Variant` commitment mapping contract,

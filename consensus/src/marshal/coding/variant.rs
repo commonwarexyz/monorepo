@@ -30,10 +30,12 @@ impl<B: CertifiableBlock, C: CodingScheme, H: Hasher, P: PublicKey> Variant for 
     type Commitment = Commitment;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
+        // Commitment is deterministic from the coded block contents.
         block.commitment()
     }
 
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
+        // The inner digest is embedded in the coding commitment.
         commitment.block()
     }
 

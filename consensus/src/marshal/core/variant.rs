@@ -11,6 +11,11 @@
 //! 1. `commitment_to_inner(commitment(block)) == block.digest()`
 //! 2. For valid blocks in the same variant, equal digests imply equal commitments.
 //!
+//! Existing variants satisfy this as follows:
+//! - Standard: commitment is exactly the block digest.
+//! - Coding: commitment embeds the block digest plus deterministic coding metadata
+//!   derived from the same block.
+//!
 //! This allows digest-keyed caches (for example, cached finalizations) to safely recover the
 //! unique commitment for a block.
 //!
@@ -29,6 +34,10 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
+    ///
+    /// The `CertifiableBlock` bound here is for context recovery in deferred verification.
+    /// It does not define commitment uniqueness; that is defined by this trait's mapping
+    /// contract (`commitment` / `commitment_to_inner`).
     type Block: CertifiableBlock<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>
         + Clone;
