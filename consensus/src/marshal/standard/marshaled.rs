@@ -748,7 +748,7 @@ where
     } else {
         Either::Right(
             marshal
-                .subscribe_by_commitment(parent_round, parent_digest)
+                .subscribe_by_digest(parent_round, parent_digest)
                 .await,
         )
     }
