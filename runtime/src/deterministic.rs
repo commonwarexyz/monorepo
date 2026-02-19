@@ -1928,7 +1928,7 @@ mod tests {
         let executor2 = Runner::from(checkpoint);
         executor2.start(move |context| async move {
             assert_eq!(context.current(), time_before_recovery);
-            
+
             // Advance time further
             context.sleep(duration_to_sleep).await;
             assert_eq!(
@@ -1983,10 +1983,7 @@ mod tests {
 
         executor.start(move |context| async move {
             // Check that the time matches the custom start time
-            assert_eq!(
-                context.current(),
-                start_time
-            );
+            assert_eq!(context.current(), start_time);
         });
     }
 
