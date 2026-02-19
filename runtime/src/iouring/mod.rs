@@ -108,6 +108,9 @@ const TIMEOUT_WORK_ID: u64 = u64::MAX;
 /// Reserved ID for internal wake poll completions.
 const WAKE_WORK_ID: u64 = u64::MAX - 1;
 
+/// Max loop deferrals before forcing a submit in the wake fast path.
+const MAX_DEFER_LOOPS: usize = 2;
+
 /// Buffer for io_uring operations.
 ///
 /// The variant must match the operation type:
@@ -481,12 +484,9 @@ impl IoUringLoop {
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
 
-        // Hybrid flush policy for the wake-fast path:
-        // - flush immediately once a small batch is staged
-        // - otherwise allow a small number of deferrals for batching
+        // Wake fast path coalescing threshold: scale with ring size while
+        // keeping a small bounded window for predictable latency.
         let batch_threshold = (self.cfg.size / 32).clamp(1, 32) as usize;
-        let max_defer_loops = 2;
-
         let mut defer_loops = 0;
         loop {
             // Process available completions.
@@ -510,9 +510,9 @@ impl IoUringLoop {
             if self.waker.clear() {
                 if submissions == 0 {
                     defer_loops = 0;
-                } else if submissions >= batch_threshold || defer_loops >= max_defer_loops {
-                    // Submit staged SQEs to cap tail latency under steady
-                    // wakeups while still allowing small-batch coalescing.
+                } else if submissions >= batch_threshold || defer_loops >= MAX_DEFER_LOOPS {
+                    // Flush once enough SQEs are staged, or after bounded
+                    // deferrals to cap tail latency under steady wakeups.
                     ring.submit().expect("unable to submit to ring");
                     defer_loops = 0;
                 } else {
