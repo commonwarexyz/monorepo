@@ -319,14 +319,19 @@ impl Waker {
     /// The first caller in a burst flips `wake_pending` and writes to eventfd.
     /// Subsequent callers skip the syscall.
     fn wake(&self) {
-        if !self.inner.wake_pending.swap(true, Ordering::AcqRel) {
+        if self
+            .inner
+            .wake_pending
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
             self.signal();
         }
     }
 
     /// Clear and return the previous pending state.
     fn clear(&self) -> bool {
-        self.inner.wake_pending.swap(false, Ordering::AcqRel)
+        self.inner.wake_pending.swap(false, Ordering::Relaxed)
     }
 
     /// Consume wake notifications from the eventfd counter.
