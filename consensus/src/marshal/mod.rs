@@ -1230,6 +1230,7 @@ mod tests {
                 .with_timeout(Some(Duration::from_secs(120))),
         );
         runner.start(|mut context| async move {
+            // Build a two-node scenario: victim (prunes) and attacker (serves delayed backfill).
             let mut oracle = setup_network(context.clone(), Some(1));
             let Fixture {
                 participants,
@@ -1237,14 +1238,17 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
+            // Use two validators from the fixture for the attack path.
             let victim = participants[0].clone();
             let attacker = participants[1].clone();
             let peers = vec![victim.clone(), attacker.clone()];
 
+            // Track both peers in one manager set so resolver targeting has both candidates.
             let mut manager = oracle.manager();
             manager.track(0, peers.clone().try_into().unwrap()).await;
 
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            // Helper to bootstrap a marshal instance with prunable finalized archives.
             let init_marshal = |label: &str, validator: K, scheme: S| {
                 let ctx = context.with_label(label);
                 let partition_prefix = format!("stale-floor-{validator}");
@@ -1356,20 +1360,24 @@ mod tests {
             let mut attacker_mailbox =
                 init_marshal("attacker", attacker.clone(), schemes[1].clone()).await;
 
+            // Start with healthy connectivity, then cut attacker -> victim responses.
             setup_network_links(&mut oracle, &peers, LINK).await;
             oracle
                 .remove_link(attacker.clone(), victim.clone())
                 .await
                 .unwrap();
 
+            // Craft a block/finalization pair that will become stale after floor advancement.
             let stale_height = Height::new(5);
             let round = Round::new(Epoch::zero(), View::new(stale_height.get()));
             let stale_block = make_block(Sha256::hash(b"stale-parent"), stale_height, 5);
             let commitment = stale_block.commitment();
 
+            // Attacker has the data locally and is able to serve it once link is re-enabled.
             attacker_mailbox.proposed(round, stale_block.clone()).await;
             attacker_mailbox.verified(round, stale_block).await;
 
+            // Victim observes finalization first, which triggers resolver fetch for the missing block.
             let proposal = Proposal {
                 round,
                 parent: View::new(stale_height.get() - 1),
@@ -1383,6 +1391,7 @@ mod tests {
             // Allow the block request to be issued while responses are still blocked.
             context.sleep(Duration::from_millis(500)).await;
 
+            // Advance floor beyond stale height so any late delivery is below retained range.
             let floor = Height::new(10);
             victim_mailbox.set_floor(floor).await;
 
@@ -1390,12 +1399,14 @@ mod tests {
             // has been processed before re-enabling delayed deliveries.
             let _ = victim_mailbox.get_finalization(floor).await;
 
+            // Re-enable the delayed response path. Attacker can now deliver the stale block.
             oracle
                 .add_link(attacker.clone(), victim.clone(), LINK)
                 .await
                 .unwrap();
             context.sleep(Duration::from_secs(3)).await;
 
+            // Stale-but-valid delivery should not be considered Byzantine behavior.
             let blocked = oracle.blocked().await.unwrap();
             assert!(
                 !blocked
@@ -1404,6 +1415,7 @@ mod tests {
                 "stale delivery below floor must not block the serving peer"
             );
 
+            // The stale block/finalization pair must not be persisted below the active floor.
             assert!(
                 victim_mailbox.get_block(stale_height).await.is_none(),
                 "stale block below floor must not be persisted"
