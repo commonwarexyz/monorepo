@@ -273,7 +273,9 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
     commitment: C::Commitment,
     /// The coded shards.
     ///
-    /// These shards are optional to enable lazy construction.
+    /// These shards are optional to enable lazy construction. If the block is
+    /// constructed with [`Self::new_trusted`], the shards are computed lazily
+    /// via [`Self::shards`].
     shards: Option<Vec<C::StrongShard>>,
     /// Phantom data for the hasher.
     _hasher: PhantomData<H>,
