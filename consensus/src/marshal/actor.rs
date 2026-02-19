@@ -418,7 +418,8 @@ where
                 // Start with the ack that woke this `select_loop!` arm.
                 let mut pending = Some(self.pending_acks.complete_current(result));
                 loop {
-                    let (height, commitment, result) = pending.take().expect("pending ack must exist");
+                    let (height, commitment, result) =
+                        pending.take().expect("pending ack must exist");
                     match result {
                         Ok(()) => {
                             // Apply in-memory progress updates for this acknowledged block.
@@ -519,19 +520,21 @@ where
                         if let Some(block) = self.find_block(&buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
-                            self.store_finalization(
-                                height,
-                                commitment,
-                                block,
-                                Some(finalization),
-                                &mut application,
-                            )
-                            .await;
-                            let _ =
+                            if self
+                                .store_finalization(
+                                    height,
+                                    commitment,
+                                    block,
+                                    Some(finalization),
+                                    &mut application,
+                                )
+                                .await
+                            {
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
                                     .await;
-                            self.sync_finalized().await;
-                            debug!(?round, %height, "finalized block stored");
+                                self.sync_finalized().await;
+                                debug!(?round, %height, "finalized block stored");
+                            }
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
@@ -690,23 +693,26 @@ where
                         handler::Message::Produce { key, response } => {
                             produces.push((key, response));
                         }
-                        handler::Message::Deliver { key, value, response } => {
-                            needs_sync |= self.handle_deliver(
-                                key,
-                                value,
-                                response,
-                                &mut delivers,
-                                &mut application,
-                            ).await;
+                        handler::Message::Deliver {
+                            key,
+                            value,
+                            response,
+                        } => {
+                            needs_sync |= self
+                                .handle_deliver(
+                                    key,
+                                    value,
+                                    response,
+                                    &mut delivers,
+                                    &mut application,
+                                )
+                                .await;
                         }
                     }
                 }
 
                 // Batch verify and process all delivers
-                needs_sync |= self.verify_delivered(
-                    delivers,
-                    &mut application,
-                ).await;
+                needs_sync |= self.verify_delivered(delivers, &mut application).await;
 
                 // Attempt to fill gaps before handling produce requests (so
                 // we can serve data we just received)
@@ -721,9 +727,12 @@ where
                 }
 
                 // Handle produce requests in parallel
-                join_all(produces.into_iter().map(|(key, response)| {
-                    self.handle_produce(key, response, &buffer)
-                })).await;
+                join_all(
+                    produces
+                        .into_iter()
+                        .map(|(key, response)| self.handle_produce(key, response, &buffer)),
+                )
+                .await;
             },
         }
     }
@@ -795,11 +804,12 @@ where
                 // Persist the block, also storing the finalization if we have it
                 let height = block.height();
                 let finalization = self.cache.get_finalization_for(commitment).await;
-                self.store_finalization(height, commitment, block, finalization, application)
+                let wrote = self
+                    .store_finalization(height, commitment, block, finalization, application)
                     .await;
                 debug!(?commitment, %height, "received block");
-                response.send_lossy(true);
-                true
+                response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
+                wrote
             }
             Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
@@ -959,15 +969,15 @@ where
                     let height = block.height();
                     debug!(?round, %height, "received finalization");
 
-                    self.store_finalization(
-                        height,
-                        block.commitment(),
-                        block,
-                        Some(finalization),
-                        application,
-                    )
-                    .await;
-                    wrote = true;
+                    wrote |= self
+                        .store_finalization(
+                            height,
+                            block.commitment(),
+                            block,
+                            Some(finalization),
+                            application,
+                        )
+                        .await;
                 }
                 PendingVerification::Notarized {
                     notarization,
@@ -986,15 +996,15 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                        self.store_finalization(
-                            height,
-                            commitment,
-                            block.clone(),
-                            Some(finalization),
-                            application,
-                        )
-                        .await;
-                        wrote = true;
+                        wrote |= self
+                            .store_finalization(
+                                height,
+                                commitment,
+                                block.clone(),
+                                Some(finalization),
+                                application,
+                            )
+                            .await;
                     }
 
                     // Cache the notarization and block
@@ -1207,7 +1217,20 @@ where
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-    ) {
+    ) -> bool {
+        // Blocks below the last processed height are not useful to us, so we ignore them (this
+        // has the nice byproduct of ensuring we don't call a backing store with a block below the
+        // pruning boundary)
+        if height <= self.last_processed_height {
+            debug!(
+                %height,
+                floor = %self.last_processed_height,
+                ?commitment,
+                "dropping finalization at or below processed height floor"
+            );
+            return false;
+        }
+
         self.notify_subscribers(commitment, &block);
 
         // Extract round before finalization is moved into try_join
@@ -1234,7 +1257,7 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and send tip update to application
+        // Update metrics and application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application
                 .report(Update::Tip(round, height, commitment))
@@ -1242,8 +1265,9 @@ where
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
-
         self.try_dispatch_blocks(application).await;
+
+        true
     }
 
     /// Get the latest finalized block information (height and commitment tuple).
@@ -1326,15 +1350,15 @@ where
                 let commitment = cursor.parent();
                 if let Some(block) = self.find_block(buffer, commitment).await {
                     let finalization = self.cache.get_finalization_for(commitment).await;
-                    self.store_finalization(
-                        block.height(),
-                        commitment,
-                        block.clone(),
-                        finalization,
-                        application,
-                    )
-                    .await;
-                    wrote = true;
+                    wrote |= self
+                        .store_finalization(
+                            block.height(),
+                            commitment,
+                            block.clone(),
+                            finalization,
+                            application,
+                        )
+                        .await;
                     debug!(height = %block.height(), "repaired block");
                     cursor = block;
                 } else {

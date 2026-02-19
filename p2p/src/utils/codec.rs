@@ -237,7 +237,7 @@ where
                     (peer, result)
                 });
                 decode_pool.push(handle);
-            }
+            },
         }
     }
 
