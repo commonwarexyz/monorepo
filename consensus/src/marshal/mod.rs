@@ -1230,7 +1230,8 @@ mod tests {
                 .with_timeout(Some(Duration::from_secs(120))),
         );
         runner.start(|mut context| async move {
-            // Build a two-node scenario: victim (prunes) and attacker (serves delayed backfill).
+            // Build a two-node race: requester advances floor while responder's
+            // backfill response is delayed.
             let mut oracle = setup_network(context.clone(), Some(1));
             let Fixture {
                 participants,
@@ -1238,10 +1239,10 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            // Use two validators from the fixture for the attack path.
-            let victim = participants[0].clone();
-            let attacker = participants[1].clone();
-            let peers = vec![victim.clone(), attacker.clone()];
+            // Use two validators from the fixture to model the delayed-delivery race.
+            let requester = participants[0].clone();
+            let responder = participants[1].clone();
+            let peers = vec![requester.clone(), responder.clone()];
 
             // Track both peers in one manager set so resolver targeting has both candidates.
             let mut manager = oracle.manager();
@@ -1355,15 +1356,15 @@ mod tests {
                 }
             };
 
-            let mut victim_mailbox =
-                init_marshal("victim", victim.clone(), schemes[0].clone()).await;
-            let mut attacker_mailbox =
-                init_marshal("attacker", attacker.clone(), schemes[1].clone()).await;
+            let mut requester_mailbox =
+                init_marshal("requester", requester.clone(), schemes[0].clone()).await;
+            let mut responder_mailbox =
+                init_marshal("responder", responder.clone(), schemes[1].clone()).await;
 
-            // Start with healthy connectivity, then cut attacker -> victim responses.
+            // Start with healthy connectivity, then delay responder -> requester deliveries.
             setup_network_links(&mut oracle, &peers, LINK).await;
             oracle
-                .remove_link(attacker.clone(), victim.clone())
+                .remove_link(responder.clone(), requester.clone())
                 .await
                 .unwrap();
 
@@ -1373,18 +1374,19 @@ mod tests {
             let stale_block = make_block(Sha256::hash(b"stale-parent"), stale_height, 5);
             let commitment = stale_block.commitment();
 
-            // Attacker has the data locally and is able to serve it once link is re-enabled.
-            attacker_mailbox.proposed(round, stale_block.clone()).await;
-            attacker_mailbox.verified(round, stale_block).await;
+            // Responder has the data locally and can serve it once the link is re-enabled.
+            responder_mailbox.proposed(round, stale_block.clone()).await;
+            responder_mailbox.verified(round, stale_block).await;
 
-            // Victim observes finalization first, which triggers resolver fetch for the missing block.
+            // Requester observes finalization first, which triggers resolver fetch
+            // for the missing block.
             let proposal = Proposal {
                 round,
                 parent: View::new(stale_height.get() - 1),
                 payload: commitment,
             };
             let finalization = make_finalization(proposal, &schemes, QUORUM);
-            victim_mailbox
+            requester_mailbox
                 .report(Activity::Finalization(finalization))
                 .await;
 
@@ -1393,15 +1395,15 @@ mod tests {
 
             // Advance floor beyond stale height so any late delivery is below retained range.
             let floor = Height::new(10);
-            victim_mailbox.set_floor(floor).await;
+            requester_mailbox.set_floor(floor).await;
 
             // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
             // has been processed before re-enabling delayed deliveries.
-            let _ = victim_mailbox.get_finalization(floor).await;
+            let _ = requester_mailbox.get_finalization(floor).await;
 
-            // Re-enable the delayed response path. Attacker can now deliver the stale block.
+            // Re-enable the delayed response path. Responder can now deliver the stale block.
             oracle
-                .add_link(attacker.clone(), victim.clone(), LINK)
+                .add_link(responder.clone(), requester.clone(), LINK)
                 .await
                 .unwrap();
             context.sleep(Duration::from_secs(3)).await;
@@ -1411,17 +1413,17 @@ mod tests {
             assert!(
                 !blocked
                     .iter()
-                    .any(|(blocker, blocked)| blocker == &victim && blocked == &attacker),
+                    .any(|(blocker, blocked)| blocker == &requester && blocked == &responder),
                 "stale delivery below floor must not block the serving peer"
             );
 
             // The stale block/finalization pair must not be persisted below the active floor.
             assert!(
-                victim_mailbox.get_block(stale_height).await.is_none(),
+                requester_mailbox.get_block(stale_height).await.is_none(),
                 "stale block below floor must not be persisted"
             );
             assert!(
-                victim_mailbox
+                requester_mailbox
                     .get_finalization(stale_height)
                     .await
                     .is_none(),
