@@ -50,7 +50,15 @@ use tracing::{info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
-const IOURING_NETWORK_SIZE: u32 = 1024;
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        // Use a smaller ring in tests to reduce `io_uring_setup` failures
+        // under parallel test load due to mlock/resource limits.
+        const IOURING_NETWORK_SIZE: u32 = 128;
+    } else {
+        const IOURING_NETWORK_SIZE: u32 = 1024;
+    }
+}
 
 #[derive(Debug)]
 struct Metrics {
