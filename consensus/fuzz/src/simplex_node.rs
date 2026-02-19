@@ -678,6 +678,15 @@ where
 
     async fn send_notarize_vote(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
+        self.send_notarize_vote_with_policy(signer_idx, proposal)
+            .await;
+    }
+
+    async fn send_notarize_vote_with_policy(
+        &mut self,
+        signer_idx: usize,
+        proposal: Proposal<Sha256Digest>,
+    ) {
         match self.context.gen_range(0..100u8) {
             // 94% - normal notarize vote
             0..=93 => {
@@ -704,7 +713,7 @@ where
             self.broadcast_payload_for_verify(signer_idx, &proposal)
                 .await;
         }
-        self.send_notarize_vote_for_proposal(signer_idx, proposal)
+        self.send_notarize_vote_with_policy(signer_idx, proposal)
             .await;
     }
 
