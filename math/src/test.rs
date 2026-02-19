@@ -123,7 +123,7 @@ impl Field for F {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let byte = u.arbitrary::<u8>()? % P;
@@ -236,7 +236,7 @@ impl CryptoGroup for G {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for G {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self::generator() * &u.arbitrary::<F>()?)

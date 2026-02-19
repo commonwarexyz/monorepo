@@ -39,7 +39,7 @@ impl core::fmt::Debug for F {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let x = u.arbitrary::<u64>()?;

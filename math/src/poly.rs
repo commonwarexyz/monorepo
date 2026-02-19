@@ -473,15 +473,19 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 mod impl_arbitrary {
     use super::*;
     use arbitrary::Arbitrary;
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            let first = u.arbitrary()?;
+            let rest: Vec<F> = u.arbitrary()?;
+            let mut coeffs = NonEmptyVec::new(first);
+            coeffs.extend(rest);
             Ok(Self {
-                coeffs: u.arbitrary()?,
+                coeffs,
             })
         }
     }
