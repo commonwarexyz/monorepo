@@ -17,12 +17,13 @@
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{simulated::SplitTarget, Message, Receiver};
+use commonware_utils::sync::Mutex;
 use rand::Rng;
 use rand_core::CryptoRngCore;
 use std::{
     collections::HashSet,
     fmt::{self, Debug},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 /// A filtering split-router that routes messages by origin public key.
@@ -59,7 +60,7 @@ impl<P: PublicKey, E: CryptoRngCore + Send + 'static> Router<P, E> {
     }
 
     fn should_drop_honest_message(&self) -> bool {
-        let mut context = self.context.lock().unwrap();
+        let mut context = self.context.lock();
         let sample = context.gen::<u8>() % 100;
         sample < self.honest_messages_drop_ratio
     }
