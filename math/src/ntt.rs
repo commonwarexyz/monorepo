@@ -337,7 +337,7 @@ impl IndexMut<(usize, usize)> for Matrix {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for Matrix {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let rows = u.int_in_range(1..=16)?;

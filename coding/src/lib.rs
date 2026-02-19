@@ -261,6 +261,7 @@ mod test {
     const MAX_SHARD_SIZE: usize = 1 << 31;
     const MAX_SHARDS: u16 = 32;
     const MAX_DATA: usize = 1024;
+    const MIN_EXTRA_SHARDS: u16 = 1;
 
     fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
         // Encode data into shards.
@@ -313,13 +314,10 @@ mod test {
         assert_eq!(decoded, data);
     }
 
-    fn generate_case(
-        u: &mut Unstructured<'_>,
-        min_extra: u16,
-    ) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
-        let min_extra = min_extra.clamp(1, MAX_SHARDS);
+    fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
         let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
-        let extra_shards = min_extra + (u.arbitrary::<u16>()? % (MAX_SHARDS - min_extra + 1));
+        let extra_shards =
+            MIN_EXTRA_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_EXTRA_SHARDS + 1));
         let total_shards = minimum_shards + extra_shards;
 
         let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);
@@ -373,14 +371,13 @@ mod test {
         roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
     }
 
-    // Reed-Solomon requires extra_shards >= 1 (i.e., total > min).
     #[test]
     fn minifuzz_roundtrip_reed_solomon() {
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
-                let (config, data, selected) = generate_case(u, 1)?;
+                let (config, data, selected) = generate_case(u)?;
                 roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
@@ -392,7 +389,7 @@ mod test {
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
-                let (config, data, selected) = generate_case(u, 1)?;
+                let (config, data, selected) = generate_case(u)?;
                 roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
@@ -404,7 +401,7 @@ mod test {
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
-                let (config, data, selected) = generate_case(u, 1)?;
+                let (config, data, selected) = generate_case(u)?;
                 roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
                 Ok(())
             });

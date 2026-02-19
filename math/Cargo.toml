@@ -43,6 +43,7 @@ commonware-utils.workspace = true
 rand_core.workspace = true
 
 [dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 rand.workspace = true
