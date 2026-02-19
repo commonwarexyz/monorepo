@@ -92,20 +92,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         &self,
         offset: u64,
         len: usize,
-        buf: impl Into<IoBufsMut> + Send,
+        bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let buf = buf.into();
+        let bufs = bufs.into();
         self.auditor.event(b"read_at_buf", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
             hasher.update(&len.to_be_bytes());
         });
-        self.inner.read_at_buf(offset, len, buf).await
+        self.inner.read_at_buf(offset, len, bufs).await
     }
 
-    async fn write_at(&self, offset: u64, buf: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = buf.into().coalesce();
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let buf = bufs.into().coalesce();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);

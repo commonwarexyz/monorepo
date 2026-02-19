@@ -703,6 +703,86 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_ack_pipeline_backlog_persists_on_restart() {
+        let runner = deterministic::Runner::new(
+            deterministic::Config::new()
+                .with_seed(0xA11CF)
+                .with_timeout(Some(Duration::from_secs(120))),
+        );
+        runner.start(|mut context| async move {
+            let mut oracle = setup_network(context.clone(), None);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let validator = participants[0].clone();
+            let application = Application::<B>::manual_ack();
+            let (application, mut actor, _processed_height) = setup_validator_with(
+                context.with_label("validator_0"),
+                &mut oracle,
+                validator.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                application,
+            )
+            .await;
+
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = Sha256::hash(b"");
+            for i in 1..=3 {
+                let block = make_block(parent, Height::new(i), i);
+                parent = block.digest();
+                let round = Round::new(
+                    epocher.containing(block.height()).unwrap().epoch(),
+                    View::new(i),
+                );
+                actor.verified(round, block.clone()).await;
+                let proposal = Proposal {
+                    round,
+                    parent: View::new(i.saturating_sub(1)),
+                    payload: block.digest(),
+                };
+                let finalization = make_finalization(proposal, &schemes, QUORUM);
+                actor.report(Activity::Finalization(finalization)).await;
+            }
+
+            while application.pending_ack_heights().len() < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(1), Height::new(2), Height::new(3)]
+            );
+
+            // Acknowledge all pending blocks without yielding so marshal can
+            // drain them in one ack arm and then sync metadata once.
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+            assert_eq!(application.acknowledge_next(), Some(Height::new(2)));
+            assert_eq!(application.acknowledge_next(), Some(Height::new(3)));
+
+            // Yield to marshal
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Assert that the application has processed up to height 3.
+            assert_eq!(application.tip().unwrap().0, Height::new(3));
+
+            // Restart marshal and confirm the processed height restored from metadata.
+            let (_restart_application, _restart_actor, restart_height) = setup_validator_with(
+                context.with_label("validator_0_restart"),
+                &mut oracle,
+                validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(3),
+                Application::manual_ack(),
+            )
+            .await;
+            assert_eq!(restart_height, Height::new(3));
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_sync_height_floor() {
         let runner = deterministic::Runner::new(
             deterministic::Config::new()
