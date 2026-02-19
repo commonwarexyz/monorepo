@@ -361,8 +361,9 @@ where
 
     /// Get a finalization from the prunable archive by block digest.
     ///
-    /// Protocol invariant: in valid executions, a block digest maps to exactly one
-    /// consensus payload commitment for the active marshal variant.
+    /// Protocol invariant: for blocks/certificates admitted by marshal verification,
+    /// a block digest maps to exactly one consensus payload commitment for the active
+    /// marshal variant instance.
     ///
     /// This is the [`Variant`](crate::marshal::core::Variant) commitment mapping
     /// invariant, not a `CertifiableBlock` property.

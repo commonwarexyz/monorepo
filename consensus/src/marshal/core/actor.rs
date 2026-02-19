@@ -1403,8 +1403,9 @@ where
             "variant commitment_to_inner(commitment(block)) must equal block digest"
         );
         let finalization = finalization.map(|finalization| {
-            // Variant/protocol rule (2): for a given block digest in this variant, a valid
-            // finalization payload must match `V::commitment(&block)`.
+            // Variant/protocol rule (2): for blocks/certificates admitted by marshal
+            // verification in this variant instance, a given block digest has a unique
+            // commitment, so finalization payload must match `V::commitment(&block)`.
             //
             // This invariant comes from the `Variant` commitment mapping contract,
             // not from `CertifiableBlock`.

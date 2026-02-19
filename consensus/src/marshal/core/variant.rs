@@ -9,12 +9,16 @@
 //! Marshal relies on a commitment mapping invariant provided by [`Variant`]:
 //!
 //! 1. `commitment_to_inner(commitment(block)) == block.digest()`
-//! 2. For valid blocks in the same variant, equal digests imply equal commitments.
+//! 2. For blocks accepted by marshal in the same variant instance, equal digests imply
+//!    equal commitments.
 //!
 //! Existing variants satisfy this as follows:
 //! - Standard: commitment is exactly the block digest.
 //! - Coding: commitment embeds the block digest plus deterministic coding metadata
 //!   derived from the same block.
+//!
+//! "Accepted by marshal" means the proposal/certificate passed the variant's verification
+//! invariants for this marshal instance (for example, coding config/context checks).
 //!
 //! This allows digest-keyed caches (for example, cached finalizations) to safely recover the
 //! unique commitment for a block.
@@ -66,8 +70,10 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Extracts the block digest from a consensus commitment.
     ///
-    /// For valid blocks in this variant, the digest must uniquely determine the commitment.
-    /// In other words, there should not be two valid commitments with the same inner digest.
+    /// For blocks/certificates accepted by marshal in this variant instance, the digest
+    /// must uniquely determine the commitment.
+    /// In other words, there should not be two accepted commitments with the same
+    /// inner digest.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Converts a working block to an application block.
