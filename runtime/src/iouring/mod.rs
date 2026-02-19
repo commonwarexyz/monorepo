@@ -167,8 +167,8 @@ pub struct Metrics {
     /// Number of operations submitted to the io_uring whose CQEs haven't
     /// yet been processed. Note this metric doesn't include timeouts,
     /// which are generated internally by the io_uring event loop.
-    /// It's only updated before `submit_and_wait` is called, so it may
-    /// temporarily vary from the actual number of pending operations.
+    /// This is updated in the main loop and at shutdown drain exit, so it may
+    /// temporarily vary from the exact in-flight count between update points.
     pending_operations: Gauge,
 }
 
@@ -505,8 +505,8 @@ impl IoUringLoop {
 
             self.metrics.pending_operations.set(self.waiters.len() as _);
 
-            // If producers queued more work since our last channel drain, loop
-            // again without blocking.
+            // If a producer signaled wake since the last clear, loop again
+            // without blocking.
             if self.waker.clear() {
                 if submissions == 0 {
                     defer_loops = 0;
