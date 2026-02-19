@@ -1907,6 +1907,38 @@ mod tests {
     }
 
     #[test]
+    fn test_recover_time_persists() {
+        // Initialize the first runtime
+        let executor = deterministic::Runner::default();
+        let duration_to_sleep = Duration::from_secs(10);
+
+        // Sleep for some time and recover the runtime
+        let (time_before_recovery, checkpoint) = executor.start_and_recover(|context| async move {
+            context.sleep(duration_to_sleep).await;
+            context.current()
+        });
+
+        // Check that the time advanced correctly before recovery
+        assert_eq!(
+            time_before_recovery.duration_since(UNIX_EPOCH).unwrap(),
+            duration_to_sleep
+        );
+
+        // Check that the time persists after recovery
+        let executor2 = Runner::from(checkpoint);
+        executor2.start(move |context| async move {
+            assert_eq!(context.current(), time_before_recovery);
+            
+            // Advance time further
+            context.sleep(duration_to_sleep).await;
+            assert_eq!(
+                context.current().duration_since(UNIX_EPOCH).unwrap(),
+                duration_to_sleep * 2
+            );
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "executor still has weak references")]
     fn test_context_return() {
         // Initialize runtime
