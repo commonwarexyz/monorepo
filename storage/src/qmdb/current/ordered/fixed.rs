@@ -790,6 +790,19 @@ pub mod test {
 
             let (db, _) = db.into_mutable().commit(None).await.unwrap();
             let db = db.into_merkleized().await.unwrap();
+
+            // After committing, the DB should be empty and we should be able to generate a proof.
+            let proof = db
+                .exclusion_proof(hasher.inner(), &Sha256::fill(0x00))
+                .await
+                .unwrap();
+            assert!(CleanCurrentTest::verify_exclusion_proof(
+                hasher.inner(),
+                &Sha256::fill(0x00),
+                &proof,
+                &db.root(),
+            ));
+
             db.destroy().await.unwrap();
         });
     }

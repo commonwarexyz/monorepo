@@ -197,11 +197,12 @@ where
                 (loc, key_data)
             }
             None => {
-                // The key is below all existing keys. Use the last CommitFloor
-                // to prove emptiness. The Commit proof variant requires the
+                // The DB is empty. Use the last CommitFloor to prove
+                // emptiness. The Commit proof variant requires the
                 // CommitFloor's floor to equal its own location (genuinely
                 // empty at commit time). If this doesn't hold (e.g. uncommitted
-                // deletes emptied the DB), we can't generate a valid proof.
+                // deletes emptied the DB), we can't generate a valid proof until
+                // the next commit.
                 let loc = self.any.last_commit_loc;
                 let op = self.any.log.reader().await.read(*loc).await?;
                 let Operation::CommitFloor(value, floor) = op else {
