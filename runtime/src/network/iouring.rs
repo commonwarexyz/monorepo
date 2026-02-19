@@ -296,11 +296,11 @@ impl Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, buf: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
+    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), crate::Error> {
         // Convert to contiguous IoBuf for io_uring send
         // (zero-copy if single buffer, copies if multiple)
         // TODO(#2705): Use writev to avoid this copy.
-        let mut buf = buf.into().coalesce_with_pool(&self.pool);
+        let mut buf = bufs.into().coalesce_with_pool(&self.pool);
         let mut bytes_sent = 0;
         let buf_len = buf.len();
 

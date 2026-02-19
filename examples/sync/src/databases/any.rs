@@ -34,13 +34,13 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
         mmr_journal_partition: "mmr-journal".into(),
         mmr_metadata_partition: "mmr-metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(1024),
+        mmr_write_buffer: NZUsize!(4096),
         log_journal_partition: "log-journal".into(),
         log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(1024),
+        log_write_buffer: NZUsize!(4096),
         translator: Translator::default(),
         thread_pool: None,
-        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
+        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
     }
 }
 
