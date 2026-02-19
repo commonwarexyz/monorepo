@@ -182,10 +182,9 @@ where
         verification::historical_range_proof(self, self.bounds.end, range).await
     }
 
-    /// Return the leaf bounds this prover can prove against.
-    ///
-    /// The upper bound is the requested historical size, and the lower bound is the earliest
-    /// provable leaf for that historical view, derived from the pruning boundary.
+    /// Return the `[start,end)` range of leaves over which proofs can be generated. The `end` bound
+    /// is the historical number of leaves used to generate this prover, and the `start` bound is
+    /// the earliest unpruned leaf.
     pub fn bounds(&self) -> Range<Location> {
         self.bounds.clone()
     }
@@ -233,24 +232,19 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
             }
             inner.pruned_to_pos
         };
-        let end_pos = Position::try_from(end_leaf)?;
-        if prune_pos >= end_pos {
-            return Err(Error::Empty);
-        }
 
         // Convert the pruning boundary to the location of the nearest unpruned leaf.
-        let start_size = PeakIterator::to_nearest_size(prune_pos);
-        let start_leaf = Location::try_from(start_size).unwrap_or_else(|_| {
-            // If a valid MMR size is not a leaf, then the value + 1 must be a leaf.
-            let start_pos = start_size + 1;
-            Location::try_from(start_pos).expect("size + 1 should always be a leaf")
-        });
-
-        if start_leaf >= end_leaf {
-            return Err(Error::Empty);
+        let end_pos = Position::try_from(end_leaf)?;
+        let mut start_pos = prune_pos;
+        while start_pos < end_pos {
+            // Loop guaranteed to terminate after log2(n) iterations.
+            if let Ok(loc) = Location::try_from(start_pos) {
+                return Ok(loc..end_leaf);
+            }
+            start_pos += 1;
         }
 
-        Ok(start_leaf..end_leaf)
+        Err(Error::Empty)
     }
 
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
@@ -286,7 +280,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
                     err = %digest.expect_err("digest is Err in else branch"),
                     "could not convert node from metadata bytes to digest"
                 );
-                return Err(Error::MissingNode(pos));
+                return Err(Error::DataCorrupted(
+                    "could not read digest at requested pos",
+                ));
             };
             return Ok(digest);
         }
@@ -730,7 +726,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         *self.inner.read().mem_mmr.root()
     }
 
-    /// Return a prover bound to the historical state when the MMR had `leaves` leaves.
+    /// Return a prover over the historical state when the MMR had `leaves` leaves.
     ///
     /// # Errors
     ///
@@ -903,7 +899,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         Location::try_from(size).expect("merkleized size should be valid")
     }
 
-    /// Return a prover bound to the historical state when the MMR had `leaves` leaves.
+    /// Return a prover over the historical state when the MMR had `leaves` leaves.
     ///
     /// # Errors
     ///
@@ -1113,23 +1109,21 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<D> for Prover<'_, 
             if position >= mem_bounds.start && position < mem_bounds.end {
                 return Ok(Some(*inner.mem_mmr.get_node_unchecked(position)));
             }
-
-            // If the requested node is pruned, return None.
-            if position < inner.pruned_to_pos {
-                return Ok(None);
-            }
         }
 
-        // Otherwise get the node from the journal. Since we've checked the pruning boundary above,
-        // we expect it to exist.
-        Ok(Some(
-            Mmr::<E, D, Dirty>::get_from_metadata_or_journal(
-                &self.mmr.metadata,
-                &self.mmr.journal,
-                position,
-            )
-            .await?,
-        ))
+        // Otherwise get the node from the metadata+journal. If it's missing it must be due to
+        // pruning, so we swallow MissingNode errors.
+        match Mmr::<E, D, Dirty>::get_from_metadata_or_journal(
+            &self.mmr.metadata,
+            &self.mmr.journal,
+            position,
+        )
+        .await
+        {
+            Ok(digest) => Ok(Some(digest)),
+            Err(Error::MissingNode(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -2730,6 +2724,67 @@ mod tests {
             ));
 
             mmr.merkleize(&mut hasher).destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journaled_mmr_prover_bounds_non_size_prune_excludes_pruned_leaves() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mmr = Mmr::init(
+                context.with_label("non_size_prune"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap()
+            .into_dirty();
+
+            for i in 0..16 {
+                mmr.add(&mut hasher, &test_digest(i)).unwrap();
+            }
+
+            let mut mmr = mmr.merkleize(&mut hasher);
+            let end = mmr.leaves();
+            let size = mmr.size();
+            let mut failures = Vec::new();
+            for raw_pos in 1..*size {
+                let prune_pos = Position::new(raw_pos);
+                mmr.prune_to_pos(prune_pos).await.unwrap();
+                let Ok(clean_prover) = mmr.prover(end) else {
+                    continue;
+                };
+                let bounds = clean_prover.bounds();
+                for loc_u64 in *bounds.start..*bounds.end {
+                    let loc = Location::new_unchecked(loc_u64);
+                    if let Err(err) = clean_prover.proof(loc).await {
+                        failures.push(format!(
+                            "clean prune_pos={prune_pos} loc={loc} bounds={bounds:?} err={err}"
+                        ));
+                    }
+                }
+
+                let dirty = mmr.into_dirty();
+                let dirty_prover = dirty.prover(&mut hasher, end).unwrap();
+                let dirty_bounds = dirty_prover.bounds();
+                for loc_u64 in *dirty_bounds.start..*dirty_bounds.end {
+                    let loc = Location::new_unchecked(loc_u64);
+                    if let Err(err) = dirty_prover.proof(loc).await {
+                        failures.push(format!(
+                            "dirty prune_pos={prune_pos} loc={loc} bounds={dirty_bounds:?} err={err}"
+                        ));
+                    }
+                }
+                mmr = dirty.merkleize(&mut hasher);
+            }
+
+            assert!(
+                failures.is_empty(),
+                "proof generation within prover bounds returned errors: {failures:?}"
+            );
+
+            mmr.destroy().await.unwrap();
         });
     }
 }
