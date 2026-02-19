@@ -51,7 +51,7 @@
 //! it.
 
 use arbitrary::Unstructured;
-use commonware_utils::{from_hex, hex};
+use commonware_utils::from_hex_formatted;
 use rand_chacha::ChaCha8Rng;
 use rand_core::{RngCore as _, SeedableRng};
 use std::{
@@ -102,8 +102,7 @@ impl Branch {
     }
 
     fn try_from_hex(s: &str) -> Option<Self> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        let bytes: [u8; 12] = from_hex(s)?.try_into().ok()?;
+        let bytes: [u8; 12] = from_hex_formatted(s)?.try_into().ok()?;
         let seed = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let thread = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let size = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
@@ -129,11 +128,11 @@ impl Branch {
 
 impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut bytes = [0u8; 12];
-        bytes[0..4].copy_from_slice(&self.seed.to_be_bytes());
-        bytes[4..8].copy_from_slice(&self.thread.to_be_bytes());
-        bytes[8..12].copy_from_slice(&self.size.to_be_bytes());
-        write!(f, "0x{}", hex(&bytes))
+        write!(
+            f,
+            "0x{:08x}{:08x}{:08x}",
+            self.seed, self.thread, self.size
+        )
     }
 }
 
