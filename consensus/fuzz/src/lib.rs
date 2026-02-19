@@ -2,6 +2,7 @@ pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
 pub mod network;
+pub mod scheme;
 pub mod simplex;
 pub mod simplex_node;
 pub mod strategy;
@@ -45,7 +46,7 @@ use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinPkCustomRandom, SimplexBls12381MinSig,
     SimplexBls12381MultisigMinPk, SimplexBls12381MultisigMinSig, SimplexEd25519,
-    SimplexEd25519CustomRoundRobin, SimplexSecp256r1,
+    SimplexEd25519CustomRoundRobin, SimplexId, SimplexSecp256r1,
 };
 use std::{
     collections::HashMap,

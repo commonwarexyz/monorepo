@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 commonware-codec.workspace = true
 commonware-consensus = { workspace = true, features = ["arbitrary", "fuzz"] }
 commonware-cryptography.workspace = true
@@ -153,6 +154,13 @@ bench = false
 [[bin]]
 name = "simplex_ed25519_node"
 path = "fuzz_targets/simplex_ed25519_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_id_node"
+path = "fuzz_targets/simplex_id_node.rs"
 test = false
 doc = false
 bench = false

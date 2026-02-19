@@ -1,3 +1,4 @@
+use crate::scheme as id_scheme;
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
     elector::{Config as ElectorConfig, Random, RoundRobin},
@@ -77,6 +78,21 @@ impl Simplex for SimplexEd25519 {
         n: u32,
     ) -> Fixture<Self::Scheme> {
         ed25519::fixture(context, namespace, n)
+    }
+}
+
+pub struct SimplexId;
+
+impl Simplex for SimplexId {
+    type Scheme = id_scheme::Scheme;
+    type Elector = RoundRobin;
+
+    fn fixture(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> Fixture<Self::Scheme> {
+        id_scheme::fixture(context, namespace, n)
     }
 }
 
