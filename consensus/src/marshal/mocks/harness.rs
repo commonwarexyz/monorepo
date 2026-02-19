@@ -44,7 +44,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
     Rng,
