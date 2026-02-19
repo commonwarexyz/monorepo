@@ -6,7 +6,7 @@ use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, M
 use commonware_storage::mmr::{
     journaled::{CleanMmr, Config, DirtyMmr, Mmr, SyncConfig},
     location::{Location, LocationRangeExt},
-    Position, StandardHasher as Standard,
+    Error, Position, StandardHasher as Standard,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -267,40 +267,74 @@ fn fuzz(input: FuzzInput) {
                     let start_loc = start_loc.clamp(0, u8::MAX - 1);
                     let end_loc = end_loc.clamp(start_loc + 1, u8::MAX) as u64;
                     let start_loc = start_loc as u64;
-
-                    // HistoricalRangeProof requires Clean MMR
                     let state = mmr;
-                    let mmr = match state {
-                        MmrState::Clean(m) => m,
-                        MmrState::Dirty(m) => m.merkleize(&mut hasher),
-                    };
-
-                    if mmr.leaves() > 0 {
-                        // Ensure the size represents a valid MMR structure
-                        let start_pos = Position::from(start_loc);
-                        if start_loc < mmr.leaves()
-                            && end_loc < mmr.leaves()
-                            && mmr.bounds().contains(&start_pos)
-                        {
-                            let range =
-                                Location::new(start_loc).unwrap()..Location::new(end_loc).unwrap();
-
-                            if let Ok(prover) = mmr.prover(mmr.leaves()) {
-                                if let Ok(historical_proof) =
-                                    prover.range_proof(range.clone()).await
+                    match state {
+                        MmrState::Clean(mmr) => {
+                            if mmr.leaves() > 0 {
+                                let start_pos = Position::from(start_loc);
+                                if start_loc < mmr.leaves()
+                                    && end_loc < mmr.leaves()
+                                    && mmr.bounds().contains(&start_pos)
                                 {
-                                    let root = mmr.root();
-                                    assert!(historical_proof.verify_range_inclusion(
-                                        &mut hasher,
-                                        &leaves[range.to_usize_range()],
-                                        Location::new(start_loc).unwrap(),
-                                        &root
-                                    ));
+                                    let range = Location::new(start_loc).unwrap()
+                                        ..Location::new(end_loc).unwrap();
+                                    if let Ok(historical_proof) = mmr
+                                        .historical_range_proof(mmr.leaves(), range.clone())
+                                        .await
+                                    {
+                                        let root = mmr.root();
+                                        assert!(historical_proof.verify_range_inclusion(
+                                            &mut hasher,
+                                            &leaves[range.to_usize_range()],
+                                            Location::new(start_loc).unwrap(),
+                                            &root
+                                        ));
+                                    }
                                 }
+                            }
+                            MmrState::Clean(mmr)
+                        }
+                        MmrState::Dirty(mmr) => {
+                            if mmr.leaves() > 0 {
+                                let start_pos = Position::from(start_loc);
+                                if start_loc < mmr.leaves()
+                                    && end_loc < mmr.leaves()
+                                    && mmr.bounds().contains(&start_pos)
+                                {
+                                    let leaves_count = mmr.leaves();
+                                    let range = Location::new(start_loc).unwrap()
+                                        ..Location::new(end_loc).unwrap();
+                                    match mmr
+                                        .historical_range_proof(leaves_count, range.clone())
+                                        .await
+                                    {
+                                        Err(Error::Unmerkleized) => {
+                                            let clean = mmr.merkleize(&mut hasher);
+                                            if let Ok(historical_proof) = clean
+                                                .historical_range_proof(leaves_count, range.clone())
+                                                .await
+                                            {
+                                                let root = clean.root();
+                                                assert!(historical_proof.verify_range_inclusion(
+                                                    &mut hasher,
+                                                    &leaves[range.to_usize_range()],
+                                                    Location::new(start_loc).unwrap(),
+                                                    &root
+                                                ));
+                                            }
+                                            MmrState::Clean(clean)
+                                        }
+                                        Err(_) => MmrState::Dirty(mmr),
+                                        Ok(_) => MmrState::Dirty(mmr),
+                                    }
+                                } else {
+                                    MmrState::Dirty(mmr)
+                                }
+                            } else {
+                                MmrState::Dirty(mmr)
                             }
                         }
                     }
-                    MmrState::Clean(mmr)
                 }
 
                 MmrJournaledOperation::Sync => {

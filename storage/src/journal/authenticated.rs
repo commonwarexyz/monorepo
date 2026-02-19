@@ -251,8 +251,7 @@ where
 
         let proof = self
             .mmr
-            .prover(historical_leaves)?
-            .range_proof(start_loc..end_loc)
+            .historical_range_proof(historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
