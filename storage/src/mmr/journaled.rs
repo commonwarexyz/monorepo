@@ -847,44 +847,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
-    /// Pop up to `leaves_to_pop` leaves from the in-mem MMR, stopping early if the MMR is empty or
-    /// has no more unpruned nodes.
-    ///
-    /// Returns the number of leaves that still need to be popped.
-    fn pop_cached_leaves(
-        inner: &mut Inner<D, Dirty>,
-        mut leaves_to_pop: usize,
-    ) -> Result<usize, Error> {
-        while leaves_to_pop > 0 {
-            match inner.mem_mmr.pop() {
-                Ok(_) => leaves_to_pop -= 1,
-                Err(ElementPruned(_)) => break,
-                Err(Empty) => break,
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(leaves_to_pop)
-    }
-
-    /// Compute the target MMR size after popping `leaves_to_pop` leaves.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::Empty] if there are less than `leaves_to_pop` leaves.
-    fn compute_rewind_target_size(
-        inner: &Inner<D, Dirty>,
-        leaves_to_pop: usize,
-    ) -> Result<Position, Error> {
-        let destination_leaf = inner
-            .mem_mmr
-            .leaves()
-            .checked_sub(leaves_to_pop as u64)
-            .ok_or(Error::Empty)?;
-
-        Ok(Position::try_from(destination_leaf).expect("valid leaf should convert to size"))
-    }
-
     /// Return the largest fully-merkleized historical size in leaves.
     pub fn merkleized_leaves(&self) -> Location {
         let size = self.inner.read().merkleized_size;
@@ -968,23 +930,22 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             let inner = self.inner.get_mut();
 
             // First pop as many leaves as possible from the in-memory MMR.
-            leaves_to_pop = match Self::pop_cached_leaves(inner, leaves_to_pop) {
-                Ok(remaining) => remaining,
-                Err(err) => {
-                    inner.merkleized_size =
-                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
-                    return Err(err);
+            while leaves_to_pop > 0 {
+                match inner.mem_mmr.pop() {
+                    Ok(_) => leaves_to_pop -= 1,
+                    Err(ElementPruned(_)) | Err(Empty) => break,
+                    Err(err) => return Err(err), // propagate unexpected errors
                 }
-            };
+            }
             if leaves_to_pop == 0 {
                 inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
                 return Ok(());
             }
 
-            // Pop remaining nodes from the journaled mmr.
-            let new_size = match Self::compute_rewind_target_size(inner, leaves_to_pop) {
-                Ok(new_size) => new_size,
-                Err(Error::Empty) => {
+            // Compute the rewind size for the remaining leaves to pop.
+            let destination_leaf = match inner.mem_mmr.leaves().checked_sub(leaves_to_pop as u64) {
+                Some(destination_leaf) => destination_leaf,
+                None => {
                     let pruned_to_pos = inner.pruned_to_pos;
                     inner.merkleized_size =
                         std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
@@ -994,12 +955,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
                         Error::ElementPruned(pruned_to_pos - 1)
                     });
                 }
-                Err(err) => {
-                    inner.merkleized_size =
-                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
-                    return Err(err);
-                }
             };
+            let new_size =
+                Position::try_from(destination_leaf).expect("valid leaf should convert to size");
 
             if new_size < inner.pruned_to_pos {
                 inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
