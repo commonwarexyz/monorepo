@@ -519,18 +519,19 @@ where
                         if let Some(block) = self.find_block(&buffer, commitment).await {
                             // If found, persist the block
                             let height = block.height();
-                            self.store_finalization(
-                                height,
-                                commitment,
-                                block,
-                                Some(finalization),
-                                &mut application,
-                            )
-                            .await;
-                            let _ =
+                            if self
+                                .store_finalization(
+                                    height,
+                                    commitment,
+                                    block,
+                                    Some(finalization),
+                                    &mut application,
+                                )
+                                .await {
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-                                    .await;
-                            self.sync_finalized().await;
+                                .await;
+                                self.sync_finalized().await;
+                            }
                             debug!(?round, %height, "finalized block stored");
                         } else {
                             // Otherwise, fetch the block from the network.
@@ -794,22 +795,13 @@ where
 
                 // Persist the block, also storing the finalization if we have it
                 let height = block.height();
-                if height <= self.last_processed_height {
-                    debug!(
-                        %height,
-                        floor = %self.last_processed_height,
-                        "dropping block delivery at or below processed height floor"
-                    );
-                    // Stale due to local floor/pruning. Do not treat as invalid peer data.
-                    response.send_lossy(true);
-                    return false;
-                }
                 let finalization = self.cache.get_finalization_for(commitment).await;
-                self.store_finalization(height, commitment, block, finalization, application)
+                let wrote = self
+                    .store_finalization(height, commitment, block, finalization, application)
                     .await;
                 debug!(?commitment, %height, "received block");
-                response.send_lossy(true);
-                true
+                response.send_lossy(true); // if a valid block is received, we should still send true (even if it was stale)
+                wrote
             }
             Request::Finalized { height } => {
                 let Some(bounds) = self.epocher.containing(height) else {
@@ -969,15 +961,15 @@ where
                     let height = block.height();
                     debug!(?round, %height, "received finalization");
 
-                    self.store_finalization(
-                        height,
-                        block.commitment(),
-                        block,
-                        Some(finalization),
-                        application,
-                    )
-                    .await;
-                    wrote = true;
+                    wrote |= self
+                        .store_finalization(
+                            height,
+                            block.commitment(),
+                            block,
+                            Some(finalization),
+                            application,
+                        )
+                        .await;
                 }
                 PendingVerification::Notarized {
                     notarization,
@@ -996,15 +988,15 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
-                        self.store_finalization(
-                            height,
-                            commitment,
-                            block.clone(),
-                            Some(finalization),
-                            application,
-                        )
-                        .await;
-                        wrote = true;
+                        wrote |= self
+                            .store_finalization(
+                                height,
+                                commitment,
+                                block.clone(),
+                                Some(finalization),
+                                application,
+                            )
+                            .await;
                     }
 
                     // Cache the notarization and block
@@ -1217,7 +1209,10 @@ where
         block: B,
         finalization: Option<Finalization<P::Scheme, B::Commitment>>,
         application: &mut impl Reporter<Activity = Update<B, A>>,
-    ) {
+    ) -> bool {
+        // Blocks below the last processed height are not useful to us, so we ignore them (this
+        // has the nice byproduct of ensuring we don't call a backing store with a block below the
+        // floor)
         if height <= self.last_processed_height {
             debug!(
                 %height,
@@ -1225,7 +1220,7 @@ where
                 ?commitment,
                 "dropping finalization at or below processed height floor"
             );
-            return;
+            return false;
         }
 
         self.notify_subscribers(commitment, &block);
@@ -1254,7 +1249,7 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and send tip update to application
+        // Update metrics and update application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application
                 .report(Update::Tip(round, height, commitment))
@@ -1262,8 +1257,9 @@ where
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
-
         self.try_dispatch_blocks(application).await;
+
+        true
     }
 
     /// Get the latest finalized block information (height and commitment tuple).
@@ -1346,15 +1342,15 @@ where
                 let commitment = cursor.parent();
                 if let Some(block) = self.find_block(buffer, commitment).await {
                     let finalization = self.cache.get_finalization_for(commitment).await;
-                    self.store_finalization(
-                        block.height(),
-                        commitment,
-                        block.clone(),
-                        finalization,
-                        application,
-                    )
-                    .await;
-                    wrote = true;
+                    wrote |= self
+                        .store_finalization(
+                            block.height(),
+                            commitment,
+                            block.clone(),
+                            finalization,
+                            application,
+                        )
+                        .await;
                     debug!(height = %block.height(), "repaired block");
                     cursor = block;
                 } else {
