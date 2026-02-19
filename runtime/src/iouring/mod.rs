@@ -681,23 +681,20 @@ impl IoUringLoop {
     /// - If `shutdown_timeout` is `Some`, this waits until all waiters complete
     ///   or the timeout elapses, then abandons any remaining waiters.
     fn drain(&mut self, ring: &mut IoUring) {
-        let deadline = self
-            .cfg
-            .shutdown_timeout
-            .and_then(|timeout| Instant::now().checked_add(timeout));
+        let mut remaining = self.cfg.shutdown_timeout;
 
         while !self.waiters.is_empty() {
-            let timeout =
-                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-
-            if timeout.is_some_and(|t| t.is_zero()) {
+            if remaining.is_some_and(|t| t.is_zero()) {
                 break;
             }
 
+            let start = Instant::now();
             let got_completion = self
-                .submit_and_wait(ring, 1, timeout)
+                .submit_and_wait(ring, 1, remaining)
                 .expect("unable to submit to ring");
 
+            // Always drain CQEs, even after timeout: completions can race with
+            // timeout expiry and still be pending in the queue
             for cqe in ring.completion() {
                 self.handle_cqe(cqe);
             }
@@ -705,6 +702,10 @@ impl IoUringLoop {
             if !got_completion {
                 // Shutdown timeout elapsed before all in-flight work completed.
                 break;
+            }
+
+            if let Some(remaining) = remaining.as_mut() {
+                *remaining = remaining.saturating_sub(start.elapsed());
             }
         }
 
