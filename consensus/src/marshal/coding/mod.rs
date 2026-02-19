@@ -1622,11 +1622,12 @@ mod tests {
         })
     }
 
+    #[should_panic(expected = "finalization payload must match block commitment")]
     #[test_traced("WARN")]
-    fn test_notarized_deliver_does_not_promote_mismatched_cached_finalization() {
-        // Regression: a cached finalization for digest->commitment A must not be
-        // promoted when a notarized delivery provides commitment B with the same
-        // inner block digest.
+    fn test_notarized_deliver_panics_on_mismatched_cached_finalization_invariant_violation() {
+        // Invariant test: we intentionally synthesize an impossible protocol state
+        // (cached finalization for commitment A, notarized delivery for commitment B
+        // with the same inner digest). Marshal should panic on this mismatch.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), Some(1));
@@ -1664,7 +1665,6 @@ mod tests {
                 .await;
 
             let mut v0_mailbox = v0_setup.mailbox;
-            let v0_application = v0_setup.application;
             let mut v1_mailbox = v1_setup.mailbox;
 
             let genesis_ctx = CodingCtx {
@@ -1716,21 +1716,10 @@ mod tests {
             CodingHarness::report_finalization(&mut v0_mailbox, finalization_a).await;
             context.sleep(Duration::from_millis(100)).await;
 
-            // Deliver notarization for commitment_b to validator 0. The notarized
-            // deliver path must not promote the cached finalization for commitment_a.
+            // Deliver notarization for commitment_b to validator 0. This must trip
+            // the commitment invariant assertion in `store_finalization`.
             CodingHarness::report_notarization(&mut v0_mailbox, notarization_b).await;
             context.sleep(Duration::from_secs(5)).await;
-
-            // No finalization should be archived by height for the mismatched pair.
-            assert!(
-                v0_mailbox.get_finalization(Height::new(1)).await.is_none(),
-                "mismatched cached finalization must not be promoted on notarized delivery"
-            );
-            // Tip advancement is the externally visible regression signal.
-            assert!(
-                v0_application.tip().is_none(),
-                "tip must not advance from mismatched promotion"
-            );
         })
     }
 }

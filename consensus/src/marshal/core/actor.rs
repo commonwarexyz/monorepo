@@ -1393,24 +1393,15 @@ where
 
         // Convert block to storage format
         let commitment = V::commitment(&block);
-        let finalization = finalization.and_then(|finalization| {
+        let finalization = finalization.map(|finalization| {
+            // Protocol invariant: for a given certifiable block digest, a valid
+            // finalization payload must match `V::commitment(&block)`.
             let payload = finalization.proposal.payload;
-            if payload == commitment {
-                Some(finalization)
-            } else {
-                // Defensive-only path: this should be unreachable under protocol
-                // invariants (finalization payload must match this block's commitment
-                // for the same digest). We do not panic here to avoid remote-triggered
-                // process abort on invariant violations.
-                warn!(
-                    %height,
-                    ?digest,
-                    block_commitment = ?commitment,
-                    finalization_commitment = ?payload,
-                    "dropping finalization with mismatched commitment"
-                );
-                None
-            }
+            assert_eq!(
+                payload, commitment,
+                "finalization payload must match block commitment"
+            );
+            finalization
         });
         let stored: V::StoredBlock = block.into();
         let round = finalization.as_ref().map(|f| f.round());
