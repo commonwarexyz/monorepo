@@ -100,7 +100,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// Reserved ID for a CQE that indicates an operation timed out.
@@ -628,31 +628,38 @@ impl IoUringLoop {
         false
     }
 
-    /// Perform a single shutdown wait/drain pass.
+    /// Drain in-flight operations during shutdown.
     ///
-    /// This waits once for up to the current pending operation count, then drains
-    /// currently available CQEs and returns. Remaining waiters, if any, are
-    /// abandoned as part of shutdown.
+    /// - If `shutdown_timeout` is `None`, this waits until all waiters complete.
+    /// - If `shutdown_timeout` is `Some`, this waits until all waiters complete
+    ///   or the timeout elapses, then abandons any remaining waiters.
     fn drain(&mut self, ring: &mut IoUring) {
-        if self.waiters.is_empty() {
-            return;
-        }
+        let deadline = self
+            .cfg
+            .shutdown_timeout
+            .map(|timeout| Instant::now() + timeout);
 
-        // When op_timeout is set, each operation uses 2 SQ entries
-        // (op + linked timeout).
-        let pending = if self.cfg.op_timeout.is_some() {
-            self.waiters.len() * 2
-        } else {
-            self.waiters.len()
-        };
+        while !self.waiters.is_empty() {
+            let timeout =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 
-        let _ = self
-            .submit_and_wait(ring, pending, self.cfg.shutdown_timeout)
-            .expect("unable to submit to ring");
+            if timeout.is_some_and(|t| t.is_zero()) {
+                break;
+            }
 
-        while let Some(cqe) = ring.completion().next() {
-            // No wake re-arm during shutdown drain
-            let _ = self.handle_cqe(cqe);
+            let got_completion = self
+                .submit_and_wait(ring, 1, timeout)
+                .expect("unable to submit to ring");
+
+            while let Some(cqe) = ring.completion().next() {
+                // No wake re-arm during shutdown drain.
+                let _ = self.handle_cqe(cqe);
+            }
+
+            if !got_completion {
+                // Shutdown timeout elapsed before all in-flight work completed.
+                break;
+            }
         }
     }
 
@@ -888,10 +895,10 @@ mod tests {
         // Drop submission channel to trigger io_uring shutdown
         drop(submitter);
 
-        // With single-pass shutdown draining, the loop may exit before this
-        // operation completes, dropping `tx`.
-        let err = rx.await.unwrap_err();
-        assert!(matches!(err, RecvError { .. }));
+        // With `shutdown_timeout = None`, shutdown waits until all in-flight
+        // operations complete.
+        let (result, _) = rx.await.unwrap();
+        assert_eq!(result, -libc::ETIME);
         handle.join().unwrap();
     }
 
