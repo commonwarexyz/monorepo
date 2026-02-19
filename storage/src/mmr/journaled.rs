@@ -48,15 +48,15 @@ pub type CleanMmr<E, D> = Mmr<E, D, Clean<D>>;
 
 /// Trait for valid journaled MMR type states.
 pub trait State<D: Digest>: MemState<D> + Send + Sync {
-    type MerkleizedSize: Send + Sync;
+    type Inner: InnerState<D, Self> + Send + Sync;
 }
 
 impl<D: Digest> State<D> for Dirty {
-    type MerkleizedSize = RwLock<Position>;
+    type Inner = DirtyInner<D>;
 }
 
 impl<D: Digest> State<D> for Clean<D> {
-    type MerkleizedSize = ();
+    type Inner = CleanInner<D>;
 }
 
 /// Configuration for a journal-backed MMR.
@@ -103,22 +103,63 @@ pub struct SyncConfig<D: Digest> {
     pub pinned_nodes: Option<Vec<D>>,
 }
 
-/// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
-struct Inner<D: Digest, S: State<D>> {
+/// Common accessors for state-specific [Mmr] inner state.
+pub trait InnerState<D: Digest, S: State<D>> {
+    fn mem_mmr(&self) -> &MemMmr<D, S>;
+    fn pruned_to_pos(&self) -> Position;
+}
+
+/// Fields of [CleanMmr] protected by an [RwLock] for interior mutability.
+pub struct CleanInner<D: Digest> {
     /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
     /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
     /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D, S>,
+    mem_mmr: MemMmr<D, Clean<D>>,
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
     pruned_to_pos: Position,
 }
 
+impl<D: Digest> InnerState<D, Clean<D>> for CleanInner<D> {
+    fn mem_mmr(&self) -> &MemMmr<D, Clean<D>> {
+        &self.mem_mmr
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        self.pruned_to_pos
+    }
+}
+
+/// Fields of [DirtyMmr] protected by an [RwLock] for interior mutability.
+pub struct DirtyInner<D: Digest> {
+    /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
+    /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
+    /// the journaled MMR's pruning boundary.
+    mem_mmr: MemMmr<D, Dirty>,
+
+    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
+    /// pruned.
+    pruned_to_pos: Position,
+
+    /// The historical size up to which this dirty MMR has been merkleized.
+    merkleized_size: Position,
+}
+
+impl<D: Digest> InnerState<D, Dirty> for DirtyInner<D> {
+    fn mem_mmr(&self) -> &MemMmr<D, Dirty> {
+        &self.mem_mmr
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        self.pruned_to_pos
+    }
+}
+
 /// A MMR backed by a fixed-item-length journal.
 pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
     /// Lock-protected mutable state.
-    inner: RwLock<Inner<D, S>>,
+    inner: RwLock<S::Inner>,
 
     /// Stores all unpruned MMR nodes.
     journal: Journal<E, D>,
@@ -133,11 +174,6 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest, S: State<D> = Dirty> {
 
     /// The thread pool to use for parallelization.
     pool: Option<ThreadPool>,
-
-    /// The historical size up to which the MMR has been merkleized.
-    ///
-    /// In [DirtyMmr] state this is a [`RwLock<Position>`]. In [CleanMmr] state this is `()`.
-    merkleized_size: S::MerkleizedSize,
 }
 
 /// A proof generator bound to a fixed historical MMR size in leaves.
@@ -195,15 +231,15 @@ impl<E: RStorage + Clock + Metrics, D: Digest> From<CleanMmr<E, D>> for DirtyMmr
         let inner = clean.inner.into_inner();
         let size = inner.mem_mmr.size();
         Self {
-            inner: RwLock::new(Inner {
+            inner: RwLock::new(DirtyInner {
                 mem_mmr: inner.mem_mmr.into(),
                 pruned_to_pos: inner.pruned_to_pos,
+                merkleized_size: size,
             }),
             journal: clean.journal,
             metadata: clean.metadata,
             sync_lock: clean.sync_lock,
             pool: clean.pool,
-            merkleized_size: RwLock::new(size),
         }
     }
 }
@@ -227,10 +263,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
         // Get the pruning boundary and ensure it doesn't leave us with an invalid range.
         let prune_pos = {
             let inner = self.inner.read();
-            if end_leaf > inner.mem_mmr.leaves() {
+            if end_leaf > inner.mem_mmr().leaves() {
                 return Err(Error::RangeOutOfBounds(end_leaf));
             }
-            inner.pruned_to_pos
+            inner.pruned_to_pos()
         };
 
         // Convert the pruning boundary to the location of the nearest unpruned leaf.
@@ -250,17 +286,17 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
-        self.inner.read().mem_mmr.size()
+        self.inner.read().mem_mmr().size()
     }
 
     /// Return the total number of leaves in the MMR.
     pub fn leaves(&self) -> Location {
-        self.inner.read().mem_mmr.leaves()
+        self.inner.read().mem_mmr().leaves()
     }
 
     /// Return the position of the last leaf in this MMR, or None if the MMR is empty.
     pub fn last_leaf_pos(&self) -> Option<Position> {
-        self.inner.read().mem_mmr.last_leaf_pos()
+        self.inner.read().mem_mmr().last_leaf_pos()
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -304,7 +340,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest, S: State<D>> Mmr<E, D, S> {
     /// retained nodes respectively.
     pub fn bounds(&self) -> std::ops::Range<Position> {
         let inner = self.inner.read();
-        inner.pruned_to_pos..inner.mem_mmr.size()
+        inner.pruned_to_pos()..inner.mem_mmr().size()
     }
 
     /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
@@ -360,7 +396,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 hasher,
             )?;
             return Ok(Self {
-                inner: RwLock::new(Inner {
+                inner: RwLock::new(CleanInner {
                     mem_mmr,
                     pruned_to_pos: Position::new(0),
                 }),
@@ -368,7 +404,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
                 metadata,
                 sync_lock: AsyncMutex::new(()),
                 pool: cfg.thread_pool,
-                merkleized_size: (),
             });
         }
 
@@ -475,7 +510,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         }
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: RwLock::new(CleanInner {
                 mem_mmr,
                 pruned_to_pos: prune_pos,
             }),
@@ -483,7 +518,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             metadata,
             sync_lock: AsyncMutex::new(()),
             pool: cfg.thread_pool,
-            merkleized_size: (),
         })
     }
 
@@ -584,7 +618,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
         journal.prune(*cfg.range.start).await?;
 
         Ok(Self {
-            inner: RwLock::new(Inner {
+            inner: RwLock::new(CleanInner {
                 mem_mmr,
                 pruned_to_pos: cfg.range.start,
             }),
@@ -592,7 +626,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
             metadata,
             sync_lock: AsyncMutex::new(()),
             pool: cfg.config.thread_pool,
-            merkleized_size: (),
         })
     }
 
@@ -847,24 +880,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest> CleanMmr<E, D> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
-    /// Clamp tracked merkleized size to at most `size`.
-    fn clamp_merkleized_size(&mut self, size: Position) {
-        let merkleized_size = self.merkleized_size.get_mut();
-        *merkleized_size = std::cmp::min(*merkleized_size, size);
-    }
-
-    /// Clamp tracked merkleized size to the current in-memory MMR size.
-    fn clamp_merkleized_to_mem_size(&mut self) {
-        let size = self.inner.get_mut().mem_mmr.size();
-        self.clamp_merkleized_size(size);
-    }
-
     /// Pop up to `leaves_to_pop` leaves from the in-mem MMR, stopping early if the MMR is empty or
     /// has no more unpruned nodes.
     ///
     /// Returns the number of leaves that still need to be popped.
-    fn pop_cached_leaves(&mut self, mut leaves_to_pop: usize) -> Result<usize, Error> {
-        let inner = self.inner.get_mut();
+    fn pop_cached_leaves(
+        inner: &mut DirtyInner<D>,
+        mut leaves_to_pop: usize,
+    ) -> Result<usize, Error> {
         while leaves_to_pop > 0 {
             match inner.mem_mmr.pop() {
                 Ok(_) => leaves_to_pop -= 1,
@@ -882,8 +905,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     /// # Errors
     ///
     /// Returns [Error::Empty] if there are less than `leaves_to_pop` leaves.
-    fn compute_rewind_target_size(&mut self, leaves_to_pop: usize) -> Result<Position, Error> {
-        let inner = self.inner.get_mut();
+    fn compute_rewind_target_size(
+        inner: &DirtyInner<D>,
+        leaves_to_pop: usize,
+    ) -> Result<Position, Error> {
         let destination_leaf = inner
             .mem_mmr
             .leaves()
@@ -895,7 +920,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
     /// Return the largest fully-merkleized historical size in leaves.
     pub fn merkleized_leaves(&self) -> Location {
-        let size = *self.merkleized_size.read();
+        let size = self.inner.read().merkleized_size;
         Location::try_from(size).expect("merkleized size should be valid")
     }
 
@@ -908,11 +933,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     ///
     /// # Warnings
     ///
-    /// - Holding a prover will block `pop()` and `merkleize()`, but `add()` can proceed
-    ///   concurrently.
+    /// - Holding a prover will block `pop()` and `merkleize()`, but not `add()`.
     /// - If the MMR isn't fully merkleized for the requested historical state (`leaves >
     ///   merkleized_leaves()`), the MMR will be merkleized to the current tip before returning.
-    ///   This can be CPU intensive.
+    ///   This can be CPU intensive, and will block `add()` until complete.
+    // TODO(<https://github.com/commonwarexyz/monorepo/issues/3163>): Allow concurrent `add()` calls
+    // during merkleization.
     pub fn prover(
         &self,
         hasher: &mut impl Hasher<Digest = D>,
@@ -923,16 +949,15 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
         }
 
         let requested_size = Position::try_from(leaves)?;
-        let merkleized_size = *self.merkleized_size.read();
-        if requested_size > merkleized_size {
+        let needs_merkleization = requested_size > self.inner.read().merkleized_size;
+        if needs_merkleization {
             let mut inner = self.inner.write();
             // Re-check under the write lock: another concurrent prover call may have already
             // merkleized to tip after our optimistic read, and we want to avoid duplicate work.
-            let merkleized_size = *self.merkleized_size.read();
-            if requested_size > merkleized_size {
+            if requested_size > inner.merkleized_size {
                 let dirty_mem = std::mem::take(&mut inner.mem_mmr);
                 inner.mem_mmr = dirty_mem.merkleize(hasher, self.pool.clone()).into_dirty();
-                *self.merkleized_size.write() = inner.mem_mmr.size();
+                inner.merkleized_size = inner.mem_mmr.size();
             }
         }
 
@@ -946,7 +971,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
     pub fn merkleize(self, h: &mut impl Hasher<Digest = D>) -> CleanMmr<E, D> {
         let inner = self.inner.into_inner();
         CleanMmr {
-            inner: RwLock::new(Inner {
+            inner: RwLock::new(CleanInner {
                 mem_mmr: inner.mem_mmr.merkleize(h, self.pool.clone()),
                 pruned_to_pos: inner.pruned_to_pos,
             }),
@@ -954,7 +979,6 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             metadata: self.metadata,
             sync_lock: self.sync_lock,
             pool: self.pool,
-            merkleized_size: (),
         }
     }
 
@@ -972,41 +996,49 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
 
     /// Pop elements while staying in Dirty state. No root recomputation occurs until merkleize.
     pub async fn pop(&mut self, mut leaves_to_pop: usize) -> Result<(), Error> {
-        // First pop as many leaves as possible from the in-memory MMR.
-        leaves_to_pop = match self.pop_cached_leaves(leaves_to_pop) {
-            Ok(remaining) => remaining,
-            Err(err) => {
-                self.clamp_merkleized_to_mem_size();
-                return Err(err);
-            }
-        };
-        if leaves_to_pop == 0 {
-            self.clamp_merkleized_to_mem_size();
-            return Ok(());
-        }
+        let new_size = {
+            let inner = self.inner.get_mut();
 
-        // Pop remaining nodes from the journaled mmr.
-        let new_size = match self.compute_rewind_target_size(leaves_to_pop) {
-            Ok(new_size) => new_size,
-            Err(Error::Empty) => {
-                let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
-                self.clamp_merkleized_to_mem_size();
-                return Err(if pruned_to_pos == 0 {
-                    Error::Empty
-                } else {
-                    Error::ElementPruned(pruned_to_pos - 1)
-                });
+            // First pop as many leaves as possible from the in-memory MMR.
+            leaves_to_pop = match Self::pop_cached_leaves(inner, leaves_to_pop) {
+                Ok(remaining) => remaining,
+                Err(err) => {
+                    inner.merkleized_size =
+                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                    return Err(err);
+                }
+            };
+            if leaves_to_pop == 0 {
+                inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                return Ok(());
             }
-            Err(err) => {
-                self.clamp_merkleized_to_mem_size();
-                return Err(err);
+
+            // Pop remaining nodes from the journaled mmr.
+            let new_size = match Self::compute_rewind_target_size(inner, leaves_to_pop) {
+                Ok(new_size) => new_size,
+                Err(Error::Empty) => {
+                    let pruned_to_pos = inner.pruned_to_pos;
+                    inner.merkleized_size =
+                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                    return Err(if pruned_to_pos == 0 {
+                        Error::Empty
+                    } else {
+                        Error::ElementPruned(pruned_to_pos - 1)
+                    });
+                }
+                Err(err) => {
+                    inner.merkleized_size =
+                        std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                    return Err(err);
+                }
+            };
+
+            if new_size < inner.pruned_to_pos {
+                inner.merkleized_size = std::cmp::min(inner.merkleized_size, inner.mem_mmr.size());
+                return Err(Error::ElementPruned(new_size));
             }
+            new_size
         };
-        let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
-        if new_size < pruned_to_pos {
-            self.clamp_merkleized_to_mem_size();
-            return Err(Error::ElementPruned(new_size));
-        }
 
         self.journal.rewind(*new_size).await?;
         self.journal.sync().await?;
@@ -1031,7 +1063,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> DirtyMmr<E, D> {
             inner.pruned_to_pos,
         )
         .await?;
-        self.clamp_merkleized_size(new_size);
+        inner.merkleized_size = std::cmp::min(inner.merkleized_size, new_size);
 
         Ok(())
     }
