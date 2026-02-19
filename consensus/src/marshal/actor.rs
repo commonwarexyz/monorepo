@@ -1212,7 +1212,7 @@ where
     ) -> bool {
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
-        // floor)
+        // pruning boundary)
         if height <= self.last_processed_height {
             debug!(
                 %height,
