@@ -1123,10 +1123,13 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        // Protocol invariant: this digest's cached finalization payload must
-                        // match `V::commitment(&block)`. We still re-check in
-                        // `store_finalization` as a defensive guard against invariant
-                        // violations; that branch should be unreachable in valid execution.
+                        // Protocol invariant: for this variant, `digest` identifies a
+                        // unique commitment, so this cached finalization payload must match
+                        // `V::commitment(&block)`.
+                        //
+                        // This is enforced by assertion in `store_finalization`. It is not
+                        // a `CertifiableBlock` property; it is the `Variant` mapping
+                        // contract.
                         wrote |= self
                             .store_finalization(
                                 height,
@@ -1393,9 +1396,17 @@ where
 
         // Convert block to storage format
         let commitment = V::commitment(&block);
+        assert_eq!(
+            V::commitment_to_inner(commitment),
+            digest,
+            "variant commitment_to_inner(commitment(block)) must equal block digest"
+        );
         let finalization = finalization.map(|finalization| {
-            // Protocol invariant: for a given certifiable block digest, a valid
+            // Protocol invariant: for a given block digest in this variant, a valid
             // finalization payload must match `V::commitment(&block)`.
+            //
+            // This invariant comes from the `Variant` commitment mapping contract,
+            // not from `CertifiableBlock`.
             let payload = finalization.proposal.payload;
             assert_eq!(
                 payload, commitment,

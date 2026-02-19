@@ -1625,9 +1625,12 @@ mod tests {
     #[should_panic(expected = "finalization payload must match block commitment")]
     #[test_traced("WARN")]
     fn test_notarized_deliver_panics_on_mismatched_cached_finalization_invariant_violation() {
-        // Invariant test: we intentionally synthesize an impossible protocol state
-        // (cached finalization for commitment A, notarized delivery for commitment B
-        // with the same inner digest). Marshal should panic on this mismatch.
+        // Invariant test: we intentionally synthesize a state that should be unreachable
+        // under normal protocol execution (digest-keyed cached finalization whose payload
+        // does not equal the delivered block's commitment).
+        //
+        // Marshal must panic because this violates the Variant commitment mapping
+        // contract documented in `marshal::core::variant`.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut oracle = setup_network(context.clone(), Some(1));

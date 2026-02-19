@@ -6,11 +6,17 @@
 //! - [`Variant`]: Describes the types used by a marshal variant
 //! - [`Buffer`]: Abstracts over block dissemination strategies
 //!
-//! The [`Variant`] trait expects a 1:1 mapping between the [`Variant::Commitment`] and the
-//! block digest, with the commitment being a superset of the digest. The commitment may
-//! contain extra information that can be used for optimized retrieval or variant-specific
-//! mechanisms, though it is required that the digest can be extracted from the commitment
-//! for lookup purposes.
+//! Marshal relies on a commitment mapping invariant provided by [`Variant`]:
+//!
+//! 1. `commitment_to_inner(commitment(block)) == block.digest()`
+//! 2. For valid blocks in the same variant, equal digests imply equal commitments.
+//!
+//! This allows digest-keyed caches (for example, cached finalizations) to safely recover the
+//! unique commitment for a block.
+//!
+//! Note that this invariant is separate from [`crate::CertifiableBlock`].
+//! `CertifiableBlock` is required for deferred-verification context recovery, not for
+//! digest-to-commitment uniqueness.
 
 use crate::{types::Round, CertifiableBlock};
 use commonware_codec::{Codec, Read};
@@ -44,9 +50,15 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Computes the consensus commitment for a block.
     ///
     /// The commitment is what validators sign over during consensus.
+    ///
+    /// Together with [`Variant::commitment_to_inner`], implementations must satisfy:
+    /// `commitment_to_inner(commitment(block)) == block.digest()`.
     fn commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Extracts the block digest from a consensus commitment.
+    ///
+    /// For valid blocks in this variant, the digest must uniquely determine the commitment.
+    /// In other words, there should not be two valid commitments with the same inner digest.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Converts a working block to an application block.
