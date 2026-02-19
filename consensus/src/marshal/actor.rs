@@ -418,7 +418,8 @@ where
                 // Start with the ack that woke this `select_loop!` arm.
                 let mut pending = Some(self.pending_acks.complete_current(result));
                 loop {
-                    let (height, commitment, result) = pending.take().expect("pending ack must exist");
+                    let (height, commitment, result) =
+                        pending.take().expect("pending ack must exist");
                     match result {
                         Ok(()) => {
                             // Apply in-memory progress updates for this acknowledged block.
@@ -527,12 +528,13 @@ where
                                     Some(finalization),
                                     &mut application,
                                 )
-                                .await {
+                                .await
+                            {
                                 self.try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-                                .await;
+                                    .await;
                                 self.sync_finalized().await;
+                                debug!(?round, %height, "finalized block stored");
                             }
-                            debug!(?round, %height, "finalized block stored");
                         } else {
                             // Otherwise, fetch the block from the network.
                             debug!(?round, ?commitment, "finalized block missing");
@@ -691,23 +693,26 @@ where
                         handler::Message::Produce { key, response } => {
                             produces.push((key, response));
                         }
-                        handler::Message::Deliver { key, value, response } => {
-                            needs_sync |= self.handle_deliver(
-                                key,
-                                value,
-                                response,
-                                &mut delivers,
-                                &mut application,
-                            ).await;
+                        handler::Message::Deliver {
+                            key,
+                            value,
+                            response,
+                        } => {
+                            needs_sync |= self
+                                .handle_deliver(
+                                    key,
+                                    value,
+                                    response,
+                                    &mut delivers,
+                                    &mut application,
+                                )
+                                .await;
                         }
                     }
                 }
 
                 // Batch verify and process all delivers
-                needs_sync |= self.verify_delivered(
-                    delivers,
-                    &mut application,
-                ).await;
+                needs_sync |= self.verify_delivered(delivers, &mut application).await;
 
                 // Attempt to fill gaps before handling produce requests (so
                 // we can serve data we just received)
@@ -722,9 +727,12 @@ where
                 }
 
                 // Handle produce requests in parallel
-                join_all(produces.into_iter().map(|(key, response)| {
-                    self.handle_produce(key, response, &buffer)
-                })).await;
+                join_all(
+                    produces
+                        .into_iter()
+                        .map(|(key, response)| self.handle_produce(key, response, &buffer)),
+                )
+                .await;
             },
         }
     }
