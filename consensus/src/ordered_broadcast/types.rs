@@ -393,7 +393,7 @@ impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
         // Note: epoch is NOT included in signed data. The p2p channel is already
         // muxed by epoch, so including it in the signature is redundant. Not signing
         // over epoch allows certificates to be verified without knowing the epoch.
-        self.chunk.encode().into()
+        self.chunk.encode()
     }
 }
 
