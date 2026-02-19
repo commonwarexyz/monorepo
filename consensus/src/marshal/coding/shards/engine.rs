@@ -2894,6 +2894,125 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_same_round_equivocation_preserves_certifiable_recovery() {
+        // Regression coverage for same-round leader equivocation:
+        // - leader equivocates across two commitments in the same round
+        // - we receive a shard for commitment B (the certifiable one)
+        // - commitment A reconstructs first
+        // - commitment B must still remain recoverable
+        let fixture: Fixture<C> = Fixture {
+            num_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _oracle, mut peers, coding_config| async move {
+                let receiver_idx = 3usize;
+                let receiver_pk = peers[receiver_idx].public_key.clone();
+                let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
+
+                let leader = peers[0].public_key.clone();
+                let round = Round::new(Epoch::zero(), View::new(7));
+
+                // Two different commitments in the same round (equivocation scenario).
+                let block_a = CodedBlock::<B, C>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 111),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment_a = block_a.commitment();
+                let block_b = CodedBlock::<B, C>::new(
+                    B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 222),
+                    coding_config,
+                    &STRATEGY,
+                );
+                let commitment_b = block_b.commitment();
+
+                // Receiver learns both commitments in the same round.
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(commitment_a, leader.clone(), round)
+                    .await;
+                peers[receiver_idx]
+                    .mailbox
+                    .discovered(commitment_b, leader.clone(), round)
+                    .await;
+
+                // Subscribe to the certifiable commitment before any reconstruction.
+                let certifiable_sub = peers[receiver_idx].mailbox.subscribe(commitment_b).await;
+
+                // We receive our strong shard for commitment B from the equivocating leader.
+                let strong_b = block_b
+                    .shard::<H>(receiver_shard_idx)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), strong_b, true)
+                    .await
+                    .expect("send failed");
+
+                // Reconstruct conflicting commitment A first.
+                let strong_a = block_a
+                    .shard::<H>(receiver_shard_idx)
+                    .expect("missing shard")
+                    .encode();
+                peers[0]
+                    .sender
+                    .send(Recipients::One(receiver_pk.clone()), strong_a, true)
+                    .await
+                    .expect("send failed");
+                for i in [1usize, 2usize, 4usize] {
+                    let weak_a = block_a
+                        .shard::<H>(peers[i].index.get() as u16)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed")
+                        .encode();
+                    peers[i]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak_a, true)
+                        .await
+                        .expect("send failed");
+                }
+                context.sleep(config.link.latency * 4).await;
+                let reconstructed_a = peers[receiver_idx]
+                    .mailbox
+                    .get(commitment_a)
+                    .await
+                    .expect("conflicting commitment should reconstruct first");
+                assert_eq!(reconstructed_a.commitment(), commitment_a);
+
+                // Commitment B should still be recoverable after A reconstructed.
+                for i in [1usize, 2usize, 4usize] {
+                    let weak_b = block_b
+                        .shard::<H>(peers[i].index.get() as u16)
+                        .expect("missing shard")
+                        .verify_into_weak()
+                        .expect("verify_into_weak failed")
+                        .encode();
+                    peers[i]
+                        .sender
+                        .send(Recipients::One(receiver_pk.clone()), weak_b, true)
+                        .await
+                        .expect("send failed");
+                }
+
+                select! {
+                    result = certifiable_sub => {
+                        let reconstructed_b =
+                            result.expect("certifiable commitment should remain recoverable");
+                        assert_eq!(reconstructed_b.commitment(), commitment_b);
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("certifiable commitment was not recoverable after same-round equivocation");
+                    },
+                }
+            },
+        );
+    }
+
+    #[test_traced]
     fn test_drain_pending_validates_weak_shards_after_strong_shard() {
         // Test that weak shards arriving BEFORE the strong shard are validated
         // via drain_pending once the strong shard arrives, enabling reconstruction.
