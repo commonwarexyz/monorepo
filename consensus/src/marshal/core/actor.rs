@@ -1122,32 +1122,20 @@ where
                     // a notarization then a finalization are received via consensus
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
-                    let block_commitment = V::commitment(&block);
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        let finalization_commitment = finalization.proposal.payload;
-                        if finalization_commitment == block_commitment {
-                            wrote |= self
-                                .store_finalization(
-                                    height,
-                                    digest,
-                                    block.clone(),
-                                    Some(finalization),
-                                    application,
-                                    buffer,
-                                )
-                                .await;
-                        } else {
-                            // Cached finalizations are indexed by inner block digest.
-                            // In coding variants, multiple commitments may share the same
-                            // digest, so mismatched commitments must not be promoted.
-                            warn!(
-                                ?round,
-                                ?digest,
-                                ?block_commitment,
-                                ?finalization_commitment,
-                                "cached finalization commitment mismatched notarized block"
-                            );
-                        }
+                        // Protocol invariant: for a valid certifiable block digest, any
+                        // matching finalization payload should reference the same commitment.
+                        // `store_finalization` performs the commitment check in one place.
+                        wrote |= self
+                            .store_finalization(
+                                height,
+                                digest,
+                                block.clone(),
+                                Some(finalization),
+                                application,
+                                buffer,
+                            )
+                            .await;
                     }
 
                     // Cache the notarization and block.

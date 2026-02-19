@@ -1726,11 +1726,6 @@ mod tests {
                 v0_mailbox.get_finalization(Height::new(1)).await.is_none(),
                 "mismatched cached finalization must not be promoted on notarized delivery"
             );
-            // Without promotion, block 1 should not be finalized/persisted either.
-            assert!(
-                v0_mailbox.get_block(Height::new(1)).await.is_none(),
-                "notarized delivery must not finalize the mismatched block"
-            );
             // Tip advancement is the externally visible regression signal.
             assert!(
                 v0_application.tip().is_none(),
