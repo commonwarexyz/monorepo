@@ -206,7 +206,7 @@ where
     }
 
     fn is_round_robin_leader(&self, signer_idx: usize, view: u64) -> bool {
-        let participant_count = self.byzantine_participants.len() + 1; // + honest
+        let participant_count = self.byzantine_participants.len() + 1;
         if participant_count == 0 {
             return false;
         }
@@ -215,7 +215,7 @@ where
     }
 
     fn is_honest_round_robin_leader(&self, view: u64) -> bool {
-        let participant_count = self.byzantine_participants.len() + 1; // + honest
+        let participant_count = self.byzantine_participants.len() + 1;
         if participant_count == 0 {
             return false;
         }
@@ -697,16 +697,16 @@ where
         proposal: Proposal<Sha256Digest>,
     ) {
         match self.context.gen_range(0..100u8) {
-            // 94% - normal notarize vote
+            // normal notarize vote
             0..=93 => {
                 self.send_notarize_vote_for_proposal(signer_idx, proposal)
                     .await;
             }
-            // 3% - malformed vote bytes
+            // malformed vote bytes
             94..=96 => {
                 self.send_malformed_vote(signer_idx).await;
             }
-            // 3% - validly encoded notarize with wrong epoch
+            // validly encoded notarize with wrong epoch
             97..=99 => {
                 self.send_wrong_epoch_notarize_vote_for_proposal(signer_idx, proposal)
                     .await;
@@ -716,6 +716,14 @@ where
     }
 
     async fn send_broadcast_and_notarize(&mut self, signer_idx: usize) {
+        // create a valid verify path so the honest node can complete peer verification
+        // and perform `verify` flow.
+        if self.context.gen_range(0..100u8) < 3
+            && self.send_valid_broadcast_and_notarize(signer_idx).await
+        {
+            return;
+        }
+
         let proposal = self.select_event_proposal();
         let view = proposal.view().get();
         if self.is_round_robin_leader(signer_idx, view) {
@@ -724,6 +732,50 @@ where
         }
         self.send_notarize_vote_with_policy(signer_idx, proposal)
             .await;
+    }
+
+    async fn send_valid_broadcast_and_notarize(&mut self, signer_idx: usize) -> bool {
+        let mut view = self.last_view.clamp(1, MAX_SAFE_VIEW);
+        if !self.is_round_robin_leader(signer_idx, view) {
+            let next = view.saturating_add(1).min(MAX_SAFE_VIEW);
+            if !self.is_round_robin_leader(signer_idx, next) {
+                return false;
+            }
+            view = next;
+        }
+
+        let parent_view = self
+            .finalized_by_view
+            .keys()
+            .copied()
+            .filter(|v| *v > 0 && *v < view)
+            .max();
+        let Some(parent_view) = parent_view else {
+            return false;
+        };
+        let Some(parent_payload) = self.finalized_by_view.get(&parent_view).copied() else {
+            return false;
+        };
+
+        let mut proposal = self.get_or_build_proposal_for_view(view);
+        proposal = self.strategy.proposal_with_view(&proposal, view);
+        proposal.parent = View::new(parent_view);
+        self.proposal_by_view.insert(view, proposal.clone());
+        self.latest_proposals.push_back(proposal.clone());
+        while self.latest_proposals.len() > PROPOSAL_CACHE_LIMIT {
+            self.latest_proposals.pop_front();
+        }
+
+        let Some(sender) = self.byzantine_participants.get(signer_idx).cloned() else {
+            return false;
+        };
+        let rand = self.context.gen::<u64>();
+        let contents = (proposal.round, parent_payload, rand).encode();
+        self.relay.broadcast(&sender, (proposal.payload, contents));
+
+        self.send_notarize_vote_for_proposal(signer_idx, proposal)
+            .await;
+        true
     }
 
     async fn send_notarize_vote_for_proposal(
@@ -973,7 +1025,7 @@ where
         let prefer_honest_vote = self.context.gen_bool(0.5);
 
         match self.context.gen_range(0..100u8) {
-            // 90% — normal notarization (the primary path)
+            // normal notarization (the primary path)
             0..=89 => {
                 self.send_notarization_certificate_for_proposal(
                     signer_idx,
@@ -982,16 +1034,16 @@ where
                 )
                 .await;
             }
-            // 4% — malformed bytes on the wire
+            // malformed bytes on the wire
             90..=93 => {
                 self.send_malformed_certificate(signer_idx).await;
             }
-            // 3% — wrong epoch nullification
+            // wrong epoch nullification
             94..=96 => {
                 self.send_wrong_epoch_nullification_certificate(signer_idx)
                     .await;
             }
-            // 3% — structurally valid but cryptographically invalid notarization
+            // structurally valid but cryptographically invalid notarization
             97..=99 => {
                 self.send_invalid_notarization_certificate(signer_idx).await;
             }
@@ -1059,25 +1111,25 @@ where
         );
 
         match self.context.gen_range(0..100u8) {
-            // 87% — normal nullification
+            // normal nullification
             0..=86 => {
                 self.send_nullification_certificate_for_view(signer_idx, view)
                     .await;
             }
-            // 3% — drive local nullification assembly to hit floor-broadcast path
+            // drive local nullification assembly to hit floor-broadcast path
             87..=89 => {
                 self.try_trigger_local_nullification_floor().await;
             }
-            // 4% — malformed bytes
+            // malformed bytes
             90..=93 => {
                 self.send_malformed_certificate(signer_idx).await;
             }
-            // 3% — wrong epoch nullification
+            // wrong epoch nullification
             94..=96 => {
                 self.send_wrong_epoch_nullification_certificate(signer_idx)
                     .await;
             }
-            // 3% — structurally valid but cryptographically invalid nullification
+            // structurally valid but cryptographically invalid nullification
             97..=99 => {
                 self.send_invalid_nullification_certificate(signer_idx)
                     .await;
@@ -1178,12 +1230,12 @@ where
         let proposal = self.select_event_proposal();
 
         match self.context.gen_range(0..100u8) {
-            // 96% — normal nullification
+            // normal nullification
             0..=95 => {
                 self.send_finalization_certificate_for_proposal(signer_idx, proposal)
                     .await;
             }
-            // 4% — malformed bytes
+            // malformed bytes
             96..=99 => {
                 self.send_invalid_finalization_certificate(signer_idx).await;
             }
