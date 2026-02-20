@@ -473,57 +473,148 @@ impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
-mod fuzz {
+#[cfg(any(test, feature = "arbitrary"))]
+mod impl_arbitrary {
     use super::*;
     use arbitrary::Arbitrary;
 
     impl<'a, F: Arbitrary<'a>> Arbitrary<'a> for Poly<F> {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self {
-                coeffs: u.arbitrary()?,
-            })
+            let first = u.arbitrary()?;
+            let rest: Vec<F> = u.arbitrary()?;
+            let mut coeffs = NonEmptyVec::new(first);
+            coeffs.extend(rest);
+            Ok(Self { coeffs })
         }
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use crate::{
+        algebra::test_suites,
+        test::{F, G},
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::Encode as _;
+    use commonware_parallel::Sequential;
+    use commonware_utils::ordered::Map;
+
+    #[derive(Debug, Arbitrary)]
+    pub enum Plan {
+        Codec(Poly<F>),
+        EvalAdd(Poly<F>, Poly<F>, F),
+        EvalScale(Poly<F>, F, F),
+        EvalZero(Poly<F>),
+        EvalMsm(Poly<F>, F),
+        Interpolate(Poly<F>),
+        InterpolateWithZeroPoint(Poly<F>),
+        InterpolateWithZeroPointMiddle(Poly<F>),
+        TranslateScale(Poly<F>, F),
+        CommitEval(Poly<F>, F),
+        FuzzAdditive,
+        FuzzSpaceRing,
+    }
+
+    impl Plan {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Codec(f) => {
+                    assert_eq!(
+                        &f,
+                        &Poly::<F>::read_cfg(&mut f.encode(), &(RangeCfg::exact(f.required()), ()))
+                            .unwrap()
+                    );
+                }
+                Self::EvalAdd(f, g, x) => {
+                    assert_eq!(f.eval(&x) + &g.eval(&x), (f + &g).eval(&x));
+                }
+                Self::EvalScale(f, x, w) => {
+                    assert_eq!(f.eval(&x) * &w, (f * &w).eval(&x));
+                }
+                Self::EvalZero(f) => {
+                    assert_eq!(&f.eval(&F::zero()), f.constant());
+                }
+                Self::EvalMsm(f, x) => {
+                    assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
+                }
+                Self::Interpolate(f) => {
+                    if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
+                        return Ok(());
+                    }
+                    let mut points = (0..f.required().get())
+                        .map(|i| F::from((i + 1) as u8))
+                        .collect::<Vec<_>>();
+                    let interpolator = Interpolator::new(points.iter().copied().enumerate());
+                    let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+                    let recovered = interpolator.interpolate(&evals, &Sequential);
+                    assert_eq!(recovered.as_ref(), Some(f.constant()));
+                    points.pop();
+                    assert_eq!(
+                        interpolator.interpolate(
+                            &Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()),
+                            &Sequential
+                        ),
+                        None
+                    );
+                }
+                Self::InterpolateWithZeroPoint(f) => {
+                    if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
+                        return Ok(());
+                    }
+                    let points: Vec<_> =
+                        (0..f.required().get()).map(|i| F::from(i as u8)).collect();
+                    let interpolator = Interpolator::new(points.iter().copied().enumerate());
+                    let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+                    let recovered = interpolator.interpolate(&evals, &Sequential);
+                    assert_eq!(recovered.as_ref(), Some(f.constant()));
+                }
+                Self::InterpolateWithZeroPointMiddle(f) => {
+                    if f == Poly::zero()
+                        || f.required().get() < 2
+                        || f.required().get() >= F::MAX as u32
+                    {
+                        return Ok(());
+                    }
+                    let n = f.required().get();
+                    let points: Vec<_> = (1..n)
+                        .map(|i| F::from(i as u8))
+                        .chain(core::iter::once(F::zero()))
+                        .collect();
+                    let interpolator = Interpolator::new(points.iter().copied().enumerate());
+                    let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
+                    let recovered = interpolator.interpolate(&evals, &Sequential);
+                    assert_eq!(recovered.as_ref(), Some(f.constant()));
+                }
+                Self::TranslateScale(f, x) => {
+                    assert_eq!(f.translate(|c| x * c), f * &x);
+                }
+                Self::CommitEval(f, x) => {
+                    assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
+                }
+                Self::FuzzAdditive => {
+                    test_suites::fuzz_additive::<Poly<F>>(u)?;
+                }
+                Self::FuzzSpaceRing => {
+                    test_suites::fuzz_space_ring::<F, Poly<F>>(u)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_fuzz() {
+        commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test::{F, G};
-    use commonware_codec::Encode;
-    use commonware_parallel::Sequential;
-    use proptest::{
-        prelude::{Arbitrary, BoxedStrategy, Strategy as _},
-        prop_assume, proptest,
-        sample::SizeRange,
-    };
-
-    impl Arbitrary for Poly<F> {
-        type Parameters = SizeRange;
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(size: Self::Parameters) -> Self::Strategy {
-            let nonempty_size = if size.start() == 0 { size + 1 } else { size };
-            proptest::collection::vec(F::arbitrary(), nonempty_size)
-                .prop_map(Self::from_iter_unchecked)
-                .boxed()
-        }
-    }
-
-    #[test]
-    fn test_additive() {
-        crate::algebra::test_suites::test_additive(file!(), &Poly::<F>::arbitrary());
-    }
-
-    #[test]
-    fn test_space() {
-        crate::algebra::test_suites::test_space_ring(
-            file!(),
-            &F::arbitrary(),
-            &Poly::<F>::arbitrary(),
-        );
-    }
+    use crate::test::F;
 
     #[test]
     fn test_eq() {
@@ -542,83 +633,6 @@ mod test {
         assert!(eq(&[1, 2, 0, 0], &[1, 2]));
         assert!(!eq(&[1, 2, 0], &[2, 3]));
         assert!(!eq(&[2, 3], &[1, 2, 0]));
-    }
-
-    proptest! {
-        #[test]
-        fn test_codec(f: Poly<F>) {
-            assert_eq!(&f, &Poly::<F>::read_cfg(&mut f.encode(), &(RangeCfg::exact(f.required()), ())).unwrap())
-        }
-
-        #[test]
-        fn test_eval_add(f: Poly<F>, g: Poly<F>, x: F) {
-            assert_eq!(f.eval(&x) + &g.eval(&x), (f + &g).eval(&x));
-        }
-
-        #[test]
-        fn test_eval_scale(f: Poly<F>, x: F, w: F) {
-            assert_eq!(f.eval(&x) * &w, (f * &w).eval(&x));
-        }
-
-        #[test]
-        fn test_eval_zero(f: Poly<F>) {
-            assert_eq!(&f.eval(&F::zero()), f.constant());
-        }
-
-        #[test]
-        fn test_eval_msm(f: Poly<F>, x: F) {
-            assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
-        }
-
-        #[test]
-        fn test_interpolate(f: Poly<F>) {
-            // Make sure this isn't the zero polynomial.
-            prop_assume!(f != Poly::zero());
-            prop_assume!(f.required().get() < F::MAX as u32);
-            let mut points = (0..f.required().get()).map(|i| F::from((i + 1) as u8)).collect::<Vec<_>>();
-            let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
-            assert_eq!(recovered.as_ref(), Some(f.constant()));
-            points.pop();
-            assert!(interpolator.interpolate(&Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate()), &Sequential).is_none());
-        }
-
-        #[test]
-        fn test_interpolate_with_zero_point(f: Poly<F>) {
-            // Use 0, 1, 2, ... as evaluation points (first point is zero)
-            prop_assume!(f != Poly::zero());
-            prop_assume!(f.required().get() < F::MAX as u32);
-            let points: Vec<_> = (0..f.required().get()).map(|i| F::from(i as u8)).collect();
-            let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
-            assert_eq!(recovered.as_ref(), Some(f.constant()));
-        }
-
-        #[test]
-        fn test_interpolate_with_zero_point_middle(f: Poly<F>) {
-            // Use 1, 2, ..., 0 as evaluation points (zero at last position)
-            prop_assume!(f != Poly::zero());
-            prop_assume!(f.required().get() >= 2);
-            prop_assume!(f.required().get() < F::MAX as u32);
-            let n = f.required().get();
-            let points: Vec<_> = (1..n).map(|i| F::from(i as u8)).chain(core::iter::once(F::zero())).collect();
-            let interpolator = Interpolator::new(points.iter().copied().enumerate());
-            let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
-            let recovered = interpolator.interpolate(&evals, &Sequential);
-            assert_eq!(recovered.as_ref(), Some(f.constant()));
-        }
-
-        #[test]
-        fn test_translate_scale(f: Poly<F>, x: F) {
-            assert_eq!(f.translate(|c| x * c), f * &x);
-        }
-
-        #[test]
-        fn test_commit_eval(f: Poly<F>, x: F) {
-            assert_eq!(G::generator() * &f.eval(&x), Poly::<G>::commit(f).eval(&x));
-        }
     }
 
     #[cfg(feature = "arbitrary")]

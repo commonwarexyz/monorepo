@@ -1,0 +1,28 @@
+[package]
+name = "commonware-invariants"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Define and exercise invariants."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/invariants"
+documentation = "https://docs.rs/commonware-invariants"
+
+[lints]
+workspace = true
+
+[dependencies]
+arbitrary.workspace = true
+commonware-macros.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
+rand = { workspace = true, features = ["std", "std_rng"] }
+rand_chacha.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+
+[lib]
+bench = false
