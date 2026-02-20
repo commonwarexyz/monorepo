@@ -139,10 +139,10 @@
 //! and the `2f` revealed shares).
 //!
 //! While **it will not be possible for any external observer (or a Byzantine adversary) to recover the shared secret and/or form a signature,**
-//! a secret with more than `f` revealed shares no longer guarantees safety when used in some applications (like when used to form threshold certificates for consensus).
+//! a secret with more than `f` revealed shares no longer can be used safely in some applications (like when used to form threshold certificates for consensus).
 //! Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f` honest players and another block `B_2`
-//! to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1`
-//! (for `B_2`), however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
+//! to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`), however, with `h` other shares
+//! revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
 //! #### Future Work: Dropping the Synchrony Assumption for `f` Bounded Reveals?
 //!
