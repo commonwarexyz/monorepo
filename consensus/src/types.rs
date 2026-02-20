@@ -695,13 +695,13 @@ pub use commonware_utils::Participant;
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
-        //! Coding commitment and related types.
+        //! Types and utilities for working with [`Commitment`]s.
 
         use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
-        use commonware_utils::{Array, Span};
+        use commonware_utils::{Array, Span, NZU16};
         use core::{
             num::NonZeroU16,
             ops::{Deref, Range},
@@ -775,7 +775,7 @@ commonware_macros::stability_scope!(ALPHA {
                 let mut buf = [0u8; Self::SIZE];
                 rng.fill_bytes(&mut buf[..Self::CONFIG_OFFSET]);
 
-                let one = NonZeroU16::new(1).expect("1 is always non-zero");
+                let one = NZU16!(1);
                 let shards = rng.next_u32();
                 let config = CodingConfig {
                     minimum_shards: NonZeroU16::new(shards as u16).unwrap_or(one),
