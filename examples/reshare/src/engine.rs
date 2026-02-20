@@ -13,7 +13,7 @@ use commonware_consensus::{
         self,
         core::Actor as MarshalActor,
         resolver::handler,
-        standard::{Marshaled, Standard},
+        standard::{Deferred, Standard},
     },
     simplex::{elector::Config as Elector, scheme::Scheme, types::Finalization},
     types::{FixedEpocher, ViewDelta},
@@ -115,7 +115,7 @@ where
         V,
         C,
         H,
-        Marshaled<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
+        Deferred<E, S, Application<E, S, H, C, V>, Block<H, C, V>, FixedEpocher>,
         S,
         L,
         T,
@@ -283,7 +283,7 @@ where
         )
         .await;
 
-        let application = Marshaled::new(
+        let application = Deferred::new(
             context.with_label("application"),
             Application::new(dkg_mailbox.clone()),
             marshal_mailbox.clone(),

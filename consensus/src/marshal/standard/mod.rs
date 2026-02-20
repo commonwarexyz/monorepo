@@ -31,9 +31,9 @@ commonware_macros::stability_scope!(ALPHA {
 
     mod inline;
     pub use inline::Inline;
-});
 
-mod verification;
+    mod verification;
+});
 
 mod variant;
 pub use variant::Standard;
