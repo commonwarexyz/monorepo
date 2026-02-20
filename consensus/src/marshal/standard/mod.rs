@@ -180,7 +180,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod wrapper_tests {
+mod tests {
     use super::{Deferred, Inline, Standard};
     use crate::{
         marshal::{
