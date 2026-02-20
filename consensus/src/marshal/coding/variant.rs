@@ -50,7 +50,7 @@ where
     }
 
     fn parent_commitment(block: &Self::Block) -> Self::Commitment {
-        // Coding mode carries parent commitment in the embedded consensus context.
+        // Parent commitment is embedded in the consensus context.
         block.context().parent.1
     }
 
