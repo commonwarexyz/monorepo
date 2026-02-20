@@ -128,18 +128,11 @@
             <div class="image-caption">Figure 4: Erasure-coded Chain Structure.</div>
         </div>
 
-        <h2>Deferred Verification, Even Without Coding</h2>
-
-        <p>There is a second win: <code>certify</code> gives us deferred verification as a first-class pattern in the standard path. We can start verification early, hide it behind vote propagation latency, and require the result at certification time. This is already used in the standard marshal path (see <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/deferred.rs">standard::Deferred</a></code>), without erasure coding. In a global deployment of <code>alto</code> with a simulated 500ms verification duration, we saw view latency drop by 105ms on average with this feature enabled.</p>
-        <p>Application developers can opt-in to this change by implementing the <code>CertifiableBlock</code> trait on their block type, which requires storing the consensus context within their blocks. The <code>inline</code> path is retained for applications that want to make no changes.</p>
-
-        <p>If your application only carries basic block data (for example parent digest and height), you can continue using <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/inline.rs">standard::Inline</a></code> with no embedded consensus context.</p>
-
         <h2>Out-of-the-Box Performance</h2>
 
-        <p>Applications do not need to be rewritten to use this feature. If you already implement the consensus <code>Application</code>/<code>VerifyingApplication</code> interfaces, wrap the same application with coding marshal and get erasure-coded dissemination automatically. Build, verify, report: same contract.</p>
+        <p>Applications do not need to be rewritten to use this feature. If you already implement the consensus <code>Application</code>/<code>VerifyingApplication</code> interfaces, wrap the same application with <code>marshal::coding</code> and get erasure-coded dissemination automatically. Build, verify, report: same contract.</p>
 
-        <p>The tradeoff is deliberate and explicit: opting into coding is a protocol-level breaking change. On-wire payloads, commitments, and verification flow differ from the standard path, so networks must choose to upgrade into coding (or stay on standard) intentionally. The upside is that this choice is localized, reversible in architecture, and does not force application developers to redesign core logic.</p>
+        <p>The tradeoff is deliberate and explicit: opting into coding is a protocol-level breaking change. On-wire payloads, commitments, and verification flow differ from the standard path, so networks must choose to upgrade into coding (or stay on <code>marshal::standard</code>) intentionally.</p>
 
         <h2>Alto Benchmarks</h2>
 
