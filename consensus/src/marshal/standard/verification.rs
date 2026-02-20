@@ -59,7 +59,9 @@ where
     }
 
     // Re-proposals are signaled by `digest == context.parent.1`.
-    // They skip normal parent/height checks because parent == block.
+    // They skip normal parent/height checks because:
+    // 1. The block was already verified when originally proposed.
+    // 2. Parent-child checks would fail by construction when parent == block.
     if digest == context.parent.1 {
         if !is_valid_reproposal_at_verify(epocher, block.height(), context.epoch()) {
             debug!(
@@ -109,11 +111,14 @@ where
         parent_digest,
         // This context is produced by simplex for the active epoch, so
         // `(context.epoch(), parent_view)` is a trusted hint for parent lookup.
+        // Epoch-boundary ancestry is represented via epoch genesis in the
+        // current epoch's view space.
         Some(Round::new(context.epoch(), parent_view)),
         application,
         marshal,
     )
     .await;
+    // If consensus drops the receiver, we can stop work early.
     let parent = select! {
         _ = tx.closed() => {
             debug!(
@@ -154,6 +159,7 @@ where
         (runtime_context.with_label("app_verify"), context.clone()),
         ancestry_stream,
     );
+    // If consensus drops the receiver, we can stop work early.
     let application_valid = select! {
         _ = tx.closed() => {
             debug!(
@@ -178,6 +184,9 @@ where
 ///
 /// `parent_round` is a resolver hint. Callers should only provide a hint when the
 /// source context is trusted/validated. Untrusted paths should pass `None`.
+///
+/// The returned subscription receiver may resolve with `RecvError` if marshal
+/// cancels the request.
 #[inline]
 pub(super) async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
