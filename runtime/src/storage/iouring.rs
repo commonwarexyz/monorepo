@@ -19,6 +19,7 @@
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
+//! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::Header;
 use crate::{
@@ -26,11 +27,7 @@ use crate::{
     BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{
-    channel::{mpsc, oneshot},
-    from_hex, hex,
-};
-use futures::executor::block_on;
+use commonware_utils::{channel::oneshot, from_hex, hex};
 use io_uring::{opcode, types};
 use prometheus_client::registry::Registry;
 use std::{
@@ -73,29 +70,28 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_submitter: iouring::Submitter,
     pool: BufferPool,
 }
 
 impl Storage {
     /// Returns a new `Storage` instance.
     pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
-        let (io_sender, receiver) = mpsc::channel::<iouring::Op>(cfg.iouring_config.size as usize);
-
-        let storage = Self {
-            storage_directory: cfg.storage_directory.clone(),
-            io_sender,
-            pool,
-        };
-        let metrics = Arc::new(iouring::Metrics::new(registry));
-
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
         cfg.iouring_config.single_issuer = true;
 
-        std::thread::spawn(|| block_on(iouring::run(cfg.iouring_config, metrics, receiver)));
+        let (io_submitter, iouring_loop) = iouring::IoUringLoop::new(cfg.iouring_config, registry);
+
+        let storage = Self {
+            storage_directory: cfg.storage_directory,
+            io_submitter,
+            pool,
+        };
+
+        std::thread::spawn(move || iouring_loop.run());
         storage
     }
 }
@@ -173,7 +169,7 @@ impl crate::Storage for Storage {
             partition.into(),
             name,
             file,
-            self.io_sender.clone(),
+            self.io_submitter.clone(),
             self.pool.clone(),
         );
         Ok((blob, logical_len, blob_version))
@@ -234,7 +230,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_sender: mpsc::Sender<iouring::Op>,
+    io_submitter: iouring::Submitter,
     /// Buffer pool for read allocations
     pool: BufferPool,
 }
@@ -245,7 +241,7 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             file: self.file.clone(),
-            io_sender: self.io_sender.clone(),
+            io_submitter: self.io_submitter.clone(),
             pool: self.pool.clone(),
         }
     }
@@ -256,14 +252,14 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_sender: mpsc::Sender<iouring::Op>,
+        io_submitter: iouring::Submitter,
         pool: BufferPool,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
-            io_sender,
+            io_submitter,
             pool,
         }
     }
@@ -296,7 +292,7 @@ impl crate::Blob for Blob {
 
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_read = 0;
-        let io_sender = self.io_sender.clone();
+        let io_submitter = self.io_submitter.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -318,7 +314,7 @@ impl crate::Blob for Blob {
 
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
-            io_sender
+            io_submitter
                 .send(iouring::Op {
                     work: op,
                     sender,
@@ -366,7 +362,7 @@ impl crate::Blob for Blob {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut bytes_written = 0;
         let buf_len = buf.len();
-        let io_sender = self.io_sender.clone();
+        let io_submitter = self.io_submitter.clone();
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
@@ -388,7 +384,7 @@ impl crate::Blob for Blob {
 
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
-            io_sender
+            io_submitter
                 .send(iouring::Op {
                     work: op,
                     sender,
@@ -434,7 +430,7 @@ impl crate::Blob for Blob {
 
             // Submit the operation
             let (sender, receiver) = oneshot::channel();
-            self.io_sender
+            self.io_submitter
                 .clone()
                 .send(iouring::Op {
                     work: op,
