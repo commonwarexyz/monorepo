@@ -128,7 +128,7 @@
 //!
 //! ### Up to `2f` Reveals Under Asynchrony
 //!
-//! If the network is not synchronous, however, Byzantine players may obtain up to `2f` revealed shares (`f` from Byzantine players
+//! If the network is asynchronous, Byzantine players may obtain up to `2f` revealed shares (`f` from Byzantine players
 //! and `f` from honest players).
 //!
 //! To see how this could be, consider a network where `f` honest participants are in one partition and (`f + 1` honest and
@@ -137,13 +137,12 @@
 //! honest players (that are in the first partition). A colluding Byzantine adversary will then have access to their acknowledged `f`
 //! shares and the revealed `f` shares. If the Byzantine adversary reveals all of their (still private) shares at this time, each of the
 //! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
-//! and the `2f` revealed shares).
+//! and the `2f` revealed shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover the shared secret.**
 //!
-//! While **it will not be possible for any external observer (or a Byzantine adversary) to recover the shared secret and/or form a signature**,
-//! a secret with more than `f` revealed shares no longer can be used safely in some applications (like when used to form threshold certificates for consensus).
-//! Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f` honest players and another block `B_2`
-//! to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`), however, with `h` other shares
-//! revealed another quorum of `2f + h` can be formed for `B_1`.
+//! While not entirely revealed, a secret with more than `f` revealed shares may no longer be safe for some applications (like when used to
+//! form threshold certificates for consensus). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
+//! honest players and another block `B_2` to `f + 1` other honest players. Normally, it would only be possible to create one quorum of `2f + 1` (for `B_2`),
+//! however, with `h` other shares revealed another quorum of `2f + h` can be formed for `B_1`.
 //!
 //! #### Future Work: Dropping the Synchrony Assumption for `f` Bounded Reveals?
 //!
