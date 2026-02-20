@@ -19,7 +19,7 @@ use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use tracing::debug;
 
-/// Validation failures for standard deferred verification.
+/// Validation failures for standard verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     ParentDigest,
@@ -27,7 +27,7 @@ pub(crate) enum Error {
     Height,
 }
 
-/// Consolidated validation for standard deferred verification.
+/// Consolidated validation for standard verification.
 #[inline]
 pub(crate) fn validate_block<B>(
     block: &B,

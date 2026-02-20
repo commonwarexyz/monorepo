@@ -1,7 +1,7 @@
 //! Coding-specific validation helpers for marshal verification and reconstruction.
 //!
 //! This module contains pure invariant checks for coding-mode proposal verification,
-//! deferred verification, and reconstruction.
+//! block verification, and reconstruction.
 
 use crate::{
     marshal::{
@@ -15,7 +15,7 @@ use commonware_codec::{EncodeSize, Write};
 use commonware_coding::Config as CodingConfig;
 use commonware_cryptography::{Committable, Digest, Hasher};
 
-/// Validation failures for coding deferred verification.
+/// Validation failures for coding block verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockError {
     Commitment,
@@ -42,7 +42,7 @@ pub(crate) enum ReconstructionError<D: Digest> {
     ContextDigest(D, D),
 }
 
-/// Consolidated validation for coding deferred verification.
+/// Consolidated validation for coding block verification.
 pub(crate) fn validate_block<H, ES, B>(
     epocher: &ES,
     block: &B,
