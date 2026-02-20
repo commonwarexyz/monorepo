@@ -493,6 +493,32 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_proposal_none_context_skips_context_digest_check() {
+        let fixture = baseline_fixture();
+        let wrong_context = Round::new(Epoch::new(0), View::new(8));
+        let payload_with_wrong_context = commitment_for(
+            fixture.block.digest(),
+            wrong_context,
+            fixture.config,
+            b"block_root",
+        );
+        assert_eq!(
+            validate_proposal::<Sha256, Round>(payload_with_wrong_context, fixture.config, None),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_proposal_none_context_still_enforces_coding_config() {
+        let fixture = baseline_fixture();
+        let wrong = coding_config_for_participants(7);
+        assert_eq!(
+            validate_proposal::<Sha256, Round>(fixture.commitment, wrong, None),
+            Err(ProposalError::CodingConfig)
+        );
+    }
+
+    #[test]
     fn test_validate_reconstruction_block_digest_error() {
         let fixture = baseline_fixture();
         let wrong_commitment = commitment_for(

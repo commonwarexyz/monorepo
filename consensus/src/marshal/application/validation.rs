@@ -116,6 +116,14 @@ mod tests {
             embedded,
             Round::new(Epoch::new(1), View::new(10)),
         ));
+
+        // Non-boundary block is not inferred as re-proposal, even with later view.
+        assert!(!is_inferred_reproposal_at_certify(
+            &epocher,
+            Height::new(8),
+            Round::new(Epoch::new(0), View::new(8)),
+            Round::new(Epoch::new(0), View::new(9)),
+        ));
     }
 
     #[test]
@@ -130,6 +138,13 @@ mod tests {
             &epocher,
             Height::new(7),
             Epoch::new(1)
+        ));
+
+        // Height at u64::MAX is out of range for this epocher due to last-height overflow.
+        assert!(!is_block_in_expected_epoch(
+            &epocher,
+            Height::new(u64::MAX),
+            Epoch::new(0)
         ));
     }
 
