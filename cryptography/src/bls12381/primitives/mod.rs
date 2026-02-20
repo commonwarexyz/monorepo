@@ -10,6 +10,33 @@
 //!   the BLS12-381 scalar field with <https://github.com/supranational/blst>.
 //! * <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs>: Parallel MSM using tile-based Pippenger.
 //!
+//! # Security Notes
+//!
+//! ## Zero-Checks
+//!
+//! This module intentionally deviates from strict IETF BLS key-validation behavior by allowing
+//! canonical zero scalars and identity group elements to deserialize. The IRTF CFRG BLS draft
+//! specifies KeyValidate as rejecting identity public keys (Section 2.5) and explicitly discusses
+//! why in Section 5.2:
+//! <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature#section-2.5>
+//! <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature#section-5.2>
+//!
+//! The security model is that choosing a zero public key is a weak key choice for that participant,
+//! with impact similar to leaking that participant's private key: that identity can be impersonated,
+//! but this does not automatically break discrete-log assumptions for other honest participants.
+//!
+//! In multi-party settings (aggregate signatures, batch verification, threshold protocols), security
+//! must be evaluated holistically at the set level. Adversarial participants can coordinate keys
+//! and signatures to produce zero values in the aggregate (e.g. choosing `X` and `-X` as keys),
+//! so simply checking individual values is not sufficient, and the protocol as a whole needs
+//! to be considered.
+//!
+//! Proof-of-possession is the primary mechanism used here to prevent rogue-key attacks, which is the
+//! most common area where zero keys might pose a problem. Our PoP verification explicitly enforces non-zero inputs.
+//! This aligns with the PoP requirements and rogue-key guidance in Section 3.3 and Section 3.3.4:
+//! <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature#section-3.3>
+//! <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature#section-3.3.4>
+//!
 //! # Example
 //!
 //! ```rust

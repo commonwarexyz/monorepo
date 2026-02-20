@@ -28,7 +28,7 @@ use super::{
     Error,
 };
 use commonware_codec::Encode;
-use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Random};
 use commonware_utils::union_unique;
 
 /// Computes the public key from the private key.
@@ -120,6 +120,9 @@ pub fn verify_proof_of_possession<V: Variant>(
     namespace: &[u8],
     signature: &V::Signature,
 ) -> Result<(), Error> {
+    if *public == V::Public::zero() || *signature == V::Signature::zero() {
+        return Err(Error::InvalidSignature);
+    }
     let hm = hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
     V::verify(public, &hm, signature)
 }
@@ -134,7 +137,7 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::{DecodeExt, Encode, Error as CodecError, ReadExt};
-    use commonware_math::algebra::CryptoGroup;
+    use commonware_math::algebra::{Additive, CryptoGroup};
     use commonware_parallel::Sequential;
     use commonware_utils::{from_hex_formatted, test_rng, union_unique};
     use rstest::rstest;
@@ -219,6 +222,27 @@ mod tests {
     fn test_single_proof_of_possession() {
         single_proof_of_possession::<MinPk>();
         single_proof_of_possession::<MinSig>();
+    }
+
+    fn proof_of_possession_rejects_zero_inputs<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut test_rng());
+        let namespace = b"test";
+        let pop = sign_proof_of_possession::<V>(&private, namespace);
+
+        assert!(matches!(
+            verify_proof_of_possession::<V>(&V::Public::zero(), namespace, &pop),
+            Err(Error::InvalidSignature)
+        ));
+        assert!(matches!(
+            verify_proof_of_possession::<V>(&public, namespace, &V::Signature::zero()),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_proof_of_possession_rejects_zero_inputs() {
+        proof_of_possession_rejects_zero_inputs::<MinPk>();
+        proof_of_possession_rejects_zero_inputs::<MinSig>();
     }
 
     fn blst_verify_message<V: Variant>(
@@ -410,10 +434,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sign_zero_key() {
+    fn test_zero_key_is_decodable() {
         let result =
             parse_private_key("0x0000000000000000000000000000000000000000000000000000000000000000");
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     /// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.

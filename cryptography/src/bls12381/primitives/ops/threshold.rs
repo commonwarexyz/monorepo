@@ -20,6 +20,7 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_codec::Encode;
+use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 use commonware_utils::{ordered::Map, union_unique, Faults, Participant};
 use rand_core::CryptoRngCore;
@@ -103,8 +104,13 @@ pub fn verify_proof_of_possession<V: Variant>(
     namespace: &[u8],
     partial: &PartialSignature<V>,
 ) -> Result<(), Error> {
+    let partial_public = sharing.partial_public(partial.index)?;
+    if partial_public == V::Public::zero() || partial.value == V::Signature::zero() {
+        return Err(Error::InvalidSignature);
+    }
+
     super::verify::<V>(
-        &sharing.partial_public(partial.index)?,
+        &partial_public,
         V::PROOF_OF_POSSESSION,
         &union_unique(namespace, &sharing.public().encode()),
         &partial.value,
@@ -351,12 +357,12 @@ mod tests {
         primitives::{
             group::{Private, Scalar, G1_MESSAGE, G2_MESSAGE},
             ops::{self, hash_with_namespace},
-            variant::{MinPk, MinSig},
+            variant::{MinPk, MinSig, PartialSignature},
         },
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
+    use commonware_math::algebra::{Additive, CryptoGroup, Field as _, Random, Ring, Space};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{test_rng, union_unique, Faults, N3f1, NZUsize, NZU32};
 
@@ -415,6 +421,28 @@ mod tests {
     fn test_threshold_proof_of_possession() {
         threshold_proof_of_possession::<MinPk>();
         threshold_proof_of_possession::<MinSig>();
+    }
+
+    fn threshold_proof_of_possession_rejects_zero_signature<V: Variant>() {
+        let n = 5;
+        let mut rng = test_rng();
+        let namespace = b"test";
+        let (sharing, shares) =
+            dkg::deal_anonymous::<V, N3f1>(&mut rng, Default::default(), NZU32!(n));
+        let partial = PartialSignature {
+            value: V::Signature::zero(),
+            index: shares[0].index,
+        };
+        assert!(matches!(
+            verify_proof_of_possession::<V>(&sharing, namespace, &partial),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_threshold_proof_of_possession_rejects_zero_signature() {
+        threshold_proof_of_possession_rejects_zero_signature::<MinPk>();
+        threshold_proof_of_possession_rejects_zero_signature::<MinSig>();
     }
 
     fn blst_verify_message<V: Variant>(

@@ -19,14 +19,14 @@ use blst::{
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
     blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
     blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
-    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
-    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
-    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p1_from_affine, blst_p1_in_g1, blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress,
+    blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_tile_pippenger,
+    blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg,
+    blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2, blst_p2_mult,
+    blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
+    blst_scalar_from_fr, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -572,17 +572,12 @@ impl Read for Scalar {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
-        // per IETF BLS12-381 spec (Draft 4+).
-        //
-        // References:
-        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
-        // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+        // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates
+        // that the scalar is in canonical field range (including zero).
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_sk_check(&scalar) {
+            if !blst_scalar_fr_check(&scalar) {
                 return Err(Invalid("Scalar", "Invalid"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
@@ -1038,7 +1033,7 @@ impl Read for G1 {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
         // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // We additionally enforce subgroup membership.
         unsafe {
             let mut affine = blst_p1_affine::default();
             match blst_p1_uncompress(&mut affine, bytes.as_ptr()) {
@@ -1048,15 +1043,10 @@ impl Read for G1 {
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
                 BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
                 BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
+                BLST_ERROR::BLST_PK_IS_INFINITY => {}
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
             }
             blst_p1_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p1_is_inf(&ret) {
-                return Err(Invalid("G1", "Infinity"));
-            }
 
             // Verify that the deserialized element is in G1
             if !blst_p1_in_g1(&ret) {
@@ -1458,7 +1448,7 @@ impl Read for G2 {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
         // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
-        // Additional checks for infinity and subgroup membership prevent small subgroup attacks.
+        // We additionally enforce subgroup membership.
         unsafe {
             let mut affine = blst_p2_affine::default();
             match blst_p2_uncompress(&mut affine, bytes.as_ptr()) {
@@ -1468,15 +1458,10 @@ impl Read for G2 {
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
                 BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
                 BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
+                BLST_ERROR::BLST_PK_IS_INFINITY => {}
                 BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
             }
             blst_p2_from_affine(&mut ret, &affine);
-
-            // Verify that deserialized element isn't infinite
-            if blst_p2_is_inf(&ret) {
-                return Err(Invalid("G2", "Infinity"));
-            }
 
             // Verify that the deserialized element is in G2
             if !blst_p2_in_g2(&ret) {
@@ -1739,6 +1724,15 @@ mod tests {
     }
 
     #[test]
+    fn test_scalar_codec_zero() {
+        let original = Scalar::zero();
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), Scalar::SIZE);
+        let decoded = Scalar::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
     fn test_g1_codec() {
         let original = G1::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
@@ -1748,12 +1742,32 @@ mod tests {
     }
 
     #[test]
+    fn test_g1_codec_zero() {
+        let original = G1::zero();
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), G1::SIZE);
+        let decoded = G1::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+        assert_eq!(decoded, G1::zero());
+    }
+
+    #[test]
     fn test_g2_codec() {
         let original = G2::generator() * &Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g2_codec_zero() {
+        let original = G2::zero();
+        let mut encoded = original.encode();
+        assert_eq!(encoded.len(), G2::SIZE);
+        let decoded = G2::decode(&mut encoded).unwrap();
+        assert_eq!(original, decoded);
+        assert_eq!(decoded, G2::zero());
     }
 
     /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
