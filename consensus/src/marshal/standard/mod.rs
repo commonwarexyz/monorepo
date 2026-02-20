@@ -77,10 +77,6 @@ mod tests {
         assert_eq!(r1, r2);
     }
 
-    fn run_for_both_harnesses(f: impl FnOnce()) {
-        f();
-    }
-
     #[test_traced("WARN")]
     fn test_standard_finalize_good_links() {
         for seed in 0..5 {
@@ -115,8 +111,8 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_ack_pipeline_backlog() {
-        run_for_both_harnesses(harness::ack_pipeline_backlog::<InlineHarness>);
-        run_for_both_harnesses(harness::ack_pipeline_backlog::<DeferredHarness>);
+        harness::ack_pipeline_backlog::<InlineHarness>();
+        harness::ack_pipeline_backlog::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
