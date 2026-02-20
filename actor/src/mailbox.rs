@@ -101,12 +101,13 @@ impl<I> Mailbox<I> {
 
     /// Send a fire-and-forget message, ignoring closed-mailbox errors.
     ///
-    /// Returns `true` when ingress was delivered and `false` if the mailbox was closed.
-    pub async fn tell_lossy<T>(&self, msg: T) -> bool
+    /// Returns `true` when ingress was delivered and `false` if the mailbox was
+    /// closed or at capacity.
+    pub fn tell_lossy<T>(&self, msg: T) -> bool
     where
         T: Tell<I>,
     {
-        self.tx.send(msg.into_ingress()).await.is_ok()
+        self.tx.try_send(msg.into_ingress()).is_ok()
     }
 
     /// Send a request and wait for a response.
@@ -136,10 +137,13 @@ impl<I> Mailbox<I> {
         T: Future<Output = ()>,
     {
         let (tx, rx) = oneshot::channel::<A::Response>();
-        self.tx
-            .send(msg.into_ingress(tx))
-            .await
-            .map_err(|_| MailboxError::Closed)?;
+        let mut timeout = pin!(timeout);
+        let send = self.tx.send(msg.into_ingress(tx));
+        let mut send = pin!(send);
+        select! {
+            _ = &mut timeout => return Err(MailboxError::Timeout),
+            result = &mut send => result.map_err(|_| MailboxError::Closed)?,
+        }
 
         await_response_or_timeout(rx, timeout).await
     }
@@ -243,7 +247,9 @@ impl<I> From<mpsc::UnboundedSender<I>> for UnboundedMailbox<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{deterministic, Clock, Runner};
+    use futures::future;
+    use std::time::Duration;
 
     enum TestIngress {
         Tell,
@@ -328,6 +334,51 @@ mod tests {
             };
             let value = futures::join!(requester, responder).0;
             assert_eq!(value, 9);
+        });
+    }
+
+    #[test]
+    fn ask_timeout_should_cover_enqueue_backpressure() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (tx, mut rx) = mpsc::channel::<TestIngress>(1);
+            let mailbox = Mailbox::new(tx.clone());
+
+            // Saturate the bounded mailbox so future sends observe pure backpressure.
+            tx.try_send(TestIngress::Tell).expect("fill mailbox");
+            // Hold the receiver so capacity is never freed.
+            let _ = &mut rx;
+
+            select! {
+                res = mailbox.ask_timeout(AskMsg, future::ready(())) => {
+                    match res {
+                        Err(MailboxError::Timeout) => {}
+                        Ok(value) => panic!("unexpected success with value {value}"),
+                        Err(other) => panic!("unexpected error: {other:?}"),
+                    }
+                },
+                _ = context.sleep(Duration::from_millis(1)) => {
+                    panic!("ask_timeout failed to respect timeout when enqueue stalls");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn bounded_tell_lossy_does_not_block_when_full() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (tx, mut rx) = mpsc::channel::<TestIngress>(1);
+            let mailbox = Mailbox::new(tx);
+
+            assert!(mailbox.tell_lossy(TellMsg));
+            assert!(!mailbox.tell_lossy(TellMsg));
+
+            assert!(matches!(rx.recv().await, Some(TestIngress::Tell)));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
         });
     }
 }

@@ -132,6 +132,83 @@ fn collect_usage_from_fields(fields: &[Field], names: &GenericParamNames) -> Gen
     usage
 }
 
+fn collect_readonly_ingress_usage(items: &[Item], names: &GenericParamNames) -> GenericUsage {
+    let mut usage = GenericUsage::default();
+    for item in items {
+        if let ItemKind::Ask {
+            response,
+            read_write: false,
+        } = &item.kind
+        {
+            usage.merge(collect_usage_from_fields(&item.fields, names));
+            usage.merge(collect_usage_from_type(response, names));
+        }
+    }
+    usage
+}
+
+fn collect_read_write_ingress_usage(items: &[Item], names: &GenericParamNames) -> GenericUsage {
+    let mut usage = GenericUsage::default();
+    for item in items {
+        match &item.kind {
+            ItemKind::Tell => {
+                usage.merge(collect_usage_from_fields(&item.fields, names));
+            }
+            ItemKind::Ask {
+                response,
+                read_write: true,
+            }
+            | ItemKind::Subscribe { response } => {
+                usage.merge(collect_usage_from_fields(&item.fields, names));
+                usage.merge(collect_usage_from_type(response, names));
+            }
+            ItemKind::Ask {
+                read_write: false, ..
+            } => {}
+        }
+    }
+    usage
+}
+
+fn has_unused_generics(generics: &Generics, usage: &GenericUsage) -> bool {
+    generics.params.iter().any(|param| match param {
+        GenericParam::Type(param) => !usage.type_params.contains(&param.ident.to_string()),
+        GenericParam::Lifetime(param) => !usage
+            .lifetime_params
+            .contains(&param.lifetime.ident.to_string()),
+        GenericParam::Const(param) => !usage.const_params.contains(&param.ident.to_string()),
+    })
+}
+
+fn phantom_variant_for_unused_generics(generics: &Generics, usage: &GenericUsage) -> TokenStream2 {
+    if generics.params.is_empty() || !has_unused_generics(generics, usage) {
+        return quote!();
+    }
+
+    let phantom_args: Vec<_> = generics
+        .params
+        .iter()
+        .map(|p| match p {
+            GenericParam::Type(tp) => {
+                let ident = &tp.ident;
+                quote!(#ident)
+            }
+            GenericParam::Lifetime(lp) => {
+                let lt = &lp.lifetime;
+                quote!(&#lt ())
+            }
+            GenericParam::Const(param) => {
+                let ident = &param.ident;
+                quote!([(); #ident])
+            }
+        })
+        .collect();
+    quote! {
+        #[doc(hidden)]
+        _Phantom(::core::marker::PhantomData<(#(#phantom_args),*)>),
+    }
+}
+
 fn wrapper_generics_tokens(
     generics: &Generics,
     usage: &GenericUsage,
@@ -535,8 +612,8 @@ fn emit_mailbox_method(
             }
 
             #(#attrs)*
-            pub async fn #lossy_method(&self) -> bool {
-                self.0.tell_lossy(#unit_constructor).await
+            pub fn #lossy_method(&self) -> bool {
+                self.0.tell_lossy(#unit_constructor)
             }
 
             #(#attrs)*
@@ -551,8 +628,8 @@ fn emit_mailbox_method(
             }
 
             #(#attrs)*
-            pub async fn #lossy_method(&self, #(#args),*) -> bool {
-                self.0.tell_lossy(#variant { #(#values),* }).await
+            pub fn #lossy_method(&self, #(#args),*) -> bool {
+                self.0.tell_lossy(#variant { #(#values),* })
             }
 
             #(#attrs)*
@@ -709,41 +786,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         MailboxKind::Unbounded => quote!(#actor::mailbox::UnboundedMailbox<#ingress #ty_generics>),
     };
 
-    let phantom_variant = if generics.params.is_empty() {
-        quote!()
-    } else {
-        let phantom_args: Vec<_> = generics
-            .params
-            .iter()
-            .map(|p| match p {
-                GenericParam::Type(tp) => {
-                    let ident = &tp.ident;
-                    quote!(#ident)
-                }
-                GenericParam::Lifetime(lp) => {
-                    let lt = &lp.lifetime;
-                    quote!(&#lt ())
-                }
-                GenericParam::Const(_) => quote!(()),
-            })
-            .collect();
-        quote! {
-            #[doc(hidden)]
-            _Phantom(::core::marker::PhantomData<(#(#phantom_args),*)>),
-        }
-    };
-
-    let empty = quote!();
-    let readonly_phantom = if readonly_variants.is_empty() {
-        &phantom_variant
-    } else {
-        &empty
-    };
-    let read_write_phantom = if read_write_variants.is_empty() {
-        &phantom_variant
-    } else {
-        &empty
-    };
+    let readonly_usage = collect_readonly_ingress_usage(&items, &names);
+    let read_write_usage = collect_read_write_ingress_usage(&items, &names);
+    let readonly_phantom = phantom_variant_for_unused_generics(&generics, &readonly_usage);
+    let read_write_phantom = phantom_variant_for_unused_generics(&generics, &read_write_usage);
 
     quote! {
         pub enum #readonly_ingress #generics #where_clause {

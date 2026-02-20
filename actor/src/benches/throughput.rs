@@ -88,7 +88,11 @@ impl<E: Spawner + Clock> Actor<E> for ThroughputActor {
     }
 }
 
-fn throughput_actor(value: u64, lane_batch: usize, batch_penalty: Duration) -> ThroughputActor {
+const fn throughput_actor(
+    value: u64,
+    lane_batch: usize,
+    batch_penalty: Duration,
+) -> ThroughputActor {
     ThroughputActor {
         value,
         lane_batch: NonZeroUsize::new(lane_batch).expect("lane batch must be non-zero"),

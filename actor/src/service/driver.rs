@@ -207,10 +207,6 @@ where
                 if self.wait_for_read_capacity(&mut args, &mut reads).await {
                     return;
                 }
-
-                self.actor
-                    .postprocess(self.context.as_present_mut(), &mut args)
-                    .await;
                 continue;
             }
 
@@ -231,35 +227,36 @@ where
                     }
                 }
             };
-            if let Some(event) = event {
-                match event {
-                    LoopEvent::Shutdown => {
-                        self.shutdown_gracefully(&mut args, &mut reads, "shutdown signal received")
-                            .await;
-                        return;
-                    }
-                    LoopEvent::Mailbox(lane, Some(message)) => {
-                        if self.dispatch_ingress(&mut args, &mut reads, message).await {
-                            return;
-                        }
-                        if self.drain_lane_batch(&mut args, &mut reads, lane).await {
-                            return;
-                        }
-                    }
-                    LoopEvent::External(Some(message)) => {
-                        if self.handle_read_write(&mut args, &mut reads, message).await {
-                            return;
-                        }
-                    }
-                    LoopEvent::Mailbox(_, None) | LoopEvent::External(None) => {
-                        self.shutdown_gracefully(
-                            &mut args,
-                            &mut reads,
-                            "ingress source closed, shutting down actor",
-                        )
+            let Some(event) = event else {
+                continue;
+            };
+            match event {
+                LoopEvent::Shutdown => {
+                    self.shutdown_gracefully(&mut args, &mut reads, "shutdown signal received")
                         .await;
+                    return;
+                }
+                LoopEvent::Mailbox(lane, Some(message)) => {
+                    if self.dispatch_ingress(&mut args, &mut reads, message).await {
                         return;
                     }
+                    if self.drain_lane_batch(&mut args, &mut reads, lane).await {
+                        return;
+                    }
+                }
+                LoopEvent::External(Some(message)) => {
+                    if self.handle_read_write(&mut args, &mut reads, message).await {
+                        return;
+                    }
+                }
+                LoopEvent::Mailbox(_, None) | LoopEvent::External(None) => {
+                    self.shutdown_gracefully(
+                        &mut args,
+                        &mut reads,
+                        "ingress source closed, shutting down actor",
+                    )
+                    .await;
+                    return;
                 }
             }
 
