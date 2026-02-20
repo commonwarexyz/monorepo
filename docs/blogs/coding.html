@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Deliver Us in Pieces</title>
+    <meta name="description" content="Validators on most blockchain networks are overprovisioned for bandwidth when they are a leader and underutilized the rest of the time. In a 'standard' blockchain (akin to marshal::standard over broadcast::buffered), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?">
+    <meta name="author" content="Ben Clabby">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/coding" />
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/coding" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/coding_chain.png" />
+    <meta property="og:title" content="Deliver Us in Pieces" />
+    <meta property="og:description" content="Validators on most blockchain networks are overprovisioned for bandwidth when they are a leader and underutilized the rest of the time. In a 'standard' blockchain (akin to marshal::standard over broadcast::buffered), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?" />
+    <meta property="article:author" content="https://x.com/vex_0x" />
+    <meta property="article:published_time" content="2026-02-20T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-02-20T00:00:00Z" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/coding" />
+    <meta property="twitter:title" content="Deliver Us in Pieces" />
+    <meta property="twitter:description" content="Validators on most blockchain networks are overprovisioned for bandwidth when they are a leader and underutilized the rest of the time. In a 'standard' blockchain (akin to marshal::standard over broadcast::buffered), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/coding_chain.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@vex_0x" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Deliver Us in Pieces</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
+            <div class="date">February 20, 2026</div>
+        </div>
+
+        <p>Validators on most blockchain networks are overprovisioned for bandwidth when they are a leader and underutilized the rest of the time.</p>
+
+        <p>In a "standard" blockchain (akin to <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?</p>
+
+        <p>Today, we are introducing a new marshal dialect: <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify uniquely constructed shards and relay to other validators. All without slowing down <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> (which supports safely voting for a block before it is fully reconstructed).</p>
+
+        <h2>Certification: A Second Decision Point</h2>
+
+        <p>The foundation of this integration is a new phase in a view's progression to finalization within <code>consensus::simplex</code>. "Certification" offers a local, deterministic method to nullify a view after voting on partial information.</p>
+
+        <p>A notarization proves that a quorum observed the same commitment. It does not force replicas to keep going down that path. After notarization forms, the network can still change course (ensuring that invalid data is not enshrined in the canonical chain).</p>
+
+        <p>If <code>certify</code> returns true, the validator advances to the next view and then votes to <code>finalize</code> the certified view. If <code>certify</code> returns false, the validator votes to <code>nullify</code> and refuses to build on that payload. In other words: notarization says “we saw it,” certification decides “we will build on it.”</p>
+
+        <div class="image-container">
+            <center>
+                <img src="/imgs/certify_sequence.png" alt="View Sequence" width="50%" />
+            </center>
+            <div class="image-caption">Figure 1: Simplex view lifecycle with certification</div>
+        </div>
+
+        <h2>Why This Matters for Coding</h2>
+
+        <p>In the coding path, this boundary improves view latency by changing when validators can vote.</p>
+
+        <p>The proposer first erasure-encodes their block and commits to all shards to form a consensus payload (the <b>commitment</b>). Then, they disperse both a shard as well as an inclusion proof to the validators (a method described in <a href="https://www.usenix.org/system/files/nsdi22-paper-yang_lei.pdf">Dispersed Ledger</a>). Upon receipt, validators verify proposal invariants and shard validity against the erasure-coding commitment, relay their shard, and vote to notarize. Full block reconstruction is deferred to <code>certify</code>.</p>
+
+        <div class="image-container">
+            <img src="/imgs/coding_commitment_construction.png" alt="Erasure coding commitment construction" />
+            <div class="image-caption">Figure 2: Coding Commitment Construction</div>
+        </div>
+
+        <p>This is closest in spirit to <a href="https://eprint.iacr.org/2023/1916.pdf">DispersedSimplex</a>: notarize the commitment first, recover the block later, then gate finalization on local certification. We differ from other stacks that employ erasure-coded broadcast (such as <a href="https://arxiv.org/abs/2502.20692">RaptorCast + MonadBFT</a>) which typically wait for full block recovery before a validator can vote (increasing view latency and thus transaction latency).</p>
+
+        <div class="image-container">
+            <img src="/imgs/coding_dissemination.png" alt="Erasure-coded Block dissemination" />
+            <div class="image-caption">Figure 3: Block Dissemination Lifecycle</div>
+        </div>
+
+        <p>After notarization, <code>certify</code> is the first point where the full block is required: we reconstruct it, check ancestry and epoch invariants, and run full application verification. If reconstruction fails or the reconstructed blob is invalid, certification fails and the view is nullified cleanly - no bad blocks end up in the finalized chain.</p>
+
+        <div class="image-container">
+            <img src="/imgs/coding_chain.png" alt="Erasure-coded Block dissemination and chain diagram" />
+            <div class="image-caption">Figure 4: Erasure-coded Chain Structure</div>
+        </div>
+
+        <h2>Out-of-the-Box Performance (If You Want It)</h2>
+
+        <p>Applications do not need to be rewritten to use this feature. If you already implement the <code>Application</code>/<code>VerifyingApplication</code> interfaces, wrap the same application with <code>marshal::coding</code> and get erasure-coded dissemination automatically.</p>
+
+        <p>Interested in upgrading to <code>marshal::coding</code> at some point but not quite ready yet? We continue to support <code>marshal::standard::Inline</code> (all you need is a height and a parent digest) and <code>marshal::standard::Deferred</code> (if your block stores the consensus context, we can defer the verification check until <code>certify</code>).</p>
+
+        <h2>Alto Benchmarks</h2>
+
+        <p>For global <a href="https://alto.commonware.xyz">Alto</a> benchmarks, we deploy 50 validators uniformly across <code>ap-northeast-1</code>, <code>ap-northeast-2</code>, <code>ap-south-1</code>, <code>ap-southeast-2</code>, <code>eu-central-1</code>, <code>eu-north-1</code>, <code>eu-west-1</code>, <code>sa-east-1</code>, <code>us-east-1</code>, and <code>us-west-1</code>. Each validator runs on a <code>c8g.2xlarge</code> instance (8 vcpus, 4 dedicated to <code>tokio</code> and 4 dedicated to a <code>rayon</code> thread pool used for parallel hashing and signature verification).</p>
+        <p>The first experiment fixes block size at 4MiB to emphasize low view latency. In this configuration, coding marshal sustains about 14Mb/s while keeping average view latency around 300ms.</p>
+
+        <div class="image-container">
+            <img src="/imgs/alto_coding_4.png" alt="Alto coding benchmarks (4 MiB blocks)" />
+            <div class="image-caption">Figure 5: Global Alto cluster, using <code><a href="https://docs.rs/commonware-coding/latest/commonware_coding/struct.ReedSolomon.html">coding::reed_solomon</a></code> and <code><a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/blake3/struct.Blake3.html">cryptography::blake3</a></code>, achieving ~14Mb/s throughput and ~300ms view latency with statically sized 4MiB blocks</div>
+        </div>
+
+        <p>The second experiment increases block size to 8MiB to push throughput. Throughput rises to about 17Mb/s while view latency stays below 500ms, showing that larger blocks remain practical on the same global topology.</p>
+
+        <div class="image-container">
+            <img src="/imgs/alto_coding_8.png" alt="Alto coding benchmarks (8 MiB blocks)" />
+            <div class="image-caption">Figure 6: Global Alto cluster, using <code><a href="https://docs.rs/commonware-coding/latest/commonware_coding/struct.ReedSolomon.html">coding::reed_solomon</a></code> and <code><a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/blake3/struct.Blake3.html">cryptography::blake3</a></code>, achieving ~17Mb/s throughput and &lt;500ms view latency with statically sized 8MiB blocks</div>
+        </div>
+
+        <h2>What Comes Next</h2>
+
+        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster and more composable consensus deployments. <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code> is now <a href="/blogs/is-it-ready-yet.html">in ALPHA</a>, and will be included in our next release.</p>
+
+        <p><i>Can you have too much blockspace?</i></p>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="/shared.js"></script>
+</body>
+
+</html>
