@@ -1440,6 +1440,7 @@ dependencies = [
  "commonware-macros",
  "commonware-parallel",
  "commonware-utils",
+ "criterion",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",

@@ -1,9 +1,14 @@
 use crate::bls12381::primitives::{group::Scalar, variant::Variant, Error};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use cfg_if::cfg_if;
 use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_math::poly::{Interpolator, Poly};
+use commonware_math::{
+    algebra::{FieldNTT, Ring},
+    poly::{Interpolator, Poly},
+};
 use commonware_parallel::Sequential;
 use commonware_utils::{ordered::Set, Faults, Participant, NZU32};
 #[cfg(feature = "std")]
@@ -11,6 +16,8 @@ use core::iter;
 use core::num::NonZeroU32;
 #[cfg(feature = "std")]
 use std::sync::{Arc, OnceLock};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 /// Configures how participants are assigned shares of a secret.
 ///
@@ -19,9 +26,13 @@ use std::sync::{Arc, OnceLock};
 #[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Mode {
-    // TODO (https://github.com/commonware-xyz/monorepo/issues/1836): Add a mode for sub O(N^2) interpolation
     #[default]
     NonZeroCounter = 0,
+
+    /// Assigns participants to powers of a root of unity.
+    ///
+    /// This mode enables sub-quadratic interpolation using NTT-based algorithms.
+    RootsOfUnity = 1,
 }
 
 impl Mode {
@@ -37,13 +48,37 @@ impl Mode {
                 // Adding 1 is critical, because f(0) will contain the secret.
                 Some(Scalar::from_u64(i.get() as u64 + 1))
             }
+            Self::RootsOfUnity => {
+                // Participant i gets w^i. Since w^i != 0 for any i, this never
+                // collides with the secret at f(0).
+                let size = (total.get() as u64).next_power_of_two();
+                let lg_size = size.ilog2() as u8;
+                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
+                Some(w.exp(&[i.get() as u64]))
+            }
         }
     }
 
     /// Compute the scalars for all participants.
     #[cfg(feature = "std")]
-    pub(crate) fn all_scalars(self, total: NonZeroU32) -> impl Iterator<Item = Scalar> {
-        (0..total.get()).map(move |i| self.scalar(total, Participant::new(i)).expect("i < total"))
+    pub(crate) fn all_scalars(self, total: NonZeroU32) -> Vec<Scalar> {
+        match self {
+            Self::NonZeroCounter => (0..total.get())
+                .map(|i| Scalar::from_u64(i as u64 + 1))
+                .collect(),
+            Self::RootsOfUnity => {
+                let size = (total.get() as u64).next_power_of_two();
+                let lg_size = size.ilog2() as u8;
+                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
+                (0..total.get())
+                    .scan(Scalar::one(), |state, _| {
+                        let val = state.clone();
+                        *state *= &w;
+                        Some(val)
+                    })
+                    .collect()
+            }
+        }
     }
 
     /// Create an interpolator for this mode, given a set of indices.
@@ -62,22 +97,50 @@ impl Mode {
         indices: &Set<I>,
         to_index: impl Fn(&I) -> Option<Participant>,
     ) -> Option<Interpolator<I, Scalar>> {
-        let mut count = 0;
-        let iter = indices
-            .iter()
-            .filter_map(|i| {
-                let scalar = self.scalar(total, to_index(i)?)?;
-                Some((i.clone(), scalar))
-            })
-            .inspect(|_| {
-                count += 1;
-            });
-        let out = Interpolator::new(iter);
-        // If any indices failed to produce a scalar, reject.
-        if count != indices.len() {
-            return None;
+        match self {
+            Self::NonZeroCounter => {
+                let mut count = 0;
+                let iter = indices
+                    .iter()
+                    .filter_map(|i| {
+                        let scalar = self.scalar(total, to_index(i)?)?;
+                        Some((i.clone(), scalar))
+                    })
+                    .inspect(|_| {
+                        count += 1;
+                    });
+                let out = Interpolator::new(iter);
+                if count != indices.len() {
+                    return None;
+                }
+                Some(out)
+            }
+            Self::RootsOfUnity => {
+                // For roots of unity mode, we use the fast O(n log n) interpolation.
+                // Participant i maps to exponent i, so the evaluation point is w^i.
+                let size = (total.get() as u64).next_power_of_two();
+                let ntt_total = NonZeroU32::new(u32::try_from(size).ok()?)?;
+
+                let mut count = 0;
+                let points: Vec<(I, u32)> = indices
+                    .iter()
+                    .filter_map(|i| {
+                        let participant = to_index(i)?;
+                        if participant.get() >= total.get() {
+                            return None;
+                        }
+                        count += 1;
+                        Some((i.clone(), participant.get()))
+                    })
+                    .collect();
+
+                if count != indices.len() {
+                    return None;
+                }
+
+                Some(Interpolator::roots_of_unity(ntt_total, points))
+            }
         }
-        Some(out)
     }
 
     /// Create an interpolator for this mode, given a set, and a subset.
@@ -122,6 +185,7 @@ impl Read for Mode {
         let tag: u8 = ReadExt::read(buf)?;
         match tag {
             0 => Ok(Self::NonZeroCounter),
+            1 => Ok(Self::RootsOfUnity),
             o => Err(commonware_codec::Error::InvalidEnum(o)),
         }
     }
@@ -169,7 +233,7 @@ impl<V: Variant> Sharing<V> {
     }
 
     #[cfg(feature = "std")]
-    fn all_scalars(&self) -> impl Iterator<Item = Scalar> {
+    fn all_scalars(&self) -> Vec<Scalar> {
         self.mode.all_scalars(self.total)
     }
 
@@ -285,6 +349,103 @@ impl<V: Variant> Read for Sharing<V> {
     }
 }
 
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use commonware_invariants::minifuzz;
+    use commonware_utils::ordered::Map;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn test_roots_of_unity_interpolator_large_total_returns_none() {
+        let total = NonZeroU32::new(u32::MAX).expect("u32::MAX is non-zero");
+        let indices = Set::from_iter_dedup([Participant::new(0)]);
+        let interpolator =
+            Mode::RootsOfUnity.interpolator(total, &indices, |participant| Some(*participant));
+        assert!(
+            interpolator.is_none(),
+            "domain > u32::MAX should be rejected instead of panicking"
+        );
+    }
+
+    #[test]
+    fn test_all_scalars_matches_scalar() {
+        minifuzz::test(|u| {
+            let mode = match u.int_in_range(0u8..=1)? {
+                0 => Mode::NonZeroCounter,
+                1 => Mode::RootsOfUnity,
+                _ => unreachable!("range is 0..=1"),
+            };
+            let total = NonZeroU32::new(u.int_in_range(1u32..=512u32)?).expect("range is non-zero");
+            let index = u.int_in_range(0u32..=total.get() - 1)?;
+            let participant = Participant::new(index);
+
+            let scalars = mode.all_scalars(total);
+            assert_eq!(
+                scalars[usize::from(participant)].clone(),
+                mode.scalar(total, participant).expect("index is in range")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_subset_interpolation_recovers_constant() {
+        minifuzz::test(|u| {
+            let mode = match u.int_in_range(0u8..=1)? {
+                0 => Mode::NonZeroCounter,
+                1 => Mode::RootsOfUnity,
+                _ => unreachable!("range is 0..=1"),
+            };
+            let total = NonZeroU32::new(u.int_in_range(1u32..=64u32)?).expect("range is non-zero");
+
+            let mut subset_vec = Vec::new();
+            for i in 0..total.get() {
+                if u.arbitrary::<bool>()? {
+                    subset_vec.push(Participant::new(i));
+                }
+            }
+            if subset_vec.is_empty() {
+                let i = u.int_in_range(0u32..=total.get() - 1)?;
+                subset_vec.push(Participant::new(i));
+            }
+            let subset = Set::from_iter_dedup(subset_vec);
+
+            let max_degree = u32::try_from(subset.len() - 1).expect("subset len fits in u32");
+            let degree = u.int_in_range(0u32..=max_degree)?;
+            let seed: u64 = u.arbitrary()?;
+            let poly: Poly<Scalar> = Poly::new(&mut StdRng::seed_from_u64(seed), degree);
+
+            let all_shares = Map::from_iter_dedup((0..total.get()).map(|i| {
+                let participant = Participant::new(i);
+                let scalar = mode.scalar(total, participant).expect("in range");
+                let share = poly.eval(&scalar);
+                (participant, share)
+            }));
+
+            let subset_evals = Map::from_iter_dedup(subset.iter().map(|participant| {
+                (
+                    *participant,
+                    all_shares
+                        .get_value(participant)
+                        .expect("participant exists")
+                        .clone(),
+                )
+            }));
+
+            let interpolator = mode
+                .interpolator(total, &subset, |participant| Some(*participant))
+                .expect("subset indices are valid");
+            let recovered = interpolator
+                .interpolate(&subset_evals, &Sequential)
+                .expect("subset should match interpolator domain");
+
+            assert_eq!(recovered, poly.constant().clone());
+            Ok(())
+        });
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;
@@ -294,8 +455,9 @@ mod fuzz {
 
     impl<'a> Arbitrary<'a> for Mode {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            match u.int_in_range(0u8..=0)? {
+            match u.int_in_range(0u8..=1)? {
                 0 => Ok(Self::NonZeroCounter),
+                1 => Ok(Self::RootsOfUnity),
                 _ => Err(arbitrary::Error::IncorrectFormat),
             }
         }

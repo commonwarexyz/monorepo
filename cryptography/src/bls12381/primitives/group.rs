@@ -17,8 +17,8 @@ use alloc::{vec, vec::Vec};
 use blst::{
     blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
     blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
-    blst_fr_mul, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
+    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
@@ -35,7 +35,8 @@ use commonware_codec::{
     FixedSize, Read, ReadExt, Write,
 };
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
+    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
+    Space,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{hex, Participant};
@@ -320,6 +321,44 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
         0x5884_b7fa_0003_4802,
         0x998c_4fef_ecbc_4ff5,
         0x1824_b159_acc5_056f,
+    ],
+});
+
+/// A primitive 2^32-th root of unity in the BLS12-381 scalar field.
+///
+/// This is GENERATOR^t where t * 2^32 + 1 = r, with GENERATOR = 7.
+///
+/// Reference: <https://github.com/zkcrypto/bls12_381/blob/main/src/scalar.rs>
+const ROOT_OF_UNITY: Scalar = Scalar(blst_fr {
+    l: [
+        0xb9b5_8d8c_5f0e_466a,
+        0x5b1b_4c80_1819_d7ec,
+        0x0af5_3ae3_52a3_1e64,
+        0x5bf3_adda_19e9_b27b,
+    ],
+});
+
+/// An element which is not a power of any root of unity.
+///
+/// This is used for coset NTT operations. We use 7 (the multiplicative generator).
+const COSET_SHIFT: Scalar = Scalar(blst_fr {
+    l: [
+        0x0000_000e_ffff_fff1,
+        0x17e3_63d3_0018_9c0f,
+        0xff9c_5787_6f84_57b0,
+        0x3513_3220_8fc5_a8c4,
+    ],
+});
+
+/// The inverse of [`COSET_SHIFT`] (i.e. 7^-1 mod r) in Montgomery form.
+///
+/// Computed via `COSET_SHIFT.inv()`.
+const COSET_SHIFT_INV: Scalar = Scalar(blst_fr {
+    l: [
+        0xdb6d_b6da_db6d_b6dc,
+        0xe6b5_824a_db6c_c6da,
+        0xf8b3_56e0_0581_0db9,
+        0x66d0_f1e6_60ec_4796,
     ],
 });
 
@@ -748,6 +787,37 @@ impl Random for Scalar {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
         Self::from_ikm(&ikm)
+    }
+}
+
+impl FieldNTT for Scalar {
+    /// BLS12-381 scalar field has two-adicity of 32 (r-1 is divisible by 2^32).
+    const MAX_LG_ROOT_ORDER: u8 = 32;
+
+    fn root_of_unity(lg: u8) -> Option<Self> {
+        if lg > Self::MAX_LG_ROOT_ORDER {
+            return None;
+        }
+        let mut out = ROOT_OF_UNITY;
+        for _ in 0..(Self::MAX_LG_ROOT_ORDER - lg) {
+            out = out.clone() * &out;
+        }
+        Some(out)
+    }
+
+    fn coset_shift() -> Self {
+        COSET_SHIFT
+    }
+
+    fn coset_shift_inv() -> Self {
+        COSET_SHIFT_INV
+    }
+
+    fn div_2(&self) -> Self {
+        let mut ret = blst_fr::default();
+        // SAFETY: blst_fr_rshift supports in-place (ret==a). Both pointers valid.
+        unsafe { blst_fr_rshift(&mut ret, &self.0, 1) };
+        Self(ret)
     }
 }
 
@@ -1694,6 +1764,11 @@ mod tests {
     }
 
     #[test]
+    fn test_scalar_as_field_ntt() {
+        minifuzz::test(test_suites::fuzz_field_ntt::<Scalar>);
+    }
+
+    #[test]
     fn test_g1_as_space() {
         minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G1>);
     }
@@ -2198,5 +2273,25 @@ mod tests {
             CodecConformance<Scalar>,
             CodecConformance<Share>
         }
+    }
+
+    #[test]
+    fn test_ntt_constants() {
+        let root = Scalar::root_of_unity(32).unwrap();
+        let root_pow_2_32 = root.exp(&[1u64 << 32]);
+        assert_eq!(root_pow_2_32, Scalar::one(), "root^(2^32) should be 1");
+
+        let coset = Scalar::coset_shift();
+        let coset_inv = Scalar::coset_shift_inv();
+        let product = coset * &coset_inv;
+        assert_eq!(
+            product,
+            Scalar::one(),
+            "coset_shift * coset_shift_inv should be 1"
+        );
+
+        let two = Scalar::from_u64(2);
+        let half = Scalar::one().div_2();
+        assert_eq!(two * &half, Scalar::one(), "2 * (1/2) should be 1");
     }
 }
