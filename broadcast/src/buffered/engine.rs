@@ -467,7 +467,7 @@ impl<
 
             // Increment metrics for each dropped waiter
             for _ in 0..dropped_count {
-                self.metrics.get.inc(Status::Dropped);
+                self.metrics.subscribe.inc(Status::Dropped);
             }
 
             !waiters.is_empty()
