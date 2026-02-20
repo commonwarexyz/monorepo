@@ -388,8 +388,6 @@ impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
     }
 
     fn message(&self) -> Bytes {
-        // Epoch is NOT included in signed data. Not signing over epoch allows
-        // certificates to be verified without knowing the epoch.
         self.chunk.encode()
     }
 }
