@@ -520,17 +520,14 @@ where
 mod tests {
     use super::Inline;
     use crate::{
-        marshal::{
-            mocks::{
-                harness::{
-                    default_leader, make_raw_block, setup_network, B, BLOCKS_PER_EPOCH, Ctx,
-                    NAMESPACE, NUM_VALIDATORS, S, StandardHarness, TestHarness, V,
-                },
-                verifying::MockVerifyingApp,
+        marshal::mocks::{
+            harness::{
+                default_leader, make_raw_block, setup_network, Ctx, StandardHarness, TestHarness,
+                B, BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, S, V,
             },
+            verifying::MockVerifyingApp,
         },
-        simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-        simplex::types::Context,
+        simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Context},
         types::{Epoch, FixedEpocher, Height, Round, View},
         Automaton, Block, CertifiableAutomaton, Relay, VerifyingApplication,
     };
@@ -688,7 +685,8 @@ mod tests {
 
             // Invalid re-proposal: non-boundary block.
             let non_boundary_height = Height::new(10);
-            let non_boundary_round = Round::new(Epoch::zero(), View::new(non_boundary_height.get()));
+            let non_boundary_round =
+                Round::new(Epoch::zero(), View::new(non_boundary_height.get()));
             let non_boundary_block = B::new::<Sha256>(
                 Ctx {
                     round: non_boundary_round,
@@ -838,7 +836,12 @@ mod tests {
                 leader: me,
                 parent: (View::zero(), genesis.digest()),
             };
-            let block = B::new::<Sha256>(verify_context.clone(), genesis.digest(), Height::new(1), 100);
+            let block = B::new::<Sha256>(
+                verify_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
             let digest = block.digest();
             marshal.clone().proposed(round, block).await;
 
