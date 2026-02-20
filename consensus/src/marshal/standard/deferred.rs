@@ -79,7 +79,7 @@ use crate::{
         },
         core::Mailbox,
         standard::{
-            verification::{
+            validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
             },
             Standard,

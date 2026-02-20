@@ -32,7 +32,7 @@ commonware_macros::stability_scope!(ALPHA {
     mod inline;
     pub use inline::Inline;
 
-    mod verification;
+    mod validation;
 });
 
 mod variant;

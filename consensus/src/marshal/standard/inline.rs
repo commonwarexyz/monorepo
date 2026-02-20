@@ -48,7 +48,7 @@ use crate::{
         application::validation::LastBuilt,
         core::Mailbox,
         standard::{
-            verification::{
+            validation::{
                 fetch_parent, precheck_epoch_and_reproposal, verify_with_parent, Decision,
             },
             Standard,
