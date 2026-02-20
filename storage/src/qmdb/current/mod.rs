@@ -44,8 +44,12 @@
 //! _grafted leaf_ digest that incorporates both the bitmap chunk and the ops subtree root:
 //!
 //! ```text
-//! grafted_leaf = hash(bitmap_chunk || ops_subtree_root)
+//! grafted_leaf = hash(bitmap_chunk || ops_subtree_root)   // non-zero chunk
+//! grafted_leaf = ops_subtree_root                         // all-zero chunk (identity)
 //! ```
+//!
+//! The all-zero identity means that for pruned regions (where every operation is inactive), the
+//! grafted MMR is structurally identical to the ops MMR at and above the grafting height.
 //!
 //! Above the grafting height, internal nodes use standard MMR hashing over the grafted leaves.
 //! Below the grafting height, the ops MMR is unchanged.
@@ -129,6 +133,35 @@
 //! digest peaks covering the pruned region are persisted to metadata as "pinned nodes". On
 //! recovery, these pinned nodes are loaded and serve as opaque siblings during upward propagation,
 //! allowing the grafted tree to be rebuilt without the pruned chunks.
+//!
+//! # Root structure
+//!
+//! The canonical root of a `current` database is:
+//!
+//! ```text
+//! root = hash(grafted_root || ops_root)
+//! ```
+//!
+//! This combines two components:
+//!
+//! - **Grafted root**: The root of the grafted MMR (overlaying bitmap chunks with ops subtree
+//!   roots, plus any partial chunk). Used for proofs about operation values and their activity
+//!   status. See [RangeProof](proof::RangeProof) and [OperationProof](proof::OperationProof).
+//!
+//! - **Ops root**: The root of the raw operations MMR (the inner [crate::qmdb::any] database's
+//!   root). Used for state sync, where a client downloads operations and verifies each batch
+//!   against this root using standard MMR range proofs.
+//!
+//! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root) and
+//! [MerkleizedStore](crate::qmdb::store::MerkleizedStore)`::`[root()](crate::qmdb::store::MerkleizedStore::root).
+//! The ops root is returned by the `sync::Database` trait's `root()` method, since the sync engine
+//! verifies batches against the ops root, not the canonical root.
+//!
+//! For state sync, the sync engine targets the ops root and verifies each batch against it.
+//! After sync, the bitmap and grafted MMR are reconstructed deterministically from the
+//! operations, and the canonical root is computed. Validating that the ops root is part of the
+//! canonical root (i.e. that `hash(grafted_root || ops_root) == canonical_root`) is the
+//! caller's responsibility; the sync engine does not perform this check.
 
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -156,6 +189,7 @@ pub mod db;
 mod grafting;
 pub mod ordered;
 pub mod proof;
+pub(crate) mod sync;
 pub mod unordered;
 
 /// Configuration for a `Current` authenticated db with fixed-size values.
@@ -348,7 +382,8 @@ where
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
-    let root = db::compute_root(&mut hasher, &storage, partial_chunk).await?;
+    let ops_root = any.log.root();
+    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -435,7 +470,8 @@ where
     // Compute and cache the root.
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
-    let root = db::compute_root(&mut hasher, &storage, partial_chunk).await?;
+    let ops_root = any.log.root();
+    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
