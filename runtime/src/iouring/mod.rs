@@ -400,7 +400,7 @@ impl Waker {
         let prev = self
             .inner
             .state
-            .fetch_or(SLEEP_INTENT_BIT, Ordering::AcqRel);
+            .fetch_or(SLEEP_INTENT_BIT, Ordering::Acquire);
         (prev >> 1) & SUBMISSION_SEQ_MASK
     }
 
