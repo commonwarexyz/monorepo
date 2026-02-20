@@ -135,7 +135,7 @@
             <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
             <div class="date">February 20, 2026</div>
         </div>
-        <p>Validator clusters already have the bandwidth, but in the standard proposal path of consensus::simplex one node pushes the whole block while everyone else mostly waits, so effective throughput collapses to a single bottleneck.</p>
+        <p>Validator clusters already have the bandwidth. We are just not using it. In the standard proposal path of <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code>, one node pushes the whole block while everyone else waits, so throughput is bottlenecked. What if we distributed the load?</p>
         <h3><a href="/blogs/is-it-ready-yet.html">Is it ready yet?</a></h3>
         <div class="meta">
             <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
