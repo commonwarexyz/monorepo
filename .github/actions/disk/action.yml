@@ -40,10 +40,13 @@ runs:
       shell: pwsh
       run: |
         if (Get-Command docker -ErrorAction SilentlyContinue) {
+          Write-Host "docker available; running docker cleanup."
           docker system prune -af
           if ($LASTEXITCODE -ne 0) {
             Write-Host "docker system prune failed with exit code $LASTEXITCODE; continuing."
             $global:LASTEXITCODE = 0
+          } else {
+            Write-Host "docker cleanup completed successfully."
           }
         } else {
           Write-Host "docker not available; skipping docker cleanup."
