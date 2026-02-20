@@ -31,7 +31,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Attempt to broadcast a message to the associated recipients.
         fn broadcast(
-            &mut self,
+            &self,
             recipients: Self::Recipients,
             message: Self::Message,
         ) -> impl Future<Output = oneshot::Receiver<Self::Response>> + Send;

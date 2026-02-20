@@ -17,8 +17,7 @@ use crate::{
             db::{Merkleized, State, Unmerkleized},
             proof::OperationProof,
         },
-        store::{self, LogStore as _},
-        DurabilityState, Durable, Error, NonDurable,
+        store, DurabilityState, Durable, Error, NonDurable,
     },
 };
 use commonware_codec::Codec;
@@ -189,34 +188,39 @@ where
         hasher: &mut H,
         key: &K,
     ) -> Result<super::ExclusionProof<K, V, H::Digest, N>, Error> {
-        let span = self.any.get_span(key).await?;
-        let loc = match &span {
+        match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
                     // Cannot prove exclusion of a key that exists in the db.
                     return Err(Error::KeyExists);
                 }
-                *loc
+                let op_proof = self.operation_proof(hasher, loc).await?;
+                Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
             }
-            None => self
-                .size()
-                .await
-                .checked_sub(1)
-                .expect("db shouldn't be empty"),
-        };
-
-        let op_proof = self.operation_proof(hasher, loc).await?;
-
-        Ok(match span {
-            Some((_, key_data)) => super::ExclusionProof::KeyValue(op_proof, key_data),
             None => {
-                let value = match self.any.log.reader().await.read(*loc).await? {
-                    Operation::CommitFloor(value, _) => value,
-                    _ => unreachable!("last commit is not a CommitFloor operation"),
+                // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
+                // variant requires the CommitFloor's floor to equal its own location (genuinely
+                // empty at commit time). If this doesn't hold (e.g. uncommitted deleted emptied
+                // the DB), we can't generate a valid proof until the next commit.
+                let op = self
+                    .any
+                    .log
+                    .reader()
+                    .await
+                    .read(*self.any.last_commit_loc)
+                    .await?;
+                let Operation::CommitFloor(value, floor) = op else {
+                    unreachable!("last_commit_loc should always point to a CommitFloor");
                 };
-                super::ExclusionProof::Commit(op_proof, value)
+                if floor != self.any.last_commit_loc {
+                    return Err(Error::NotEmpty);
+                }
+                let op_proof = self
+                    .operation_proof(hasher, self.any.last_commit_loc)
+                    .await?;
+                Ok(super::ExclusionProof::Commit(op_proof, value))
             }
-        })
+        }
     }
 }
 
