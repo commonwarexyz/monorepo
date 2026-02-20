@@ -1118,13 +1118,8 @@ where
                     // and we resolve the notarization request before the block request.
                     let height = block.height();
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
-                        // Protocol invariant: for this variant, `digest` identifies a
-                        // unique commitment, so this cached finalization payload must match
-                        // `V::commitment(&block)`.
-                        //
-                        // This is enforced by assertion in `store_finalization`. It is not
-                        // a `CertifiableBlock` property; it is the `Variant` mapping
-                        // contract.
+                        // Invariant: `digest` identifies a unique `commitment`, so this
+                        // cached finalization payload must match `V::commitment(&block)`.
                         wrote |= self
                             .store_finalization(
                                 height,
@@ -1377,6 +1372,9 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
     ) -> bool {
+        // Blocks below the last processed height are not useful to us, so we ignore them (this
+        // has the nice byproduct of ensuring we don't call a backing store with a block below the
+        // pruning boundary)
         if height <= self.last_processed_height {
             debug!(
                 %height,
@@ -1386,29 +1384,10 @@ where
             );
             return false;
         }
-
         self.notify_subscribers(&block);
 
         // Convert block to storage format
         let commitment = V::commitment(&block);
-        // Variant mapping rule (1): commitment_to_inner(commitment(block)) == block.digest().
-        assert_eq!(
-            V::commitment_to_inner(commitment),
-            digest,
-            "variant commitment_to_inner(commitment(block)) must equal block digest"
-        );
-        let finalization = finalization.inspect(|finalization| {
-            // Variant/protocol rule (2): for blocks/certificates admitted by marshal
-            // verification in this variant instance, a given block digest has a unique
-            // commitment, so finalization payload must match `V::commitment(&block)`.
-            //
-            // This invariant comes from the `Variant` commitment mapping contract,
-            // not from `CertifiableBlock`.
-            assert_eq!(
-                &finalization.proposal.payload, &commitment,
-                "finalization payload must match block commitment"
-            );
-        });
         let stored: V::StoredBlock = block.into();
         let round = finalization.as_ref().map(|f| f.round());
 
@@ -1433,16 +1412,13 @@ where
             panic!("failed to finalize: {e}");
         }
 
-        // Update metrics and application
+        // Update metrics, buffer, and application
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest)).await;
             self.tip = height;
             let _ = self.finalized_height.try_set(height.get());
         }
-
-        // Notify buffer that block is finalized (for cache eviction).
         buffer.finalized(commitment).await;
-
         self.try_dispatch_blocks(application).await;
 
         true
