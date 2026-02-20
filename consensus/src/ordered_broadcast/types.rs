@@ -369,13 +369,11 @@ impl Namespace for AckNamespace {
 /// This is used as the context type for `Scheme` implementations for validators.
 /// It contains the chunk being acknowledged.
 ///
-/// Note: epoch is NOT included here because the p2p channel is already muxed by epoch,
-/// so including it in the signature is redundant. Not signing over epoch allows
-/// certificates to be verified without knowing the epoch.
-///
-/// Replay resistance still holds for the signed statement: signatures are domain
-/// separated with the ack namespace and bind the chunk `(sequencer, height, payload)`.
-/// The protocol also validates sender identity and epoch routing before accepting an ack.
+/// Epoch is NOT included in the signed data. Not signing over epoch allows
+/// certificates to be verified without knowing the epoch. Replay resistance
+/// is maintained by domain-separated namespaces and the chunk binding
+/// `(sequencer, height, payload)`. The protocol validates sender identity
+/// and epoch-scoped scheme membership before accepting an ack.
 #[derive(Debug, Clone)]
 pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     /// The chunk being acknowledged.
@@ -390,9 +388,8 @@ impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
     }
 
     fn message(&self) -> Bytes {
-        // Note: epoch is NOT included in signed data. The p2p channel is already
-        // muxed by epoch, so including it in the signature is redundant. Not signing
-        // over epoch allows certificates to be verified without knowing the epoch.
+        // Epoch is NOT included in signed data. Not signing over epoch allows
+        // certificates to be verified without knowing the epoch.
         self.chunk.encode()
     }
 }
@@ -761,18 +758,16 @@ where
 ///
 /// When a validator receives and validates a chunk, it sends an Ack containing:
 /// 1. The chunk being acknowledged
-/// 2. The current epoch (for routing, not signed over)
+/// 2. The current epoch (for scheme lookup, not signed over)
 /// 3. An attestation over the chunk
 ///
 /// These attestations from validators can be aggregated to form a certificate
 /// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
 ///
-/// Note: The epoch is included in the message for routing purposes but is NOT
-/// signed over. The p2p channel is already muxed by epoch, making it redundant
-/// to include in the signature. Replay resistance comes from signing the
-/// domain-separated chunk statement and from sender/epoch validation during
-/// ack processing.
+/// The epoch is included in the message for scheme lookup (to find the correct
+/// validator set) but is NOT signed over. Not signing over epoch allows
+/// certificates to be verified without knowing the epoch.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being acknowledged.
@@ -1069,8 +1064,8 @@ impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// This ensures that the certificate is valid for the given chunk, using
     /// the provided scheme.
     ///
-    /// Note: The epoch field is used for routing but is NOT verified as part
-    /// of the certificate signature.
+    /// Note: The epoch field is used for scheme lookup but is NOT part of
+    /// the certificate signature.
     ///
     /// Returns true if the signature is valid, false otherwise.
     pub fn verify<R>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
