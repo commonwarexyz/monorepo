@@ -76,8 +76,8 @@ where
     },
     /// A request to prune all caches at and below the given commitment.
     Prune {
-        /// The prune target's [`Commitment`].
-        min: Commitment,
+        /// Inclusive prune target [`Commitment`].
+        through: Commitment,
     },
 }
 
@@ -185,8 +185,8 @@ where
     }
 
     /// Request to prune all caches at and below the given commitment.
-    pub async fn prune(&self, min: Commitment) {
-        let msg = Message::Prune { min };
+    pub async fn prune(&self, through: Commitment) {
+        let msg = Message::Prune { through };
         self.sender.send_lossy(msg).await;
     }
 }

@@ -488,8 +488,8 @@ where
                 Message::SubscribeByDigest { digest, response } => {
                     self.handle_block_subscription(BlockSubscriptionKey::Digest(digest), response);
                 }
-                Message::Prune { min } => {
-                    self.prune(min);
+                Message::Prune { through } => {
+                    self.prune(through);
                 }
             },
             Some((peer, shard)) = receiver.recv() else {
@@ -938,8 +938,8 @@ where
     /// Byzantine leader can equivocate, producing multiple valid commitments
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
-    fn prune(&mut self, min: Commitment) {
-        if let Some(height) = self.reconstructed_blocks.get(&min).map(|b| b.height()) {
+    fn prune(&mut self, through: Commitment) {
+        if let Some(height) = self.reconstructed_blocks.get(&through).map(|b| b.height()) {
             self.reconstructed_blocks
                 .retain(|_, block| block.height() > height);
         }
@@ -947,8 +947,8 @@ where
         // Always clear direct state/subscriptions for the pruned commitment.
         // This avoids dangling waiters when prune is called for a commitment
         // that was never reconstructed locally.
-        self.drop_subscriptions(min);
-        let Some(round) = self.state.remove(&min).map(|state| state.round()) else {
+        self.drop_subscriptions(through);
+        let Some(round) = self.state.remove(&through).map(|state| state.round()) else {
             return;
         };
 
