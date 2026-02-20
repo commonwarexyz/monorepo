@@ -122,7 +122,7 @@
 //! player's dealing even if they sent an acknowledgement).
 //!
 //! Even if the remaining `f` commitments are from Byzantine dealers, there will not be enough dealings to recover the derived share
-//! of any honest player (at most `f` of `2f + 1` dealings publicly revealed for the linear combination that composes a share). Given all `2f + 1`
+//! of any honest player (at most `f` of `2f + 1` points for a linear combination publicly revealed). Given all `2f + 1`
 //! honest players have access to their shares and it is not possible for a Byzantine player to derive any honest player's share, this claim holds.
 //!
 //! ### Up to `2f` Reveals Under Asynchrony
