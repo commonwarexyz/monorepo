@@ -695,6 +695,8 @@ pub use commonware_utils::Participant;
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
+        //! Coding commitment and related types.
+
         use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
