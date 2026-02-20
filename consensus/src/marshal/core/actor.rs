@@ -11,10 +11,10 @@ use crate::{
     },
     simplex::{
         scheme::Scheme,
-        types::{verify_certificates, Context, Finalization, Notarization, Subject},
+        types::{verify_certificates, Finalization, Notarization, Subject},
     },
     types::{Epoch, Epocher, Height, Round, ViewDelta},
-    Block, CertifiableBlock, Epochable, Heightable, Reporter,
+    Block, Epochable, Heightable, Reporter,
 };
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode, Read};
@@ -201,9 +201,6 @@ pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    V::Block: CertifiableBlock<
-        Context = Context<V::Commitment, <P::Scheme as CertificateScheme>::PublicKey>,
-    >,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
@@ -269,9 +266,6 @@ impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
-    V::Block: CertifiableBlock<
-        Context = Context<V::Commitment, <P::Scheme as CertificateScheme>::PublicKey>,
-    >,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
@@ -1580,8 +1574,13 @@ where
 
             // Iterate backwards, repairing blocks as we go.
             while cursor.height() > gap_start {
-                let (_, parent_commitment) = cursor.context().parent;
                 let parent_digest = cursor.parent();
+                let parent_commitment = V::parent_commitment(&cursor);
+                assert_eq!(
+                    V::commitment_to_inner(parent_commitment),
+                    parent_digest,
+                    "variant parent commitment must map to block parent digest"
+                );
                 if let Some(block) = self
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
@@ -1602,9 +1601,9 @@ where
                 } else {
                     // Request the next missing block digest
                     //
-                    // SAFETY: We can rely on the parent commitment from the embedded context of the block
-                    // because the block is provably a member of the finalized chain due to the end boundary
-                    // of the gap being finalized.
+                    // SAFETY: We can rely on this variant-derived parent commitment because
+                    // the block is provably a member of the finalized chain due to the end
+                    // boundary of the gap being finalized.
                     resolver
                         .fetch(Request::<V::Commitment>::Block(parent_commitment))
                         .await;

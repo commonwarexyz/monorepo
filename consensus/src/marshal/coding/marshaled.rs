@@ -132,7 +132,7 @@ const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -165,7 +165,7 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -1000,7 +1000,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: CertificateScheme,
     A: Application<E, Block = B, Context = Context<Commitment, S::PublicKey>>,
-    B: CertifiableBlock,
+    B: CertifiableBlock<Context = Context<Commitment, S::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
 {

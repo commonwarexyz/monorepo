@@ -26,6 +26,10 @@
 commonware_macros::stability_scope!(ALPHA {
     mod marshaled;
     pub use marshaled::Marshaled;
+    pub use marshaled::Marshaled as DeferredMarshaled;
+
+    mod inline;
+    pub use inline::InlineMarshaled;
 });
 
 mod variant;
@@ -846,7 +850,8 @@ mod tests {
                 leader: me,
                 parent: (View::new(1), parent_commitment),
             };
-            let block = B::new::<Sha256>(verify_context.clone(), parent.digest(), Height::new(2), 200);
+            let block =
+                B::new::<Sha256>(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let commitment = block.digest();
             marshal.clone().proposed(round, block).await;
 

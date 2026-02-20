@@ -24,10 +24,10 @@
 //! unique commitment for a block.
 //!
 //! Note that this invariant is separate from [`crate::CertifiableBlock`].
-//! `CertifiableBlock` is required for deferred-verification context recovery, not for
-//! digest-to-commitment uniqueness.
+//! Deferred verification wrappers may require `CertifiableBlock` to recover consensus
+//! context, but core marshal only requires block ancestry and digest semantics.
 
-use crate::{types::Round, CertifiableBlock};
+use crate::{types::Round, Block};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible};
 use commonware_utils::channel::oneshot;
@@ -38,21 +38,17 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
     /// Must be convertible to `StoredBlock` via `Into` for archival.
-    ///
-    /// The `CertifiableBlock` bound here is for context recovery in deferred verification.
-    /// It does not define commitment uniqueness; that is defined by this trait's mapping
-    /// contract (`commitment` / `commitment_to_inner`).
-    type Block: CertifiableBlock<Digest = <Self::ApplicationBlock as Digestible>::Digest>
+    type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>
         + Clone;
 
     /// The application block type.
-    type ApplicationBlock: CertifiableBlock + Clone;
+    type ApplicationBlock: Block + Clone;
 
     /// The type of block stored in the archive.
     ///
     /// Must be convertible back to the working block type via `Into`.
-    type StoredBlock: CertifiableBlock<Digest = <Self::Block as Digestible>::Digest>
+    type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
         + Clone
         + Codec<Cfg = <Self::Block as Read>::Cfg>;
@@ -75,6 +71,13 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// In other words, there should not be two accepted commitments with the same
     /// inner digest.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
+
+    /// Returns the parent commitment referenced by `block`.
+    ///
+    /// This allows core marshal to repair finalized ancestry using only variant-level
+    /// commitment semantics, without assuming that blocks expose an embedded consensus
+    /// context.
+    fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
     /// Converts a working block to an application block.
     ///

@@ -6,7 +6,7 @@
 use crate::{
     marshal::core::{Buffer, Variant},
     types::Round,
-    CertifiableBlock,
+    Block,
 };
 use commonware_broadcast::{buffered, Broadcaster};
 use commonware_cryptography::{Digestible, PublicKey};
@@ -17,11 +17,11 @@ use commonware_utils::channel::oneshot;
 ///
 /// This variant sends the entire block to all peers.
 #[derive(Default, Clone, Copy)]
-pub struct Standard<B: CertifiableBlock>(std::marker::PhantomData<B>);
+pub struct Standard<B: Block>(std::marker::PhantomData<B>);
 
 impl<B> Variant for Standard<B>
 where
-    B: CertifiableBlock,
+    B: Block,
 {
     type ApplicationBlock = B;
     type Block = B;
@@ -38,6 +38,11 @@ where
         commitment
     }
 
+    fn parent_commitment(block: &Self::Block) -> Self::Commitment {
+        // In standard mode, commitments are digests, so parent commitment is parent digest.
+        block.parent()
+    }
+
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
         block
     }
@@ -45,7 +50,7 @@ where
 
 impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>
 where
-    B: CertifiableBlock,
+    B: Block,
     K: PublicKey,
 {
     type CachedBlock = B;

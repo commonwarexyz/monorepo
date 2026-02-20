@@ -1488,7 +1488,8 @@ mod tests {
                 leader: me,
                 parent: (View::new(1), parent_commitment),
             };
-            let block = make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
+            let block =
+                make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let coded_block = CodedBlock::new(block, coding_config, &Sequential);
             let commitment = coded_block.commitment();
             shards.clone().proposed(round, coded_block).await;
