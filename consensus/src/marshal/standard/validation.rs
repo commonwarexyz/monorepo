@@ -2,8 +2,7 @@ use crate::{
     marshal::{
         ancestry::AncestorStream,
         application::validation::{
-            is_block_in_expected_epoch, is_valid_reproposal_at_verify,
-            validate_standard_block_for_verification,
+            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
         },
         core::Mailbox,
         standard::Standard,
@@ -19,6 +18,36 @@ use commonware_utils::channel::oneshot::{self, error::RecvError};
 use futures::future::{ready, Either, Ready};
 use rand::Rng;
 use tracing::debug;
+
+/// Validation failures for standard verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Error {
+    ParentDigest,
+    ExpectedParentDigest,
+    Height,
+}
+
+/// Consolidated validation for standard verification.
+#[inline]
+pub(crate) fn validate_block<B>(
+    block: &B,
+    parent: &B,
+    parent_digest: B::Digest,
+) -> Result<(), Error>
+where
+    B: Block,
+{
+    if block.parent() != parent.digest() {
+        return Err(Error::ParentDigest);
+    }
+    if parent.digest() != parent_digest {
+        return Err(Error::ExpectedParentDigest);
+    }
+    if !has_contiguous_height(parent.height(), block.height()) {
+        return Err(Error::Height);
+    }
+    Ok(())
+}
 
 /// Result of the shared epoch / re-proposal pre-check step.
 ///
@@ -140,7 +169,7 @@ where
     };
 
     // Validate parent digest and contiguous child height before application logic.
-    if let Err(err) = validate_standard_block_for_verification(&block, &parent, parent_digest) {
+    if let Err(err) = validate_block(&block, &parent, parent_digest) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -208,5 +237,120 @@ where
                 .subscribe_by_digest(parent_round, parent_digest)
                 .await,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Height;
+    use bytes::{Buf, BufMut};
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_cryptography::{sha256::Digest as Sha256Digest, Digestible, Hasher, Sha256};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestBlock {
+        digest: Sha256Digest,
+        parent: Sha256Digest,
+        height: Height,
+    }
+
+    impl Write for TestBlock {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.digest.write(buf);
+            self.parent.write(buf);
+            self.height.write(buf);
+        }
+    }
+
+    impl EncodeSize for TestBlock {
+        fn encode_size(&self) -> usize {
+            self.digest.encode_size() + self.parent.encode_size() + self.height.encode_size()
+        }
+    }
+
+    impl Read for TestBlock {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+            let digest = Sha256Digest::read(buf)?;
+            let parent = Sha256Digest::read(buf)?;
+            let height = Height::read(buf)?;
+            Ok(Self {
+                digest,
+                parent,
+                height,
+            })
+        }
+    }
+
+    impl Digestible for TestBlock {
+        type Digest = Sha256Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.digest
+        }
+    }
+
+    impl crate::Heightable for TestBlock {
+        fn height(&self) -> Height {
+            self.height
+        }
+    }
+
+    impl crate::Block for TestBlock {
+        fn parent(&self) -> Self::Digest {
+            self.parent
+        }
+    }
+
+    fn baseline_blocks() -> (TestBlock, TestBlock) {
+        let parent_digest = Sha256::hash(b"parent");
+        let parent = TestBlock {
+            digest: parent_digest,
+            parent: Sha256::hash(b"grandparent"),
+            height: Height::new(6),
+        };
+        let block = TestBlock {
+            digest: Sha256::hash(b"block"),
+            parent: parent_digest,
+            height: Height::new(7),
+        };
+        (parent, block)
+    }
+
+    #[test]
+    fn test_validate_block_ok() {
+        let (parent, block) = baseline_blocks();
+        assert_eq!(validate_block(&block, &parent, parent.digest()), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_block_parent_digest_error() {
+        let (parent, mut block) = baseline_blocks();
+        block.parent = Sha256::hash(b"wrong_parent");
+        assert_eq!(
+            validate_block(&block, &parent, parent.digest()),
+            Err(Error::ParentDigest)
+        );
+    }
+
+    #[test]
+    fn test_validate_block_expected_parent_digest_error() {
+        let (parent, block) = baseline_blocks();
+        assert_eq!(
+            validate_block(&block, &parent, Sha256::hash(b"wrong_expected_parent")),
+            Err(Error::ExpectedParentDigest)
+        );
+    }
+
+    #[test]
+    fn test_validate_block_height_error() {
+        let (parent, mut block) = baseline_blocks();
+        block.height = Height::new(9);
+        assert_eq!(
+            validate_block(&block, &parent, parent.digest()),
+            Err(Error::Height)
+        );
     }
 }

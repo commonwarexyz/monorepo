@@ -709,6 +709,12 @@ commonware_macros::stability_scope!(ALPHA {
         use rand_core::CryptoRngCore;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
+        ///
+        /// Commitment wire layout (byte ranges are start..end):
+        /// - block digest:   0..32
+        /// - coding root:    32..64
+        /// - context digest: 64..96
+        /// - coding config:  96..100
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct Commitment([u8; Self::SIZE]);
 

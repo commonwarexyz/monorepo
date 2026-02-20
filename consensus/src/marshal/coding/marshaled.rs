@@ -78,15 +78,14 @@ use crate::{
         ancestry::AncestorStream,
         application::{
             validation::{
-                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify,
-                validate_coded_block_for_verification, validate_coded_proposal,
-                CodedProposalValidationError, LastBuilt,
+                is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, LastBuilt,
             },
             verification_tasks::VerificationTasks,
         },
         coding::{
             shards,
             types::{coding_config_for_participants, hash_context, CodedBlock},
+            validation::{validate_block, validate_proposal, ProposalError},
             Coding,
         },
         core, Update,
@@ -371,7 +370,7 @@ where
                     }
                 };
 
-                if let Err(err) = validate_coded_block_for_verification::<H, _, _>(
+                if let Err(err) = validate_block::<H, _, _>(
                     &epocher,
                     &block,
                     &parent,
@@ -655,12 +654,11 @@ where
 
         // Validate proposal-level invariants:
         // - coding config must match active participant set
-        // - context hash must match unless this is a re-proposal
+        // - context digest must match unless this is a re-proposal
         let proposal_context = (!is_reproposal).then_some(&consensus_context);
-        if let Err(err) = validate_coded_proposal::<H, _>(payload, coding_config, proposal_context)
-        {
+        if let Err(err) = validate_proposal::<H, _>(payload, coding_config, proposal_context) {
             match err {
-                CodedProposalValidationError::CodingConfig => {
+                ProposalError::CodingConfig => {
                     warn!(
                         round = %consensus_context.round,
                         got = ?payload.config(),
@@ -668,7 +666,7 @@ where
                         "rejected proposal with unexpected coding configuration"
                     );
                 }
-                CodedProposalValidationError::ContextHash => {
+                ProposalError::ContextDigest => {
                     let expected = hash_context::<H, _>(&consensus_context);
                     let got = payload.context::<H::Digest>();
                     warn!(
@@ -685,7 +683,7 @@ where
             return rx;
         }
 
-        // Re-proposals skip context-hash validation because the consensus context will point
+        // Re-proposals skip context-digest validation because the consensus context will point
         // at the prior epoch-boundary block while the embedded block context is from the
         // original proposal view.
         //
