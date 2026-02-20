@@ -225,7 +225,7 @@ pub type DST = &'static [u8];
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
@@ -342,7 +342,7 @@ pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO
 /// to be safely deployed in this environment).
 pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for G1 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self::generator() * &u.arbitrary::<Scalar>()?)
@@ -368,7 +368,7 @@ pub const G2_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO
 /// to be safely deployed in this environment).
 pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for G2 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self::generator() * &u.arbitrary::<Scalar>()?)
@@ -1679,78 +1679,38 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_invariants::minifuzz;
     use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
-    use proptest::{prelude::*, strategy::Strategy};
-    use rand::{rngs::StdRng, SeedableRng};
     use std::{
         collections::{BTreeSet, HashMap},
         num::NonZeroUsize,
     };
 
-    impl Arbitrary for Scalar {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<[u8; 32]>()
-                .prop_map(|seed| Self::random(&mut StdRng::from_seed(seed)))
-                .boxed()
-        }
-    }
-
-    impl Arbitrary for G1 {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            prop_oneof![
-                Just(Self::zero()),
-                Just(Self::generator()),
-                any::<Scalar>().prop_map(|s| Self::generator() * &s)
-            ]
-            .boxed()
-        }
-    }
-
-    impl Arbitrary for G2 {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            prop_oneof![
-                Just(Self::zero()),
-                Just(Self::generator()),
-                any::<Scalar>().prop_map(|s| Self::generator() * &s)
-            ]
-            .boxed()
-        }
-    }
-
     #[test]
     fn test_scalar_as_field() {
-        test_suites::test_field(file!(), &any::<Scalar>());
+        minifuzz::test(test_suites::fuzz_field::<Scalar>);
     }
 
     #[test]
     fn test_g1_as_space() {
-        test_suites::test_space_ring(file!(), &any::<Scalar>(), &any::<G1>());
+        minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G1>);
     }
 
     #[test]
     fn test_g2_as_space() {
-        test_suites::test_space_ring(file!(), &any::<Scalar>(), &any::<G2>());
+        minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G2>);
     }
 
     #[test]
     fn test_hash_to_g1() {
-        test_suites::test_hash_to_group::<G1>(file!());
+        minifuzz::test(test_suites::fuzz_hash_to_group::<G1>);
     }
 
     #[test]
     fn test_hash_to_g2() {
-        test_suites::test_hash_to_group::<G2>(file!());
+        minifuzz::test(test_suites::fuzz_hash_to_group::<G2>);
     }
 
     #[test]
@@ -2151,52 +2111,68 @@ mod tests {
         assert_eq!(G::msm(&pts, &scalars, &par), single_point * &single_scalar);
     }
 
-    proptest! {
-        #[test]
-        fn test_msm_parallel_g1(
-            points in prop::collection::vec(any::<G1>(), MIN_PARALLEL_POINTS..=100),
-            scalars in prop::collection::vec(any::<Scalar>(), MIN_PARALLEL_POINTS..=100),
-        ) {
-            let n = points.len().min(scalars.len());
-            test_msm_parallel_impl(
-                points.into_iter().take(n).collect(),
-                scalars.into_iter().take(n).collect(),
-            );
-        }
+    #[test]
+    fn test_msm_parallel_g1() {
+        minifuzz::test(|u| {
+            let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
+            let points: Vec<G1> = (0..n)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let scalars: Vec<Scalar> = (0..n)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            test_msm_parallel_impl(points, scalars);
+            Ok(())
+        });
+    }
 
-        #[test]
-        fn test_msm_parallel_g2(
-            points in prop::collection::vec(any::<G2>(), MIN_PARALLEL_POINTS..=100),
-            scalars in prop::collection::vec(any::<Scalar>(), MIN_PARALLEL_POINTS..=100),
-        ) {
-            let n = points.len().min(scalars.len());
-            test_msm_parallel_impl(
-                points.into_iter().take(n).collect(),
-                scalars.into_iter().take(n).collect(),
-            );
-        }
+    #[test]
+    fn test_msm_parallel_g2() {
+        minifuzz::test(|u| {
+            let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
+            let points: Vec<G2> = (0..n)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let scalars: Vec<Scalar> = (0..n)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            test_msm_parallel_impl(points, scalars);
+            Ok(())
+        });
+    }
 
-        #[test]
-        fn test_msm_parallel_edge_cases_g1(
-            points in prop::collection::vec(any::<G1>(), 50..=50),
-            scalars in prop::collection::vec(any::<Scalar>(), 50..=50),
-            single_point in any::<G1>(),
-            single_scalar in any::<Scalar>(),
-            idx in 0usize..50,
-        ) {
+    #[test]
+    fn test_msm_parallel_edge_cases_g1() {
+        minifuzz::test(|u| {
+            let points: Vec<G1> = (0..50)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let scalars: Vec<Scalar> = (0..50)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let single_point: G1 = u.arbitrary()?;
+            let single_scalar: Scalar = u.arbitrary()?;
+            let idx: usize = u.int_in_range(0..=49)?;
             test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
-        }
+            Ok(())
+        });
+    }
 
-        #[test]
-        fn test_msm_parallel_edge_cases_g2(
-            points in prop::collection::vec(any::<G2>(), 50..=50),
-            scalars in prop::collection::vec(any::<Scalar>(), 50..=50),
-            single_point in any::<G2>(),
-            single_scalar in any::<Scalar>(),
-            idx in 0usize..50,
-        ) {
+    #[test]
+    fn test_msm_parallel_edge_cases_g2() {
+        minifuzz::test(|u| {
+            let points: Vec<G2> = (0..50)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let scalars: Vec<Scalar> = (0..50)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?;
+            let single_point: G2 = u.arbitrary()?;
+            let single_scalar: Scalar = u.arbitrary()?;
+            let idx: usize = u.int_in_range(0..=49)?;
             test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
-        }
+            Ok(())
+        });
     }
 
     #[test]

@@ -251,19 +251,17 @@ commonware_macros::stability_scope!(ALPHA {
 mod test {
     use super::*;
     use crate::reed_solomon::ReedSolomon;
+    use arbitrary::Unstructured;
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
+    use commonware_invariants::minifuzz;
     use commonware_parallel::Sequential;
     use commonware_utils::NZU16;
-    use proptest::{
-        prelude::{any, prop, Just, ProptestConfig},
-        proptest,
-        strategy::Strategy as PStrategy,
-    };
 
     const MAX_SHARD_SIZE: usize = 1 << 31;
     const MAX_SHARDS: u16 = 32;
     const MAX_DATA: usize = 1024;
+    const MIN_EXTRA_SHARDS: u16 = 1;
 
     fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
         // Encode data into shards.
@@ -316,22 +314,33 @@ mod test {
         assert_eq!(decoded, data);
     }
 
-    fn roundtrip_strategy() -> impl PStrategy<Value = (Config, Vec<u8>, Vec<u16>)> {
-        (1u16..=MAX_SHARDS, 1u16..=MAX_SHARDS).prop_flat_map(|(min_shards, extra_shards)| {
-            let total = min_shards + extra_shards;
-            let all_indices: Vec<u16> = (0..total).collect();
-            let indices = (min_shards as usize..=total as usize)
-                .prop_flat_map(move |n| proptest::sample::subsequence(all_indices.clone(), n));
-            let data = prop::collection::vec(any::<u8>(), 0..=MAX_DATA);
-            (
-                Just(Config {
-                    minimum_shards: NZU16!(min_shards),
-                    extra_shards: NZU16!(extra_shards),
-                }),
-                data,
-                indices,
-            )
-        })
+    fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
+        let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
+        let extra_shards =
+            MIN_EXTRA_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_EXTRA_SHARDS + 1));
+        let total_shards = minimum_shards + extra_shards;
+
+        let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);
+        let data = u.bytes(data_len)?.to_vec();
+
+        let selected_len = usize::from(minimum_shards)
+            + (usize::from(u.arbitrary::<u16>()?) % (usize::from(extra_shards) + 1));
+        let mut selected: Vec<u16> = (0..total_shards).collect();
+        for i in 0..selected_len {
+            let remaining = usize::from(total_shards) - i;
+            let j = i + (usize::from(u.arbitrary::<u16>()?) % remaining);
+            selected.swap(i, j);
+        }
+        selected.truncate(selected_len);
+
+        Ok((
+            Config {
+                minimum_shards: NZU16!(minimum_shards),
+                extra_shards: NZU16!(extra_shards),
+            },
+            data,
+            selected,
+        ))
     }
 
     #[test]
@@ -362,29 +371,40 @@ mod test {
         roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+    #[test]
+    fn minifuzz_roundtrip_reed_solomon() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+    }
 
-        #[test]
-        fn proptest_roundtrip_reed_solomon(
-            (config, data, selected) in roundtrip_strategy()
-        ) {
-            roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
-        }
+    #[test]
+    fn minifuzz_roundtrip_no_coding() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+    }
 
-        #[test]
-        fn proptest_roundtrip_no_coding(
-            (config, data, selected) in roundtrip_strategy()
-        ) {
-            roundtrip::<NoCoding<Sha256>>(&config, &data, &selected);
-        }
-
-        #[test]
-        fn proptest_roundtrip_zoda(
-            (config, data, selected) in roundtrip_strategy()
-        ) {
-            roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
-        }
+    #[test]
+    fn minifuzz_roundtrip_zoda() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
     }
 
     #[cfg(feature = "arbitrary")]
