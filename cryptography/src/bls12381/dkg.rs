@@ -98,6 +98,28 @@
 //! - [`deal_anonymous`]: a lower-level version that produces a polynomial directly,
 //!   and doesn't require public keys for the players.
 //!
+//! ## State
+//!
+//! The structs in this module are stateful. They maintain state, and assume that
+//! they exist from the start of the DKG to the end of the DKG. Nevertheless,
+//! it is possible to use this code while allowing this state to persist, allowing
+//! nodes to come and go offline.
+//!
+//! The suggested pattern for doing so is to replay the messages that dealers and
+//! players would process. For the dealer, it's important to use a seeded form of
+//! randomness, so that way the same messages can be generated on a second run.
+//! For the player, using [`Player::resume`] is more robust than just [`Player::new`],
+//! because it allows checking the integrity of the messages you're replaying
+//! against the publicly committed transcript (so far). This can detect some recoverable
+//! operator errors, like the disk where messages are stored not being attached,
+//! resulting in there being no private messages for the player to replay,
+//! despite their being publicly committed state suggesting the opposite.
+//!
+//! Besides a few cases like this that can be caught, in general it's very important
+//! that whatever means are used to allow nodes participating in the DKG to crash,
+//! the abstraction provided is nonetheless as if the nodes have a continuous state
+//! updated throughout the protocol.
+//!
 //! # Caveats
 //!
 //! ## Synchrony Assumption
@@ -317,8 +339,12 @@ const SIG_LOG: &[u8] = b"log";
 /// The error type for the DKG protocol.
 ///
 /// The only error which can happen through no fault of your own is
-/// [`Error::DkgFailed`]. Everything else only happens if you use a configuration
-/// for [`Info`] or [`Dealer`] which is invalid in some way.
+/// [`Error::DkgFailed`].
+///
+/// [`Error::PlayerCorrupted`] happens through mistakes or faults when the state
+/// of a player is restored after a crash.
+///
+/// The other errors are due to issues with configuration.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -333,6 +359,15 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
+    /// The player's state has been corrupted, and is missing information.
+    ///
+    /// This error is emitted when the player is missing shares that it should
+    /// otherwise have based on the flow of the protocol. This can only happen
+    /// if the code in this module is used in a stateful way, restoring the
+    /// state of the player from saved information. If this state is corrupted
+    /// on disk, or missing, then this error can happen.
+    #[error("player is in a corrupted state")]
+    PlayerCorrupted,
 }
 
 /// The output of a successful DKG.
@@ -1032,6 +1067,16 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
             }
         }
     }
+
+    /// Returns true if a player's ack is contained in this log.
+    pub fn player_acked(&self, player: &P) -> bool {
+        match &self.results {
+            DealerResult::TooManyReveals => false,
+            DealerResult::Ok(map) => map
+                .get_value(player)
+                .is_some_and(|a_or_r| matches!(a_or_r, AckOrReveal::Ack(_))),
+        }
+    }
 }
 
 /// Information about the reveals and acks in a [`DealerLog`].
@@ -1477,6 +1522,58 @@ impl<V: Variant, S: Signer> Player<V, S> {
         })
     }
 
+    /// Resume a [`Player`], given some existing public state.
+    ///
+    /// This is equivalent to calling [`Self::new`] and then [`Self::dealer_message`]
+    /// with the appropriate messages, but includes extra safeguards to detect
+    /// missing / corrupted state.
+    ///
+    /// All messages the player should have received must be passed into this method,
+    /// and if any messages which should be present based on this player's actions
+    /// in the log are missing, this method will return [`Error::PlayerCorrupted`].
+    ///
+    /// The returned map contains the acknowledgements generated while replaying
+    /// `msgs`, keyed by dealer.
+    ///
+    /// For example, if a particular private message containing a share is not
+    /// present in `msgs`, but we've already acknowledged it, and this has been
+    /// included in a public log, then this method will fail.
+    ///
+    /// This method cannot catch all cases where state has been corrupted. In
+    /// particular, if a dealer has not posted their log publicly yet, but has
+    /// already received an ack, then this method cannot help in that case,
+    /// but the issue still remains.
+    pub fn resume<M: Faults>(
+        info: Info<V, S::PublicKey>,
+        me: S,
+        logs: &BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
+        msgs: impl IntoIterator<Item = (S::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
+    ) -> Result<(Self, BTreeMap<S::PublicKey, PlayerAck<S::PublicKey>>), Error> {
+        let mut this = Self::new(info, me)?;
+        let mut acks = BTreeMap::new();
+        // We want to check our own behavior. Other things get resolved by `select`
+        // later, and we want to avoid treading on its behavior.
+        // So, we want to see if the logs contain acks that we've posted which
+        // are not matched by things here.
+        for (dealer, pub_msg, priv_msg) in msgs {
+            if let Some(ack) = this.dealer_message::<M>(dealer.clone(), pub_msg, priv_msg) {
+                acks.insert(dealer, ack);
+            }
+        }
+        // Have we emitted any acks, publicly recorded, for which we do not have the private message?
+        if logs
+            .iter()
+            .any(|(d, l)| l.player_acked(&this.me_pub) && !acks.contains_key(d))
+        {
+            // If so, we have a problem, because we're missing a share that we're
+            // supposed to have, and that we publicly committed to having, so we're
+            // corrupted.
+            return Err(Error::PlayerCorrupted);
+        }
+
+        Ok((this, acks))
+    }
+
     /// Process a message from a dealer.
     ///
     /// It's important that nobody can impersonate the dealer, and that the
@@ -1509,18 +1606,31 @@ impl<V: Variant, S: Signer> Player<V, S> {
 
     /// Finalize the player, producing an output, and a share.
     ///
-    /// This should agree with [`observe`], in terms of `Ok` vs `Err` and the
-    /// public output, so long as the logs agree. It's crucial that the players
+    /// This should agree with [`observe`], in terms of `Ok` vs `Err` (with one exception)
+    /// and the public output, so long as the logs agree. It's crucial that the players
     /// come to agreement, in some way, on exactly which logs they need to use
     /// for finalize.
     ///
-    /// This will only ever return [`Error::DkgFailed`].
+    /// The exception is that if this function returns [`Error::PlayerCorrupted`],
+    /// then [`observe`] will return `Ok`, because this error indicates that this
+    /// player's state has been corrupted, but the DKG has otherwise succeeded.
+    /// However, this player's share is not recoverable without external intervention.
+    ///
+    /// Otherwise, the only error this function can return is [`Error::DkgFailed`].
     pub fn finalize<M: Faults>(
         self,
         logs: BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         let selected = select::<V, S::PublicKey, M>(&self.info, logs)?;
+        // If there's a log that contains an ack of ours, but no corresponding view,
+        // then we're corrupted.
+        if selected
+            .iter_pairs()
+            .any(|(d, l)| l.player_acked(&self.me_pub) && !self.view.contains_key(d))
+        {
+            return Err(Error::PlayerCorrupted);
+        }
         // We are extracting the private scalars from `Secret` protection
         // because interpolation/summation needs owned scalars for polynomial
         // arithmetic. The extracted scalars are scoped to this function and
