@@ -86,6 +86,13 @@ mod tests {
             Height::new(8),
             Epoch::new(0)
         ));
+
+        // Out-of-range epoch is never a valid re-proposal boundary.
+        assert!(!is_valid_reproposal_at_verify(
+            &epocher,
+            Height::new(0),
+            Epoch::new(u64::MAX)
+        ));
     }
 
     #[test]
