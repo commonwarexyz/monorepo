@@ -128,7 +128,7 @@
 //!
 //! ### Up to `2f` Reveals Under Asynchrony
 //!
-//! If the network is not synchronous, however, Byzantine players may recover up to `2f` reveals (`f` from Byzantine players
+//! If the network is not synchronous, however, Byzantine players may obtain up to `2f` revealed shares (`f` from Byzantine players
 //! and `f` from honest players).
 //!
 //! To see how this could be, consider a network where `f` honest participants are in one partition and (`f + 1` honest and
