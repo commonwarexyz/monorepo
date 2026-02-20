@@ -660,6 +660,378 @@ impl TestHarness for StandardHarness {
     }
 }
 
+/// Inline wrapper test harness for standard marshal behavior.
+pub struct InlineHarness;
+
+impl TestHarness for InlineHarness {
+    type ApplicationBlock = <StandardHarness as TestHarness>::ApplicationBlock;
+    type Variant = <StandardHarness as TestHarness>::Variant;
+    type TestBlock = <StandardHarness as TestHarness>::TestBlock;
+    type ValidatorExtra = <StandardHarness as TestHarness>::ValidatorExtra;
+    type Commitment = <StandardHarness as TestHarness>::Commitment;
+
+    async fn setup_validator(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+    ) -> ValidatorSetup<Self> {
+        let setup = StandardHarness::setup_validator(context, oracle, validator, provider).await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+        }
+    }
+
+    async fn setup_validator_with(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+    ) -> ValidatorSetup<Self> {
+        let setup = StandardHarness::setup_validator_with(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+        )
+        .await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+        }
+    }
+
+    fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment {
+        StandardHarness::genesis_parent_commitment(num_participants)
+    }
+
+    fn make_test_block(
+        parent: D,
+        parent_commitment: Self::Commitment,
+        height: Height,
+        timestamp: u64,
+        num_participants: u16,
+    ) -> Self::TestBlock {
+        StandardHarness::make_test_block(
+            parent,
+            parent_commitment,
+            height,
+            timestamp,
+            num_participants,
+        )
+    }
+
+    fn commitment(block: &Self::TestBlock) -> Self::Commitment {
+        StandardHarness::commitment(block)
+    }
+
+    fn digest(block: &Self::TestBlock) -> D {
+        StandardHarness::digest(block)
+    }
+
+    fn height(block: &Self::TestBlock) -> Height {
+        StandardHarness::height(block)
+    }
+
+    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
+        StandardHarness::propose(
+            &mut ValidatorHandle::<StandardHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra,
+            },
+            round,
+            block,
+        )
+        .await;
+    }
+
+    async fn verify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+        _all_handles: &mut [ValidatorHandle<Self>],
+    ) {
+        StandardHarness::verify(
+            &mut ValidatorHandle::<StandardHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra,
+            },
+            round,
+            block,
+            &mut [],
+        )
+        .await;
+    }
+
+    fn make_finalization(
+        proposal: Proposal<Self::Commitment>,
+        schemes: &[S],
+        quorum: u32,
+    ) -> Finalization<S, Self::Commitment> {
+        StandardHarness::make_finalization(proposal, schemes, quorum)
+    }
+
+    fn make_notarization(
+        proposal: Proposal<Self::Commitment>,
+        schemes: &[S],
+        quorum: u32,
+    ) -> Notarization<S, Self::Commitment> {
+        StandardHarness::make_notarization(proposal, schemes, quorum)
+    }
+
+    async fn report_finalization(
+        mailbox: &mut Mailbox<S, Self::Variant>,
+        finalization: Finalization<S, Self::Commitment>,
+    ) {
+        StandardHarness::report_finalization(mailbox, finalization).await;
+    }
+
+    async fn report_notarization(
+        mailbox: &mut Mailbox<S, Self::Variant>,
+        notarization: Notarization<S, Self::Commitment>,
+    ) {
+        StandardHarness::report_notarization(mailbox, notarization).await;
+    }
+
+    fn finalize_timeout() -> Duration {
+        StandardHarness::finalize_timeout()
+    }
+
+    async fn setup_prunable_validator(
+        context: deterministic::Context,
+        oracle: &Oracle<K, deterministic::Context>,
+        validator: K,
+        schemes: &[S],
+        partition_prefix: &str,
+        page_cache: CacheRef,
+    ) -> (
+        Mailbox<S, Self::Variant>,
+        Self::ValidatorExtra,
+        Application<Self::ApplicationBlock>,
+    ) {
+        StandardHarness::setup_prunable_validator(
+            context,
+            oracle,
+            validator,
+            schemes,
+            partition_prefix,
+            page_cache,
+        )
+        .await
+    }
+
+    async fn verify_for_prune(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) {
+        StandardHarness::verify_for_prune(
+            &mut ValidatorHandle::<StandardHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra,
+            },
+            round,
+            block,
+        )
+        .await;
+    }
+}
+
+/// Deferred wrapper test harness for standard marshal behavior.
+pub struct DeferredHarness;
+
+impl TestHarness for DeferredHarness {
+    type ApplicationBlock = <InlineHarness as TestHarness>::ApplicationBlock;
+    type Variant = <InlineHarness as TestHarness>::Variant;
+    type TestBlock = <InlineHarness as TestHarness>::TestBlock;
+    type ValidatorExtra = <InlineHarness as TestHarness>::ValidatorExtra;
+    type Commitment = <InlineHarness as TestHarness>::Commitment;
+
+    async fn setup_validator(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+    ) -> ValidatorSetup<Self> {
+        let setup = InlineHarness::setup_validator(context, oracle, validator, provider).await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+        }
+    }
+
+    async fn setup_validator_with(
+        context: deterministic::Context,
+        oracle: &mut Oracle<K, deterministic::Context>,
+        validator: K,
+        provider: P,
+        max_pending_acks: NonZeroUsize,
+        application: Application<Self::ApplicationBlock>,
+    ) -> ValidatorSetup<Self> {
+        let setup = InlineHarness::setup_validator_with(
+            context,
+            oracle,
+            validator,
+            provider,
+            max_pending_acks,
+            application,
+        )
+        .await;
+        ValidatorSetup {
+            application: setup.application,
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+            height: setup.height,
+        }
+    }
+
+    fn genesis_parent_commitment(num_participants: u16) -> Self::Commitment {
+        InlineHarness::genesis_parent_commitment(num_participants)
+    }
+
+    fn make_test_block(
+        parent: D,
+        parent_commitment: Self::Commitment,
+        height: Height,
+        timestamp: u64,
+        num_participants: u16,
+    ) -> Self::TestBlock {
+        InlineHarness::make_test_block(
+            parent,
+            parent_commitment,
+            height,
+            timestamp,
+            num_participants,
+        )
+    }
+
+    fn commitment(block: &Self::TestBlock) -> Self::Commitment {
+        InlineHarness::commitment(block)
+    }
+
+    fn digest(block: &Self::TestBlock) -> D {
+        InlineHarness::digest(block)
+    }
+
+    fn height(block: &Self::TestBlock) -> Height {
+        InlineHarness::height(block)
+    }
+
+    async fn propose(handle: &mut ValidatorHandle<Self>, round: Round, block: &Self::TestBlock) {
+        InlineHarness::propose(
+            &mut ValidatorHandle::<InlineHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra,
+            },
+            round,
+            block,
+        )
+        .await;
+    }
+
+    async fn verify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+        _all_handles: &mut [ValidatorHandle<Self>],
+    ) {
+        InlineHarness::verify(
+            &mut ValidatorHandle::<InlineHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra,
+            },
+            round,
+            block,
+            &mut [],
+        )
+        .await;
+    }
+
+    fn make_finalization(
+        proposal: Proposal<Self::Commitment>,
+        schemes: &[S],
+        quorum: u32,
+    ) -> Finalization<S, Self::Commitment> {
+        InlineHarness::make_finalization(proposal, schemes, quorum)
+    }
+
+    fn make_notarization(
+        proposal: Proposal<Self::Commitment>,
+        schemes: &[S],
+        quorum: u32,
+    ) -> Notarization<S, Self::Commitment> {
+        InlineHarness::make_notarization(proposal, schemes, quorum)
+    }
+
+    async fn report_finalization(
+        mailbox: &mut Mailbox<S, Self::Variant>,
+        finalization: Finalization<S, Self::Commitment>,
+    ) {
+        InlineHarness::report_finalization(mailbox, finalization).await;
+    }
+
+    async fn report_notarization(
+        mailbox: &mut Mailbox<S, Self::Variant>,
+        notarization: Notarization<S, Self::Commitment>,
+    ) {
+        InlineHarness::report_notarization(mailbox, notarization).await;
+    }
+
+    fn finalize_timeout() -> Duration {
+        InlineHarness::finalize_timeout()
+    }
+
+    async fn setup_prunable_validator(
+        context: deterministic::Context,
+        oracle: &Oracle<K, deterministic::Context>,
+        validator: K,
+        schemes: &[S],
+        partition_prefix: &str,
+        page_cache: CacheRef,
+    ) -> (
+        Mailbox<S, Self::Variant>,
+        Self::ValidatorExtra,
+        Application<Self::ApplicationBlock>,
+    ) {
+        InlineHarness::setup_prunable_validator(
+            context,
+            oracle,
+            validator,
+            schemes,
+            partition_prefix,
+            page_cache,
+        )
+        .await
+    }
+
+    async fn verify_for_prune(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Self::TestBlock,
+    ) {
+        InlineHarness::verify_for_prune(
+            &mut ValidatorHandle::<InlineHarness> {
+                mailbox: handle.mailbox.clone(),
+                extra: handle.extra,
+            },
+            round,
+            block,
+        )
+        .await;
+    }
+}
+
 // =============================================================================
 // Coding Harness Implementation
 // =============================================================================
