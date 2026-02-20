@@ -319,7 +319,7 @@ where
     }
 
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    pub fn start(
+    pub fn start<CB>(
         mut self,
         votes: (
             impl Sender<PublicKey = C::PublicKey>,
@@ -345,8 +345,11 @@ where
             mpsc::Receiver<handler::Message<H::Digest>>,
             commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
-        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
-    ) -> Handle<()> {
+        callback: CB,
+    ) -> Handle<()>
+    where
+        CB: UpdateCallBack<V, C::PublicKey> + 'static,
+    {
         spawn_cell!(
             self.context,
             self.run(
@@ -363,7 +366,7 @@ where
     }
 
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    async fn run(
+    async fn run<CB>(
         self,
         votes: (
             impl Sender<PublicKey = C::PublicKey>,
@@ -389,8 +392,11 @@ where
             mpsc::Receiver<handler::Message<H::Digest>>,
             commonware_resolver::p2p::Mailbox<handler::Request<H::Digest>, C::PublicKey>,
         ),
-        callback: Box<dyn UpdateCallBack<V, C::PublicKey>>,
-    ) {
+        callback: CB,
+    )
+    where
+        CB: UpdateCallBack<V, C::PublicKey> + 'static,
+    {
         let dkg_handle = self.dkg.start(
             self.config.output,
             self.config.share,

@@ -35,11 +35,12 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Run the validator node service.
-pub async fn run<S, L>(
+pub async fn run<S, L, CB>(
     context: tokio::Context,
     args: super::ParticipantArgs,
-    callback: Box<dyn UpdateCallBack<MinSig, ed25519::PublicKey>>,
+    callback: CB,
 ) where
+    CB: UpdateCallBack<MinSig, ed25519::PublicKey> + 'static,
     S: Scheme<<Sha256 as Hasher>::Digest, PublicKey = ed25519::PublicKey>,
     L: Elector<S>,
     Provider<S, ed25519::PrivateKey>:
@@ -189,9 +190,7 @@ mod test {
     use rand_core::CryptoRngCore;
     use std::{
         collections::{BTreeMap, HashSet},
-        future::Future,
         num::NonZeroU32,
-        pin::Pin,
         time::Duration,
     };
     use tracing::{debug, error, info};
@@ -234,33 +233,31 @@ mod test {
     }
 
     impl UpdateHandler {
-        fn boxed(pk: PublicKey, sender: mpsc::Sender<TeamUpdate>) -> Box<Self> {
-            Box::new(Self { pk, sender })
+        fn new(pk: PublicKey, sender: mpsc::Sender<TeamUpdate>) -> Self {
+            Self { pk, sender }
         }
     }
 
     impl UpdateCallBack<MinSig, PublicKey> for UpdateHandler {
-        fn on_update(
+        async fn on_update(
             &mut self,
             update: Update<MinSig, PublicKey>,
-        ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+        ) -> PostUpdate {
             let sender = self.sender.clone();
             let pk = self.pk.clone();
-            Box::pin(async move {
-                let (callback_sender, callback_receiver) = oneshot::channel();
-                if sender
-                    .send(TeamUpdate {
-                        pk,
-                        update,
-                        callback: callback_sender,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return PostUpdate::Stop;
-                };
-                callback_receiver.await.unwrap_or(PostUpdate::Stop)
-            })
+            let (callback_sender, callback_receiver) = oneshot::channel();
+            if sender
+                .send(TeamUpdate {
+                    pk,
+                    update,
+                    callback: callback_sender,
+                })
+                .await
+                .is_err()
+            {
+                return PostUpdate::Stop;
+            };
+            callback_receiver.await.unwrap_or(PostUpdate::Stop)
         }
     }
 
@@ -408,7 +405,7 @@ mod test {
                 broadcast,
                 dkg,
                 marshal,
-                UpdateHandler::boxed(pk.clone(), updates.clone()),
+                UpdateHandler::new(pk.clone(), updates.clone()),
             );
             self.handles.insert(pk, handle);
         }
