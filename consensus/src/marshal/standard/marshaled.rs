@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! [`Marshaled`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
+//! [`Deferred`] is an adapter that wraps any [`VerifyingApplication`] implementation to handle
 //! epoch transitions automatically. It intercepts consensus operations (propose, verify) and
 //! ensures blocks are only produced within valid epoch boundaries.
 //!
@@ -14,7 +14,7 @@
 //!
 //! # Deferred Verification
 //!
-//! Before casting a notarize vote, [`Marshaled`] waits for the block to become available and
+//! Before casting a notarize vote, [`Deferred`] waits for the block to become available and
 //! then verifies that the block's embedded context matches the consensus context. However, it does not
 //! wait for the application to finish verifying the block contents before voting. This enables verification
 //! to run while we wait for a quorum of votes to form a certificate (hiding verification latency behind network
@@ -23,11 +23,11 @@
 //!
 //! # Usage
 //!
-//! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
+//! Wrap your [`Application`] implementation with [`Deferred::new`] and provide it to your
 //! consensus engine for the [`Automaton`] and [`Relay`]. The wrapper handles all epoch logic transparently.
 //!
 //! ```rust,ignore
-//! let application = Marshaled::new(
+//! let application = Deferred::new(
 //!     context,
 //!     my_application,
 //!     marshal_mailbox,
@@ -116,7 +116,7 @@ use tracing::{debug, warn};
 ///
 /// # Ancestry Validation
 ///
-/// Applications wrapped by [`Marshaled`] can rely on the following ancestry checks being
+/// Applications wrapped by [`Deferred`] can rely on the following ancestry checks being
 /// performed automatically during verification:
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
@@ -136,7 +136,7 @@ use tracing::{debug, warn};
 /// _This embedded context is trustworthy because the notarizing quorum (which contains at least f+1 honest
 /// validators) verified that the block's context matched the consensus context before voting._
 #[derive(Clone)]
-pub struct Marshaled<E, S, A, B, ES>
+pub struct Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -154,7 +154,7 @@ where
     build_duration: Timed<E>,
 }
 
-impl<E, S, A, B, ES> Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -167,7 +167,7 @@ where
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
-    /// Creates a new [`Marshaled`] wrapper.
+    /// Creates a new [`Deferred`] wrapper.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         use prometheus_client::metrics::histogram::Histogram;
 
@@ -292,7 +292,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Automaton for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -566,7 +566,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> CertifiableAutomaton for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -657,7 +657,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Relay for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -697,7 +697,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for Marshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,

@@ -1,9 +1,46 @@
-//! Inline-verification standard marshal wrapper.
+//! Wrapper for standard marshal with inline verification.
 //!
-//! This wrapper is similar to [`super::Marshaled`], but it performs block verification
-//! inline in [`Automaton::verify`] and uses the default always-true certification step.
-//! It does not rely on extracting embedded consensus context from blocks and therefore
-//! supports applications whose block type is not [`crate::CertifiableBlock`].
+//! # Overview
+//!
+//! [`Inline`] adapts any [`VerifyingApplication`] to the marshal/consensus interfaces
+//! while keeping block validation in the [`Automaton::verify`] path. Unlike
+//! [`super::Deferred`], it does not defer application verification to certification.
+//! Instead, it only reports `true` from `verify` after parent/height checks and
+//! application verification complete.
+//!
+//! # Epoch Boundaries
+//!
+//! As with [`super::Deferred`], when the parent is the last block of the epoch,
+//! [`Inline`] re-proposes that boundary block instead of building a new block.
+//! This prevents proposing blocks that would be excluded by epoch transition.
+//!
+//! # Verification Model
+//!
+//! Inline mode intentionally avoids relying on embedded block context. This allows
+//! usage with block types that implement [`crate::Block`] but not
+//! [`crate::CertifiableBlock`].
+//!
+//! Because verification is completed inline, the default
+//! [`CertifiableAutomaton::certify`] behavior (always `true`) is sufficient: no
+//! additional deferred verification state must be awaited at certify time.
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! let application = Inline::new(
+//!     context,
+//!     my_application,
+//!     marshal_mailbox,
+//!     epocher,
+//! );
+//! ```
+//!
+//! # When to Use
+//!
+//! Prefer this wrapper when:
+//! - Your application block type is not certifiable.
+//! - You prefer simpler verification semantics over deferred verification latency hiding.
+//! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
     marshal::{
@@ -41,8 +78,23 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// Standard marshal wrapper that verifies blocks inline in `verify`.
+///
+/// # Ancestry Validation
+///
+/// [`Inline`] always validates immediate ancestry before invoking application
+/// verification:
+/// - Parent digest matches consensus context's expected parent
+/// - Child height is exactly parent height plus one
+///
+/// This is sufficient because the parent must have already been accepted by consensus.
+///
+/// # Certifiability
+///
+/// This wrapper requires only [`crate::Block`] for `B`, not
+/// [`crate::CertifiableBlock`]. It is designed for applications that cannot
+/// recover consensus context directly from block payloads.
 #[derive(Clone)]
-pub struct InlineMarshaled<E, S, A, B, ES>
+pub struct Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -59,7 +111,7 @@ where
     build_duration: Timed<E>,
 }
 
-impl<E, S, A, B, ES> InlineMarshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -73,6 +125,9 @@ where
     ES: Epocher,
 {
     /// Creates a new inline-verification wrapper.
+    ///
+    /// Registers a `build_duration` histogram for proposal latency and initializes
+    /// the shared "last built block" cache used by [`Relay::broadcast`].
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let build_histogram = Histogram::new(Buckets::LOCAL);
         context.register(
@@ -93,7 +148,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Automaton for InlineMarshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -109,6 +164,10 @@ where
     type Digest = B::Digest;
     type Context = Context<Self::Digest, S::PublicKey>;
 
+    /// Returns the genesis digest for `epoch`.
+    ///
+    /// For epoch zero, returns the application genesis digest. For later epochs,
+    /// uses the previous epoch's terminal block from marshal storage.
     async fn genesis(&mut self, epoch: Epoch) -> Self::Digest {
         if epoch.is_zero() {
             return self.application.genesis().await.digest();
@@ -125,6 +184,11 @@ where
         block.digest()
     }
 
+    /// Proposes a new block or re-proposes an epoch boundary block.
+    ///
+    /// Proposal runs in a spawned task and returns a receiver for the resulting digest.
+    /// Built/re-proposed blocks are cached in `last_built` so relay can broadcast
+    /// exactly what was proposed.
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
@@ -233,6 +297,16 @@ where
         rx
     }
 
+    /// Performs complete verification inline.
+    ///
+    /// This method:
+    /// 1. Fetches the block by digest
+    /// 2. Enforces epoch/re-proposal rules
+    /// 3. Fetches and validates the parent relationship
+    /// 4. Runs application verification over ancestry
+    ///
+    /// It reports `true` only after all verification steps finish. Successful
+    /// verification marks the block as verified in marshal immediately.
     async fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
@@ -267,6 +341,7 @@ where
                     },
                 };
 
+                // Block heights must map to the expected epoch.
                 if !is_block_in_expected_epoch(&epocher, block.height(), context.epoch()) {
                     debug!(height = %block.height(), "block height not in expected epoch");
                     tx.send_lossy(false);
@@ -274,6 +349,7 @@ where
                 }
 
                 // Re-proposals are signaled by `digest == context.parent.1`.
+                // They skip normal parent/height checks because parent == block.
                 if digest == context.parent.1 {
                     if !is_valid_reproposal_at_verify(&epocher, block.height(), context.epoch()) {
                         debug!(height = %block.height(), "re-proposal is not at epoch boundary");
@@ -285,6 +361,7 @@ where
                     return;
                 }
 
+                // Non-reproposal path: fetch the expected parent and validate ancestry.
                 let (parent_view, parent_digest) = context.parent;
                 let parent_request = fetch_parent(
                     parent_digest,
@@ -342,7 +419,11 @@ where
     }
 }
 
-impl<E, S, A, B, ES> CertifiableAutomaton for InlineMarshaled<E, S, A, B, ES>
+/// Inline mode relies on the default certification behavior.
+///
+/// Verification is completed during [`Automaton::verify`], so certify does not
+/// need additional wrapper-managed checks.
+impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -357,7 +438,7 @@ where
 {
 }
 
-impl<E, S, A, B, ES> Relay for InlineMarshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -367,6 +448,7 @@ where
 {
     type Digest = B::Digest;
 
+    /// Broadcasts the last proposed block, if it matches the requested digest.
     async fn broadcast(&mut self, digest: Self::Digest) {
         let Some((round, block)) = self.last_built.lock().take() else {
             warn!("missing block to broadcast");
@@ -385,7 +467,7 @@ where
     }
 }
 
-impl<E, S, A, B, ES> Reporter for InlineMarshaled<E, S, A, B, ES>
+impl<E, S, A, B, ES> Reporter for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
@@ -396,11 +478,19 @@ where
 {
     type Activity = A::Activity;
 
+    /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
         self.application.report(update).await
     }
 }
 
+/// Fetches the parent block given its digest and optional round hint.
+///
+/// If the digest matches genesis, returns genesis directly. Otherwise, subscribes
+/// to marshal for parent availability.
+///
+/// `parent_round` is only a resolver hint. Callers should supply it when the
+/// source context is trusted.
 #[inline]
 async fn fetch_parent<E, S, A, B>(
     parent_digest: B::Digest,
@@ -428,7 +518,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::InlineMarshaled;
+    use super::Inline;
     use crate::{
         simplex::types::Context, Automaton, Block, CertifiableAutomaton, Relay,
         VerifyingApplication,
@@ -456,8 +546,8 @@ mod tests {
         fn assert_certifiable<T: CertifiableAutomaton>() {}
         fn assert_relay<T: Relay>() {}
 
-        assert_automaton::<InlineMarshaled<E, S, A, B, ES>>();
-        assert_certifiable::<InlineMarshaled<E, S, A, B, ES>>();
-        assert_relay::<InlineMarshaled<E, S, A, B, ES>>();
+        assert_automaton::<Inline<E, S, A, B, ES>>();
+        assert_certifiable::<Inline<E, S, A, B, ES>>();
+        assert_relay::<Inline<E, S, A, B, ES>>();
     }
 }

@@ -8,8 +8,10 @@
 //! # Components
 //!
 //! - [`Standard`]: The variant marker type that configures marshal for full-block broadcast.
-//! - [`Marshaled`]: Wraps an [`crate::Application`] implementation to enforce epoch boundaries
-//!   and coordinate with the marshal actor.
+//! - [`Deferred`]: Deferred-verification wrapper that enforces epoch boundaries and
+//!   coordinates with the marshal actor.
+//! - [`Inline`]: Inline-verification wrapper for applications whose blocks do not
+//!   implement [`crate::CertifiableBlock`].
 //!
 //! # Usage
 //!
@@ -25,11 +27,10 @@
 
 commonware_macros::stability_scope!(ALPHA {
     mod marshaled;
-    pub use marshaled::Marshaled;
-    pub use marshaled::Marshaled as DeferredMarshaled;
+    pub use marshaled::Deferred;
 
     mod inline;
-    pub use inline::InlineMarshaled;
+    pub use inline::Inline;
 });
 
 mod variant;
@@ -47,7 +48,7 @@ mod tests {
                 },
                 verifying::MockVerifyingApp,
             },
-            standard::Marshaled,
+            standard::Deferred,
         },
         simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
@@ -222,7 +223,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
@@ -313,7 +314,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
@@ -523,7 +524,7 @@ mod tests {
             };
 
             let mut marshaled =
-                Marshaled::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
+                Deferred::new(context.clone(), mock_app, marshal.clone(), limited_epocher);
 
             // Create a parent block at height 19 (last block in epoch 0, which is supported)
             let parent_ctx = Ctx {
@@ -601,7 +602,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
@@ -645,7 +646,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Consensus determines parent should be block at height 21
-            // and calls verify on the Marshaled automaton with a block at height 35
+            // and calls verify on the Deferred automaton with a block at height 35
             let byzantine_round = Round::new(Epoch::new(1), View::new(35));
             let byzantine_context = Ctx {
                 round: byzantine_round,
@@ -653,7 +654,7 @@ mod tests {
                 parent: (View::new(21), parent_commitment),
             };
 
-            // Marshaled.certify() should reject the malicious block
+            // Deferred.certify() should reject the malicious block
             let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
                 .await
@@ -688,7 +689,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Consensus determines parent should be block at height 21
-            // and calls verify on the Marshaled automaton with a block at height 22
+            // and calls verify on the Deferred automaton with a block at height 22
             let byzantine_round = Round::new(Epoch::new(1), View::new(22));
             let byzantine_context = Ctx {
                 round: byzantine_round,
@@ -696,7 +697,7 @@ mod tests {
                 parent: (View::new(21), parent_commitment),
             };
 
-            // Marshaled.certify() should reject the malicious block
+            // Deferred.certify() should reject the malicious block
             let _ = marshaled
                 .verify(byzantine_context, malicious_commitment)
                 .await
@@ -742,7 +743,7 @@ mod tests {
             let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new(genesis.clone());
 
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
@@ -826,7 +827,7 @@ mod tests {
             let mock_app: MockVerifyingApp<B, S> =
                 MockVerifyingApp::with_verify_result(genesis.clone(), false);
 
-            let mut marshaled = Marshaled::new(
+            let mut marshaled = Deferred::new(
                 context.clone(),
                 mock_app,
                 marshal.clone(),
