@@ -92,11 +92,13 @@
 
         <h2>Certification: A Second Decision Point</h2>
 
-        <p>The foundation of this integration is a new phase in a view's progression to finalization within Simplex. "Certification" offers a local, deterministic method to nullify a view after voting on partial information. For a more formal treatment of this idea, refer to <a href="https://eprint.iacr.org/2023/1916.pdf"><i>Sing a song of Simplex</i></a> by Victor Shoup.</p>
+        <p>The foundation of this integration is a new phase in a view's progression to finalization within Simplex. "Certification" offers a local, deterministic method to nullify a view after voting on partial information.</p>
 
         <p>A notarization proves that a quorum observed the same proposal. It does not force replicas to keep going down that path. After notarization forms, the network can still change course if new information shows up locally.</p>
 
         <p>If <code>certify</code> returns true, the validator advances to the next view and then votes to <code>finalize</code> the certified view. If <code>certify</code> returns false, the validator votes to <code>nullify</code> and refuses to build on that payload. In other words: notarization says “we saw it,” certification decides “we will build on it.”</p>
+
+        <p>For a more formal treatment of this idea, refer to <a href="https://eprint.iacr.org/2023/1916.pdf"><i>Sing a song of Simplex</i></a> by Victor Shoup.</p>
 
         <div class="image-container">
             <img src="/imgs/certify_sequence.png" alt="View Sequence" />
